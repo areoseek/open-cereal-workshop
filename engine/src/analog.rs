@@ -115,6 +115,14 @@ pub struct Set {
     /// Drive (0 to 1) and tone (0 dark to 1 bright), when the drive stage is on.
     pub drive: Option<(f32, f32)>,
     pub gain: f32,
+    /// A rise-and-fall envelope: rise and fall in seconds, depth -1 to 1, and what it moves (pulse width, the
+    /// first slow wave's depth, the first oscillator's level, the second's pitch).
+    pub modenv: Option<(f32, f32, f32, [bool; 4])>,
+    /// How much the hit strength sets the level (None: wholly) and opens the filter.
+    pub vel_amp: Option<f32>,
+    pub vel_cut: f32,
+    /// Some(true): oscillators drift a few cents and start anywhere; Some(false): they start together.
+    pub drift: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -177,6 +185,9 @@ pub struct Voice {
     z: [f32; 4],
     tone: f32,
     last1: f32,
+    off: [f32; 2],
+    one: f32,
+    lvl: f32,
 }
 
 /// The ensemble of the old string machines and polys: one short delay swept slowly, heard a little early on one
@@ -266,6 +277,16 @@ impl Voice {
         for p in &mut v.ph {
             *p = rnd(&mut v.seed) * 0.5 + 0.5;
         }
+        match set.drift {
+            Some(true) => v.off = [rnd(&mut v.seed) * 0.05, rnd(&mut v.seed) * 0.05],
+            Some(false) => v.ph = [0.0; 5],
+            None => {}
+        }
+        v.one = 1.0;
+        v.lvl = match set.vel_amp {
+            Some(a) => 1.0 - a + a * vel,
+            None => vel,
+        };
         v.t = 0;
         if set.hpf_hz > 0.0 {
             v.hpc = 1.0 - (-TAU * set.hpf_hz / sr).exp();
@@ -287,12 +308,29 @@ impl Voice {
         let dt = EVERY as f32 / self.sr;
         let a = self.amp.step(&set.amp, dt);
         let f = self.fenv.step(&set.fenv, dt);
-        let mut cut_oct = f * set.env_oct + (self.key - 60.0) / 12.0 * set.track;
+        let mut cut_oct = f * set.env_oct + (self.key - 60.0) / 12.0 * set.track + set.vel_cut * (self.vel - 0.6) * 4.0;
         let mut level = 1.0;
-        self.bend = [0.0; 2];
+        self.bend = self.off;
         self.width = (set.width + f * set.width_env).clamp(0.0, 1.0);
         self.mix = 0.5;
         let since = self.t as f32 / self.sr;
+        let mut lfo1 = 1.0;
+        self.one = 1.0;
+        if let Some((rise, fall, depth, to)) = set.modenv {
+            let m = if since < rise { since / rise.max(1e-4) } else { (-(since - rise) * 4.6 / fall.max(0.001)).exp() } * depth;
+            if to[0] {
+                self.width = (self.width + m * 0.5).clamp(0.0, 1.0);
+            }
+            if to[1] {
+                lfo1 = (1.0 + m).max(0.0);
+            }
+            if to[2] {
+                self.one = (1.0 + m).clamp(0.0, 2.0);
+            }
+            if to[3] {
+                self.bend[1] += m * 12.0;
+            }
+        }
         for (k, l) in set.lfo.iter().enumerate() {
             let before = self.lfo[k];
             self.lfo[k] = (before + l.hz * dt).fract();
@@ -316,6 +354,7 @@ impl Voice {
                     self.lfo_hold[k]
                 }
             } * l.amount
+                * if k == 0 { lfo1 } else { 1.0 }
                 * if l.delay > 0.0 { (since / l.delay).min(1.0) } else { 1.0 };
             match l.dest {
                 Dest::None => {}
@@ -366,7 +405,7 @@ impl Voice {
             a = (a + a2) * 0.6;
             b = (b + b2) * 0.6;
         }
-        let (la, lb) = (set.osc[0].level * (1.0 - self.mix) * 2.0, set.osc[1].level * self.mix * 2.0);
+        let (la, lb) = (set.osc[0].level * self.one * (1.0 - self.mix) * 2.0, set.osc[1].level * self.mix * 2.0);
         let mut x = if set.ring { a * b * (la + lb) * 0.5 } else { a * la + b * lb };
         if set.osc[2].level > 0.0 {
             x += wave(set.osc[2].shape, self.ph[2], d3, width, &mut self.seed) * set.osc[2].level;
@@ -415,7 +454,7 @@ impl Voice {
             self.tone += (y - self.tone) * c;
             y = self.tone;
         }
-        let y = y * set.gain * self.vel;
+        let y = y * set.gain * self.lvl;
         match &mut self.ens {
             Some(e) => e.frame(y),
             None => [y, y],
@@ -433,6 +472,7 @@ pub fn buzz(p: &[f32]) -> Set {
     let time = |i: usize| 0.002 + u(i) * u(i) * 5.0;
     let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: u(i + 2), r: time(i + 3) };
     let mix = u(8);
+    let xt = p.len() >= 52;
     let lfo = |i: usize, dests: [Dest; 3]| Lfo {
         shape: shape(i),
         dest: if v(i + 2) > 0.0 { dests[(v(i + 1) as usize).min(2)] } else { Dest::None },
@@ -462,6 +502,11 @@ pub fn buzz(p: &[f32]) -> Set {
         lfo: [lfo(25, [Dest::Pitch, Dest::Cutoff, Dest::Width]), lfo(31, [Dest::Pitch1, Dest::Mix, Dest::Level]), Lfo::default()],
         drive: (v(37) != 0.0).then(|| (u(38), u(39))),
         gain: 0.5,
+        // the later version's eleven
+        modenv: (xt && (46..=49).any(|i| v(i) != 0.0) && v(45) != 64.0).then(|| (time(43), time(44), (v(45) - 64.0) / 64.0, [v(46) != 0.0, v(47) != 0.0, v(48) != 0.0, v(49) != 0.0])),
+        vel_amp: xt.then(|| u(50)),
+        vel_cut: if xt { u(51) } else { 0.0 },
+        drift: xt.then(|| v(42) != 0.0),
         ..Default::default()
     }
 }
@@ -768,6 +813,37 @@ mod tests {
             }
         }
         assert!(last < 0.002, "{last}");
+    }
+
+    #[test]
+    fn the_later_versions_added_settings_are_heard() {
+        // 52 settings: everything plain, one saw, filter open
+        let mut p = vec![0.0f32; 52];
+        (p[1], p[2], p[4], p[5], p[8], p[14], p[22], p[45]) = (64.0, 64.0, 64.0, 64.0, 0.0, 128.0, 512.0, 64.0);
+        let dp = 261.63 / 44100.0;
+        let peak = |p: &[f32], vel: f32| {
+            let set = buzz(p);
+            let mut v = Voice::start(&set, 44100.0, 60, vel, 7);
+            (0..6000).map(|_| v.frame(&set, dp)[0].abs()).fold(0.0, f32::max)
+        };
+        // with no hit-strength share, soft and hard are as loud; with all of it, they are not
+        assert!((peak(&p, 0.3) - peak(&p, 1.0)).abs() < 1e-3);
+        p[50] = 128.0;
+        assert!(peak(&p, 0.3) < peak(&p, 1.0) * 0.5);
+        // the rise-and-fall envelope can take the first oscillator's level down to nothing at its top
+        let loud = peak(&p, 1.0);
+        (p[43], p[44], p[45], p[48]) = (0.0, 128.0, 0.0, 1.0);
+        assert!(peak(&p, 1.0) < loud * 0.5, "{} {}", peak(&p, 1.0), loud);
+        // started together, two notes are the same sample for sample; drifting, they are not
+        let take = |p: &[f32], seed: u32| {
+            let set = buzz(p);
+            let mut v = Voice::start(&set, 44100.0, 60, 1.0, seed);
+            (0..500).map(|_| v.frame(&set, dp)[0]).collect::<Vec<f32>>()
+        };
+        p[48] = 0.0;
+        assert_eq!(take(&p, 3), take(&p, 9));
+        p[42] = 1.0;
+        assert_ne!(take(&p, 3), take(&p, 9));
     }
 
     #[test]
