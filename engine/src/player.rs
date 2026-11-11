@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use arc_swap::ArcSwap;
 
 use crate::flp::ChannelKind;
+use crate::fx;
 use crate::law;
 use crate::sample::Sample;
 use crate::song::{Env, ClipSrc, Note, Song, Target};
@@ -166,6 +167,9 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
         buses: vec![],
         eq: vec![],
+        fx: vec![],
+        ring: vec![],
+        scratch: Vec::with_capacity(BLOCK),
         dirty: vec![],
         pos: 0.0,
         was_playing: false,
@@ -505,6 +509,11 @@ pub struct Player {
     buses: Vec<Vec<[f32; 2]>>,
     /// Equaliser memory per insert and band: two values per side.
     eq: Vec<[[f32; 4]; 3]>,
+    /// Running effect units per insert, in slot order.
+    fx: Vec<Vec<(u16, fx::Unit)>>,
+    /// Frames an insert keeps running after its input stops, for effect tails.
+    ring: Vec<usize>,
+    scratch: Vec<[f32; 2]>,
     dirty: Vec<bool>,
     pos: f64,
     was_playing: bool,
@@ -938,7 +947,10 @@ impl Player {
         if self.buses.len() != ni {
             self.buses = vec![vec![[0.0; 2]; BLOCK]; ni];
             self.dirty = vec![false; ni];
+            self.fx = (0..ni).map(|_| vec![]).collect();
+            self.ring = vec![0; ni];
         }
+        let cx = fx::Ctx { sr: self.sr, step: (song.step() as f64 / self.tpf.max(1e-9)) as f32 };
         let mut live = 0;
         let follow = self.ov.any_chan;
         for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -963,12 +975,50 @@ impl Player {
 
         let master = self.transport.master();
         for &i in &song.mix_order {
-            if i >= ni || !self.dirty[i] {
+            if i >= ni || (!self.dirty[i] && self.ring[i] == 0) {
                 continue;
             }
-            self.dirty[i] = false;
             let ins = &song.inserts[i];
             let mut bus = std::mem::take(&mut self.buses[i]);
+            // effect slots, top to bottom, ahead of the insert's own controls
+            if ins.enabled && (!ins.slots.is_empty() || !self.fx[i].is_empty()) {
+                let units = &mut self.fx[i];
+                let want = ins.slots.iter().filter(|s| s.fx.is_some());
+                if want.clone().count() != units.len() || want.clone().zip(units.iter()).any(|(s, u)| s.index != u.0 || s.fx.as_ref().map(|f| f.kind) != Some(u.1.fx.kind)) {
+                    *units = want.map(|s| (s.index, fx::Unit::new(s.fx.clone().unwrap(), self.sr))).collect();
+                }
+                let mut tail = 0;
+                for (s, u) in ins.slots.iter().filter(|s| s.fx.is_some()).zip(units.iter_mut()) {
+                    if let Some(f) = &s.fx {
+                        if u.1.fx != *f {
+                            u.1.fx = f.clone();
+                        }
+                    }
+                    if !s.enabled || s.mix <= 0.0 {
+                        continue;
+                    }
+                    tail += u.1.tail(&cx);
+                    if s.mix >= 1.0 {
+                        u.1.process(&mut bus[..n], &cx);
+                    } else {
+                        self.scratch.clear();
+                        self.scratch.extend_from_slice(&bus[..n]);
+                        u.1.process(&mut bus[..n], &cx);
+                        for (w, d) in bus[..n].iter_mut().zip(&self.scratch) {
+                            w[0] = d[0] + (w[0] - d[0]) * s.mix;
+                            w[1] = d[1] + (w[1] - d[1]) * s.mix;
+                        }
+                    }
+                }
+                if self.dirty[i] {
+                    self.ring[i] = tail;
+                } else {
+                    self.ring[i] = self.ring[i].saturating_sub(n);
+                }
+            } else {
+                self.ring[i] = 0;
+            }
+            self.dirty[i] = false;
             if ins.enabled {
                 let (ov, op) = self.ov.ins.get(i).copied().unwrap_or((None, None));
                 let g = law::fader_gain(ov.unwrap_or(ins.volume)) * if i == 0 { master } else { 1.0 };

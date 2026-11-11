@@ -486,6 +486,28 @@ pub struct Slot {
     pub plugin: String,
     pub name: String,
     pub enabled: bool,
+    /// Dry/wet, 0..=1.
+    pub mix: f32,
+    /// The effect's settings when we have a unit for it; None passes the sound through untouched.
+    pub fx: Option<crate::fx::Fx>,
+    /// Where the slot sits in the file the project came from (insert, slot); None for one added since.
+    pub src: Option<(u16, u16)>,
+}
+
+impl Slot {
+    /// A new slot holding one of our units at its default settings.
+    pub fn with_fx(index: u16, kind: crate::fx::Kind) -> Self {
+        let d = crate::fx::def(kind);
+        Self { index, plugin: d.ident.to_string(), name: String::new(), enabled: true, mix: 1.0, fx: Some(crate::fx::Fx::new(kind)), src: None }
+    }
+    /// What to call the slot on screen: the user's own name when they gave one, else our name for the unit.
+    pub fn title(&self) -> String {
+        match crate::fx::title_for(&self.plugin) {
+            Some(t) if self.name.is_empty() || self.name == self.plugin => t.to_string(),
+            _ if self.name.is_empty() => self.plugin.clone(),
+            _ => self.name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -962,7 +984,7 @@ impl Song {
                         pan: ins.pan as f32 / 6400.0,
                         enabled: ins.flags & flp::INSERT_FLAG_ENABLED != 0 || ins.flags == 0,
                         sends,
-                        slots: ins.slots.iter().map(|s| Slot { index: s.index, plugin: s.plugin.clone(), name: s.name.clone(), enabled: s.enabled }).collect(),
+                        slots: ins.slots.iter().map(|s| Slot { src: Some((ins.index as u16, s.index)), index: s.index, plugin: s.plugin.clone(), name: s.name.clone(), enabled: s.enabled, mix: (s.mix as f32 / 12800.0).clamp(0.0, 1.0), fx: crate::fx::Fx::decode(&s.plugin, &s.state) }).collect(),
                         sep: (ins.stereo_separation as f32 / 64.0).clamp(-1.0, 1.0),
                         eq: ins.eq.map(|b| Band { gain_db: b[0] as f32 / 100.0, freq: b[1] as f32 / 65536.0, q: b[2] as f32 / 65536.0 }),
                         levels: {

@@ -7,6 +7,15 @@ use crate::App;
 
 const STRIP_W: f32 = 50.0;
 
+#[derive(Clone, Copy)]
+enum SlotAct {
+    Toggle(u16),
+    Open(u16),
+    Delete(u16),
+    Move(u16, u16),
+    Set(u16, cereal_engine::fx::Kind),
+}
+
 impl App {
     pub(crate) fn mixer_ui(&mut self, ui: &mut Ui) {
         let n = self.song.inserts.len();
@@ -107,22 +116,99 @@ impl App {
                     ui.label(RichText::new(self.song.insert_name(i)).strong().color(TEXT));
                     ui.separator();
                     let mut changed = false;
+                    let mut act: Option<SlotAct> = None;
                     for slot in 0..10u16 {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(side - 8.0, 18.0), Sense::click());
                         ui.painter().rect_filled(rect, 2.0, PANEL_DARK);
-                        match self.song.inserts[i].slots.iter_mut().find(|s| s.index == slot) {
+                        let dot = Rect::from_center_size(rect.right_center() - Vec2::new(9.0, 0.0), Vec2::splat(16.0));
+                        let over_dot = resp.hover_pos().map(|p| dot.contains(p)).unwrap_or(false);
+                        let filled = match self.song.inserts[i].slots.iter().find(|s| s.index == slot) {
                             Some(s) => {
-                                let label = if s.name.is_empty() { s.plugin.clone() } else { s.name.clone() };
-                                ui.painter().text(rect.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, fit(ui, &label, rect.width() - 22.0, &font), font.clone(), if s.enabled { TEXT } else { TEXT_DIM });
-                                ui.painter().circle_filled(rect.right_center() - Vec2::new(8.0, 0.0), 3.0, if s.enabled { GREEN } else { PANEL });
-                                if resp.on_hover_text("Click to switch this effect on or off").clicked() {
-                                    s.enabled = !s.enabled;
-                                    changed = true;
-                                }
+                                let open = self.fx_open == Some((i, slot));
+                                ui.painter().text(rect.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, fit(ui, &s.title(), rect.width() - 24.0, &font), font.clone(), if !s.enabled { TEXT_DIM } else if open { GREEN } else { TEXT });
+                                ui.painter().circle_filled(dot.center(), 3.5, if s.enabled { GREEN } else { PANEL });
+                                true
                             }
                             None => {
                                 ui.painter().text(rect.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, format!("Slot {}", slot + 1), font.clone(), TEXT_DIM.gamma_multiply(0.6));
+                                false
                             }
+                        };
+                        if filled && resp.clicked() {
+                            act = Some(if over_dot { SlotAct::Toggle(slot) } else { SlotAct::Open(slot) });
+                        }
+                        let popup = ui.make_persistent_id(("slot-menu", slot));
+                        if (!filled && resp.clicked()) || resp.secondary_clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(popup));
+                        }
+                        egui::popup::popup_below_widget(ui, popup, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                            ui.set_min_width(170.0);
+                            if filled {
+                                if ui.button("Delete").clicked() {
+                                    act = Some(SlotAct::Delete(slot));
+                                }
+                                if slot > 0 && ui.button("Move up").clicked() {
+                                    act = Some(SlotAct::Move(slot, slot - 1));
+                                }
+                                if slot < 9 && ui.button("Move down").clicked() {
+                                    act = Some(SlotAct::Move(slot, slot + 1));
+                                }
+                                ui.separator();
+                                ui.label(RichText::new("Replace with").small().color(TEXT_DIM));
+                            }
+                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().collect();
+                                defs.sort_by_key(|d| d.title);
+                                for d in defs {
+                                    if ui.button(d.title).clicked() {
+                                        act = Some(SlotAct::Set(slot, d.kind));
+                                    }
+                                }
+                            });
+                        });
+                        if filled {
+                            resp.on_hover_text("Click to open, click the light to switch on or off, right-click for more");
+                        }
+                    }
+                    if let Some(a) = act {
+                        let slots = &mut self.song.inserts[i].slots;
+                        match a {
+                            SlotAct::Toggle(s) => {
+                                if let Some(x) = slots.iter_mut().find(|x| x.index == s) {
+                                    x.enabled = !x.enabled;
+                                }
+                            }
+                            SlotAct::Open(s) => self.fx_open = if self.fx_open == Some((i, s)) { None } else { Some((i, s)) },
+                            SlotAct::Delete(s) => {
+                                slots.retain(|x| x.index != s);
+                                if self.fx_open == Some((i, s)) {
+                                    self.fx_open = None;
+                                }
+                            }
+                            SlotAct::Move(a, b) => {
+                                for x in slots.iter_mut() {
+                                    if x.index == a {
+                                        x.index = b;
+                                    } else if x.index == b {
+                                        x.index = a;
+                                    }
+                                }
+                                slots.sort_by_key(|x| x.index);
+                                self.fx_open = match self.fx_open {
+                                    Some((ii, s)) if ii == i && s == a => Some((i, b)),
+                                    Some((ii, s)) if ii == i && s == b => Some((i, a)),
+                                    o => o,
+                                };
+                            }
+                            SlotAct::Set(s, kind) => {
+                                slots.retain(|x| x.index != s);
+                                slots.push(cereal_engine::song::Slot::with_fx(s, kind));
+                                slots.sort_by_key(|x| x.index);
+                                self.fx_open = Some((i, s));
+                            }
+                        }
+                        if !matches!(a, SlotAct::Open(_)) {
+                            changed = true;
                         }
                     }
                     ui.add_space(4.0);

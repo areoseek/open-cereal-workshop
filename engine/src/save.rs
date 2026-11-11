@@ -974,6 +974,23 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
 fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mixer_base: usize) {
     let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
     let mut records: Vec<(u8, u16, i32)> = vec![];
+    // every slot's events as they stand in the file, so a moved slot takes its plugin with it untouched
+    let mut groups: HashMap<(u16, u16), Vec<Event>> = HashMap::new();
+    for (k, &open) in opens.iter().enumerate() {
+        let mut g: Vec<Event> = vec![];
+        for e in &ev[open + 1..] {
+            match e.id {
+                id::SLOT_INDEX => {
+                    if let (Value::Word(i), false) = (&e.value, g.is_empty()) {
+                        groups.insert((k as u16, *i), std::mem::take(&mut g));
+                    }
+                    g.clear();
+                }
+                id::INSERT_ROUTING | id::INSERT_OUTPUT | id::INSERT_FLAGS => break,
+                _ => g.push(e.clone()),
+            }
+        }
+    }
 
     for (k, &open) in opens.iter().enumerate().rev() {
         let (Some(now), Some(was)) = (song.inserts.get(k), base.inserts.get(k)) else { continue };
@@ -1015,9 +1032,85 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 put_u32(d, 4, f | if now.invert { flp::INSERT_FLAG_INVERT } else { 0 } | if now.swap { flp::INSERT_FLAG_SWAP } else { 0 });
             }
         }
-        for s in &now.slots {
-            if was.slots.iter().find(|w| w.index == s.index).map(|w| w.enabled != s.enabled).unwrap_or(false) {
-                records.push((0, cd | (s.index & 63), s.enabled as i32));
+        // effect slots: the events of each slot sit ahead of its index event
+        let shape = |i: &crate::song::Insert| i.slots.iter().map(|s| (s.index, s.src, s.plugin.clone())).collect::<Vec<_>>();
+        let last_idx = (open..=close).rev().find(|&i| ev[i].id == id::SLOT_INDEX);
+        if shape(now) != shape(was) {
+            let n_slots = (open..=close).filter(|&i| ev[i].id == id::SLOT_INDEX).count().max(10);
+            let mut region: Vec<Event> = vec![];
+            for idx in 0..n_slots as u16 {
+                if let Some(s) = now.slots.iter().find(|s| s.index == idx) {
+                    let kept = s.src.and_then(|src| groups.get(&src));
+                    let same = s.src.and_then(|(i, x)| base.inserts.get(i as usize)?.slots.iter().find(|w| w.index == x)).map(|w| w.plugin == s.plugin).unwrap_or(false);
+                    let kept = kept.filter(|_| same);
+                    let mut g = match kept {
+                        Some(g) => g.clone(),
+                        None => {
+                            let mut head = vec![0u8; 52];
+                            put_u32(&mut head, 8, 2);
+                            put_u32(&mut head, 16, 0x160);
+                            put_u32(&mut head, 40, 136);
+                            put_u32(&mut head, 44, 178);
+                            put_u32(&mut head, 48, 270);
+                            vec![
+                                text_event(id::PLUGIN_INTERNAL_NAME, &s.plugin, unicode),
+                                Event::data(212, head),
+                                Event::int(155, 0),
+                                Event::int(id::COLOR, 0x565148),
+                                Event::byte(41, 0),
+                                Event::data(id::PLUGIN_PARAMS, s.fx.as_ref().map(|f| f.encode(None)).unwrap_or_default()),
+                            ]
+                        }
+                    };
+                    for e in g.iter_mut() {
+                        match (e.id, &mut e.value) {
+                            (212, Value::Data(d)) if d.len() >= 8 => {
+                                put_u32(d, 0, k as u32);
+                                put_u32(d, 4, idx as u32);
+                            }
+                            (id::PLUGIN_PARAMS, Value::Data(d)) => {
+                                if let Some(f) = &s.fx {
+                                    *d = f.encode(Some(d));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    region.extend(g);
+                }
+                region.push(Event::word(id::SLOT_INDEX, idx));
+            }
+            match last_idx {
+                Some(last) => {
+                    ev.splice(open + 1..=last, region);
+                }
+                None => {
+                    ev.splice(open + 1..open + 1, region);
+                }
+            }
+            for idx in 0..n_slots as u16 {
+                let s = now.slots.iter().find(|s| s.index == idx);
+                records.push((0, cd | (idx & 63), s.map(|s| s.enabled).unwrap_or(true) as i32));
+                records.push((1, cd | (idx & 63), s.map(|s| q(s.mix, 12800.0)).unwrap_or(12800)));
+            }
+        } else {
+            for s in &now.slots {
+                let Some(w) = was.slots.iter().find(|w| w.index == s.index) else { continue };
+                if w.enabled != s.enabled {
+                    records.push((0, cd | (s.index & 63), s.enabled as i32));
+                }
+                if q(w.mix, 12800.0) != q(s.mix, 12800.0) {
+                    records.push((1, cd | (s.index & 63), q(s.mix, 12800.0)));
+                }
+                if let (true, Some(f)) = (w.fx != s.fx, &s.fx) {
+                    let Some(end) = (open..=close).find(|&i| ev[i].id == id::SLOT_INDEX && ev[i].value == Value::Word(s.index)) else { continue };
+                    let begin = (open..end).rev().find(|&i| ev[i].id == id::SLOT_INDEX).unwrap_or(open);
+                    if let Some(i) = (begin..end).find(|&i| ev[i].id == id::PLUGIN_PARAMS) {
+                        if let Value::Data(d) = &mut ev[i].value {
+                            *d = f.encode(Some(d));
+                        }
+                    }
+                }
             }
         }
 
@@ -1153,6 +1246,11 @@ pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), Strin
     for (i, c) in song.channels.iter_mut().enumerate() {
         c.src = Some(i as u16);
     }
+    for (k, ins) in song.inserts.iter_mut().enumerate() {
+        for s in ins.slots.iter_mut() {
+            s.src = Some((k as u16, s.index));
+        }
+    }
     Ok((bytes, flp))
 }
 
@@ -1160,6 +1258,49 @@ pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), Strin
 mod tests {
     use super::*;
     use crate::song::{Clip, Note};
+
+    #[test]
+    fn effect_slots_round_trip() {
+        use crate::fx::{Fx, Kind};
+        use crate::song::Slot;
+        let mut song = Song::new();
+        while song.inserts.len() < 4 {
+            song.inserts.push(Default::default());
+        }
+        let mut a = Slot::with_fx(2, Kind::Delay);
+        a.fx.as_mut().unwrap().p[3] = 90.0;
+        a.mix = 0.5;
+        let mut b = Slot::with_fx(5, Kind::Eq);
+        b.fx.as_mut().unwrap().p[2] = -600.0;
+        b.enabled = false;
+        song.inserts[1].slots = vec![a.clone(), b.clone()];
+        let (bytes, flp) = save(&mut song, None).unwrap();
+        let (back, _) = reload(&bytes);
+        let got = &back.inserts[1].slots;
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].index, got[0].mix, &got[0].fx), (2, 0.5, &a.fx));
+        assert_eq!((got[1].index, got[1].enabled, &got[1].fx), (5, false, &b.fx));
+
+        // change a setting, move one slot to another insert, drop the other; unchanged projects stay byte-exact
+        assert_eq!(to_bytes(&song, Some(&flp)).unwrap(), bytes);
+        let mut moved = song.inserts[1].slots.remove(0);
+        moved.index = 0;
+        moved.fx.as_mut().unwrap().p[4] = 96.0;
+        song.inserts[1].slots.clear();
+        song.inserts[3].slots.push(moved.clone());
+        song.inserts[2].slots.push(Slot::with_fx(1, Kind::Limiter));
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        let (back, _) = reload(&bytes);
+        assert!(back.inserts[1].slots.is_empty());
+        assert_eq!((back.inserts[3].slots[0].index, back.inserts[3].slots[0].mix, &back.inserts[3].slots[0].fx), (0, 0.5, &moved.fx));
+        assert_eq!(back.inserts[2].slots[0].fx, Some(Fx::new(Kind::Limiter)));
+
+        // a setting changed in place
+        let (_, flp) = reload(&bytes);
+        song.inserts[3].slots[0].fx.as_mut().unwrap().p[0] = 33.0;
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        assert_eq!(reload(&bytes).0.inserts[3].slots[0].fx.as_ref().unwrap().p[0], 33.0);
+    }
 
     fn reload(bytes: &[u8]) -> (Song, Flp) {
         let f = flp::parse(bytes).expect("our own file parses");

@@ -3,6 +3,7 @@
 
 mod browser;
 mod chanset;
+mod fxwin;
 mod mixer;
 mod pianoroll;
 mod playlist;
@@ -99,6 +100,8 @@ pub(crate) struct App {
     show_info: bool,
     show_about: bool,
     show_chanset: bool,
+    /// The effect slot whose editor is open: insert, slot.
+    fx_open: Option<(usize, u16)>,
     chanset: chanset::State,
     rename_pattern: Option<(usize, String)>,
 }
@@ -196,6 +199,7 @@ impl App {
             show_info: false,
             show_about: false,
             show_chanset: false,
+            fx_open: None,
             chanset: Default::default(),
             rename_pattern: None,
         };
@@ -209,6 +213,13 @@ impl App {
                     "mixer" => app.show_mixer = true,
                     "piano" => app.show_piano = true,
                     "channel" => app.show_chanset = true,
+                    x if x.starts_with("fx=") => {
+                        let mut it = x[3..].split(':').filter_map(|v| v.parse::<usize>().ok());
+                        if let (Some(i), Some(sl)) = (it.next(), it.next()) {
+                            app.fx_open = Some((i, sl as u16));
+                            app.sel_insert = i;
+                        }
+                    }
                     "noplaylist" => app.show_playlist = false,
                     "norack" => app.show_rack = false,
                     w => {
@@ -835,6 +846,7 @@ impl eframe::App for App {
         let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
         egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
         self.show_chanset = open;
+        self.fx_window(ctx, frame);
 
         self.small_windows(ctx);
         self.run_actions();

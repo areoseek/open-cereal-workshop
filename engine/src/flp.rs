@@ -537,6 +537,8 @@ pub struct FlpSlot {
     pub enabled: bool,
     /// 0..=12800.
     pub mix: i32,
+    /// The plugin's stored settings, as found.
+    pub state: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -858,6 +860,7 @@ impl Flp {
                     Scope::Insert => slot.name = text(d),
                     _ => {}
                 },
+                (id::PLUGIN_PARAMS, Value::Data(d)) if scope == Scope::Insert => slot.state = d.clone(),
                 (id::COLOR, Value::Int(v)) if scope == Scope::Channel => {
                     if let Some(c) = flp.channels.last_mut() {
                         c.color = *v;
