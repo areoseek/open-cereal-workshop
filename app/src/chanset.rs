@@ -305,7 +305,7 @@ impl App {
                     });
                 }
                 if pick {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
                         self.actions.push(crate::Action::LoadSample(p, Some(ci)));
                     }
                 }

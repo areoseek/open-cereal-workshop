@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// Folders under the install's `Data` folder that hold content rather than program parts.
 const WANTED: [&str; 4] = ["patches", "demo projects", "projects", "templates"];
 /// What is taken from the folders of the built-in instruments: their sample sets, never program parts.
-const SOUND_EXT: [&str; 6] = ["wav", "wti", "dat", "ogg", "flac", "fst"];
+const SOUND_EXT: [&str; 7] = ["wav", "wti", "dat", "ogg", "flac", "fst", "wv"];
 const SKIP_EXT: [&str; 6] = ["exe", "dll", "sys", "ocx", "bat", "cmd"];
 const OP_SET_DIR: i32 = 11;
 const OP_EXTRACT: i32 = 20;

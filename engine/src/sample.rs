@@ -54,7 +54,7 @@ impl Sample {
         out
     }
 
-    /// Decode an audio file (WAV, FLAC, Ogg Vorbis, MP3, AIFF). WAV files whose data chunk holds an Ogg Vorbis
+    /// Decode an audio file (WAV, FLAC, Ogg Vorbis, MP3, AIFF, WavPack). WAV files whose data chunk holds an Ogg Vorbis
     /// stream (format tags 0x674F to 0x6751 and 0x676F to 0x6771) are handled too.
     pub fn load(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -71,6 +71,17 @@ impl Sample {
 
     /// Decode audio held in memory; `ext` hints at the container.
     pub fn decode(bytes: Vec<u8>, ext: &str) -> Result<Self, String> {
+        if crate::wavpack::is_wavpack(&bytes) {
+            let d = crate::wavpack::decode(&bytes)?;
+            let k = 1.0 / (1u64 << (8 * d.bytes - 1)) as f32;
+            let val = |s: i32| if d.float { f32::from_bits(s as u32) } else { s as f32 * k };
+            let frames: Vec<[f32; 2]> = if d.channels == 1 {
+                d.samples.iter().map(|&s| [val(s); 2]).collect()
+            } else {
+                d.samples.chunks_exact(2).map(|f| [val(f[0]), val(f[1])]).collect()
+            };
+            return Ok(Self { name: String::new(), rate: d.rate, mono: d.channels == 1, frames });
+        }
         let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
         let mut hint = Hint::new();
         if !ext.is_empty() {

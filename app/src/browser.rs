@@ -15,7 +15,7 @@ pub struct State {
     selected: Option<PathBuf>,
 }
 
-const AUDIO: [&str; 6] = ["wav", "flac", "ogg", "mp3", "aif", "aiff"];
+const AUDIO: [&str; 7] = ["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"];
 
 fn ext_of(p: &Path) -> String {
     p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
