@@ -291,6 +291,8 @@ struct Voice {
     active: bool,
     sample: Option<Arc<Sample>>,
     pos: f64,
+    /// Frames the reading wraps between while the note sounds.
+    loop_pts: Option<(f64, f64)>,
     /// Source frames per output frame at the note's own pitch, and where a glide is taking it.
     step: f64,
     step_to: f64,
@@ -503,6 +505,11 @@ impl Voice {
                     } else {
                         let s = smp.at(self.pos);
                         self.pos += self.step_now;
+                        if let Some((a, b)) = self.loop_pts {
+                            if self.pos >= b {
+                                self.pos = a + (self.pos - b) % (b - a).max(1.0);
+                            }
+                        }
                         s
                     }
                 }
@@ -707,18 +714,22 @@ impl Player {
                     let Some(smp) = z.sample.clone() else { continue };
                     let keys = if z.track { (n.key as i32 - z.root) as f32 * 100.0 } else { 0.0 };
                     let step = smp.rate as f64 / sr as f64 * 2f64.powf((keys + z.tune_cents + ch.pitch_cents + n.fine_cents) as f64 / 1200.0);
+                    let loop_pts = z.looped.filter(|l| l.1 > l.0 && l.1 <= smp.frames.len()).map(|l| (l.0 as f64, l.1 as f64));
+                    // a held zone needs a length; a step with none gets a short one
+                    let held = if live { len_frames } else { Some(len_frames.unwrap_or((sr * 0.12) as u64).max(1)) };
                     let note_gain = if z.vel_scale { law::velocity_gain(n.vel) } else { 1.0 };
                     let (pl, pr) = law::pan((chan_pan + n.pan + z.pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain * z.gain;
                     self.start(Voice {
                         sample: Some(smp),
+                        loop_pts,
                         step,
                         step_to: step,
                         step_now: step,
                         level: 0.0,
                         attack: ms(z.attack * 1000.0),
                         release: ms(z.release * 1000.0),
-                        remaining: if z.one_shot && !live { None } else { len_frames },
+                        remaining: if z.one_shot { None } else { held },
                         gl: gain * pl,
                         gr: gain * pr,
                         insert: if z.out > 0 { (ch.insert + z.out).min(last) } else { ch.insert },
@@ -728,7 +739,7 @@ impl Player {
                         live: live && !z.one_shot,
                         note_gain,
                         note_pan: n.pan,
-                        follow: false,
+                        follow: z.track,
                         ..Default::default()
                     });
                 }

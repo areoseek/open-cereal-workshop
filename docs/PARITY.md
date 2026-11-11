@@ -9,7 +9,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] BeepMap
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
 - [ ] Dashboard
-- [ ] DirectWave
+- [~] DirectWave: the playing program's zones (keys, velocities, root key, file, loop points) are read and played across the keyboard. Zone envelopes, filters, LFOs, tuning and level settings, the effects section and program switching are not done; a short fade stands in for the release.
 - [ ] Drumaxx
 - [ ] Drumpad
 - [ ] FLEX

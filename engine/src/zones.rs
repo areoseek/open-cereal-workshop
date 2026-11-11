@@ -54,13 +54,11 @@ impl Map {
     pub fn parse(ident: &str, state: &[u8]) -> Option<Self> {
         if ident.eq_ignore_ascii_case("FPC") {
             pads(state)
+        } else if ident.eq_ignore_ascii_case("DirectWave") {
+            programs(state)
         } else {
             None
         }
-    }
-
-    pub fn handles(ident: &str) -> bool {
-        ident.eq_ignore_ascii_case("FPC")
     }
 
     /// Load every zone's recording. Zones whose file is not found stay silent.
@@ -154,6 +152,53 @@ fn pads(state: &[u8]) -> Option<Map> {
     Some(Map { zones })
 }
 
+/// The multi-sample player's block: a 4-byte number, then pieces; each program is a piece (number 1) whose
+/// zones are pieces (number 3). A zone holds its keys (500: root key, lowest key, highest key, lowest and
+/// highest velocity, one byte each), its name (501), the file's stored path (502) and the recording's facts
+/// (503: frames, a spare, channels, a number, rate as a float, loop kind, loop start, loop end). The first
+/// program that has zones is the one that plays.
+fn programs(state: &[u8]) -> Option<Map> {
+    let top = pieces(state.get(4..)?)?;
+    let mut zones = vec![];
+    for (id, prog) in top {
+        if id != 1 {
+            continue;
+        }
+        let Some(parts) = pieces(prog) else { continue };
+        for (pid, zone) in &parts {
+            if *pid != 3 {
+                continue;
+            }
+            let Some(inner) = pieces(zone) else { continue };
+            let find = |n: u32| inner.iter().find(|p| p.0 == n).map(|p| p.1);
+            let (Some(keys), Some(path)) = (find(500), find(502)) else { continue };
+            if keys.len() < 5 || path.is_empty() {
+                continue;
+            }
+            let facts = find(503).unwrap_or(&[]);
+            let int = |at: usize| facts.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).unwrap_or(0);
+            let looped = (int(20) != 0 && int(28) > int(24)).then(|| (int(24), int(28)));
+            zones.push(Zone {
+                name: find(501).map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
+                key_lo: keys[1].min(127),
+                key_hi: keys[2].min(127),
+                vel_lo: keys[3].min(127),
+                vel_hi: keys[4].min(127),
+                root: keys[0] as i32,
+                path: String::from_utf8_lossy(path).trim_end_matches('\0').to_string(),
+                looped,
+                // the zone envelopes are not read yet: a quick start and a short fade stand in
+                release: 0.25,
+                ..Default::default()
+            });
+        }
+        if !zones.is_empty() {
+            break;
+        }
+    }
+    Some(Map { zones })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -192,6 +237,35 @@ pub(crate) mod tests {
             b.extend(piece(2, &pad));
         }
         b
+    }
+
+    #[test]
+    fn program_zones_are_read() {
+        let mut facts = vec![];
+        for v in [48_000u32, 0, 1, 16] {
+            facts.extend(v.to_le_bytes());
+        }
+        facts.extend(44100f32.to_le_bytes());
+        for v in [2u32, 1000, 48_000, 0, 16] {
+            facts.extend(v.to_le_bytes());
+        }
+        let mut zone = piece(500, &[60, 48, 71, 0, 127, 0, 0, 0, 0]);
+        zone.extend(piece(501, b"Tone"));
+        zone.extend(piece(502, b"%FLStudioFactoryData%\\Data\\tone.wav"));
+        zone.extend(piece(503, &facts));
+        let mut prog = piece(100, &[0; 30]);
+        prog.extend(piece(3, &zone));
+        let mut b = vec![37, 0, 0, 0];
+        b.extend(piece(6, &[0; 16]));
+        b.extend(piece(1, &piece(100, &[0; 30])));
+        b.extend(piece(1, &prog));
+        let m = Map::parse("DirectWave", &b).unwrap();
+        assert_eq!(m.zones.len(), 1);
+        let z = &m.zones[0];
+        assert_eq!((z.root, z.key_lo, z.key_hi, z.track), (60, 48, 71, true));
+        assert_eq!(z.looped, Some((1000, 48_000)));
+        assert!(z.path.ends_with("tone.wav"));
+        assert!(m.hit(72, 100).next().is_none());
     }
 
     #[test]
