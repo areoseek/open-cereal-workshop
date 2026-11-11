@@ -168,6 +168,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         buses: vec![],
         eq: vec![],
         fx: vec![],
+        driven: Vec::with_capacity(64),
         ring: vec![],
         scratch: Vec::with_capacity(BLOCK),
         dirty: vec![],
@@ -555,6 +556,8 @@ pub struct Player {
     eq: Vec<[[f32; 4]; 3]>,
     /// Running effect units per insert, in slot order.
     fx: Vec<Vec<(u16, fx::Unit)>>,
+    /// Controller outputs waiting to be applied.
+    driven: Vec<(Target, f32)>,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
     scratch: Vec<[f32; 2]>,
@@ -1083,12 +1086,22 @@ impl Player {
                             _ => {}
                         }
                     }
+                    let slots_index = s.index;
                     let s = SlotNow { enabled: on, mix };
                     if !s.enabled || s.mix <= 0.0 {
                         continue;
                     }
                     tail += u.1.tail(&cx);
-                    if s.mix >= 1.0 {
+                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy) {
+                        // a controller: run it, then hand its outputs to whatever is linked to them
+                        u.1.process(&mut bus[..n], &cx);
+                        let slot = slots_index;
+                        for l in song.ctl_links.iter().filter(|l| l.ins == i && l.slot == slot) {
+                            if let Some(&v) = u.1.out.get(l.out as usize) {
+                                self.driven.push((l.target, v));
+                            }
+                        }
+                    } else if s.mix >= 1.0 {
                         u.1.process(&mut bus[..n], &cx);
                     } else {
                         self.scratch.clear();
@@ -1099,6 +1112,14 @@ impl Player {
                             w[1] = d[1] + (w[1] - d[1]) * s.mix;
                         }
                     }
+                }
+                if !self.driven.is_empty() {
+                    self.ov.fit(song);
+                    for k in 0..self.driven.len() {
+                        let (t, v) = self.driven[k];
+                        self.ov.set(t, v);
+                    }
+                    self.driven.clear();
                 }
                 if self.dirty[i] {
                     self.ring[i] = tail;
@@ -1358,6 +1379,23 @@ mod tests {
         h.transport.set_playing(true);
         p.render(&mut buf[..8192], 2);
         assert!(buf[4096..8192].iter().any(|x| x.abs() > 0.1));
+
+        // a level follower in a slot, set to duck, pulls the linked fader down while sound passes through it
+        let mut s2 = s.clone();
+        s2.channels[ac].auto = None;
+        s2.inserts[0].slots.clear();
+        let mut duck = crate::song::Slot::with_fx(0, crate::fx::Kind::Peak);
+        if let Some(f) = duck.fx.as_mut() {
+            f.p[1] = -256.0;
+            f.p[10] = 65536.0;
+        }
+        s2.inserts[0].slots.push(duck);
+        s2.ctl_links.push(crate::song::CtlLink { ins: 0, slot: 0, out: 1, target: Target::InsertVolume(0) });
+        let (h, mut p) = new_player(s2, 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_playing(true);
+        p.render(&mut buf[..8192], 2);
+        assert!(buf[4096..8192].iter().all(|x| x.abs() < 1e-6));
 
         // a layer plays its children
         let mut s = click_song();

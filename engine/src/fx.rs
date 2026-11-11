@@ -42,6 +42,8 @@ pub enum Kind {
     Plush,
     Pad,
     Tuner,
+    Peak,
+    Xy,
     Curve,
 }
 
@@ -650,6 +652,34 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
+        kind: Kind::Peak,
+        ident: "Fruity Peak Controller",
+        title: "Level Follower",
+        size: 42,
+        fixed: &[],
+        params: &[
+            p("Peak base", 0, 0, 65536, 0),
+            p("Peak amount", 4, -256, 256, 179),
+            p("Peak tension", 8, -100, 100, 0),
+            p("Peak decay", 12, 0, 128, 66),
+            p("Sweep base", 16, 0, 65536, 0),
+            p("Sweep amount", 20, -256, 256, 0),
+            p("Sweep tension", 24, -100, 100, 0),
+            p("Sweep speed", 28, 0, 65536, 32950),
+            p("Sweep shape", 32, 0, 4, 0),
+            p("Sweep phase", 36, 0, 65535, 0),
+            p("Switches", 38, 0, 0x0101_0000, 0),
+        ],
+    },
+    Def {
+        kind: Kind::Xy,
+        ident: "Fruity X-Y Controller",
+        title: "Pad Controller",
+        size: 71,
+        fixed: &[],
+        params: &[p("X", 4, 0, 65536, 32768), p("Y", 20, 0, 65536, 32768)],
+    },
+    Def {
         kind: Kind::GrainShift,
         ident: "Pitch Shifter",
         title: "Grain Shifter",
@@ -1117,6 +1147,10 @@ impl Fx {
                 None => p.def as f32,
             })
             .collect();
+        if d.kind == Kind::Peak {
+            // the phase is 16 bits wide; the switch bytes follow straight after it
+            p[9] = u16::from_le_bytes([state[36], state[37]]) as f32;
+        }
         if d.kind == Kind::Curve {
             curve_table(state, &mut p)?;
         }
@@ -1131,6 +1165,7 @@ impl Fx {
             Some(b) => b.to_vec(),
             None if self.kind == Kind::Curve => curve_fresh(),
             None if self.kind == Kind::Maxi => maxi_fresh(),
+            None if self.kind == Kind::Xy => XY_FRESH.to_vec(),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -1159,6 +1194,9 @@ impl Fx {
         out
     }
 }
+
+/// A new pad controller's block: both axes centred, the plain grid.
+const XY_FRESH: [u8; 71] = [1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 4, 70, 108, 97, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 70, 0, 0, 0];
 
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
@@ -1256,6 +1294,8 @@ pub struct Unit {
     ph: f32,
     lines: Vec<Vec<f32>>,
     lpos: Vec<usize>,
+    /// What a controller unit is putting out, 0..=1 each (level follower: both, peak, sweep).
+    pub out: [f32; 3],
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -1419,7 +1459,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3] };
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
@@ -1476,7 +1516,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3] }.tail(cx);
         }
         let p = &self.fx.p;
         match self.fx.kind {
@@ -1515,6 +1555,7 @@ impl Unit {
                 (time * (n + 1.0)) as usize + (cx.sr * 0.3) as usize
             }
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
+            Kind::Peak => (cx.sr * 3.0) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2221,6 +2262,38 @@ impl Unit {
                     self.pos = (self.pos + 1) % n;
                     self.ph = (self.ph + (1.0 - ratio) / grain).rem_euclid(1.0);
                     *f = out;
+                }
+            }
+            Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Peak => {
+                // the loudest moment of the block lifts the follower at once; it then falls back over the decay
+                let top = io.iter().fold(0f32, |m, f| m.max(f[0].abs()).max(f[1].abs())).min(1.0);
+                let fall = (-(io.len() as f32) / (0.008 * 300f32.powf(p[3] / 128.0) * sr)).exp();
+                z[0] = if top > 0.00316 && top > z[0] { top } else { z[0] * fall };
+                let shaped = |v: f32, tension: f32| v.clamp(0.0, 1.0).powf((-tension / 50.0).exp2());
+                let peak = p[0] / 65536.0 + p[1] / 128.0 * shaped(z[0], p[2]);
+                let hz = ((32768.0 - p[7]) / 4096.0).exp2();
+                self.ph = (self.ph + hz * io.len() as f32 / sr).fract();
+                let ph = (self.ph + p[9] / 65536.0).fract();
+                let wave = match p[8] as i32 {
+                    0 => 0.5 - 0.5 * (ph * TAU).cos(),
+                    1 => 1.0 - (2.0 * ph - 1.0).abs(),
+                    2 => if ph < 0.5 { 1.0 } else { 0.0 },
+                    3 => ph,
+                    _ => {
+                        // a new value every cycle
+                        if ph < z[2] {
+                            z[1] = ((z[1] * 9301.0 + 0.2113).fract() * 7.31 + ph).fract();
+                        }
+                        z[2] = ph;
+                        z[1]
+                    }
+                };
+                let sweep = p[4] / 65536.0 + p[5] / 256.0 * shaped(wave, p[6]);
+                self.out = [(peak + sweep).clamp(0.0, 1.0), peak.clamp(0.0, 1.0), sweep.clamp(0.0, 1.0)];
+                // muted unless the pass switch is on
+                if (p[10] as i32 >> 16) & 1 == 0 {
+                    io.fill([0.0; 2]);
                 }
             }
             Kind::BucketChorus => {
@@ -2940,7 +3013,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);

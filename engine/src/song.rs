@@ -613,6 +613,17 @@ pub struct Song {
     pub mix_order: Vec<usize>,
     /// Automation clips that drive something, with their playlist positions (built by `prepare`).
     pub auto_plan: Vec<AutoPlan>,
+    /// Controls driven by a controller unit sitting in an effect slot.
+    pub ctl_links: Vec<CtlLink>,
+}
+
+/// One control driven by an output of a controller unit (insert, slot, which output).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CtlLink {
+    pub ins: usize,
+    pub slot: u16,
+    pub out: u16,
+    pub target: Target,
 }
 
 pub const DEFAULT_TRACKS: usize = 500;
@@ -644,6 +655,7 @@ impl Song {
             inserts,
             mix_order: vec![],
             auto_plan: vec![],
+            ctl_links: vec![],
         };
         s.prepare();
         s
@@ -1044,6 +1056,16 @@ impl Song {
             inserts,
             mix_order: vec![],
             auto_plan: vec![],
+            ctl_links: f
+                .links
+                .iter()
+                .filter(|l| l.kind & 0x8000 != 0 && l.source >= 0x2000 && l.source != flp::DEST_GLOBAL)
+                .filter_map(|l| {
+                    let raw = (l.source >> 6) as usize;
+                    (raw >= base && raw - base < n_inserts).then(|| CtlLink { ins: raw - base, slot: l.source & 63, out: l.kind & 0x7fff, target: target(l) })
+                })
+                .filter(|c| !matches!(c.target, Target::Other { .. }))
+                .collect(),
         };
         song.prepare();
         song

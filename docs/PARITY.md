@@ -98,7 +98,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity PanOMatic (built, approximate)
 - [~] Fruity Parametric EQ (built as Seven Band EQ (classic), settings carried onto the newer unit)
 - [~] Fruity Parametric EQ 2 (built, approximate)
-- [ ] Fruity Peak Controller
+- [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas not run)
 - [ ] Fruity Phase Inverter
 - [ ] Fruity Phaser
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
@@ -113,7 +113,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Vocoder
 - [~] Fruity WaveShaper (built as Curve Shaper; drawn line read, no editor for it yet)
 - [ ] Fruity Wrapper
-- [ ] Fruity X-Y Controller
+- [~] Fruity X-Y Controller (built as Pad Controller; outputs its stored position, no pad window yet)
 - [ ] Fruity X-Y-Z Controller
 - [ ] Gross Beat
 - [ ] Hardcore
@@ -155,7 +155,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Mixer (inserts, sends, routing, EQ, effect slots; docking and metering details still to do)
 - [~] Browser (folders, preview, drag to channel)
 - [~] Transport, toolbars, hint bar
-- [~] Automation clips (channel and mixer levels; effect and instrument settings still to do)
+- [~] Automation clips (channel levels and pitch, mixer levels, slot mix and switch, effect settings; instrument settings still to do)
 - [ ] Event editor
 - [ ] Audio recording and audio editor
 - [ ] Plugin hosting (VST/CLAP)
@@ -186,6 +186,8 @@ close, not identical:
   Echo Bank: feedback mode numbering, cutoff and resonance scales, offset units.
   Pad Effects: rate switch positions, the multiplier range, every effect's ranges.
   Voice Tuner: speed law, lowest pitch law, note switch order (taken as C first).
+  Level Follower: output order (both, peak, sweep), decay and speed laws, tension curve, which switch byte lets the sound through.
+  Effect settings under automation: the setting number is taken as our listed order and the travel as our listed range.
   Plush Reverb: which stored fields are size, diffusion, brightness and character, the decay law
   (0.1 s to 100 s across the travel), the gain law (746 is unity, twenty units to the dB), which switch byte is
   the predelay tempo lock.
