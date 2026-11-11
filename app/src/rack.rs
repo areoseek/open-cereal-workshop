@@ -274,6 +274,10 @@ impl App {
         if let Some(ci) = clone {
             let mut c = self.song.channels[ci].clone();
             c.name = format!("{} #2", c.name);
+            c.ext = c.ext.as_ref().map(|h| h.fork());
+            if let Some(b) = c.bay.as_mut() {
+                b.fx.ext = b.fx.ext.as_ref().map(|h| h.fork());
+            }
             self.song.channels.push(c);
             self.dirty = true;
         }

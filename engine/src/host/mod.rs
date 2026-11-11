@@ -696,6 +696,28 @@ impl Instance {
         self.proc.lock().map(|p| p.ins.first().is_some_and(|&c| c > 0)).unwrap_or(false)
     }
 
+    /// A second plug-in of the same make with the same settings, for a copied channel or slot, so the copy
+    /// does not share its sound and settings with the first.
+    pub fn fork(&self) -> Option<Arc<Instance>> {
+        let twin = Instance::open(&self.found.path, &self.found.id)?;
+        if let Some(v) = &self.v3 {
+            // hand over changes still waiting, so the saved state has them
+            v.idle(true);
+        }
+        if let Some(state) = self.save() {
+            twin.restore(&state);
+        }
+        // changes of ours still waiting to go over are not in that state yet
+        let waiting: Vec<(u32, f64)> = self.to_plugin.lock().map(|q| q.clone()).unwrap_or_default();
+        for (id, v) in waiting {
+            twin.set(id, v);
+        }
+        if let Some(rate) = self.rate() {
+            twin.activate(rate);
+        }
+        Some(twin)
+    }
+
     /// Get ready to run at this rate. Window thread; cheap when nothing changes.
     pub fn activate(&self, rate: f32) -> bool {
         if let Some(v) = &self.v3 {
@@ -1200,6 +1222,13 @@ fn guard_x_errors() {}
 #[derive(Debug, Clone)]
 pub struct Hosted(pub Arc<Instance>);
 
+impl Hosted {
+    /// A plug-in of its own for a copy. Falls back to sharing when the file has gone.
+    pub fn fork(&self) -> Hosted {
+        Hosted(self.0.fork().unwrap_or_else(|| self.0.clone()))
+    }
+}
+
 impl PartialEq for Hosted {
     fn eq(&self, o: &Self) -> bool {
         Arc::ptr_eq(&self.0, &o.0)
@@ -1234,6 +1263,29 @@ pub(crate) fn test_install(dir: &Path, kind: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_gets_a_plugin_of_its_own_with_the_same_settings() {
+        for kind in ["clap", "vst3"] {
+            let dir = std::env::temp_dir().join(format!("cereal-fork-{kind}-{}", std::process::id()));
+            let Some(path) = test_install(&dir, kind) else {
+                eprintln!("test plug-in not built; skipped");
+                return;
+            };
+            let a = Instance::open(&path, "").expect("opens");
+            assert!(a.activate(44_100.0));
+            let id = a.params()[0].id;
+            a.set(id, 0.25);
+            let b = a.fork().expect("forks");
+            assert!(!Arc::ptr_eq(&a, &b));
+            assert_eq!(b.rate(), Some(44_100.0), "{kind}");
+            assert_eq!(b.value(id), Some(0.25), "{kind}");
+            // moving one leaves the other alone
+            b.set(id, 0.75);
+            assert_eq!(a.value(id), Some(0.25), "{kind}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 
     #[test]
     fn a_vst3_plugin_is_loaded_played_set_and_saved() {
