@@ -115,7 +115,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity WaveShaper (built as Curve Shaper; drawn line read, no editor for it yet)
 - [~] Fruity Wrapper (stock effects saved through the wrapper open as our own units and save back into the wrapper block; hosting outside plug-ins is not built)
 - [~] Fruity X-Y Controller (built as Pad Controller; outputs its stored position, no pad window yet)
-- [ ] Fruity X-Y-Z Controller
+- [~] Fruity X-Y-Z Controller
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block, mixes, attack and release; no line editor yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
 - [~] Hardcore (built as Pedal Board; input, output, graphic equaliser, a generic speaker box, drive and chorus pedals; the other pedals and the real cabinet models are not run)
 - [~] Hyper Chorus (built, approximate)
@@ -123,9 +123,9 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Luxeverb (built as Plush Reverb, approximate)
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read, no editor, look-ahead and second state not run)
-- [ ] Multiband Delay
-- [ ] Newtime
-- [ ] Newtone
+- [~] Multiband Delay
+- [~] Newtime
+- [~] Newtone
 - [~] Patcher (held effects run along the sound cables and can be edited; setting cables, side inputs and rewiring are not built)
 - [~] Pitcher (built as Voice Tuner; automatic correction only, note-driven modes, harmony voices, formant and gender not run)
 - [~] Pitch Shifter (built as Grain Shifter; formant setting not run)
@@ -133,16 +133,16 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Soundgoodizer (built, approximate)
 - [~] Spreader (built, approximate)
 - [~] Transient Processor (built, approximate)
-- [ ] Transmitter
+- [~] Transmitter
 - [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
 - [~] Tuner (opens, block kept; the pitch display is not drawn)
-- [ ] VFX Color Mapper
-- [ ] VFX Envelope
-- [ ] VFX Keyboard Splitter
-- [ ] VFX Key Mapper
-- [ ] VFX Level Scaler
-- [ ] VFX Script
-- [ ] VFX Sequencer
+- [~] VFX Color Mapper
+- [~] VFX Envelope
+- [~] VFX Keyboard Splitter
+- [~] VFX Key Mapper
+- [~] VFX Level Scaler
+- [~] VFX Script
+- [~] VFX Sequencer
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [~] Vintage Phaser (built as Stone Phaser; four stages, sweep range, feedback, speed and stereo phase; its echo, noise, colour and drive sections are not run and several setting positions are guesses)
 - [~] Vocodex (Band Vocoder: bands, follower, mapping envelopes read, built-in carrier, listens to routed mixer tracks; envelopes not yet editable, noise detection and freeze missing)

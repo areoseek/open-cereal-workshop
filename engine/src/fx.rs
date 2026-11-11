@@ -73,6 +73,7 @@ pub enum Kind {
     Amp,
     Relooper,
     Deck,
+    Multi,
 }
 
 pub struct Param {
@@ -661,6 +662,18 @@ pub static DEFS: &[Def] = &[
     },
     Def { kind: Kind::Patch, ident: "Patcher", title: "Patch Bay", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Rack, ident: "Distructor", title: "Drive Rack", size: 958, fixed: &[], params: &[] },
+    Def { kind: Kind::Multi, ident: "Multiband Delay", title: "Band Delay", size: 1781, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity X-Y-Z Controller", title: "Three Axis Pad", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Newtime", title: "Time Editor", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Newtone", title: "Pitch Editor", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Transmitter", title: "Sender", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Color Mapper", title: "Colour Router", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Envelope", title: "Note Envelope", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Keyboard Splitter", title: "Key Zones", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Key Mapper", title: "Key Remap", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Level Scaler", title: "Level Curve", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Script", title: "Note Script", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "VFX Sequencer", title: "Note Sequencer", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Voc, ident: "Vocodex", title: "Band Vocoder", size: 1182, fixed: &[], params: &[] },
     Def { kind: Kind::OldVoc, ident: "Fruity Vocoder", title: "Classic Vocoder", size: 129, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Wave Candy", title: "Scope Meter", size: 0, fixed: &[], params: &[] },
@@ -1685,6 +1698,9 @@ impl Fx {
         if kind == Kind::Voc {
             return Self::decode(def(kind).ident, &crate::fxvoc::fresh()).expect("our own block reads back");
         }
+        if kind == Kind::Multi {
+            return Self::decode(def(kind).ident, &crate::fxmulti::fresh()).expect("our own block reads back");
+        }
         if kind == Kind::OldVoc {
             return Self::decode(def(kind).ident, &crate::fxvoc::classic::fresh()).expect("our own block reads back");
         }
@@ -1719,6 +1735,9 @@ impl Fx {
         }
         if d.kind == Kind::Rack {
             return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+        }
+        if d.kind == Kind::Multi {
+            return crate::fxmulti::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
         }
         if d.kind == Kind::Voc {
             return crate::fxvoc::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
@@ -1819,6 +1838,9 @@ impl Fx {
         }
         if self.kind == Kind::Rack {
             return crate::fxrack::encode(&self.p, base);
+        }
+        if self.kind == Kind::Multi {
+            return crate::fxmulti::encode(&self.p, base);
         }
         if self.kind == Kind::Voc {
             return crate::fxvoc::encode(&self.p, base);
@@ -2035,6 +2057,7 @@ pub struct Unit {
     conv: Option<Box<crate::conv::State>>,
     rack: Option<Box<crate::fxrack::State>>,
     voc: Option<Box<crate::fxvoc::State>>,
+    multi: Option<Box<crate::fxmulti::State>>,
     oldvoc: Option<Box<crate::fxvoc::classic::State>>,
     /// What a send tap took off the signal in the last block, for the player to add to the target track.
     pub tap: Vec<[f32; 2]>,
@@ -2208,7 +2231,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None, tap: Vec::new(), patch: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
@@ -2228,6 +2251,7 @@ impl Unit {
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
             Kind::Voc => u.voc = Some(Box::default()),
+            Kind::Multi => u.multi = Some(Box::default()),
             Kind::OldVoc => u.oldvoc = Some(Box::default()),
             Kind::Rack => {
                 let mut st = crate::fxrack::State::default();
@@ -2296,7 +2320,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None, tap: Vec::new(), patch: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -2341,7 +2365,7 @@ impl Unit {
                 (time * (n + 1.0)) as usize + (cx.sr * 0.3) as usize
             }
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
-            Kind::Peak | Kind::Voc | Kind::OldVoc => (cx.sr * 3.0) as usize,
+            Kind::Peak | Kind::Voc | Kind::OldVoc | Kind::Multi => (cx.sr * 3.0) as usize,
             Kind::Warp => (cx.step * 32.0) as usize + 64,
             Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift | Kind::Finisher | Kind::LowLift | Kind::MorphEq => (cx.sr * 0.25) as usize,
             Kind::Phaser => (cx.sr * 1.5) as usize,
@@ -3784,6 +3808,11 @@ impl Unit {
                     crate::fxrack::process(p, st, io, cx);
                 }
             }
+            Kind::Multi => {
+                if let Some(st) = &mut self.multi {
+                    crate::fxmulti::process(p, st, io, cx);
+                }
+            }
             Kind::Voc => {
                 if let Some(st) = &mut self.voc {
                     crate::fxvoc::process(p, st, io, cx);
@@ -4625,7 +4654,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -4638,7 +4667,7 @@ mod tests {
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
-            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::Patch) {
+            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch) {
                 continue;
             }
             let mut fx = Fx::new(d.kind);

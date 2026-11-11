@@ -6,6 +6,7 @@ pub mod fx;
 pub mod fxbank;
 pub mod fxpatch;
 pub mod fxrack;
+pub mod fxmulti;
 pub mod fxvoc;
 pub mod synth;
 pub mod law;
