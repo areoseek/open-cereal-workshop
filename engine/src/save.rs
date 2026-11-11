@@ -485,6 +485,49 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                     }
                 }
             }
+        } else if let Some(info) = now.zones.as_ref().and_then(|z| z.bank.as_ref()) {
+            // a sound bank player: its block goes back when the file or the preset was changed
+            let ident = "SoundFont Player";
+            if !was.zones.as_ref().is_some_and(|z| z.bank.is_some()) {
+                if let Some(i) = find(ev, end, id::CHAN_TYPE) {
+                    ev[i].value = Value::Byte(2);
+                }
+                let at = match find(ev, end, id::PLUGIN_INTERNAL_NAME) {
+                    Some(i) => {
+                        ev[i] = text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode);
+                        i
+                    }
+                    None => {
+                        let at = find(ev, end, id::CHAN_TYPE).map(|i| i + 1).unwrap_or(start + 1);
+                        ev.insert(at, text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode));
+                        end += 1;
+                        at
+                    }
+                };
+                if find(ev, end, id::NEW_PLUGIN).is_none() {
+                    let mut h = vec![0u8; 52];
+                    put_u32(&mut h, 8, 2);
+                    put_u32(&mut h, 16, 0x50);
+                    put_u32(&mut h, 36, 128);
+                    put_u32(&mut h, 40, 410);
+                    put_u32(&mut h, 44, 558);
+                    put_u32(&mut h, 48, 389);
+                    ev.insert(at + 1, Event::data(id::NEW_PLUGIN, h));
+                    end += 1;
+                }
+                if find(ev, end, id::PLUGIN_PARAMS).is_none() {
+                    let at = find(ev, end, id::COLOR).or(find(ev, end, id::PLUGIN_NAME)).map(|i| i + 1).unwrap_or(at + 2);
+                    ev.insert(at, Event::data(id::PLUGIN_PARAMS, info.block.clone()));
+                    end += 1;
+                }
+            }
+            if let Some(i) = find(ev, end, id::PLUGIN_PARAMS) {
+                if let Value::Data(d) = &mut ev[i].value {
+                    if crate::sf2::setting(d).as_ref() != Some(&info.setting) {
+                        *d = info.block.clone();
+                    }
+                }
+            }
         } else if let Some(g) = now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind) {
             // a built-in instrument: the channel becomes (or stays) a generator channel carrying its settings
             let ident = crate::synth::def(g.kind).ident;
@@ -1725,6 +1768,31 @@ mod tests {
         assert_eq!(got, [(2, 24), (3, 48)]);
         // and it is stable from there
         assert_eq!(to_bytes(&r, Some(&f2)).unwrap(), bytes2);
+    }
+
+    #[test]
+    fn a_sound_bank_channel_is_saved() {
+        use crate::song::Chan;
+        let s = Song::new();
+        let bytes = to_bytes(&s, None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        let at = r.channels.len();
+        let want = crate::sf2::Setting { path: "C:\\Banks\\Strings.sf2".into(), bank: 0, patch: 48 };
+        let block = crate::sf2::with(&[], &want);
+        let mut c = Chan { name: "Strings".into(), kind: ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
+        c.zones = crate::sf2::open(&c.plugin, &block, None, None).map(std::sync::Arc::new);
+        r.channels.push(c);
+        r.prepare();
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        let info = r2.channels[at].zones.clone().and_then(|z| z.bank.clone()).expect("a sound bank channel");
+        assert_eq!(info.setting, want);
+        // picking another preset goes back into the same block
+        let again = crate::sf2::Setting { patch: 5, ..want.clone() };
+        r2.channels[at].zones = crate::sf2::open("SoundFont Player", &crate::sf2::with(&info.block, &again), None, None).map(std::sync::Arc::new);
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
     }
 
     #[test]

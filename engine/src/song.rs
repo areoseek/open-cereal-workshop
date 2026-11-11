@@ -976,7 +976,8 @@ impl Song {
                     (ChannelKind::Plugin, Some(lib)) if c.plugin.eq_ignore_ascii_case("Fruity Granulizer") && !c.sample_path.is_empty() => lib.load_stored(&c.sample_path, project_dir),
                     _ => loop_smp,
                 };
-                let zones = (c.kind == ChannelKind::Plugin).then(|| crate::zones::Map::parse(&c.plugin, &c.state)).flatten().map(|mut m| {
+                let bank = (c.kind == ChannelKind::Plugin).then(|| crate::sf2::open(&c.plugin, &c.state, lib.as_deref_mut(), project_dir)).flatten().map(Arc::new);
+                let zones = bank.is_none().then(|| (c.kind == ChannelKind::Plugin).then(|| crate::zones::Map::parse(&c.plugin, &c.state)).flatten()).flatten().map(|mut m| {
                     if let Some(lib) = lib.as_deref_mut() {
                         m.load(lib, project_dir);
                     }
@@ -1015,7 +1016,7 @@ impl Song {
                     gen: if c.kind == ChannelKind::Plugin { crate::synth::Gen::decode(&c.plugin, &c.state) } else { None },
                     bay: None,
                     slices,
-                    zones,
+                    zones: bank.or(zones),
                 };
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
                     if let Some((p, lead, g, layers)) = crate::fxpatch::decode_gen(&c.state) {

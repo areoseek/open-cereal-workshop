@@ -181,6 +181,50 @@ impl App {
                 ChannelKind::AutomationClip => {
                     ui.label("Automation clip. Its curve is drawn in the playlist.");
                 }
+                _ if c.zones.as_ref().is_some_and(|z| z.bank.is_some()) => {
+                    // a sound bank player: the file, and the preset picked from it
+                    let info = c.zones.as_ref().and_then(|z| z.bank.clone()).unwrap();
+                    let count = c.zones.as_ref().map_or(0, |z| z.zones.len());
+                    let mut want = info.setting.clone();
+                    section(ui, "SOUND BANK");
+                    ui.horizontal(|ui| {
+                        if ui.button("Load...").on_hover_text("Pick a sound bank file (.sf2)").clicked() {
+                            if let Some(f) = rfd::FileDialog::new().add_filter("Sound bank", &["sf2", "SF2"]).pick_file() {
+                                want.path = f.to_string_lossy().to_string();
+                                want.bank = 0;
+                                want.patch = 0;
+                            }
+                        }
+                        let name = info.setting.path.rsplit(['/', '\\']).next().unwrap_or("");
+                        ui.label(if name.is_empty() { "(no file loaded)" } else { name });
+                    });
+                    if info.found {
+                        let now = info.presets.iter().find(|p| (p.0, p.1) == (want.bank, want.patch)).or(info.presets.first());
+                        let text = now.map_or(String::new(), |p| format!("{}:{}  {}", p.0, p.1, p.2));
+                        ui.horizontal(|ui| {
+                            ui.label("Patch");
+                            egui::ComboBox::from_id_salt(("bank_patch", ci)).width(240.0).selected_text(text).show_ui(ui, |ui| {
+                                for p in &info.presets {
+                                    if ui.selectable_label((p.0, p.1) == (want.bank, want.patch), format!("{}:{}  {}", p.0, p.1, p.2)).clicked() {
+                                        want.bank = p.0;
+                                        want.patch = p.1;
+                                    }
+                                }
+                            });
+                        });
+                        ui.label(RichText::new(format!("{count} zones in this patch.")).small().color(TEXT_DIM));
+                    } else if !info.setting.path.is_empty() {
+                        ui.label(RichText::new("The sound bank file was not found.").small().color(Color32::from_rgb(255, 120, 110)));
+                    }
+                    if want != info.setting {
+                        let block = cereal_engine::sf2::with(&info.block, &want);
+                        let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                        if let Some(m) = cereal_engine::sf2::open("SoundFont Player", &block, Some(&mut self.lib), dir.as_deref()) {
+                            self.song.channels[ci].zones = Some(std::sync::Arc::new(m));
+                            self.dirty = true;
+                        }
+                    }
+                }
                 _ if c.zones.is_some() => {
                     // a pad machine or multi-sample player: one button per key that has sounds, its layers on hover
                     let map = c.zones.clone().unwrap();

@@ -36,17 +36,23 @@ pub struct Zone {
     pub cut_by: i32,
     /// Mixer track offset from the channel's own track.
     pub out: usize,
+    /// The zone's own level envelope, when it brings one.
+    pub env: Option<crate::song::Env>,
+    /// A low-pass the zone asks for: cutoff on the voice filter's 0..=1 scale, and resonance.
+    pub filter: Option<(f32, f32)>,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0 }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Map {
     pub zones: Vec<Zone>,
+    /// The sound bank file behind the zones, when they come from one.
+    pub bank: Option<crate::sf2::Info>,
 }
 
 impl Map {
@@ -149,7 +155,7 @@ fn pads(state: &[u8]) -> Option<Map> {
             });
         }
     }
-    Some(Map { zones })
+    Some(Map { zones, bank: None })
 }
 
 /// The multi-sample player's block: a 4-byte number, then pieces; each program is a piece (number 1) whose
@@ -196,7 +202,7 @@ fn programs(state: &[u8]) -> Option<Map> {
             break;
         }
     }
-    Some(Map { zones })
+    Some(Map { zones, bank: None })
 }
 
 #[cfg(test)]

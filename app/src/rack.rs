@@ -196,6 +196,14 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    if ui.button("Sound Bank Player").clicked() {
+                        let mut c = Chan { name: "Sound Bank Player".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
+                        c.zones = cereal_engine::sf2::open(&c.plugin, &[], None, None).map(std::sync::Arc::new);
+                        self.song.channels.push(c);
+                        self.sel_chan = self.song.channels.len() - 1;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                 })
                 .response
                 .on_hover_text("Add a channel playing a built-in instrument");

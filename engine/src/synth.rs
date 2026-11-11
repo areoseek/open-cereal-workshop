@@ -478,8 +478,6 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Poly, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Poly2, ident: "Kepler Exo", title: "Vintage Poly II", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Acid, ident: "Transistor Bass", title: "Acid Line", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Soundfont Player", title: "Sound Bank Player", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Fruity Soundfont Player", title: "Sound Bank Player", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Dashboard", title: "Control Panel", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Fruity Dance", title: "Dancer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Fruity Video Player", title: "Video Player", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -651,7 +649,7 @@ pub fn def(kind: Kind) -> &'static Def {
 
 pub fn title_for(ident: &str) -> Option<&'static str> {
     // instruments that are not settings tables: sample maps and the loop slicer
-    const OTHER: &[(&str, &str)] = &[("FPC", "Pad Machine"), ("DirectWave", "Zone Sampler"), ("Fruity Slicer", "Loop Slicer"), ("Slicex", "Marker Slicer")];
+    const OTHER: &[(&str, &str)] = &[("FPC", "Pad Machine"), ("DirectWave", "Zone Sampler"), ("Fruity Slicer", "Loop Slicer"), ("Slicex", "Marker Slicer"), ("Soundfont Player", "Sound Bank Player"), ("Fruity Soundfont Player", "Sound Bank Player")];
     DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident)).map(|d| d.title).or_else(|| OTHER.iter().find(|o| o.0.eq_ignore_ascii_case(ident)).map(|o| o.1))
 }
 

@@ -861,6 +861,10 @@ impl Player {
                         note_gain,
                         note_pan: n.pan,
                         follow: z.track,
+                        venv: z.env.unwrap_or_default(),
+                        fon: z.filter.is_some(),
+                        fcut: z.filter.map_or(1.0, |f| f.0),
+                        fres: z.filter.map_or(0.0, |f| f.1),
                         ..Default::default()
                     });
                 }
@@ -1890,7 +1894,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = |key: u8, lo: u8, hi: u8, cut: i32| crate::zones::Zone { key_lo: key, key_hi: key, vel_lo: lo, vel_hi: hi, root: key as i32, track: false, sample: Some(tone.clone()), one_shot: true, cut, cut_by: cut, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)] }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None }));
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].key = 36;
         // a short note still plays the whole recording
@@ -1911,6 +1915,21 @@ mod tests {
         let cut = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&alone, 1.0, 1.8) > 0.1);
         assert!(loud(&cut, 1.0, 1.8) < 0.01, "the open hat was stopped");
+    }
+
+    #[test]
+    fn a_zone_follows_its_own_envelope() {
+        let mut s = tone_song(2.0);
+        let tone = s.channels[0].sample.take().unwrap();
+        s.channels[0].kind = ChannelKind::Plugin;
+        let env = crate::song::Env { on: true, decay: 0.3, sustain: 0.0, release: 0.01, ..Default::default() };
+        let zone = crate::zones::Zone { root: 60, sample: Some(tone), one_shot: true, env: Some(env), ..Default::default() };
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None }));
+        s.patterns[0].toggle_step(0, 0);
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        // loud at the start, gone once the decay has run to its silent sustain
+        assert!(loud(&buf, 0.0, 0.1) > 0.1);
+        assert!(loud(&buf, 0.5, 1.5) < 1e-4);
     }
 
     #[test]
