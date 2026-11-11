@@ -22,6 +22,10 @@ fn hint(kind: Kind, i: usize, name: &str, v: f32) -> String {
         (Kind::Eq, n) if n.starts_with("Type") => format!("{name}: {}", EQ_TYPES[(v as usize).min(7)]),
         (Kind::Balance | Kind::Enhancer, "Pan") | (Kind::Delay, "Input pan") => format!("{name}: {:+.0} %", v / 1.28),
         (Kind::Balance | Kind::Enhancer, "Volume") => pct(v / 256.0),
+        (Kind::Xyz, "X" | "Y" | "Z") => pct(v / 65536.0),
+        (Kind::Xyz, "Global speed") if v <= 0.0 => "Global speed: at once".to_string(),
+        (Kind::Xyz, "Global speed") => format!("Global speed: {:.0} ms", cereal_engine::fx::xyz_time(v, 2048.0) * 1000.0),
+        (Kind::Xyz, _) => pct(v / 4096.0),
         (Kind::AutoPan, "Pan") => format!("Pan: {:+.0} %", (v - 128.0) / 1.28),
         (Kind::AutoPan, "Volume") => pct(v / 256.0),
         (Kind::AutoPan, "Amount") => format!("Amount: {:+.0} %", (v - 64.0) / 0.64),
@@ -227,7 +231,7 @@ impl App {
             if f.line_count() > 0 {
                 changed |= lines_ui(ui, f);
             }
-            if f.kind == Kind::Xy {
+            if matches!(f.kind, Kind::Xy | Kind::Xyz) {
                 changed |= xy_pad(ui, f);
             }
             if f.kind == Kind::Conv {
@@ -793,6 +797,14 @@ fn xy_pad(ui: &mut Ui, f: &mut fx::Fx) -> bool {
             changed = true;
         }
     }
+    if f.kind == Kind::Xyz && resp.hovered() && f.p.len() >= 3 {
+        // depth is on the wheel
+        let turn = ui.input(|i| i.smooth_scroll_delta.y);
+        if turn != 0.0 {
+            f.p[2] = (f.p[2] + turn * 64.0).clamp(0.0, 65536.0).round();
+            changed = true;
+        }
+    }
     if resp.double_clicked() && f.p.len() >= 2 {
         f.p[0] = 32768.0;
         f.p[1] = 32768.0;
@@ -811,8 +823,10 @@ fn xy_pad(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     let at = egui::pos2(rect.left() + x * rect.width(), rect.bottom() - y * rect.height());
     p.line_segment([egui::pos2(at.x, rect.top()), egui::pos2(at.x, rect.bottom())], egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 90, 110)));
     p.line_segment([egui::pos2(rect.left(), at.y), egui::pos2(rect.right(), at.y)], egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 90, 110)));
-    p.circle_filled(at, 7.0, Color32::from_rgb(240, 160, 60));
-    ui.label(RichText::new(format!("X {:.0} %   Y {:.0} %   (double-click to centre; link controls to X or Y with right-click, Link to controller)", x * 100.0, y * 100.0)).small().color(TEXT_DIM));
+    let depth = if f.kind == Kind::Xyz { f.p.get(2).copied().unwrap_or(32768.0) / 65536.0 } else { 0.5 };
+    p.circle_filled(at, 3.0 + 8.0 * depth, Color32::from_rgb(240, 160, 60));
+    let more = if f.kind == Kind::Xyz { format!("   Z {:.0} % (wheel)", depth * 100.0) } else { String::new() };
+    ui.label(RichText::new(format!("X {:.0} %   Y {:.0} %{more}   (double-click to centre; link controls to an axis with right-click, Link to controller)", x * 100.0, y * 100.0)).small().color(TEXT_DIM));
     changed
 }
 
@@ -832,6 +846,18 @@ fn lines_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Level line of").small().color(TEXT_DIM));
                 for (i, name) in ["Low", "Mid", "High", "Main"].iter().enumerate() {
+                    ui.selectable_value(&mut k, i, *name);
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(id, k));
+            vec![(k, String::new())]
+        }
+        Kind::Xyz => {
+            let id = ui.id().with("xyzline");
+            let mut k: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Mapping of").small().color(TEXT_DIM));
+                for (i, name) in ["X in", "X out", "Y in", "Y out", "Z in", "Z out"].iter().enumerate() {
                     ui.selectable_value(&mut k, i, *name);
                 }
             });

@@ -703,6 +703,7 @@ impl App {
                         let outs: &[&str] = match s.fx.as_ref().map(|f| f.kind) {
                             Some(cereal_engine::fx::Kind::Peak) => &["peak + sweep", "peak", "sweep"],
                             Some(cereal_engine::fx::Kind::Xy) => &["X", "Y"],
+                            Some(cereal_engine::fx::Kind::Xyz) => &["X", "Y", "Z"],
                             Some(cereal_engine::fx::Kind::Formula) => &["result"],
                             Some(cereal_engine::fx::Kind::Split) => &["attack gate"],
                             _ => &[],

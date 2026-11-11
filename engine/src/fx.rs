@@ -53,6 +53,7 @@ pub enum Kind {
     Tuner,
     Peak,
     Xy,
+    Xyz,
     Formula,
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
@@ -670,7 +671,26 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Rack, ident: "Distructor", title: "Drive Rack", size: 958, fixed: &[], params: &[] },
     Def { kind: Kind::Multi, ident: "Multiband Delay", title: "Band Delay", size: 1781, fixed: &[], params: &[] },
     Def { kind: Kind::Hosted, ident: "Hosted Plug-in", title: "Plug-in", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity X-Y-Z Controller", title: "Three Axis Pad", size: 0, fixed: &[], params: &[] },
+    Def {
+        kind: Kind::Xyz,
+        ident: "Fruity X-Y-Z Controller",
+        title: "Three Axis Pad",
+        size: 560,
+        fixed: &[],
+        params: &[
+            p("X", 4, 0, 65536, 32768),
+            p("Y", 8, 0, 65536, 32768),
+            p("Z", 12, 0, 65536, 32768),
+            p("X speed", 16, 0, 4096, 2048),
+            p("Y speed", 20, 0, 4096, 2048),
+            p("Z speed", 24, 0, 4096, 2048),
+            p("X acceleration", 28, 0, 4096, 3072),
+            p("Y acceleration", 32, 0, 4096, 3072),
+            p("Z acceleration", 36, 0, 4096, 3072),
+            p("Global speed", 40, 0, 4096, 2048),
+            p("Controller speed", 44, 0, 4096, 1024),
+        ],
+    },
     Def { kind: Kind::Thru, ident: "Newtime", title: "Time Editor", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Newtone", title: "Pitch Editor", size: 0, fixed: &[], params: &[] },
     // attacks and what follows them, split by a burst detector and treated apart; slot order as stored
@@ -1358,6 +1378,53 @@ fn curve_fresh() -> Vec<u8> {
     v
 }
 
+/// Entries in each of the three axis pad's mapping tables.
+pub const XYZ_N: usize = 65;
+
+/// A new three axis pad: everything centred, straight mappings in and out.
+fn xyz_fresh() -> Vec<u8> {
+    let mut v = Vec::with_capacity(560);
+    for x in [3i32, 32768, 32768, 32768, 2048, 2048, 2048, 3072, 3072, 3072, 2048, 1024, 6, 0x90] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    for _ in 0..3 {
+        v.extend_from_slice(&[0; 8]);
+        for _ in 0..2 {
+            for x in [3i32, 3, 2] {
+                v.extend_from_slice(&x.to_le_bytes());
+            }
+            for (x, y) in [(0f64, 0f64), (1.0, 1.0)] {
+                v.extend_from_slice(&x.to_le_bytes());
+                v.extend_from_slice(&y.to_le_bytes());
+                v.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 2]);
+            }
+            for x in [0i32, -1, -1, -1, -1] {
+                v.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+    }
+    v
+}
+
+/// Where the six mapping lines of a three axis pad start: in and out for X, then Y, then Z.
+fn xyz_lines(state: &[u8]) -> Option<Vec<usize>> {
+    let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut heads = Vec::with_capacity(6);
+    let mut at = 56;
+    for _ in 0..3 {
+        at += 8;
+        for _ in 0..2 {
+            heads.push(at);
+            let n = int(at + 8)?;
+            if !(1..=4096).contains(&n) {
+                return None;
+            }
+            at += 12 + n as usize * [12, 16, 24, 24][int(at + 4)?.clamp(0, 3) as usize] + 20;
+        }
+    }
+    (at <= state.len()).then_some(heads)
+}
+
 /// Read the curve shaper's drawn line into a table over the input range; appends the two-sided switch and the
 /// table to `p`.
 fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
@@ -1699,6 +1766,9 @@ impl Fx {
         if kind == Kind::Warp {
             return Self::decode(def(kind).ident, &warp_fresh()).expect("our own block reads back");
         }
+        if kind == Kind::Xyz {
+            return Self::decode(def(kind).ident, &xyz_fresh()).expect("our own block reads back");
+        }
         if kind == Kind::MorphEq {
             return Self::decode(def(kind).ident, &meq_fresh()).expect("our own block reads back");
         }
@@ -1837,7 +1907,12 @@ impl Fx {
                 ir = crate::sample::Sample::decode(state[w].to_vec(), "wav").ok().map(|s| Ir { smp: std::sync::Arc::new(s), path: String::new() });
             }
         }
-        let raw = matches!(d.kind, Kind::Curve | Kind::Warp).then(|| std::sync::Arc::new(state.to_vec()));
+        if d.kind == Kind::Xyz {
+            for head in xyz_lines(state)? {
+                drawn_table_n(state, head, XYZ_N, &mut p)?;
+            }
+        }
+        let raw = matches!(d.kind, Kind::Curve | Kind::Warp | Kind::Xyz).then(|| std::sync::Arc::new(state.to_vec()));
         Some(Self { kind: d.kind, p, ir, sub: None, raw, ext: None })
     }
 
@@ -1913,6 +1988,7 @@ impl Fx {
             None if self.kind == Kind::Curve => curve_fresh(),
             None if self.kind == Kind::Maxi => maxi_fresh(),
             None if self.kind == Kind::Xy => XY_FRESH.to_vec(),
+            None if self.kind == Kind::Xyz => xyz_fresh(),
             None if self.kind == Kind::Warp => warp_fresh(),
             None if self.kind == Kind::MorphEq => meq_fresh(),
             None => {
@@ -2039,6 +2115,7 @@ impl Fx {
         match self.kind {
             Kind::Curve => vec![22],
             Kind::Warp => warp_lines(block).unwrap_or_default(),
+            Kind::Xyz => xyz_lines(block).unwrap_or_default(),
             Kind::Maxi => {
                 let int = |o: usize| block.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
                 let mut heads = vec![];
@@ -2058,6 +2135,7 @@ impl Fx {
             Kind::Curve => 1,
             Kind::Maxi => 4,
             Kind::Warp => 2 * WARP_SLOTS,
+            Kind::Xyz => 6,
             _ => 0,
         }
     }
@@ -2097,6 +2175,12 @@ impl Fx {
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
     kind == Kind::Pad || kind == Kind::Amp || kind == Kind::Deck || (kind == Kind::Tuner && off < 144)
+}
+
+/// How long the three axis pad's pointer takes to close most of the way in on a new place, in seconds, from the
+/// global setting and the axis's own speed. Nothing at all with the global setting at zero.
+pub fn xyz_time(global: f32, speed: f32) -> f32 {
+    0.15 * (global / 2048.0).max(0.0) * 2048.0 / speed.max(64.0)
 }
 
 /// What a unit needs to know about the moment it is running in.
@@ -3274,6 +3358,36 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Xyz => {
+                if p.len() < 11 + 6 * XYZ_N {
+                    return;
+                }
+                let dt = io.len() as f32 / cx.sr.max(1.0);
+                let read = |t: &[f32], x: f32| {
+                    let at = x.clamp(0.0, 1.0) * (XYZ_N - 1) as f32;
+                    let i = (at as usize).min(XYZ_N - 2);
+                    t[i] + (t[i + 1] - t[i]) * (at - i as f32)
+                };
+                let fresh = self.z[6] == 0.0;
+                self.z[6] = 1.0;
+                for a in 0..3 {
+                    let lines = &p[11 + 2 * a * XYZ_N..11 + (2 * a + 2) * XYZ_N];
+                    let want = read(&lines[..XYZ_N], p[a] / 65536.0);
+                    let time = xyz_time(p[9], p[3 + a]);
+                    if fresh || time <= 0.0 {
+                        self.z[a] = want;
+                        self.z[3 + a] = 0.0;
+                    } else {
+                        // the pointer chases where it was put, picking up speed at the rate the acceleration allows
+                        let go = (want - self.z[a]) * (1.0 - (-dt / time).exp()) / dt.max(1e-6);
+                        let pick = time * 2.0 * (1.0 - p[6 + a] / 4096.0).clamp(0.0, 1.0);
+                        let k = if pick > 1e-4 { 1.0 - (-dt / pick).exp() } else { 1.0 };
+                        self.z[3 + a] += (go - self.z[3 + a]) * k;
+                        self.z[a] = (self.z[a] + self.z[3 + a] * dt).clamp(0.0, 1.0);
+                    }
+                    self.out[a] = read(&lines[XYZ_N..], self.z[a]).clamp(0.0, 1.0);
+                }
+            }
             Kind::Formula => {
                 let letters = p.get(4..).unwrap_or(&[]);
                 if self.form.as_ref().is_none_or(|f| f.0 != letters) {
@@ -5196,4 +5310,38 @@ mod tests {
         let g = y[0][0];
         assert!(g > 0.5 && (y[1500][0] - g).abs() < 1e-3 && y[700][0].abs() < 1e-4, "{g} {}", y[1500][0]);
     }
+    #[test]
+    fn the_three_axis_pad_reads_its_block_and_follows_at_its_own_pace() {
+        let fresh = Fx::new(Kind::Xyz);
+        assert_eq!(fresh.encode(None), xyz_fresh());
+        assert_eq!(fresh.line_count(), 6);
+        // an output line turned upside down turns the axis upside down, and the block still reads back
+        let mut f = fresh.clone();
+        let mut line = f.line(1).expect("X out");
+        line.pts[0].y = 1.0;
+        line.pts[1].y = 0.0;
+        assert!(f.set_line(1, &line));
+        f.p[0] = 65536.0;
+        f.p[9] = 0.0;
+        let again = Fx::decode("Fruity X-Y-Z Controller", &f.encode(None)).unwrap();
+        assert_eq!(again.p, f.p);
+        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
+        let mut u = Unit::new(again, cx.sr);
+        let mut io = vec![[0.25f32; 2]; 480];
+        u.process(&mut io, &cx);
+        assert!(u.out[0] < 0.01 && (u.out[1] - 0.5).abs() < 0.01 && (u.out[2] - 0.5).abs() < 0.01, "{:?}", u.out);
+        assert!(io.iter().all(|x| x[0] == 0.25), "the sound passes untouched");
+        // with a pace set, a jump is chased rather than taken at once
+        let mut u = Unit::new(fresh, cx.sr);
+        u.process(&mut io, &cx);
+        u.fx.p[2] = 65536.0;
+        u.process(&mut io, &cx);
+        let early = u.out[2];
+        assert!(early > 0.5 && early < 0.75, "{early}");
+        for _ in 0..200 {
+            u.process(&mut io, &cx);
+        }
+        assert!(u.out[2] > 0.99, "{}", u.out[2]);
+    }
+
 }

@@ -115,7 +115,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity WaveShaper (built as Curve Shaper; the drawn line is read, edited in the line editor and saved)
 - [~] Fruity Wrapper (stock effects saved through the wrapper open as our own units and save back into the wrapper block; hosting outside plug-ins is not built)
 - [~] Fruity X-Y Controller (built as Pad Controller with its pad; X and Y drive linked controls; movement smoothing not done)
-- [~] Fruity X-Y-Z Controller
+- [~] Fruity X-Y-Z Controller (built as Three Axis Pad: X, Y, Z senders, in and out mapping lines per axis, speed and acceleration; the pace itself is estimated; absolute/relative dragging, colour and controller speed are kept but not acted on)
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block and edited in the line editor, mixes, attack and release; no ready-made line shapes yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
 - [~] Hardcore (built as Pedal Board; input, output, graphic equaliser, a generic speaker box, drive and chorus pedals; the other pedals and the real cabinet models are not run)
 - [~] Hyper Chorus (built, approximate)

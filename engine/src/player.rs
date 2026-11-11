@@ -2160,7 +2160,7 @@ impl Player {
         }
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
-            let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy)));
+            let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy | fx::Kind::Xyz)));
             // a track being recorded runs through silence too, or the pauses would fall out of the take
             let taken = self.transport.rec_want.load(Relaxed);
             let sender = sender || (taken != u32::MAX && (taken >> 6) as usize == i);
@@ -2217,7 +2217,7 @@ impl Player {
                             }
                         }
                     }
-                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Formula) {
+                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Formula) {
                         // a controller: run it, then hand its outputs to whatever is linked to them
                         u.1.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                         u.1.process(&mut bus[..n], &cx);
