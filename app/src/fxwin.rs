@@ -256,6 +256,127 @@ impl App {
                     ui.label(RichText::new("The cabinet sounds come with your own content; none was found, so the cabinet passes the sound on.").small().color(TEXT_DIM));
                 }
             }
+            if f.kind == Kind::Voc {
+                use cereal_engine::fxvoc as vc;
+                let pick = |ui: &mut egui::Ui, f: &mut fx::Fx, salt: &str, at: usize, none: &str| -> bool {
+                    let mut hit = false;
+                    let cur = f.p[at] as i32;
+                    let name = |v: i32| match v {
+                        0 => "This track".to_string(),
+                        v if v < 0 => none.to_string(),
+                        v => format!("Routed track {v}"),
+                    };
+                    egui::ComboBox::from_id_salt((salt, ins, slot)).width(110.0).selected_text(RichText::new(name(cur)).small()).show_ui(ui, |ui| {
+                        for v in -1..=8 {
+                            if ui.selectable_label(cur == v, name(v)).clicked() && cur != v {
+                                f.p[at] = v as f32;
+                                hit = true;
+                            }
+                        }
+                    });
+                    hit
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Modulator").small().color(TEXT_DIM));
+                    changed |= pick(ui, f, "vocmod", vc::MOD_SEL, "None");
+                    ui.label(RichText::new("Carrier").small().color(TEXT_DIM));
+                    changed |= pick(ui, f, "voccar", vc::CAR_SEL, "Built-in synth");
+                    let mut lr = f.p[vc::FLAGS + vc::F_LR] >= 0.5;
+                    if ui.checkbox(&mut lr, RichText::new("Left = modulator, right = carrier").small()).changed() {
+                        f.p[vc::FLAGS + vc::F_LR] = lr as u8 as f32;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Built-in sound").small().color(TEXT_DIM));
+                    let cur = (f.p[vc::CARRIER] as usize).min(vc::CARRIERS.len() - 1);
+                    egui::ComboBox::from_id_salt(("vocsound", ins, slot)).width(110.0).selected_text(RichText::new(vc::CARRIERS[cur].1).small()).show_ui(ui, |ui| {
+                        for (i, c) in vc::CARRIERS.iter().enumerate() {
+                            if ui.selectable_label(cur == i, c.1).clicked() && cur != i {
+                                f.p[vc::CARRIER] = i as f32;
+                                changed = true;
+                            }
+                        }
+                    });
+                    let n = (f.p[vc::NOTES] as usize).min(vc::MAXNOTES);
+                    let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+                    let held: Vec<String> = (0..n).map(|i| f.p[vc::NOTES + 1 + i] as i32).map(|k| format!("{}{}", names[k.rem_euclid(12) as usize], k.div_euclid(12))).collect();
+                    ui.label(RichText::new(if held.is_empty() { "no notes held".to_string() } else { format!("holding {}", held.join(" ")) }).small());
+                    for (label, k) in [("+3rd", 4), ("+5th", 7), ("+Oct", 12)] {
+                        if n > 0 && n < vc::MAXNOTES && ui.button(RichText::new(label).small()).clicked() {
+                            f.p[vc::NOTES + 1 + n] = f.p[vc::NOTES + 1] + k as f32;
+                            f.p[vc::NOTES] = (n + 1) as f32;
+                            changed = true;
+                        }
+                    }
+                    if n > 1 && ui.button(RichText::new("- Note").small()).clicked() {
+                        f.p[vc::NOTES] = (n - 1) as f32;
+                        changed = true;
+                    }
+                    if n == 0 && ui.button(RichText::new("+ Note").small()).clicked() {
+                        f.p[vc::NOTES] = 1.0;
+                        f.p[vc::NOTES + 1] = 60.0;
+                        changed = true;
+                    }
+                    if n > 0 {
+                        let mut root = f.p[vc::NOTES + 1];
+                        if ui.add(egui::DragValue::new(&mut root).range(24.0..=96.0).speed(0.1).prefix("root ")).changed() {
+                            let by = root.round() - f.p[vc::NOTES + 1];
+                            for i in 0..n {
+                                f.p[vc::NOTES + 1 + i] += by;
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+                let rows: [&[(&str, usize, f32, f32)]; 3] = [
+                    &[("Wet", vc::WET, 0.0, 2000.0), ("Finish", vc::FINISH, 0.0, 1000.0), ("Mod thru", vc::MOD_THRU, 0.0, 65536.0), ("Mod high-pass", vc::MOD_HP, 0.0, 65536.0), ("Car thru", vc::CAR_THRU, 0.0, 65536.0), ("Car low-pass", vc::CAR_LP, 0.0, 65536.0), ("Noise", vc::NOISE, 0.0, 65536.0), ("Noise high-pass", vc::NOISE_HP, 0.0, 65536.0)],
+                    &[("Hold", vc::HOLD, 0.0, 10000.0), ("Attack", vc::ATT, 0.0, 10000.0), ("Release", vc::REL, 0.0, 10000.0), ("Bands", vc::BANDS, 5.0, 100.0), ("Order", vc::ORDER, 1.0, 4.0), ("Band width", vc::WIDTH, 50.0, 1000.0), ("Mod width", vc::MOD_WIDTH, 200.0, 8000.0)],
+                    &[("Pitch shift", vc::SHIFT, -1200.0, 1200.0), ("Unison", vc::UNISON, 0.0, 5.0), ("Unison shift", vc::UNI_SHIFT, 0.0, 1000.0), ("Unison pan", vc::UNI_PAN, 0.0, 256.0)],
+                ];
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for &(name, i, lo, hi) in row {
+                            let v = &mut f.p[i];
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.set_width(62.0);
+                                ui.vertical_centered(|ui| {
+                                    let before = *v;
+                                    let r = knob(ui, v, lo, hi, before, 26.0);
+                                    *v = v.round();
+                                    if r.changed() && *v != before {
+                                        changed = true;
+                                    }
+                                    r.on_hover_text(format!("{name}: {}", *v as i32));
+                                    ui.label(RichText::new(name).small().color(TEXT_DIM));
+                                });
+                            });
+                        }
+                        if row.len() == 4 {
+                            for (label, at) in [("Smooth follower", vc::RMS), ("Contour from carrier", vc::FLAGS + vc::F_FROM_CAR), ("from consonants", vc::FLAGS + vc::F_FROM_CONS), ("to modulator", vc::FLAGS + vc::F_TO_MOD), ("to noise", vc::FLAGS + vc::F_TO_NOISE)] {
+                                let mut on = f.p[at] >= 0.5;
+                                if ui.checkbox(&mut on, RichText::new(label).small()).changed() {
+                                    f.p[at] = on as u8 as f32;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+                }
+                // the band map: where each band sits and how much it is turned up
+                let n = (f.p[vc::BANDS] as usize).clamp(5, 100);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(560.0), 54.0), egui::Sense::hover());
+                let pt = ui.painter_at(rect);
+                pt.rect_filled(rect, 2.0, egui::Color32::from_gray(24));
+                for b in 0..n {
+                    let t = (b as f32 + 0.5) / n as f32;
+                    let y = vc::env_level(&f.p, 8, t).clamp(0.0, 1.0);
+                    let g = vc::env_level(&f.p, 0, t).clamp(0.0, 1.0);
+                    let x = rect.left() + y * rect.width();
+                    pt.line_segment([egui::pos2(x, rect.bottom()), egui::pos2(x, rect.bottom() - g * rect.height())], egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 190, 230)));
+                }
+            }
             let per_row = if f.kind == Kind::Eq { 7 } else { 6 };
             // units made of several like sections show one section at a time: (settings in front, settings per
             // section, section names)

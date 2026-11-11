@@ -145,7 +145,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] VFX Sequencer
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [ ] Vintage Phaser
-- [ ] Vocodex
+- [~] Vocodex (Band Vocoder: bands, follower, mapping envelopes read, built-in carrier, listens to routed mixer tracks; envelopes not yet editable, noise detection and freeze missing)
 - [~] Wave Candy (opens as Scope Meter, block kept, sound passes through; the displays are not drawn)
 - [~] ZGameEditor Visualizer (opens as Visual Stage, block kept, sound passes through; no visuals)
 

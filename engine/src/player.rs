@@ -171,6 +171,9 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         driven: Vec::with_capacity(64),
         ring: vec![],
         scratch: Vec::with_capacity(BLOCK),
+        cap: Vec::new(),
+        cap_at: Vec::new(),
+        blockno: 0,
         dirty: vec![],
         pos: 0.0,
         was_playing: false,
@@ -568,6 +571,10 @@ pub struct Player {
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
     scratch: Vec<[f32; 2]>,
+    /// What each insert put out this block, kept for units on other inserts that listen to it.
+    cap: Vec<Vec<[f32; 2]>>,
+    cap_at: Vec<u64>,
+    blockno: u64,
     dirty: Vec<bool>,
     pos: f64,
     was_playing: bool,
@@ -1142,6 +1149,11 @@ impl Player {
         self.transport.voices.store(live, Relaxed);
 
         let master = self.transport.master();
+        self.blockno += 1;
+        if self.cap.len() != ni {
+            self.cap = vec![Vec::new(); ni];
+            self.cap_at = vec![0; ni];
+        }
         for &i in &song.mix_order {
             if i >= ni || (!self.dirty[i] && self.ring[i] == 0) {
                 continue;
@@ -1181,6 +1193,18 @@ impl Player {
                         continue;
                     }
                     tail += u.1.tail(&cx);
+                    if let Some(sel) = u.1.side_wants() {
+                        for (which, &k) in sel.iter().enumerate() {
+                            if k < 1 {
+                                continue;
+                            }
+                            let src = song.inserts.iter().enumerate().filter(|(j, x)| *j != i && x.sends.contains(&i)).map(|(j, _)| j).nth(k as usize - 1);
+                            match src {
+                                Some(j) if self.cap_at[j] == self.blockno && self.cap[j].len() >= n => u.1.side_set(which, &self.cap[j][..n]),
+                                _ => {}
+                            }
+                        }
+                    }
                     if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy) {
                         // a controller: run it, then hand its outputs to whatever is linked to them
                         u.1.process(&mut bus[..n], &cx);
@@ -1294,6 +1318,14 @@ impl Player {
                 } else {
                     for &d in &ins.sends {
                         if d < ni {
+                            if song.inserts[d].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| f.kind == fx::Kind::Voc)) {
+                                // a unit over there may listen to this track on its own, whatever the send level
+                                let cap = &mut self.cap[i];
+                                cap.clear();
+                                cap.extend_from_slice(&bus[..n]);
+                                self.cap_at[i] = self.blockno;
+                                self.dirty[d] = true;
+                            }
                             let lv = law::fader_gain(ins.send_level(d));
                             for (o, f) in self.buses[d][..n].iter_mut().zip(&bus[..n]) {
                                 o[0] += f[0] * lv;
