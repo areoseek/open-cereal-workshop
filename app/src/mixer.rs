@@ -170,7 +170,7 @@ impl App {
                                 ui.label(RichText::new("Replace with").small().color(TEXT_DIM));
                             }
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison"].contains(&d.ident)).collect();
+                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
                                 defs.sort_by_key(|d| d.title);
                                 for d in defs {
                                     if ui.button(d.title).clicked() {
@@ -218,6 +218,9 @@ impl App {
                                 let mut new = cereal_engine::song::Slot::with_fx(s, kind);
                                 // several units share a kind; the name is what tells them apart
                                 new.plugin = ident.to_string();
+                                if let (cereal_engine::fx::Kind::Notes, Some(f), Some(fl)) = (kind, &mut new.fx, cereal_engine::notes::flavour_of(ident)) {
+                                    f.p = cereal_engine::notes::Notes { flavour: fl, active: 1, pages: vec![(1, String::new())] }.pack();
+                                }
                                 slots.push(new);
                                 slots.sort_by_key(|x| x.index);
                                 self.fx_open = Some((i, s));

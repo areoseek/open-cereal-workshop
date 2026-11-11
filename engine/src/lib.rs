@@ -13,6 +13,7 @@ pub mod synth;
 pub mod law;
 pub mod lossy;
 pub mod sf2;
+pub mod notes;
 pub mod player;
 pub mod additive;
 pub mod analog;

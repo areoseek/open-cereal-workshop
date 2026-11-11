@@ -57,6 +57,8 @@ pub enum Kind {
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
+    /// Pages of notes or a web address; makes no sound.
+    Notes,
     Conv,
     Rack,
     Patch,
@@ -680,9 +682,9 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::OldVoc, ident: "Fruity Vocoder", title: "Classic Vocoder", size: 129, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Wave Candy", title: "Scope Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "ZGameEditor Visualizer", title: "Visual Stage", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity NoteBook 2", title: "Note Pages", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity NoteBook", title: "Note Pad", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity HTML NoteBook", title: "Web Notes", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Notes, ident: "Fruity NoteBook 2", title: "Note Pages", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Notes, ident: "Fruity NoteBook", title: "Note Pad", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Notes, ident: "Fruity HTML NoteBook", title: "Web Notes", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Control Surface", title: "Control Panel", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Edison", title: "Wave Recorder", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Formula, ident: "Fruity Formula Controller", title: "Formula Sender", size: 16, fixed: &[(0, 2)], params: &[p("A", 4, 0, 65536, 0), p("B", 8, 0, 65536, 0), p("C", 12, 0, 65536, 0)] },
@@ -1729,6 +1731,9 @@ impl Fx {
             return Some(Self { kind: d.kind, p, ir: None, sub: None });
         }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
+        if d.kind == Kind::Notes {
+            return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+        }
         if d.kind == Kind::Formula {
             return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
         }
@@ -1846,6 +1851,9 @@ impl Fx {
         }
         if self.kind == Kind::Formula {
             return formula_encode(&self.p, base);
+        }
+        if self.kind == Kind::Notes {
+            return crate::notes::encode(&self.p, base);
         }
         if self.kind == Kind::Multi {
             return crate::fxmulti::encode(&self.p, base);
@@ -2745,7 +2753,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru => {}
+            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru | Kind::Notes => {}
             Kind::Conv => {
                 if let Some(st) = &mut self.conv {
                     let (dry, wet) = (p[0] / 1000.0, p[1] / 1000.0);
@@ -4768,7 +4776,7 @@ mod tests {
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
-            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch | Kind::Formula) {
+            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch | Kind::Formula | Kind::Notes) {
                 continue;
             }
             let mut fx = Fx::new(d.kind);

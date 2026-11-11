@@ -129,9 +129,12 @@ impl App {
             p if p.eq_ignore_ascii_case("Tuner") => 1,
             p if p.eq_ignore_ascii_case("Wave Candy") => 2,
             p if p.eq_ignore_ascii_case("Edison") => 3,
+            p if p.eq_ignore_ascii_case("Fruity dB Meter") => 4,
+            p if p.eq_ignore_ascii_case("Fruity Spectroman") => 5,
+            p if p.eq_ignore_ascii_case("Fruity Big Clock") => 6,
             _ => 0,
         };
-        self.handle.transport.watch_slot((meter != 0).then_some((ins, slot)));
+        self.handle.transport.watch_slot((meter != 0 && meter != 6).then_some((ins, slot)));
         let title = format!("{} - {}", self.song.inserts[ins].slots[si].title(), self.song.insert_name(ins));
         let mut open = true;
         let mut changed = false;
@@ -180,10 +183,17 @@ impl App {
                     wave_act = self.wave_eds.entry((ins, slot)).or_default().ui(ui, &self.handle, (ins, slot), rate, &take_dir);
                     return;
                 }
-                if meter == 1 {
-                    tuner_ui(ui, &frames, rate);
-                } else {
-                    scope_ui(ui, &frames, rate);
+                match meter {
+                    1 => tuner_ui(ui, &frames, rate),
+                    4 => scope_ui(ui, &frames, rate, Some(2)),
+                    5 => scope_ui(ui, &frames, rate, Some(1)),
+                    6 => {
+                        let tr = &self.handle.transport;
+                        let tempo = if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo };
+                        let tick = if tr.playing() { tr.tick().max(0.0) } else { 0.0 };
+                        clock_ui(ui, tick, self.song.ppq, tempo, self.song.bar());
+                    }
+                    _ => scope_ui(ui, &frames, rate, None),
                 }
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 return;
@@ -193,6 +203,9 @@ impl App {
             }
             if f.kind == Kind::Formula {
                 changed |= formula_ui(ui, f);
+            }
+            if f.kind == Kind::Notes {
+                changed |= notes_ui(ui, f);
             }
             if f.kind == Kind::Xy {
                 changed |= xy_pad(ui, f);
@@ -636,16 +649,40 @@ fn tuner_ui(ui: &mut Ui, frames: &[[f32; 2]], rate: f32) {
     ui.label(RichText::new("Shows the note of the sound on this mixer track. Key numbers count C5 as the middle C, as the piano roll does.").small().color(TEXT_DIM));
 }
 
+/// The big clock: where the song is, as bar, beat and tick or as minutes and seconds. A click changes between them.
+fn clock_ui(ui: &mut Ui, tick: f64, ppq: u32, tempo: f32, per_bar: u32) {
+    let id = ui.id().with("clockmode");
+    let mut as_time: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(420.0, 120.0), egui::Sense::click());
+    if resp.on_hover_text("Click to change between bar : beat : tick and minutes : seconds").clicked() {
+        as_time = !as_time;
+        ui.data_mut(|d| d.insert_temp(id, as_time));
+    }
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 3.0, Color32::from_rgb(20, 24, 28));
+    let text = if as_time {
+        let secs = tick / (tempo.max(1.0) as f64 * ppq.max(1) as f64 / 60.0);
+        format!("{}:{:02}:{:02}", (secs / 60.0) as u32, secs as u32 % 60, ((secs * 100.0) as u64 % 100))
+    } else {
+        let t = tick as u64;
+        let (bar, rest) = (t / per_bar.max(1) as u64, t % per_bar.max(1) as u64);
+        format!("{:03}:{:02}:{:03}", bar + 1, rest / ppq.max(1) as u64 + 1, rest % ppq.max(1) as u64)
+    };
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::monospace(72.0), Color32::from_rgb(240, 160, 60));
+}
+
 /// The scope meter: the wave, the frequencies, the levels or the left-right picture of the sound passing through.
-fn scope_ui(ui: &mut Ui, frames: &[[f32; 2]], rate: f32) {
+fn scope_ui(ui: &mut Ui, frames: &[[f32; 2]], rate: f32, only: Option<u8>) {
     let id = ui.id().with("scopemode");
-    let mut mode: u8 = ui.data(|d| d.get_temp(id)).unwrap_or(0);
-    ui.horizontal(|ui| {
-        for (k, name) in ["Wave", "Spectrum", "Levels", "Left / right"].iter().enumerate() {
-            ui.selectable_value(&mut mode, k as u8, *name);
-        }
-    });
-    ui.data_mut(|d| d.insert_temp(id, mode));
+    let mut mode: u8 = only.unwrap_or_else(|| ui.data(|d| d.get_temp(id)).unwrap_or(0));
+    if only.is_none() {
+        ui.horizontal(|ui| {
+            for (k, name) in ["Wave", "Spectrum", "Levels", "Left / right"].iter().enumerate() {
+                ui.selectable_value(&mut mode, k as u8, *name);
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(id, mode));
+    }
     let (rect, _) = ui.allocate_exact_size(egui::vec2(520.0, 240.0), egui::Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 3.0, Color32::from_rgb(20, 24, 28));
@@ -760,6 +797,55 @@ fn xy_pad(ui: &mut Ui, f: &mut fx::Fx) -> bool {
 }
 
 /// The formula sender's formula box, with what the formula gives right now or what is wrong with it.
+/// The note units: pages of text to read and write, or a web address to keep and open.
+fn notes_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
+    use cereal_engine::notes::Notes;
+    let mut n = Notes::unpack(&f.p);
+    let was = n.clone();
+    if n.flavour == 2 {
+        ui.label(RichText::new("Web address kept with the project").small().color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut n.pages[0].1).desired_width(380.0));
+            let url = n.pages[0].1.trim().to_string();
+            if ui.add_enabled(url.starts_with("http://") || url.starts_with("https://"), egui::Button::new("Open in browser")).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        });
+    } else {
+        let mut at = n.shown();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(at > 0, egui::Button::new("<")).on_hover_text("Previous page").clicked() {
+                at -= 1;
+            }
+            ui.label(format!("Page {} of {}", at + 1, n.pages.len()));
+            if ui.add_enabled(at + 1 < n.pages.len(), egui::Button::new(">")).on_hover_text("Next page").clicked() {
+                at += 1;
+            }
+            if ui.button("Add page").clicked() {
+                let num = n.pages.iter().map(|p| p.0).max().unwrap_or(0) + 1;
+                n.pages.insert(at + 1, (num, String::new()));
+                at += 1;
+            }
+            if ui.add_enabled(n.pages.len() > 1, egui::Button::new("Delete page")).clicked() {
+                n.pages.remove(at);
+                at = at.min(n.pages.len() - 1);
+            }
+        });
+        n.active = n.pages[at].0;
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut n.pages[at].1).desired_width(460.0).desired_rows(16));
+        });
+        if n.flavour == 1 {
+            ui.label(RichText::new("A page you change is saved as plain words; pages left alone keep their fonts and colours in the file.").small().color(TEXT_DIM));
+        }
+    }
+    if n != was {
+        f.p = n.pack();
+        return true;
+    }
+    false
+}
+
 fn formula_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     use cereal_engine::formula;
     let mut text = f.formula();
