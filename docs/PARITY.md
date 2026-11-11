@@ -25,7 +25,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Envelope Controller
 - [ ] Fruity Granulizer
 - [ ] Fruity Keyboard Controller
-- [ ] Fruity Slicer
+- [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
 - [ ] Fruity Slicer 2
 - [ ] Fruity Video Player
 - [ ] Fruity Voltage Controller

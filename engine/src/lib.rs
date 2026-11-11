@@ -11,6 +11,7 @@ pub mod additive;
 pub mod fm;
 pub mod minis;
 pub mod keys;
+pub mod slicer;
 pub mod preset;
 pub mod sample;
 pub mod save;

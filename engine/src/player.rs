@@ -690,6 +690,41 @@ impl Player {
                     });
                 }
             }
+            ChannelKind::Plugin | ChannelKind::Other(_) if ch.slices.is_some() => {
+                // a loop slicer: the key picks a slice of the loop, which plays through at the channel's pitch
+                let (Some(sl), Some(smp)) = (&ch.slices, ch.sample.clone()) else { return };
+                let scale = smp.rate as f64 / sl.rate.max(1) as f64;
+                let total = (smp.frames.len() as f64 / scale) as usize;
+                let Some((start, len, _reverse)) = sl.for_key(n.key, total) else { return };
+                let step = smp.rate as f64 / sr as f64 * 2f64.powf((ch.pitch_cents + n.fine_cents) as f64 / 1200.0);
+                let note_gain = law::velocity_gain(n.vel);
+                let note_pan = n.pan;
+                let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
+                let gain = chan_vol * note_gain;
+                let frames = (len as f64 * scale / step) as u64;
+                self.start(Voice {
+                    sample: Some(smp),
+                    pos: start as f64 * scale,
+                    step,
+                    step_to: step,
+                    step_now: step,
+                    level: 0.0,
+                    attack: ms(1.0),
+                    release: ms(6.0),
+                    remaining: Some(frames.saturating_sub((sr * 0.006) as u64).max(1)),
+                    gl: gain * pl,
+                    gr: gain * pr,
+                    insert: ch.insert,
+                    delay,
+                    chan: n.chan,
+                    key: n.key,
+                    live: false,
+                    note_gain,
+                    note_pan,
+                    follow: true,
+                    ..Default::default()
+                });
+            }
             ChannelKind::Plugin | ChannelKind::Other(_) => {
                 let note_gain = law::velocity_gain(n.vel);
                 let gain = chan_vol * note_gain;
@@ -1455,6 +1490,23 @@ mod tests {
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.3, 0.45) > 0.2);
         assert!(loud(&buf, 0.6, 1.0) < 1e-3);
+    }
+
+    #[test]
+    fn a_slicer_key_plays_its_slice_and_no_more() {
+        let mut s = tone_song(2.0);
+        s.channels[0].kind = ChannelKind::Plugin;
+        let cut = |pos| crate::slicer::Cut { pos, key: -1, reverse: false, name: String::new() };
+        s.channels[0].slices = Some(Arc::new(crate::slicer::Slices { beats: 4.0, bpm: 120.0, path: String::new(), cuts: vec![cut(0), cut(24_000), cut(48_000)], base: 60, rate: 48_000 }));
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].notes[0].key = 61;
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.05, 0.45) > 0.2);
+        assert!(loud(&buf, 0.52, 1.5) < 1e-3, "the slice ends at the next cut");
+        // a key past the last slice is silent
+        s.patterns[0].notes[0].key = 70;
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 1.0) < 1e-6);
     }
 
     #[test]
