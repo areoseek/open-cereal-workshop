@@ -150,6 +150,9 @@ impl App {
             if f.kind == Kind::Formula {
                 changed |= formula_ui(ui, f);
             }
+            if f.kind == Kind::Xy {
+                changed |= xy_pad(ui, f);
+            }
             if f.kind == Kind::Conv {
                 ui.horizontal(|ui| {
                     let name = match &f.ir {
@@ -522,6 +525,42 @@ impl App {
             self.fx_open = None;
         }
     }
+}
+
+/// The pad controller's pad: drag the dot to send X (left to right) and Y (bottom to top).
+fn xy_pad(ui: &mut Ui, f: &mut fx::Fx) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(240.0, 240.0), egui::Sense::click_and_drag());
+    let mut changed = false;
+    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+        let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+        if f.p.len() >= 2 {
+            f.p[0] = (x * 65536.0).round();
+            f.p[1] = (y * 65536.0).round();
+            changed = true;
+        }
+    }
+    if resp.double_clicked() && f.p.len() >= 2 {
+        f.p[0] = 32768.0;
+        f.p[1] = 32768.0;
+        changed = true;
+    }
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 3.0, Color32::from_rgb(24, 28, 32));
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        let c = Color32::from_rgb(44, 50, 56);
+        p.line_segment([egui::pos2(rect.left() + t * rect.width(), rect.top()), egui::pos2(rect.left() + t * rect.width(), rect.bottom())], egui::Stroke::new(1.0_f32, c));
+        p.line_segment([egui::pos2(rect.left(), rect.top() + t * rect.height()), egui::pos2(rect.right(), rect.top() + t * rect.height())], egui::Stroke::new(1.0_f32, c));
+    }
+    let x = f.p.first().copied().unwrap_or(32768.0) / 65536.0;
+    let y = f.p.get(1).copied().unwrap_or(32768.0) / 65536.0;
+    let at = egui::pos2(rect.left() + x * rect.width(), rect.bottom() - y * rect.height());
+    p.line_segment([egui::pos2(at.x, rect.top()), egui::pos2(at.x, rect.bottom())], egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 90, 110)));
+    p.line_segment([egui::pos2(rect.left(), at.y), egui::pos2(rect.right(), at.y)], egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 90, 110)));
+    p.circle_filled(at, 7.0, Color32::from_rgb(240, 160, 60));
+    ui.label(RichText::new(format!("X {:.0} %   Y {:.0} %   (double-click to centre; link controls to X or Y with right-click, Link to controller)", x * 100.0, y * 100.0)).small().color(TEXT_DIM));
+    changed
 }
 
 /// The formula sender's formula box, with what the formula gives right now or what is wrong with it.

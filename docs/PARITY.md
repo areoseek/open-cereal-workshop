@@ -114,7 +114,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Vocoder (Classic Vocoder: left gates right, per-band levels; solo and swap switches not read)
 - [~] Fruity WaveShaper (built as Curve Shaper; drawn line read, no editor for it yet)
 - [~] Fruity Wrapper (stock effects saved through the wrapper open as our own units and save back into the wrapper block; hosting outside plug-ins is not built)
-- [~] Fruity X-Y Controller (built as Pad Controller; outputs its stored position, no pad window yet)
+- [~] Fruity X-Y Controller (built as Pad Controller with its pad; X and Y drive linked controls; movement smoothing not done)
 - [~] Fruity X-Y-Z Controller
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block, mixes, attack and release; no line editor yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
 - [~] Hardcore (built as Pedal Board; input, output, graphic equaliser, a generic speaker box, drive and chorus pedals; the other pedals and the real cabinet models are not run)
