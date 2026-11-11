@@ -291,7 +291,6 @@ pub fn files() -> Vec<PathBuf> {
 
 /// What the plug-in tells the host from any thread; picked up by `idle` and `process`.
 struct Shared {
-    main: std::thread::ThreadId,
     callback: AtomicBool,
     restart: AtomicBool,
     flush: AtomicBool,
@@ -327,11 +326,33 @@ unsafe extern "C" fn params_flush(h: *const Host) {
 unsafe extern "C" fn state_dirty(h: *const Host) {
     shared(h).dirty.store(true, Relaxed);
 }
-unsafe extern "C" fn is_main(h: *const Host) -> bool {
-    shared(h).main == std::thread::current().id()
+thread_local! {
+    /// How deep this thread is in work the standard gives to the audio thread.
+    static AUDIO_ROLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
-unsafe extern "C" fn is_audio(h: *const Host) -> bool {
-    shared(h).main != std::thread::current().id()
+
+/// While this lives, the thread answers as the audio thread. Whatever thread runs the sound is the audio
+/// thread for that long; every other call is main-thread work.
+struct AudioRole;
+
+impl AudioRole {
+    fn take() -> Self {
+        AUDIO_ROLE.with(|r| r.set(r.get() + 1));
+        AudioRole
+    }
+}
+
+impl Drop for AudioRole {
+    fn drop(&mut self) {
+        AUDIO_ROLE.with(|r| r.set(r.get().saturating_sub(1)));
+    }
+}
+
+unsafe extern "C" fn is_main(_h: *const Host) -> bool {
+    AUDIO_ROLE.with(|r| r.get() == 0)
+}
+unsafe extern "C" fn is_audio(_h: *const Host) -> bool {
+    AUDIO_ROLE.with(|r| r.get() > 0)
 }
 unsafe extern "C" fn timer_register(h: *const Host, period_ms: u32, id: *mut u32) -> bool {
     let s = shared(h);
@@ -504,7 +525,6 @@ impl Instance {
         let l = load(path)?;
         let names: Vec<CString> = ["Breakfast Cereal DAW", "Breakfast Cereal", "", env!("CARGO_PKG_VERSION")].iter().filter_map(|s| CString::new(*s).ok()).collect();
         let shared = Box::into_raw(Box::new(Shared {
-            main: std::thread::current().id(),
             callback: AtomicBool::new(false),
             restart: AtomicBool::new(false),
             flush: AtomicBool::new(false),
@@ -637,6 +657,7 @@ impl Instance {
             let pl = &*self.plugin;
             if p.processing {
                 if let Some(f) = pl.stop_processing {
+                    let _role = AudioRole::take();
                     f(self.plugin);
                 }
                 p.processing = false;
@@ -680,6 +701,7 @@ impl Instance {
         }
         let got = if clock.offline { self.proc.lock().ok() } else { self.proc.try_lock().ok() };
         let Some(mut guard) = got else { return false };
+        let _role = AudioRole::take();
         let p = &mut *guard;
         if !p.active || p.rate != rate {
             return false;
@@ -962,6 +984,7 @@ impl Instance {
             return true;
         }
         let Some(api) = self.window_api() else { return false };
+        guard_x_errors();
         // SAFETY: as in `window_api`.
         unsafe {
             let Some(g) = self.gui.as_ref() else { return false };
@@ -1031,6 +1054,7 @@ impl Drop for Instance {
             if let Ok(p) = self.proc.get_mut() {
                 if p.processing {
                     if let Some(f) = pl.stop_processing {
+                        let _role = AudioRole::take();
                         f(self.plugin);
                     }
                 }
@@ -1048,6 +1072,31 @@ impl Drop for Instance {
         }
     }
 }
+
+/// A drawing error in a plug-in's window would end the whole program, as the X library's own handler exits.
+/// Ours lets the program carry on; the plug-in's window may stay blank, the song is safe.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn guard_x_errors() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    unsafe extern "C" fn quiet(_display: *mut c_void, _event: *mut c_void) -> i32 {
+        0
+    }
+    ONCE.call_once(|| {
+        // SAFETY: the X library's documented call; the library stays loaded for the life of the program.
+        unsafe {
+            if let Ok(lib) = libloading::Library::new("libX11.so.6") {
+                type Handler = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+                if let Ok(set) = lib.get::<unsafe extern "C" fn(Option<Handler>) -> Option<Handler>>(b"XSetErrorHandler\0") {
+                    set(Some(quiet));
+                }
+                std::mem::forget(lib);
+            }
+        }
+    });
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn guard_x_errors() {}
 
 /// An instance as the song holds it: two are the same when they are the same live plug-in.
 #[derive(Debug, Clone)]
@@ -1070,6 +1119,46 @@ pub(crate) fn test_plugin() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run every plug-in under the folders in CEREAL_PLUGIN_TRY: a check against other makers' work.
+    #[test]
+    #[ignore]
+    fn plugins_of_other_makers_run() {
+        let Some(dirs) = std::env::var_os("CEREAL_PLUGIN_TRY") else { return };
+        for d in std::env::split_paths(&dirs) {
+            add_folder(&d);
+        }
+        let known = known();
+        assert!(!known.is_empty(), "nothing found");
+        for f in known.iter() {
+            let inst = Instance::open(&f.path, &f.id).unwrap_or_else(|| panic!("{} does not open", f.name));
+            assert!(inst.activate(48_000.0), "{} does not start", f.name);
+            let params = inst.params();
+            let clock = Clock { playing: true, tempo: 120.0, beats: 0.0, sig: (4, 4), offline: false };
+            let mut peak = 0.0f32;
+            for block in 0..200 {
+                let mut io = vec![[0.0f32; 2]; 512];
+                if block == 0 {
+                    io[0] = [0.9, 0.9];
+                }
+                let evs: &[Ev] = if block == 0 { &[Ev::NoteOn { at: 0, key: 60, chan: 0, vel: 0.8 }] } else if block == 100 { &[Ev::NoteOff { at: 0, key: 60, chan: 0 }] } else { &[] };
+                assert!(inst.process(&mut io, evs, &clock, 48_000.0), "{} does not run", f.name);
+                assert!(io.iter().all(|x| x[0].is_finite() && x[1].is_finite()), "{} gives bad numbers", f.name);
+                if block > 0 {
+                    peak = io.iter().fold(peak, |m, x| m.max(x[0].abs()).max(x[1].abs()));
+                }
+                inst.idle();
+            }
+            let saved = inst.save();
+            let text = params.first().and_then(|p| inst.value(p.id).and_then(|v| inst.value_text(p.id, v)));
+            eprintln!("{:28} {:12} instrument {:5} notes {:5} sound in {:5} settings {:4} window {:5} saved {:?} peak {:.4} first {:?} {:?}", f.name, f.vendor, f.instrument, inst.has_note_in, inst.takes_sound(), params.len(), inst.has_window(), saved.as_ref().map(|s| s.len()), peak, params.first().map(|p| p.name.clone()), text);
+            if let Some(s) = saved {
+                let again = Instance::open(&f.path, &f.id).unwrap();
+                assert!(again.restore(&s), "{} does not take its saved settings back", f.name);
+            }
+            assert!(peak > 1e-5, "{} is silent", f.name);
+        }
+    }
 
     #[test]
     fn a_plugin_is_loaded_played_set_and_saved() {

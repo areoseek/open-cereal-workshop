@@ -52,7 +52,8 @@ pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str) -> bool {
             for p in params.iter().filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.module.to_lowercase().contains(&needle)) {
                 if p.module != module {
                     module = p.module.clone();
-                    if !module.is_empty() {
+                    // a heading is worth its row only when it gathers several settings
+                    if !module.is_empty() && params.iter().filter(|q| q.module == module).count() > 1 {
                         ui.label(RichText::new(&module).small().color(TEXT_DIM));
                         ui.end_row();
                     }

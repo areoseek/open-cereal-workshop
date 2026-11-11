@@ -398,6 +398,11 @@ impl App {
                             }
                         }
                     }
+                    "hostwin" => {
+                        for h in app.song.hosted() {
+                            eprintln!("own window: has {} shown {}", h.has_window(), h.show_window("Test"));
+                        }
+                    }
                     x if x.starts_with("addfx=") => {
                         // put a unit on the master track's first slot and open it
                         if let Some(d) = cereal_engine::fx::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&x[6..])) {
