@@ -238,6 +238,8 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         eq: vec![],
         fx: vec![],
         driven: Vec::with_capacity(64),
+        env_runs: Vec::new(),
+        seed: 0x2545_f491,
         ring: vec![],
         chan_fx: vec![],
         scratch: Vec::with_capacity(BLOCK),
@@ -352,6 +354,20 @@ impl Overrides {
 }
 
 /// A slot's switch and mix for the block being run, after automation.
+/// A note of an envelope sender channel that is still sending.
+struct EnvRun {
+    chan: u16,
+    key: u8,
+    vel: f32,
+    rand: f32,
+    /// Seconds since the note began, and when it was let go.
+    t: f32,
+    rel: Option<f32>,
+    /// Frames until a note from the song is let go.
+    left: Option<u64>,
+    set: crate::fm::Sender,
+}
+
 struct SlotNow {
     enabled: bool,
     mix: f32,
@@ -661,6 +677,9 @@ pub struct Player {
     fx: Vec<Vec<(u16, fx::Unit)>>,
     /// Controller outputs waiting to be applied.
     driven: Vec<(Target, f32)>,
+    /// Envelope sender notes still running.
+    env_runs: Vec<EnvRun>,
+    seed: u32,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
     /// The patch bay of each channel whose generator is one, with the sound its notes made this block.
@@ -747,6 +766,16 @@ impl Player {
                         self.note_on_depth(song, &Note { chan: k, ..n.clone() }, delay, len_frames, live, depth + 1);
                     }
                 }
+            }
+            return;
+        }
+        if ch.plugin.eq_ignore_ascii_case(crate::fm::ENV_SENDER) {
+            // the envelope sender makes no sound either: the note sets its envelopes running, and they are sent block by block
+            if let Some(set) = ch.gen.as_ref().and_then(|g| crate::fm::Sender::parse(&g.raw)) {
+                self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let rand = (self.seed >> 8) as f32 / (1u32 << 24) as f32;
+                self.env_runs.retain(|r| r.chan != n.chan);
+                self.env_runs.push(EnvRun { chan: n.chan, key: n.key, vel: n.vel, rand, t: 0.0, rel: None, left: len_frames.map(|f| f + delay as u64), set });
             }
             return;
         }
@@ -989,6 +1018,9 @@ impl Player {
     }
 
     fn note_off(&mut self, song: &Song, chan: u16, key: u8) {
+        for r in self.env_runs.iter_mut().filter(|r| r.chan == chan && r.key == key && r.rel.is_none()) {
+            r.rel = Some(r.t);
+        }
         if let Some(ch) = song.channels.get(chan as usize) {
             if ch.kind == ChannelKind::Layer {
                 for &k in &ch.children {
@@ -1392,6 +1424,32 @@ impl Player {
             cf.dirty = false;
         }
         self.transport.voices.store(live, Relaxed);
+
+        // envelope senders: move every running note on and hand its outputs to what is linked
+        if !self.env_runs.is_empty() {
+            let dt = n as f32 / self.sr;
+            let mut fitted = false;
+            for r in self.env_runs.iter_mut() {
+                for l in song.ctl_links.iter().filter(|l| l.chan() == Some(r.chan as usize)) {
+                    if let Some(v) = r.set.value(l.out as usize, r.key, r.vel, r.rand, r.t, r.rel) {
+                        if !fitted {
+                            self.ov.fit(song);
+                            fitted = true;
+                        }
+                        self.ov.set(l.target, v);
+                    }
+                }
+                r.t += dt;
+                if let Some(left) = r.left.as_mut() {
+                    *left = left.saturating_sub(n as u64);
+                    if *left == 0 && r.rel.is_none() {
+                        r.rel = Some(r.t);
+                    }
+                }
+            }
+            // a note is done once it is let go and every one of its lines has run out
+            self.env_runs.retain(|r| r.rel.is_none_or(|rel| r.t - rel <= (0..r.set.arts.len()).map(|a| r.set.tail(a, rel)).fold(0.0, f32::max) + dt));
+        }
 
         let master = self.transport.master();
         self.blockno += 1;
@@ -1918,6 +1976,31 @@ mod tests {
         assert_eq!(crate::synth::key_sender_value(&raw, 110), 0.0);
         assert!((crate::synth::key_sender_value(&raw, 60) - 60.0 / 119.0).abs() < 1e-6);
         assert_eq!(crate::synth::key_sender_range(&raw), (0, 119));
+    }
+
+    #[test]
+    fn an_envelope_sender_runs_into_a_linked_control() {
+        let mut s = click_song();
+        let raw = crate::fm::tests::sender_block();
+        s.channels.push(crate::song::Chan { name: "Env".into(), kind: ChannelKind::Plugin, plugin: crate::fm::ENV_SENDER.into(), gen: crate::synth::Gen::decode(crate::fm::ENV_SENDER, &raw), ..Default::default() });
+        let k = s.channels.len() - 1;
+        assert!(s.channels[k].gen.is_some());
+        s.ctl_links.push(crate::song::CtlLink::from_chan(k, 2, Target::InsertVolume(0)));
+        let (h, mut p) = new_player(s, 48_000.0);
+        let mut buf = vec![0.0f32; 512];
+        // its envelope starts from nothing, so the master fader is down at first
+        h.send(Cmd::NoteOn { chan: k as u16, key: 60, vel: 1.0 });
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        let early = buf.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        // and has opened it a second later
+        let mut long = vec![0.0f32; 96_000];
+        p.render(&mut long, 2);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        let late = buf.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(early < 0.02, "{early}");
+        assert!(late > 0.1 && late > early * 5.0, "{late}");
     }
 
     #[test]

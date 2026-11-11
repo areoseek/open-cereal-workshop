@@ -205,6 +205,18 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    if ui.button("Envelope Sender").on_hover_text("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
+                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+                        c.plugin = cereal_engine::fm::ENV_SENDER.into();
+                        c.name = "Envelope Sender".into();
+                        if let Some(g) = c.gen.as_mut() {
+                            g.raw = cereal_engine::fm::Sender::fresh();
+                        }
+                        self.song.channels.push(c);
+                        self.sel_chan = self.song.channels.len() - 1;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Key Controller").on_hover_text("A silent channel whose notes move the controls linked to it").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::synth::KEY_SENDER.into();

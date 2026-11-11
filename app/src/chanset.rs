@@ -307,7 +307,9 @@ impl App {
                     self.actions.push(crate::Action::LoadPreset(p, crate::PresetTo::Chan(ci)));
                 }
                 ui.add_space(4.0);
-                if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
+                if ident.eq_ignore_ascii_case(cereal_engine::fm::ENV_SENDER) {
+                    changed |= env_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
+                } else if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                     changed |= key_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
                 } else {
                     changed |= instrument_panel(ui, ci, self.song.channels[ci].gen.as_mut().unwrap());
@@ -487,6 +489,96 @@ impl App {
             self.dirty = true;
         }
     }
+}
+
+/// The envelope sender: per output its three knobs, how its lines combine, its key range and a picture of
+/// what a held and let-go note sends.
+fn env_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
+    let Some(set) = cereal_engine::fm::Sender::parse(raw) else {
+        ui.label(RichText::new("The stored settings could not be read. The block is kept untouched.").color(TEXT_DIM));
+        return false;
+    };
+    let mut changed = false;
+    ui.label(RichText::new("Makes no sound. Each note runs the envelopes below and sends them to the controls linked to this channel's outputs. Link a control with right-click, Link to controller.").color(TEXT_DIM));
+    let sel_id = ui.id().with("envsel");
+    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0).min(set.arts.len().saturating_sub(1));
+    ui.horizontal(|ui| {
+        ui.label("Output");
+        for k in 0..set.arts.len() {
+            ui.selectable_value(&mut sel, k, format!("{}", k + 1));
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    let Some(a) = set.arts.get(sel) else { return false };
+    let put = |raw: &mut Vec<u8>, at: usize, v: i32| raw[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let h = 4 + sel * 44;
+    ui.horizontal(|ui| {
+        let mut bip = a.art.bipolar;
+        egui::ComboBox::from_id_salt("envmode").selected_text(if bip { "Added (swings around the base)" } else { "Multiplied (rises from the base)" }).show_ui(ui, |ui| {
+            ui.selectable_value(&mut bip, true, "Added (swings around the base)");
+            ui.selectable_value(&mut bip, false, "Multiplied (rises from the base)");
+        });
+        if bip != a.art.bipolar {
+            put(raw, a.mode_at, bip as i32);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut base = a.base * 200.0 - 100.0;
+        if ui.add(egui::Slider::new(&mut base, -100.0..=100.0).text("Base").suffix(" %")).changed() {
+            put(raw, h, ((base + 100.0) / 200.0 * 256.0).round() as i32);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut env = a.env * 100.0;
+        if ui.add(egui::Slider::new(&mut env, -100.0..=100.0).text("Envelope").suffix(" %")).changed() {
+            put(raw, h + 4, (128.0 + env / 100.0 * 128.0).round() as i32);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut lfo = a.lfo * 100.0;
+        if ui.add(egui::Slider::new(&mut lfo, -100.0..=100.0).text("Slow oscillator").suffix(" %")).changed() {
+            put(raw, h + 8, (128.0 + lfo / 100.0 * 128.0).round() as i32);
+            changed = true;
+        }
+        ui.label(RichText::new(format!("{:.2} Hz", a.art.lfo_hz)).color(TEXT_DIM));
+    });
+    ui.horizontal(|ui| {
+        const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let name = |v: f64, _: std::ops::RangeInclusive<usize>| if v >= 132.0 { "top".to_string() } else { format!("{}{}", NAMES[v as usize % 12], v as usize / 12) };
+        let (mut lo, mut hi) = (a.lo.clamp(0, 256), a.hi.clamp(0, 256));
+        ui.label("Keys");
+        let c1 = ui.add(egui::DragValue::new(&mut lo).range(0..=131).custom_formatter(name)).changed();
+        ui.label("to");
+        let c2 = ui.add(egui::DragValue::new(&mut hi).range(0..=256).custom_formatter(name)).changed();
+        if c1 || c2 {
+            put(raw, a.range_at, lo.min(hi));
+            put(raw, a.range_at + 4, hi.max(lo));
+            changed = true;
+        }
+    });
+    // what a note held for a while and then let go sends on this output
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), 110.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, PANEL_DARK);
+    let key = a.lo.clamp(0, 127) as u8;
+    let held = (a.art.env.length() * 1.2).clamp(0.5, 20.0);
+    let total = held + set.tail(sel, held).clamp(0.2, 10.0);
+    let n = rect.width().max(2.0) as usize;
+    let pts: Vec<Pos2> = (0..n)
+        .map(|i| {
+            let t = i as f32 / n as f32 * total;
+            let y = set.value(sel, key, 1.0, 0.5, t, (t >= held).then_some(held)).unwrap_or(0.0);
+            Pos2::new(rect.left() + i as f32, rect.bottom() - 4.0 - y * (rect.height() - 8.0))
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
+    let x = rect.left() + held / total * rect.width();
+    p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+    ui.label(RichText::new(format!("The picture shows a note held {held:.1} s and let go at the line. Drawing the envelope, oscillator and mapping lines by hand is still to come; they are played as stored.")).small().color(TEXT_DIM));
+    changed
 }
 
 /// The key sender: what each key sends to the controls linked to it, drawn as a bar per key.

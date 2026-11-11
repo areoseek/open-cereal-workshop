@@ -548,6 +548,12 @@ impl App {
                     }
                 }
                 for (c, ch) in self.song.channels.iter().enumerate() {
+                    if ch.plugin.eq_ignore_ascii_case(cereal_engine::fm::ENV_SENDER) {
+                        let n = ch.gen.as_ref().and_then(|g| cereal_engine::fm::Sender::parse(&g.raw)).map(|s| s.arts.len()).unwrap_or(0);
+                        for k in 0..n {
+                            senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): output {}", ch.name, c + 1, k + 1)));
+                        }
+                    }
                     if ch.plugin.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                         for (k, o) in ["note", "velocity"].iter().enumerate() {
                             senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): {o}", ch.name, c + 1)));

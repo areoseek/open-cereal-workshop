@@ -349,6 +349,144 @@ impl<'a> R<'a> {
     }
 }
 
+/// The file name of the envelope sender, the silent channel whose notes run envelopes into linked controls.
+pub const ENV_SENDER: &str = "Fruity Envelope Controller";
+
+/// One output of the envelope sender: its drawn lines and its three knobs.
+#[derive(Debug, Clone)]
+pub struct SendArt {
+    pub art: Art,
+    /// Where the output rests, 0..=1.
+    pub base: f32,
+    /// How much of the envelope and of the slow oscillator goes in, -1..=1.
+    pub env: f32,
+    pub lfo: f32,
+    /// The keys that set this output off.
+    pub lo: i32,
+    pub hi: i32,
+    /// Where in the block the added-or-multiplied switch and the key range sit.
+    pub mode_at: usize,
+    pub range_at: usize,
+}
+
+/// The envelope sender's settings, read from its stored block.
+#[derive(Debug, Clone)]
+pub struct Sender {
+    pub arts: Vec<SendArt>,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Sender {
+    /// Reads the block: a table of knobs first, then per output its lines. Older blocks hold four outputs with
+    /// two mappings each, newer ones eight with five.
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        [(8usize, 5usize, 6usize), (4, 2, 4)].into_iter().find_map(|(n, maps, globals)| Self::parse_as(raw, n, maps, globals))
+    }
+
+    fn parse_as(raw: &[u8], n: usize, n_maps: usize, globals: usize) -> Option<Self> {
+        let head = 4 + n * 44;
+        if raw.len() < head + globals * 4 {
+            return None;
+        }
+        let (x, y) = if globals >= 6 { (at(raw, head) as f32 / 65536.0, at(raw, head + 4) as f32 / 65536.0) } else { (0.5, 0.5) };
+        let mut r = R { d: raw, p: head + globals * 4, lfo_rest: 16 };
+        let mut arts = Vec::with_capacity(n);
+        for k in 0..n {
+            let mode_at = r.p;
+            let bipolar = r.i()? != 0;
+            r.bytes(16)?;
+            let mut env = r.curve(1)?;
+            let len = [r.i()?, r.i()?, r.i()?, r.i()?];
+            env.prepare([knob(len[0]), knob(len[1]), knob(len[3])]);
+            let mut lfo = r.curve(2)?;
+            let speed = r.i()?;
+            r.bytes(16)?;
+            lfo.prepare([1.0; 3]);
+            let mut art = Art::neutral(bipolar);
+            for m in art.maps.iter_mut().take(n_maps) {
+                *m = r.curve(3)?;
+                m.prepare([1.0; 3]);
+            }
+            art.env = env;
+            art.lfo = lfo;
+            art.lfo_hz = 0.05 * (speed.clamp(0, 65536) as f32 / 65536.0 * 11.0).exp2();
+            let range_at = r.p;
+            let (lo, hi) = (r.i()?, r.i()?);
+            let h = 4 + k * 44;
+            let two = |o: usize| ((at(raw, o) - 128) as f32 / 128.0).clamp(-1.0, 1.0);
+            arts.push(SendArt { art, base: (at(raw, h) as f32 / 256.0).clamp(0.0, 1.0), env: two(h + 4), lfo: two(h + 8), lo, hi, mode_at, range_at });
+        }
+        (r.p == raw.len()).then_some(Self { arts, x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0) })
+    }
+
+    /// A block for a new envelope sender: eight multiplied outputs resting at nothing, each with a short
+    /// attack, a fall to a held level and a release, over the whole keyboard.
+    pub fn fresh() -> Vec<u8> {
+        fn line(kind: i32, pts: &[(f64, f64)], tail: [i32; 5], out: &mut Vec<u8>) {
+            for v in [kind, 3, pts.len() as i32] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            for &(x, y) in pts {
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&[0; 8]);
+            }
+            for v in tail {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let ints = |out: &mut Vec<u8>, vs: &[i32]| vs.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        let mut b = Vec::with_capacity(5200);
+        ints(&mut b, &[6]);
+        for _ in 0..8 {
+            ints(&mut b, &[0, 256, 128, 128, 128, 0, 128, 40000, 0, 0, 0]);
+        }
+        ints(&mut b, &[32768, 32768, 0, 0, 2, 0]);
+        for _ in 0..8 {
+            ints(&mut b, &[0, 3]);
+            for f in [0.0f32, 1.0, 0.5] {
+                b.extend_from_slice(&f.to_le_bytes());
+            }
+            line(1, &[(0.0, 0.0), (0.05, 1.0), (0.3, 0.6), (0.4, 0.0)], [0, -1, 1, -1, 2], &mut b);
+            ints(&mut b, &[128, 128, 0, 128]);
+            line(2, &[(0.0, 0.5), (1.0, 0.5)], [0, 0, -1, -1, -1], &mut b);
+            ints(&mut b, &[40000, 0, 0, 0, 0]);
+            for _ in 0..5 {
+                line(3, &[(0.0, 1.0), (1.0, 1.0)], [0, -1, -1, -1, -1], &mut b);
+            }
+            ints(&mut b, &[0, 256]);
+        }
+        b
+    }
+
+    /// What output `a` sends `t` seconds into a note (`rel` is when the key was let go), or nothing when the key
+    /// is outside the output's range. Added-up outputs swing around the resting value; multiplied ones rise from it.
+    pub fn value(&self, a: usize, key: u8, vel: f32, rand: f32, t: f32, rel: Option<f32>) -> Option<f32> {
+        let s = self.arts.get(a)?;
+        if (key as i32) < s.lo || (key as i32) > s.hi {
+            return None;
+        }
+        let xs = [key as f32 / 131.0, vel.clamp(0.0, 1.0), self.x, self.y, rand, 0.5];
+        let stat = s.art.stat(&xs);
+        let e = s.art.env.env(t, rel);
+        let l = (TAU * s.art.lfo_hz * t).sin() * (s.art.lfo.env(t, rel) - 0.5) * 2.0 * s.lfo;
+        let v = if s.art.bipolar {
+            (stat + (e - 0.5) * 2.0 * s.env + l) * 0.5
+        } else {
+            let e = if s.env < 0.0 { 1.0 - e } else { e };
+            let k = s.env.abs();
+            (stat * (1.0 - k + k * e) * (1.0 + l)).max(0.0)
+        };
+        Some((s.base + v).clamp(0.0, 1.0))
+    }
+
+    /// Seconds output `a` keeps moving after the key is let go at `t`.
+    pub fn tail(&self, a: usize, t: f32) -> f32 {
+        self.arts.get(a).map(|s| s.art.env.tail(t).max(s.art.lfo.tail(t))).unwrap_or(0.0)
+    }
+}
+
 /// A length knob: 128 leaves the drawn length alone.
 fn knob(v: i32) -> f32 {
     let x = v.clamp(0, 256) as f32 / 128.0;
@@ -971,6 +1109,89 @@ impl Voice {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// An envelope sender block of the newer layout: every output rises from nothing to full over a second and
+    /// holds there; the outputs are multiplied ones resting at nothing.
+    pub(crate) fn sender_block() -> Vec<u8> {
+        let mut b = 6i32.to_le_bytes().to_vec();
+        for _ in 0..8 {
+            for v in [0i32, 256, 128, 128, 128, 0, 128, 40000, 0, 0, 0] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for v in [32768i32, 32768, 0, 0, 2, 0] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..8 {
+            b.extend_from_slice(&0i32.to_le_bytes());
+            b.extend_from_slice(&3i32.to_le_bytes());
+            b.extend_from_slice(&[0; 12]);
+            curve(1, &[(0.0, 0.0), (1.0, 1.0)], [0, -1, -1, -1, 1], &mut b);
+            for v in [128i32, 128, 0, 128] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            curve(2, &[(0.0, 0.5), (1.0, 0.5)], [0, 0, -1, -1, -1], &mut b);
+            b.extend_from_slice(&40000i32.to_le_bytes());
+            b.extend_from_slice(&[0; 16]);
+            for _ in 0..5 {
+                curve(3, &[(0.0, 1.0), (1.0, 1.0)], [0, -1, -1, -1, -1], &mut b);
+            }
+            b.extend_from_slice(&48i32.to_le_bytes());
+            b.extend_from_slice(&256i32.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn an_envelope_sender_block_reads_and_runs() {
+        let s = Sender::parse(&sender_block()).unwrap();
+        assert_eq!(s.arts.len(), 8);
+        assert!(!s.arts[0].art.bipolar);
+        // nothing at the start, half way after half a second, full and held after that
+        assert!(s.value(0, 60, 1.0, 0.0, 0.0, None).unwrap() < 0.01);
+        assert!((s.value(0, 60, 1.0, 0.0, 0.5, None).unwrap() - 0.5).abs() < 0.02);
+        assert!(s.value(3, 60, 1.0, 0.0, 5.0, None).unwrap() > 0.99);
+        // keys under the output's range do not set it off
+        assert_eq!(s.value(0, 40, 1.0, 0.0, 0.5, None), None);
+        // a new sender's own block reads, and falls back to nothing once the key is let go
+        let f = Sender::parse(&Sender::fresh()).unwrap();
+        assert!(f.value(7, 0, 1.0, 0.0, 0.05, None).unwrap() > 0.95);
+        assert!((f.value(7, 0, 1.0, 0.0, 3.0, None).unwrap() - 0.6).abs() < 0.01);
+        assert!(f.value(7, 0, 1.0, 0.0, 4.0, Some(3.0)).unwrap() < 0.01);
+        // a cut-off block is refused rather than half read
+        assert!(Sender::parse(&sender_block()[..900]).is_none());
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every envelope sender preset and project block there reads.
+    #[test]
+    fn real_envelope_sender_blocks_read() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut seen = 0;
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+                if ext != "fst" && ext != "flp" {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&p) else { continue };
+                if !bytes.windows(ENV_SENDER.len()).any(|w| w == ENV_SENDER.as_bytes()) {
+                    continue;
+                }
+                let Ok(f) = crate::flp::parse(&bytes) else { continue };
+                for c in f.channels.iter().filter(|c| c.plugin.eq_ignore_ascii_case(ENV_SENDER) && !c.state.is_empty()) {
+                    assert!(Sender::parse(&c.state).is_some(), "{}", p.display());
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 0);
+    }
 
     fn curve(kind: i32, pts: &[(f64, f64)], tail: [i32; 5], out: &mut Vec<u8>) {
         out.extend_from_slice(&kind.to_le_bytes());
