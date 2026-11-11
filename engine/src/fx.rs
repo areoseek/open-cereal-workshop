@@ -41,6 +41,7 @@ pub enum Kind {
     OldFlanger,
     Plush,
     Pad,
+    Tuner,
     Curve,
 }
 
@@ -621,6 +622,34 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
+        kind: Kind::Tuner,
+        ident: "Pitcher",
+        title: "Voice Tuner",
+        size: 160,
+        fixed: &[(0, 0x464c_5353), (4, 152), (8, 0x5054_5231), (16, 0x3f80_0000)],
+        params: &[
+            p("Speed", 12, 0, 10000, 10000),
+            p("Fine tune", 20, 0, 10000, 5000),
+            p("Gender", 24, 0, 10000, 5000),
+            p("Pan 1", 80, 0, 10000, 5000),
+            p("Pan 2", 84, 0, 10000, 5000),
+            p("Pan 3", 88, 0, 10000, 5000),
+            p("Pan 4", 92, 0, 10000, 5000),
+            p("Formant", 100, 0, 10000, 0),
+            p("Spread", 104, 0, 10000, 5000),
+            p("Lowest pitch", 108, 0, 10000, 0),
+            p("Follow notes", 112, 0, 10000, 0),
+            p("Follow octaves", 116, 0, 10000, 0),
+            p("Harmonise", 120, 0, 10000, 0),
+            p("Key", 124, 0, 110000, 0),
+            p("Scale", 128, 0, 30000, 0),
+            p("Reference", 140, 0, 30000, 20000),
+            p("Notes C to D#", 144, 0, 0x0101_0101, 0x0101_0101),
+            p("Notes E to G", 148, 0, 0x0101_0101, 0x0101_0101),
+            p("Notes G# to B", 152, 0, 0x0101_0101, 0x0101_0101),
+        ],
+    },
+    Def {
         kind: Kind::GrainShift,
         ident: "Pitch Shifter",
         title: "Grain Shifter",
@@ -1075,7 +1104,7 @@ impl Fx {
             .params
             .iter()
             .map(|p| match state.get(p.off..p.off + 4) {
-                Some(b) if floats(d.kind) => (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 10000.0).round(),
+                Some(b) if floats(d.kind, p.off) => (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 10000.0).round(),
                 Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32,
                 None => p.def as f32,
             })
@@ -1108,7 +1137,7 @@ impl Fx {
         for (p, v) in d.params.iter().zip(&self.p) {
             let Some(off) = (if self.kind == Kind::Maxi { maxi_off(version, p.off) } else { Some(p.off) }) else { continue };
             if off + 4 <= out.len() {
-                if floats(self.kind) {
+                if floats(self.kind, p.off) {
                     // leave a stored value alone unless the setting moved off it
                     let old = f32::from_le_bytes([out[off], out[off + 1], out[off + 2], out[off + 3]]);
                     if (old * 10000.0).round() != v.round() {
@@ -1124,8 +1153,8 @@ impl Fx {
 }
 
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
-fn floats(kind: Kind) -> bool {
-    kind == Kind::Pad
+fn floats(kind: Kind, off: usize) -> bool {
+    kind == Kind::Pad || (kind == Kind::Tuner && off < 144)
 }
 
 /// What a unit needs to know about the moment it is running in.
@@ -1395,6 +1424,11 @@ impl Unit {
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            Kind::Tuner => {
+                u.buf = vec![[0.0; 2]; (sr * 0.2) as usize + 8];
+                u.lines.push(vec![0.0; 2048]);
+                u.lpos.push(0);
+            }
             Kind::Pad => {
                 u.buf = vec![[0.0; 2]; (sr * 4.0) as usize + 8];
                 for ms in PAD_MS {
@@ -1472,7 +1506,7 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + (cx.sr * 0.3) as usize
             }
-            Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
+            Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2070,6 +2104,115 @@ impl Unit {
                     }
                     self.ph = (self.ph + 1.0 / cycle).fract();
                     *f = [(dry[0] + (w[0] - dry[0]) * mix) * gout, (dry[1] + (w[1] - dry[1]) * mix) * gout];
+                }
+            }
+            Kind::Tuner => {
+                // listen: the mono sum at half rate goes into a ring, and every 512 frames the ring is searched
+                // for the lag at which the wave best repeats
+                let n = self.buf.len();
+                let low = 50.0 * 10f32.powf((p[9] / 10000.0).clamp(0.0, 1.0));
+                let fine = (p[1] / 5000.0 - 1.0) / 12.0;
+                let speed = (p[0] / 10000.0).clamp(0.0, 1.0);
+                let a = 1.0 - (-1.0 / ((0.003 + (1.0 - speed) * (1.0 - speed) * 0.4) * sr)).exp();
+                let mut on = [false; 12];
+                for (k, o) in on.iter_mut().enumerate() {
+                    *o = (p[16 + k / 4] as i32 >> (8 * (k % 4))) & 0xff != 0;
+                }
+                let half = sr * 0.5;
+                for f in io.iter_mut() {
+                    let m = (f[0] + f[1]) * 0.5;
+                    z[1] += m;
+                    z[2] += 1.0;
+                    if z[2] >= 2.0 {
+                        let lp = self.lpos[0];
+                        self.lines[0][lp] = z[1] * 0.5;
+                        self.lpos[0] = (lp + 1) % 2048;
+                        z[1] = 0.0;
+                        z[2] = 0.0;
+                    }
+                    z[0] += 1.0;
+                    if z[0] >= 512.0 {
+                        z[0] = 0.0;
+                        const W: usize = 1024;
+                        let mut x = [0f32; W];
+                        let lp = self.lpos[0];
+                        for (i, v) in x.iter_mut().enumerate() {
+                            *v = self.lines[0][(lp + 2048 - W + i) % 2048];
+                        }
+                        let top = ((half / low) as usize).clamp(8, 500);
+                        let bottom = ((half / 1200.0) as usize).max(2);
+                        let span = W - top;
+                        let power: f32 = x[..span].iter().map(|v| v * v).sum::<f32>() / span as f32;
+                        let mut hz = 0.0;
+                        if power > 1e-7 {
+                            let mut d = [0f32; 502];
+                            let mut run = 0.0;
+                            let mut found = 0usize;
+                            for lag in 1..=top {
+                                let mut sum = 0.0;
+                                for i in 0..span {
+                                    let e = x[i] - x[i + lag];
+                                    sum += e * e;
+                                }
+                                run += sum;
+                                d[lag] = sum * lag as f32 / run.max(1e-12);
+                            }
+                            let mut lag = bottom;
+                            while lag < top {
+                                if d[lag] < 0.15 {
+                                    while lag + 1 < top && d[lag + 1] < d[lag] {
+                                        lag += 1;
+                                    }
+                                    found = lag;
+                                    break;
+                                }
+                                lag += 1;
+                            }
+                            if found > 1 && found + 1 <= top {
+                                let (y0, y1, y2) = (d[found - 1], d[found], d[found + 1]);
+                                let den = y0 - 2.0 * y1 + y2;
+                                let shift = if den.abs() > 1e-9 { 0.5 * (y0 - y2) / den } else { 0.0 };
+                                hz = half / (found as f32 + shift.clamp(-1.0, 1.0));
+                            }
+                        }
+                        z[3] = hz;
+                        // where it should be: the nearest note that is switched on
+                        let mut want = 0.0;
+                        if hz > 0.0 {
+                            let note = 69.0 + 12.0 * (hz / 440.0).log2();
+                            let near = note.round() as i32;
+                            let mut best = f32::MAX;
+                            for c in near - 6..=near + 6 {
+                                let dist = (c as f32 - note).abs();
+                                if on[c.rem_euclid(12) as usize] && dist < best {
+                                    best = dist;
+                                    want = (c as f32 - note) / 12.0;
+                                }
+                            }
+                            let period = sr / hz;
+                            z[5] = period * (sr * 0.012 / period).ceil();
+                        }
+                        z[6] = want + fine;
+                    }
+                    // z[4] is the shift in octaves, sliding toward the wanted one
+                    z[4] += (z[6] - z[4]) * a;
+                    let ratio = z[4].exp2();
+                    let grain = if z[5] > 0.0 { z[5] } else { sr * 0.02 }.min(n as f32 - 8.0);
+                    self.buf[self.pos] = *f;
+                    let mut out = [0f32; 2];
+                    for k in 0..2 {
+                        let ph = (self.ph + k as f32 * 0.5).fract();
+                        let w = 0.5 - 0.5 * (ph * TAU).cos();
+                        let at = self.pos as f32 + n as f32 - (ph * grain + 1.0);
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        for c in 0..2 {
+                            out[c] += (self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr) * w;
+                        }
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    self.ph = (self.ph + (1.0 - ratio) / grain).rem_euclid(1.0);
+                    *f = out;
                 }
             }
             Kind::BucketChorus => {
@@ -2789,7 +2932,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -2917,6 +3060,14 @@ mod tests {
         let mut e = fx;
         e.p[1] = 10000.0;
         assert_eq!(run(e, sine, 64)[10], sine(10));
+
+        // voice tuner: a tone a little sharp of A is pulled onto A
+        let fx = Fx::new(Kind::Tuner);
+        assert_eq!(Fx::decode("Pitcher", &fx.encode(None)).unwrap(), fx);
+        let sharp = |i: usize| [(i as f32 * 450.0 * TAU / 44100.0).sin() * 0.5; 2];
+        let out = run(fx, sharp, 88200);
+        let ups = out[44100..].windows(2).filter(|w| w[0][0] < 0.0 && w[1][0] >= 0.0).count() as f32;
+        assert!((ups - 440.0).abs() < 3.0, "{ups}");
 
         // grain shifter: an octave up doubles the number of zero crossings
         let mut fx = Fx::new(Kind::GrainShift);

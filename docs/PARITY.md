@@ -126,7 +126,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Newtime
 - [ ] Newtone
 - [ ] Patcher
-- [ ] Pitcher
+- [~] Pitcher (built as Voice Tuner; automatic correction only, note-driven modes, harmony voices, formant and gender not run)
 - [~] Pitch Shifter (built as Grain Shifter; formant setting not run)
 - [ ] Razer Chroma
 - [~] Soundgoodizer (built, approximate)
@@ -185,6 +185,7 @@ close, not identical:
   Band Splitter: slopes above 24 dB an octave are capped.
   Echo Bank: feedback mode numbering, cutoff and resonance scales, offset units.
   Pad Effects: rate switch positions, the multiplier range, every effect's ranges.
+  Voice Tuner: speed law, lowest pitch law, note switch order (taken as C first).
   Plush Reverb: which stored fields are size, diffusion, brightness and character, the decay law
   (0.1 s to 100 s across the travel), the gain law (746 is unity, twenty units to the dB), which switch byte is
   the predelay tempo lock.
