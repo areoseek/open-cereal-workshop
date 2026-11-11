@@ -30,6 +30,11 @@ pub enum Kind {
     Spread,
     Transient,
     Swarm,
+    MultiComp,
+    OldEq,
+    OldReverb,
+    OldFlanger,
+    Curve,
 }
 
 pub struct Param {
@@ -332,7 +337,216 @@ pub static DEFS: &[Def] = &[
             p("Mix", 44, 0, 1000, 500),
         ],
     },
+    Def {
+        kind: Kind::MultiComp,
+        ident: "Fruity Multiband Compressor",
+        title: "Three Band Compressor",
+        size: 124,
+        fixed: &[(8, 1), (120, 50)],
+        params: &[
+            p("Gain", 4, 0, 65536, 32768),
+            p("Limiter", 12, 0, 1, 0),
+            p("High state", 16, 0, 2, 0),
+            p("High from", 20, 20, 20000, 17000),
+            p("High threshold", 24, 0, 65536, 21845),
+            p("High ratio", 28, 0, 65536, 45875),
+            p("High knee", 32, 0, 65536, 32768),
+            p("High attack", 36, 1, 1000, 100),
+            p("High release", 40, 100, 10000, 1000),
+            p("High gain", 44, 0, 65536, 52429),
+            p("Mid state", 48, 0, 2, 0),
+            p("Mid to", 52, 20, 20000, 17000),
+            p("Mid from", 56, 20, 20000, 6500),
+            p("Mid threshold", 60, 0, 65536, 21845),
+            p("Mid ratio", 64, 0, 65536, 45875),
+            p("Mid knee", 68, 0, 65536, 32768),
+            p("Mid attack", 72, 1, 1000, 100),
+            p("Mid release", 76, 100, 10000, 1000),
+            p("Mid gain", 80, 0, 65536, 52429),
+            p("Low state", 84, 0, 2, 0),
+            p("Low to", 88, 20, 20000, 6500),
+            p("Low threshold", 92, 0, 65536, 21845),
+            p("Low ratio", 96, 0, 65536, 45875),
+            p("Low knee", 100, 0, 65536, 32768),
+            p("Low attack", 104, 1, 1000, 100),
+            p("Low release", 108, 100, 10000, 1000),
+            p("Low gain", 112, 0, 65536, 52429),
+        ],
+    },
+    Def {
+        kind: Kind::OldEq,
+        ident: "Fruity Parametric EQ",
+        title: "Seven Band EQ (classic)",
+        size: 116,
+        fixed: &[],
+        params: &[
+            p("Band 1 level", 0, -1800, 1800, 0),
+            p("Band 2 level", 4, -1800, 1800, 0),
+            p("Band 3 level", 8, -1800, 1800, 0),
+            p("Band 4 level", 12, -1800, 1800, 0),
+            p("Band 5 level", 16, -1800, 1800, 0),
+            p("Band 6 level", 20, -1800, 1800, 0),
+            p("Band 7 level", 24, -1800, 1800, 0),
+            p("Band 1 freq", 28, 0, 65536, 5777),
+            p("Band 2 freq", 32, 0, 65536, 13024),
+            p("Band 3 freq", 36, 0, 65536, 19904),
+            p("Band 4 freq", 40, 0, 65536, 33145),
+            p("Band 5 freq", 44, 0, 65536, 42327),
+            p("Band 6 freq", 48, 0, 65536, 49307),
+            p("Band 7 freq", 52, 0, 65536, 55825),
+            p("Band 1 width", 56, 0, 65536, 17500),
+            p("Band 2 width", 60, 0, 65536, 17500),
+            p("Band 3 width", 64, 0, 65536, 17500),
+            p("Band 4 width", 68, 0, 65536, 17500),
+            p("Band 5 width", 72, 0, 65536, 24000),
+            p("Band 6 width", 76, 0, 65536, 24000),
+            p("Band 7 width", 80, 0, 65536, 17500),
+            p("Band 1 type", 84, 0, 7, 5),
+            p("Band 2 type", 88, 0, 7, 6),
+            p("Band 3 type", 92, 0, 7, 6),
+            p("Band 4 type", 96, 0, 7, 6),
+            p("Band 5 type", 100, 0, 7, 6),
+            p("Band 6 type", 104, 0, 7, 6),
+            p("Band 7 type", 108, 0, 7, 7),
+            p("Main level", 112, 0, 256, 128),
+        ],
+    },
+    Def {
+        kind: Kind::OldReverb,
+        ident: "Fruity Reeverb",
+        title: "Room Reverb (classic)",
+        size: 44,
+        fixed: &[(0, 1)],
+        params: &[
+            p("Low cut", 4, 0, 65536, 0),
+            p("High cut", 8, 0, 65536, 65536),
+            p("Predelay", 12, 0, 300, 0),
+            p("Room size", 16, 0, 65536, 65536),
+            p("Diffusion", 20, 0, 65536, 65536),
+            p("Colour", 24, 0, 40, 20),
+            p("Decay", 28, 0, 65536, 2048),
+            p("High damping", 32, 0, 65536, 65536),
+            p("Dry", 36, 0, 65536, 65536),
+            p("Wet", 40, 0, 65536, 16384),
+        ],
+    },
+    Def {
+        kind: Kind::OldFlanger,
+        ident: "Fruity Flanger",
+        title: "Flanger (classic)",
+        size: 52,
+        fixed: &[(0, 1)],
+        params: &[
+            p("Delay", 4, 0, 1024, 0),
+            p("Depth", 8, 0, 5000, 2000),
+            p("Rate", 12, 0, 5000, 2000),
+            p("Phase", 16, 0, 360, 118),
+            p("Damp", 20, 0, 5000, 0),
+            p("Shape", 24, 0, 1024, 0),
+            p("Feedback", 28, 0, 100, 23),
+            p("Invert feedback", 32, 0, 1024, 1024),
+            p("Invert wet", 36, 0, 1024, 1024),
+            p("Dry", 40, 0, 5000, 3500),
+            p("Wet", 44, 0, 5000, 3000),
+            p("Cross", 48, 0, 5000, 2500),
+        ],
+    },
+    Def { kind: Kind::Curve, ident: "Fruity WaveShaper", title: "Curve Shaper", size: 102, fixed: &[], params: &[p("Pre", 4, 0, 256, 128), p("Mix", 8, 0, 128, 128), p("Post", 12, 0, 128, 128)] },
 ];
+
+/// Points of the curve shaper's table.
+const CURVE_N: usize = 257;
+
+/// A fresh curve shaper block: one straight line from corner to corner.
+fn curve_fresh() -> Vec<u8> {
+    let mut v = Vec::with_capacity(102);
+    for x in [4i32, 128, 128, 128] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v.extend_from_slice(&[0; 6]);
+    for x in [3i32, 3, 2] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    for (x, y) in [(0f64, 0f64), (1.0, 1.0)] {
+        v.extend_from_slice(&x.to_le_bytes());
+        v.extend_from_slice(&y.to_le_bytes());
+        v.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+    for x in [0i32, -1, -1, -1, -1] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v
+}
+
+/// Read the curve shaper's drawn line into a table over the input range; appends the two-sided switch and the
+/// table to `p`. The block holds a header, the point list (three layouts by age) and a short tail.
+fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
+    let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let sub = int(26)?;
+    let n = int(30)? as usize;
+    let size = match sub {
+        0 => 12,
+        1 => 16,
+        _ => 24,
+    };
+    if n == 0 || n > 4096 || state.len() < 34 + n * size {
+        return None;
+    }
+    // (x, y, tension, segment type); x is stored as the distance from the point before
+    let mut pts = Vec::with_capacity(n);
+    let mut x = 0f32;
+    for k in 0..n {
+        let b = &state[34 + k * size..34 + (k + 1) * size];
+        let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+        let d = |o: usize| f64::from_le_bytes(b[o..o + 8].try_into().unwrap()) as f32;
+        let (dx, y, t, kind) = match size {
+            12 => (f(0), f(4), f(8), 0),
+            16 => (f(0), f(4), f(8), b[12]),
+            _ => (d(0), d(8), f(16), b[20]),
+        };
+        let ok = |v: f32| if v.is_finite() { v } else { 0.0 };
+        x += ok(dx).max(0.0);
+        pts.push((x, ok(y).clamp(0.0, 1.0), ok(t), kind));
+    }
+    let span = x.max(1e-6);
+    p.push(if state[16] != 0 { 1.0 } else { 0.0 });
+    let mut seg = 1;
+    for i in 0..CURVE_N {
+        let at = i as f32 / (CURVE_N - 1) as f32 * span;
+        while seg + 1 < n && at > pts[seg].0 {
+            seg += 1;
+        }
+        let v = if n == 1 {
+            pts[0].1
+        } else {
+            let (a, b) = (pts[seg - 1], pts[seg]);
+            let w = b.0 - a.0;
+            let t = if w > 1e-9 { ((at - a.0) / w).clamp(0.0, 1.0) } else { 1.0 };
+            let s = match b.3 {
+                1 | 8 | 12 => {
+                    if t < 0.5 {
+                        0.5 * crate::fm::bend(t * 2.0, b.2)
+                    } else {
+                        1.0 - 0.5 * crate::fm::bend(2.0 - t * 2.0, b.2)
+                    }
+                }
+                2 => {
+                    if t >= 1.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                9 => 0.5 - 0.5 * (t * PI).cos(),
+                10 => t * t * (3.0 - 2.0 * t),
+                _ => crate::fm::bend(t, b.2),
+            };
+            a.1 + (b.1 - a.1) * s
+        };
+        p.push(v);
+    }
+    Some(())
+}
 
 pub fn def(kind: Kind) -> &'static Def {
     DEFS.iter().find(|d| d.kind == kind).expect("every kind has a table")
@@ -352,6 +566,9 @@ pub struct Fx {
 
 impl Fx {
     pub fn new(kind: Kind) -> Self {
+        if kind == Kind::Curve {
+            return Self::decode(def(kind).ident, &curve_fresh()).expect("our own block reads back");
+        }
         Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
     }
 
@@ -377,7 +594,7 @@ impl Fx {
         if state.len() < least {
             return None;
         }
-        let p = d
+        let mut p: Vec<f32> = d
             .params
             .iter()
             .map(|p| match state.get(p.off..p.off + 4) {
@@ -385,6 +602,9 @@ impl Fx {
                 None => p.def as f32,
             })
             .collect();
+        if d.kind == Kind::Curve {
+            curve_table(state, &mut p)?;
+        }
         Some(Self { kind: d.kind, p })
     }
 
@@ -394,6 +614,7 @@ impl Fx {
         let d = def(self.kind);
         let mut out = match base {
             Some(b) => b.to_vec(),
+            None if self.kind == Kind::Curve => curve_fresh(),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -421,9 +642,61 @@ pub struct Ctx {
     pub step: f32,
 }
 
+/// The classic units run on the processor of their successor. This gives the successor's kind for one of them.
+fn successor(kind: Kind) -> Option<Kind> {
+    match kind {
+        Kind::OldEq => Some(Kind::Eq),
+        Kind::OldReverb => Some(Kind::Reverb),
+        Kind::OldFlanger => Some(Kind::Flanger),
+        _ => None,
+    }
+}
+
+/// Settings of a classic unit `p` put into the terms of its successor `q`.
+fn translate(kind: Kind, p: &[f32], q: &mut [f32]) {
+    match kind {
+        Kind::OldEq => {
+            q[..28].copy_from_slice(&p[..28]);
+            q[28..35].fill(0.0);
+            q[35] = 2000.0 * (p[28].max(1.0) / 128.0).log10();
+        }
+        Kind::OldReverb => {
+            let cut = |v: f32| if v >= 65536.0 { 221.0 } else { 5.0 + v / 65536.0 * 215.0 };
+            q[0] = if p[0] <= 0.0 { 19.0 } else { 20.0 + p[0] / 65536.0 * 3000.0 };
+            q[1] = cut(p[1]);
+            q[2] = p[2];
+            q[3] = p[3] / 655.36;
+            q[4] = p[4] / 655.36;
+            q[5] = (p[6] / 100.0).clamp(1.0, 200.0);
+            q[6] = cut(p[7]);
+            q[7] = 100.0 + (p[5] - 20.0) * 4.0;
+            q[8] = 500.0;
+            q[9] = 0.0;
+            q[10] = p[8] / 512.0;
+            q[11] = p[9] / 1024.0;
+            q[12] = p[9] / 512.0;
+            q[13] = 0.0;
+            q[14] = 0.0;
+        }
+        Kind::OldFlanger => {
+            let sign = |v: f32| if v >= 512.0 { -1.0 } else { 1.0 };
+            q[0] = 1.0 + p[0] / 1024.0 * 9.0;
+            q[1] = p[1] / 5000.0 * 1024.0;
+            q[2] = 1024.0 * ((p[2] / 1000.0).max(0.02) / 0.02).ln() / 250f32.ln();
+            q[3] = p[3];
+            q[4] = 128.0 * (1.0 - p[4] / 5000.0);
+            q[5] = p[6] * 1.28 * sign(p[7]);
+            q[6] = p[9] / 5000.0 * 128.0;
+            q[7] = p[10] / 5000.0 * 128.0 * sign(p[8]);
+        }
+        _ => {}
+    }
+}
+
 /// One running effect: the settings plus whatever memory the processor needs.
 pub struct Unit {
     pub fx: Fx,
+    inner: Option<Box<Unit>>,
     z: [f32; 64],
     buf: Vec<[f32; 2]>,
     pos: usize,
@@ -567,7 +840,8 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
-        let mut u = Self { fx, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] };
+        let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] };
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
@@ -593,6 +867,11 @@ impl Unit {
 
     /// How long the unit can keep sounding after its input stops, in frames.
     pub fn tail(&self, cx: &Ctx) -> usize {
+        if let Some(u) = &self.inner {
+            let mut q = u.fx.clone();
+            translate(self.fx.kind, &self.fx.p, &mut q.p);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] }.tail(cx);
+        }
         let p = &self.fx.p;
         match self.fx.kind {
             Kind::Delay => {
@@ -612,12 +891,17 @@ impl Unit {
             Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
-            Kind::Comp | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
+            Kind::Comp | Kind::MultiComp | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
             _ => 0,
         }
     }
 
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
+        if let Some(u) = &mut self.inner {
+            translate(self.fx.kind, &self.fx.p, &mut u.fx.p);
+            u.process(io, cx);
+            return;
+        }
         let sr = cx.sr;
         let p = &self.fx.p;
         let z = &mut self.z;
@@ -883,6 +1167,99 @@ impl Unit {
                     }
                     self.pos = (self.pos + 1) % n;
                     *f = y;
+                }
+            }
+            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger => {}
+            Kind::Curve => {
+                if p.len() < 4 + CURVE_N {
+                    return;
+                }
+                let pre = ((p[0] - 128.0) / 32.0).exp2();
+                let mix = (p[1] / 128.0).clamp(0.0, 1.0);
+                let post = p[2] / 128.0;
+                let two = p[3] >= 0.5;
+                let table = &p[4..4 + CURVE_N];
+                let top = (CURVE_N - 1) as f32;
+                let read = |x: f32| {
+                    let at = x.clamp(0.0, 1.0) * top;
+                    let i = (at as usize).min(CURVE_N - 2);
+                    table[i] + (table[i + 1] - table[i]) * (at - i as f32)
+                };
+                for f in io.iter_mut() {
+                    for x in f.iter_mut() {
+                        let d = *x * pre;
+                        let w = if two { read(d * 0.5 + 0.5) * 2.0 - 1.0 } else { read(d.abs()) * d.signum() };
+                        *x = (*x * (1.0 - mix) + w * mix) * post;
+                    }
+                }
+            }
+            Kind::MultiComp => {
+                // stored cutoffs run on a logarithmic knob scale
+                let hz = |v: f32| 20.0 * 1000f32.powf((v / 20000.0).clamp(0.0, 1.0));
+                let g_lo = svf_g(hz(p[20]), sr);
+                let g_hi = svf_g(hz(p[3]), sr);
+                // per band: state, threshold dB, slope, knee dB, attack, release, gain
+                let band = |b: usize| {
+                    let o = [4usize, 13, 21][b];
+                    let x = (p[o + 1] / 65536.0).clamp(0.0, 1.0);
+                    (
+                        p[[2usize, 10, 19][b]] as i32,
+                        -60.0 * (p[o] / 65536.0).clamp(0.0, 1.0),
+                        x,
+                        (p[o + 2] / 65536.0).clamp(0.0, 1.0) * 24.0,
+                        (-1.0 / ((p[o + 3] / 10.0).max(0.05) * 0.001 * sr)).exp(),
+                        (-1.0 / ((p[o + 4] / 10.0).max(1.0) * 0.001 * sr)).exp(),
+                        p[o + 5] / 52429.0,
+                    )
+                };
+                let bands = [band(0), band(1), band(2)];
+                let main = p[0] / 32768.0;
+                let limit = p[1] >= 0.5;
+                const Q: f32 = std::f32::consts::SQRT_2;
+                for f in io.iter_mut() {
+                    let mut part = [[0f32; 2]; 3];
+                    for c in 0..2 {
+                        let x = f[c];
+                        let (l1, _, _) = svf(&mut z[c * 8..], x, g_lo, Q);
+                        let (low, _, _) = svf(&mut z[c * 8 + 2..], l1, g_lo, Q);
+                        let (_, _, h1) = svf(&mut z[c * 8 + 4..], x, g_hi, Q);
+                        let (_, _, high) = svf(&mut z[c * 8 + 6..], h1, g_hi, Q);
+                        part[0][c] = high;
+                        part[2][c] = low;
+                        part[1][c] = x - low - high;
+                    }
+                    let mut out = [0f32; 2];
+                    for (b, &(state, thr, slope, knee, att, rel, gain)) in bands.iter().enumerate() {
+                        let s = part[b];
+                        match state {
+                            1 => continue,
+                            2 => {
+                                out[0] += s[0];
+                                out[1] += s[1];
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        let peak = s[0].abs().max(s[1].abs()).max(1e-9);
+                        let over = 20.0 * peak.log10() - thr;
+                        let want = if knee > 0.0 && over.abs() < knee / 2.0 {
+                            -slope * (over + knee / 2.0).powi(2) / (2.0 * knee)
+                        } else if over > 0.0 {
+                            -slope * over
+                        } else {
+                            0.0
+                        };
+                        let e = &mut z[32 + b];
+                        let k = if want < *e { att } else { rel };
+                        *e = want + (*e - want) * k;
+                        let g = db(*e) * gain;
+                        out[0] += s[0] * g;
+                        out[1] += s[1] * g;
+                    }
+                    for c in 0..2 {
+                        let v = out[c] * main;
+                        f[c] = if limit { v.clamp(-1.0, 1.0) } else { v };
+                    }
                 }
             }
             Kind::Eq => {
@@ -1316,7 +1693,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::OldReverb | Kind::OldFlanger) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);

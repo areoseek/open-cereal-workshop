@@ -37,7 +37,7 @@ fn look(t: &[f32], ph: f32) -> f32 {
 
 /// Bend a 0..=1 ramp. Positive tension moves fast first and settles (nearly every decay in the presets at hand
 /// is drawn with positive tension, which only makes sense this way round); negative starts slowly.
-fn bend(t: f32, tension: f32) -> f32 {
+pub(crate) fn bend(t: f32, tension: f32) -> f32 {
     let k = (tension.clamp(-1.0, 1.0).abs() * 3.0).exp2();
     if tension.abs() < 1e-4 {
         t
