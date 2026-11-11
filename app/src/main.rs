@@ -704,6 +704,7 @@ impl App {
                             Some(cereal_engine::fx::Kind::Peak) => &["peak + sweep", "peak", "sweep"],
                             Some(cereal_engine::fx::Kind::Xy) => &["X", "Y"],
                             Some(cereal_engine::fx::Kind::Formula) => &["result"],
+                            Some(cereal_engine::fx::Kind::Split) => &["attack gate"],
                             _ => &[],
                         };
                         for (k, o) in outs.iter().enumerate() {

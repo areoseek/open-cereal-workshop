@@ -2253,6 +2253,14 @@ impl Player {
                             w[1] = d[1] + (w[1] - d[1]) * s.mix;
                         }
                     }
+                    if u.1.fx.kind == fx::Kind::Split {
+                        // its gate is there for linked controls to follow
+                        for l in song.ctl_links.iter().filter(|l| l.ins == i && l.slot == slots_index) {
+                            if let Some(&v) = u.1.out.get(l.out as usize) {
+                                self.driven.push((l.target, v));
+                            }
+                        }
+                    }
                     if self.transport.rec_want.load(Relaxed) == (i as u32) << 6 | (slots_index as u32 & 63) {
                         // the window only ever holds this for the moment it swaps the buffer out
                         if let Ok(mut r) = self.transport.rec.lock() {

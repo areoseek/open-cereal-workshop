@@ -123,7 +123,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Luxeverb (built as Plush Reverb, approximate)
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read and edited in the line editor, look-ahead and second state not run)
-- [~] Multiband Delay
+- [~] Multiband Delay (built as Band Delay, approximate)
 - [~] Newtime
 - [~] Newtone
 - [~] Patcher (held effects run along the sound cables and can be edited; setting cables, side inputs and rewiring are not built)
@@ -133,7 +133,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Soundgoodizer (built, approximate)
 - [~] Spreader (built, approximate)
 - [~] Transient Processor (built, approximate)
-- [~] Transmitter
+- [~] Transmitter (built as Attack Splitter: all 47 stored numbers read and saved back; a burst detector with sensitivity, three modes, hold and release opens a gate that divides the sound into attacks and the rest, which add up to the input again; each part has its level, tilt, switch and one of saturation, bounce, diffusion or echo (free or tempo time) with its own mix; side linking and 5 ms look-ahead; the gate is offered to linked controls. Which number is which was worked out from the presets, the times, gains and the look-ahead's place are estimates; side-chain input and separate outputs for the parts are not run, no moving display, latency is not reported)
 - [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
 - [~] Tuner (Pitch Meter: note name, cents needle and frequency of the sound on its track; its display options are not read)
 - [~] VFX Color Mapper
