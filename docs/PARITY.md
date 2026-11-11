@@ -59,7 +59,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Control Surface
 - [ ] Distructor
 - [ ] Edison
-- [ ] Effector
+- [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
 - [ ] Emphasis
 - [ ] Emphasizer
 - [ ] EQUO
@@ -184,6 +184,7 @@ close, not identical:
   Grain Shifter: meaning of density and colour, grain sizes.
   Band Splitter: slopes above 24 dB an octave are capped.
   Echo Bank: feedback mode numbering, cutoff and resonance scales, offset units.
+  Pad Effects: rate switch positions, the multiplier range, every effect's ranges.
   Plush Reverb: which stored fields are size, diffusion, brightness and character, the decay law
   (0.1 s to 100 s across the travel), the gain law (746 is unity, twenty units to the dB), which switch byte is
   the predelay tempo lock.

@@ -40,6 +40,7 @@ pub enum Kind {
     OldReverb,
     OldFlanger,
     Plush,
+    Pad,
     Curve,
 }
 
@@ -599,6 +600,27 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
+        kind: Kind::Pad,
+        ident: "Effector",
+        title: "Pad Effects",
+        size: 316,
+        fixed: &[(0, 0x464c_5353), (4, 308), (8, 0x4658_3031)],
+        params: &[
+            p("Effect", 268, 0, 10000, 1818),
+            p("Bypass", 272, 0, 10000, 0),
+            p("Mix", 276, 0, 10000, 10000),
+            p("X", 280, 0, 10000, 5000),
+            p("Y", 284, 0, 10000, 5000),
+            p("Rate", 288, 0, 10000, 1111),
+            p("Shape", 292, 0, 10000, 0),
+            p("X mod", 296, 0, 10000, 5000),
+            p("Y mod", 300, 0, 10000, 5000),
+            p("Rate multiply", 304, 0, 10000, 0),
+            p("Input", 308, 0, 10000, 10000),
+            p("Output", 312, 0, 10000, 5000),
+        ],
+    },
+    Def {
         kind: Kind::GrainShift,
         ident: "Pitch Shifter",
         title: "Grain Shifter",
@@ -1053,6 +1075,7 @@ impl Fx {
             .params
             .iter()
             .map(|p| match state.get(p.off..p.off + 4) {
+                Some(b) if floats(d.kind) => (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 10000.0).round(),
                 Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32,
                 None => p.def as f32,
             })
@@ -1085,11 +1108,24 @@ impl Fx {
         for (p, v) in d.params.iter().zip(&self.p) {
             let Some(off) = (if self.kind == Kind::Maxi { maxi_off(version, p.off) } else { Some(p.off) }) else { continue };
             if off + 4 <= out.len() {
-                out[off..off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
+                if floats(self.kind) {
+                    // leave a stored value alone unless the setting moved off it
+                    let old = f32::from_le_bytes([out[off], out[off + 1], out[off + 2], out[off + 3]]);
+                    if (old * 10000.0).round() != v.round() {
+                        out[off..off + 4].copy_from_slice(&(v / 10000.0).to_le_bytes());
+                    }
+                } else {
+                    out[off..off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
+                }
             }
         }
         out
     }
+}
+
+/// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
+fn floats(kind: Kind) -> bool {
+    kind == Kind::Pad
 }
 
 /// What a unit needs to know about the moment it is running in.
@@ -1184,6 +1220,11 @@ pub struct Unit {
     lines: Vec<Vec<f32>>,
     lpos: Vec<usize>,
 }
+
+/// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
+const PAD_MS: [f32; 6] = [29.7, 37.1, 41.1, 43.7, 5.0, 1.7];
+/// First two formants of the vowels A E I O U, in Hz.
+const VOWELS: [[f32; 2]; 5] = [[800.0, 1150.0], [400.0, 2000.0], [300.0, 2500.0], [450.0, 800.0], [325.0, 700.0]];
 
 fn db(x: f32) -> f32 {
     10f32.powf(x / 20.0)
@@ -1354,6 +1395,15 @@ impl Unit {
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            Kind::Pad => {
+                u.buf = vec![[0.0; 2]; (sr * 4.0) as usize + 8];
+                for ms in PAD_MS {
+                    for side in [1.0f32, 1.07] {
+                        u.lines.push(vec![0.0; (ms * side * sr / 1000.0) as usize + 2]);
+                        u.lpos.push(0);
+                    }
+                }
+            }
             Kind::EchoBank => {
                 for _ in 0..8 {
                     u.lines.push(vec![0.0; ((sr * 2.0) as usize + 8) * 2]);
@@ -1423,6 +1473,7 @@ impl Unit {
                 (time * (n + 1.0)) as usize + (cx.sr * 0.3) as usize
             }
             Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
+            Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
             Kind::Comp | Kind::MultiComp | Kind::Maxi | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
@@ -1844,6 +1895,181 @@ impl Unit {
                     }
                     let into = [dry[0] + (sum[0] - dry[0]) * mix, dry[1] + (sum[1] - dry[1]) * mix];
                     *f = run(3, into, &mut z[26..28]);
+                }
+            }
+            Kind::Pad => {
+                if p[1] >= 5000.0 {
+                    return;
+                }
+                let which = (p[0] / 10000.0 * 11.0).round() as i32;
+                let mix = (p[2] / 10000.0).clamp(0.0, 1.0);
+                let (gin, gout) = (p[10] / 10000.0, p[11] / 5000.0);
+                // the sweep: beats in a cycle from the rate switches, sped up by the multiplier
+                let beats = 8.0 / ((p[5] / 10000.0 * 6.0).round()).exp2();
+                let cycle = (beats * cx.step * 4.0 / (1.0 + p[9] / 10000.0 * 7.0)).max(16.0);
+                let shape = (p[6] / 10000.0 * 2.0).round() as i32;
+                let (xm, ym) = (p[7] / 5000.0 - 1.0, p[8] / 5000.0 - 1.0);
+                let n = self.buf.len();
+                for f in io.iter_mut() {
+                    let ph = self.ph;
+                    let l = match shape {
+                        0 => (ph * TAU).sin(),
+                        1 => 2.0 * ph - 1.0,
+                        _ => if ph < 0.5 { 1.0 } else { -1.0 },
+                    };
+                    let x = (p[3] / 10000.0 + xm * l * 0.5).clamp(0.0, 1.0);
+                    let y = (p[4] / 10000.0 + ym * l * 0.5).clamp(0.0, 1.0);
+                    let dry = [f[0] * gin, f[1] * gin];
+                    let mut w = dry;
+                    // z[40] is the unit's own slow sweep, z[41] a counter
+                    z[40] = (z[40] + 0.3 / sr).fract();
+                    let slow = 0.5 - 0.5 * (z[40] * TAU).cos();
+                    match which {
+                        0 => {
+                            let drive = 1.0 + x * x * 60.0;
+                            let a = 1.0 - (-TAU * 400.0 * 50f32.powf(y) / sr).exp();
+                            for c in 0..2 {
+                                let v = (dry[c] * drive).tanh() / drive.sqrt();
+                                z[c] += (v - z[c]) * a;
+                                w[c] = z[c];
+                            }
+                        }
+                        1 => {
+                            let steps = (16.0 - x * 14.0).exp2();
+                            let hold = 1.0 + y * y * 60.0;
+                            z[41] += 1.0;
+                            if z[41] >= hold {
+                                z[41] -= hold;
+                                z[0] = (dry[0] * steps).round() / steps;
+                                z[1] = (dry[1] * steps).round() / steps;
+                            }
+                            w = [z[0], z[1]];
+                        }
+                        2 => {
+                            let d = (0.5 + slow * x * 8.0) * 0.001 * sr;
+                            let at = self.pos as f32 + n as f32 - d;
+                            let i = at as usize;
+                            let fr = at - i as f32;
+                            for c in 0..2 {
+                                let v = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                                self.buf[self.pos][c] = dry[c] + v * y * 0.9;
+                                w[c] = (dry[c] + v) * 0.7;
+                            }
+                        }
+                        3 => {
+                            let g = svf_g(300.0 * 12f32.powf(slow * x), sr);
+                            let a = (1.0 - g) / (1.0 + g);
+                            for c in 0..2 {
+                                let mut v = dry[c] + z[c * 5 + 4] * y * 0.9;
+                                for k in 0..4 {
+                                    let o = z[c * 5 + k] - a * v;
+                                    z[c * 5 + k] = v + a * o;
+                                    v = o;
+                                }
+                                z[c * 5 + 4] = v;
+                                w[c] = (dry[c] + v) * 0.7;
+                            }
+                        }
+                        4 => {
+                            let low = x < 0.5;
+                            let hz = if low { 80.0 * 250f32.powf(x * 2.0) } else { 20.0 * 500f32.powf(x * 2.0 - 1.0) };
+                            let g = svf_g(hz, sr);
+                            let k = 2.0 - y * 1.9;
+                            for c in 0..2 {
+                                let (lp, _, hp) = svf(&mut z[c * 2..], dry[c], g, k);
+                                w[c] = if low { lp } else { hp };
+                            }
+                        }
+                        5 => {
+                            let d = ((cx.step * 3.0) as usize).clamp(1, n - 1);
+                            let a = 1.0 - (-TAU * (300.0 + 18000.0 * (1.0 - y) * (1.0 - y)) / sr).exp();
+                            let old = self.buf[(self.pos + n - d) % n];
+                            for c in 0..2 {
+                                z[c] += (old[c] - z[c]) * a;
+                                self.buf[self.pos][c] = dry[c] + z[c] * x * 0.95;
+                                w[c] = dry[c] + z[c];
+                            }
+                        }
+                        6 => {
+                            let fb = 0.7 + x * 0.28;
+                            for c in 0..2 {
+                                let mut sum = 0.0;
+                                for k in 0..4 {
+                                    let li = k * 2 + c;
+                                    let m = self.lines[li].len();
+                                    let lp = self.lpos[li];
+                                    let old = self.lines[li][lp];
+                                    z[c * 4 + k] += (old - z[c * 4 + k]) * 0.6;
+                                    self.lines[li][lp] = dry[c] + z[c * 4 + k] * fb;
+                                    self.lpos[li] = (lp + 1) % m;
+                                    sum += old;
+                                }
+                                let mut v = sum * 0.25;
+                                for k in 4..6 {
+                                    let li = k * 2 + c;
+                                    let m = self.lines[li].len();
+                                    let lp = self.lpos[li];
+                                    let old = self.lines[li][lp];
+                                    let into = v + old * 0.5;
+                                    self.lines[li][lp] = into;
+                                    self.lpos[li] = (lp + 1) % m;
+                                    v = old - into * 0.5;
+                                }
+                                w[c] = dry[c] + v * y * 2.0;
+                            }
+                        }
+                        7 => {
+                            let (gl, gr) = balance(x * 2.0 - 1.0);
+                            // the far ear hears it a little later
+                            let late = ((x - 0.5).abs() * 2.0 * y * 0.0007 * sr) as usize;
+                            self.buf[self.pos] = dry;
+                            let old = self.buf[(self.pos + n - late) % n];
+                            let m = (dry[0] + dry[1]) * 0.5 * y;
+                            let s = [dry[0] * (1.0 - y) + m, dry[1] * (1.0 - y) + m];
+                            let o = [old[0] * (1.0 - y) + (old[0] + old[1]) * 0.5 * y, old[1] * (1.0 - y) + (old[0] + old[1]) * 0.5 * y];
+                            w = if x < 0.5 { [s[0] * gl, o[1] * gr] } else { [o[0] * gl, s[1] * gr] };
+                        }
+                        8 => {
+                            let rel = 0.02 + x * x * 2.0;
+                            let env = (-ph / rel).exp();
+                            let g = (1.0 - y) + y * env;
+                            w = [dry[0] * g, dry[1] * g];
+                        }
+                        9 => {
+                            // the first slice of every cycle is caught and said again until the cycle ends
+                            let g = ((cycle / 8.0) as usize).clamp(8, n - 1);
+                            let at = (ph * cycle) as usize;
+                            if at < g {
+                                self.buf[at] = dry;
+                            } else {
+                                w = self.buf[at % g];
+                            }
+                        }
+                        10 => {
+                            let v = (x * 4.0).clamp(0.0, 3.999);
+                            let (i, fr) = (v as usize, v.fract());
+                            let throat = 1.4 * 0.5f32.powf(y);
+                            for c in 0..2 {
+                                let mut sum = 0.0;
+                                for k in 0..2 {
+                                    let hz = (VOWELS[i][k] * (1.0 - fr) + VOWELS[i + 1][k] * fr) * throat;
+                                    let (_, bp, _) = svf(&mut z[c * 4 + k * 2..], dry[c], svf_g(hz, sr), 0.12);
+                                    sum += bp * if k == 0 { 0.12 } else { 0.08 };
+                                }
+                                w[c] = sum;
+                            }
+                        }
+                        _ => {
+                            z[41] = (z[41] + 20.0 * 500f32.powf(x) / sr).fract();
+                            let m = (z[41] * TAU).sin();
+                            w = [dry[0] * m, dry[1] * m];
+                        }
+                    }
+                    if !matches!(which, 9) {
+                        self.pos = (self.pos + 1) % n;
+                    }
+                    self.ph = (self.ph + 1.0 / cycle).fract();
+                    *f = [(dry[0] + (w[0] - dry[0]) * mix) * gout, (dry[1] + (w[1] - dry[1]) * mix) * gout];
                 }
             }
             Kind::BucketChorus => {
@@ -2563,7 +2789,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -2678,6 +2904,19 @@ mod tests {
         dry_only.p[33] = -600.0;
         let out = run(dry_only, click, 4096);
         assert!((out[0][0] - 1.0).abs() < 1e-3 && rms(&out[64..]) < 1e-6);
+
+        // pad effects: fresh block reads back, every effect stays bounded, bypass passes
+        let fx = Fx::new(Kind::Pad);
+        assert_eq!(Fx::decode("Effector", &fx.encode(None)).unwrap(), fx);
+        for k in 0..12 {
+            let mut e = fx.clone();
+            e.p[0] = (k as f32 / 11.0 * 10000.0).round();
+            let out = run(e, sine, 22050);
+            assert!(out.iter().all(|f| f[0].is_finite() && f[0].abs() < 8.0), "effect {k}");
+        }
+        let mut e = fx;
+        e.p[1] = 10000.0;
+        assert_eq!(run(e, sine, 64)[10], sine(10));
 
         // grain shifter: an octave up doubles the number of zero crossings
         let mut fx = Fx::new(Kind::GrainShift);
