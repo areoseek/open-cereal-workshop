@@ -52,6 +52,17 @@ pub fn read(path: &std::path::Path) -> Result<Preset, String> {
     parse(&std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
 }
 
+/// A preset file for one plugin's settings, in the layout the reference program writes.
+pub fn write(ident: &str, state: &[u8], generator: bool) -> Vec<u8> {
+    use crate::flp::{Event, Header};
+    let mut name = ident.as_bytes().to_vec();
+    name.push(0);
+    let mut wrap = vec![0u8; 52];
+    wrap[9] = 2;
+    let events = vec![Event::data(199, b"20.8.4\0".to_vec()), Event::data(ID_IDENT, name), Event::data(212, wrap), Event::data(ID_STATE, state.to_vec())];
+    FlpFile { header: Header { format: 0x30, channels: if generator { 8 } else { 4 }, ppq: 96 }, events, trailer: vec![] }.to_bytes()
+}
+
 impl Preset {
     /// The unit of ours these settings load onto. Names are matched without regard to case, as old presets
     /// spell them differently.
@@ -75,6 +86,17 @@ mod tests {
     fn file(ident: &[u8], state: Vec<u8>) -> Vec<u8> {
         let f = FlpFile { header: Header { format: 0x30, channels: 1, ppq: 96 }, events: vec![Event::data(ID_IDENT, ident.to_vec()), Event::data(212, vec![0; 52]), Event::data(ID_STATE, state)], trailer: vec![] };
         f.to_bytes()
+    }
+
+    #[test]
+    fn a_saved_preset_reads_back_the_same() {
+        let mut f = crate::fx::Fx::new(crate::fx::Kind::Comp);
+        f.p[0] -= 20.0;
+        let bytes = write(crate::fx::def(f.kind).ident, &f.encode(None), false);
+        assert_eq!(parse(&bytes).unwrap().unit(), Some(Unit::Fx(f)));
+        let g = crate::synth::Gen::new(crate::synth::Kind::Osc3);
+        let bytes = write(crate::synth::def(g.kind).ident, &g.encode(None), true);
+        assert_eq!(parse(&bytes).unwrap().unit(), Some(Unit::Gen(g)));
     }
 
     #[test]

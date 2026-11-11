@@ -130,6 +130,7 @@ pub(crate) struct App {
     show_info: bool,
     show_about: bool,
     render: Option<RenderOpts>,
+    save_preset: Option<(String, bool)>,
     show_chanset: bool,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
@@ -236,6 +237,7 @@ impl App {
             show_info: false,
             show_about: false,
             render: None,
+            save_preset: None,
             show_chanset: false,
             fx_open: None,
             preset_lists: Default::default(),
@@ -640,6 +642,9 @@ impl App {
         let label = at.and_then(|i| list[i].file_stem()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Presets".into());
         let mut pick = None;
         ui.horizontal(|ui| {
+            if ui.small_button("Save").on_hover_text("Save these settings as a preset file").clicked() {
+                self.save_preset = Some((ident.to_string(), generator));
+            }
             if list.is_empty() {
                 ui.label(egui::RichText::new("Presets: none found (Options > Sounds and presets from your own copy)").small().color(widgets::TEXT_DIM));
                 return;
@@ -664,6 +669,29 @@ impl App {
             });
         });
         pick
+    }
+
+    /// Write the settings of the open effect or the selected instrument to a preset file.
+    fn save_preset_file(&mut self, ident: &str, generator: bool) {
+        let state = if generator {
+            self.song.channels.get(self.sel_chan).and_then(|c| c.gen.as_ref()).filter(|g| cereal_engine::synth::def(g.kind).ident == ident).map(|g| g.encode(None))
+        } else {
+            self.fx_open.and_then(|(i, s)| self.song.inserts.get(i)?.slots.iter().find(|x| x.index == s)?.fx.as_ref()).filter(|f| cereal_engine::fx::def(f.kind).ident == ident).map(|f| f.encode(None))
+        };
+        let Some(state) = state else { return };
+        let mut d = rfd::FileDialog::new().add_filter("Preset file", &["fst"]).set_file_name("My preset.fst");
+        if let Some(dir) = self.presets_for(ident, generator).first().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
+            d = d.set_directory(dir);
+        }
+        let Some(path) = d.save_file() else { return };
+        self.status = match std::fs::write(&path, cereal_engine::preset::write(ident, &state, generator)) {
+            Ok(()) => {
+                self.preset_lists.remove(ident);
+                self.preset_name.insert(ident.to_string(), path.clone());
+                format!("Saved preset {}", path.display())
+            }
+            Err(e) => format!("Preset not saved: {e}"),
+        };
     }
 
     fn run_actions(&mut self) {
@@ -1151,6 +1179,9 @@ impl App {
         }
 
         self.render_window(ctx);
+        if let Some((ident, generator)) = self.save_preset.take() {
+            self.save_preset_file(&ident, generator);
+        }
         let mut open = self.show_about;
         egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.heading("Breakfast Cereal DAW");
