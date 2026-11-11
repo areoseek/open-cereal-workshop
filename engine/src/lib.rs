@@ -11,6 +11,7 @@ pub mod fxmulti;
 pub mod fxvoc;
 pub mod synth;
 pub mod law;
+pub mod lossy;
 pub mod player;
 pub mod additive;
 pub mod analog;

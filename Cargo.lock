@@ -549,6 +549,8 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "miniz_oxide 0.8.9",
+ "rusty_mp3",
+ "rusty_vorbis",
  "symphonia",
 ]
 
@@ -2734,6 +2736,18 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty_mp3"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda7c6c82285d2bc3f1e6aded40ca6f7572fe9eec77f18fb10efc1d03aed3877"
+
+[[package]]
+name = "rusty_vorbis"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99b79a70d038e0cecf397375b4320258c77d037c64c2b538d64a1d27f1b3e8bc"
 
 [[package]]
 name = "same-file"

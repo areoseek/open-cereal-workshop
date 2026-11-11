@@ -459,15 +459,28 @@ impl App {
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
         if self.render.is_none() {
-            self.render = Some(RenderOpts { flac: false, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode() });
+            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode() });
         }
     }
 
     fn render_to_file(&mut self, o: &RenderOpts) {
-        let (ext, label) = if o.flac { ("flac", "FLAC audio") } else { ("wav", "WAV audio") };
+        let (ext, label) = match (o.lossy, o.flac) {
+            (1, _) => ("mp3", "MP3 audio"),
+            (2, _) => ("ogg", "Ogg Vorbis audio"),
+            (_, true) => ("flac", "FLAC audio"),
+            _ => ("wav", "WAV audio"),
+        };
         let default = self.path.as_ref().map(|p| p.with_extension(ext)).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| format!("untitled.{ext}"));
         let Some(path) = rfd::FileDialog::new().add_filter(label, &[ext]).set_file_name(default).save_file() else { return };
         let buf = cereal_engine::render_song(&self.song, o.rate as f32, o.song, self.handle.transport.pattern(), o.tail);
+        if o.lossy != 0 {
+            let made = if o.lossy == 1 { cereal_engine::lossy::mp3(&buf, o.rate, o.kbps) } else { cereal_engine::lossy::ogg(&buf, o.rate, o.quality) };
+            self.status = match made.and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string())) {
+                Ok(()) => format!("Exported {}", path.display()),
+                Err(e) => format!("Export failed: {e}"),
+            };
+            return;
+        }
         let r = std::fs::File::create(&path).and_then(|f| {
             let w = std::io::BufWriter::new(f);
             if o.flac {
@@ -496,25 +509,51 @@ impl App {
                 ui.end_row();
                 ui.label("Format");
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut o.flac, false, "WAV");
-                    ui.selectable_value(&mut o.flac, true, "FLAC");
+                    let mut f = if o.lossy != 0 { o.lossy + 1 } else { o.flac as u8 };
+                    for (k, name) in ["WAV", "FLAC", "MP3", "OGG"].iter().enumerate() {
+                        ui.selectable_value(&mut f, k as u8, *name);
+                    }
+                    o.flac = f == 1;
+                    o.lossy = f.saturating_sub(1);
                 });
                 ui.end_row();
-                ui.label("Depth");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut o.bits, 16, "16 bit");
-                    ui.selectable_value(&mut o.bits, 24, "24 bit");
-                    if !o.flac {
-                        ui.selectable_value(&mut o.bits, 32, "32 bit float");
-                    } else if o.bits > 24 {
-                        o.bits = 24;
+                match o.lossy {
+                    1 => {
+                        ui.label("Bitrate");
+                        ui.horizontal(|ui| {
+                            for k in [128u32, 160, 192, 256, 320] {
+                                ui.selectable_value(&mut o.kbps, k, format!("{k} kbps"));
+                            }
+                        });
                     }
-                });
+                    2 => {
+                        ui.label("Quality");
+                        ui.add(egui::Slider::new(&mut o.quality, 0.0..=10.0).step_by(1.0));
+                    }
+                    _ => {
+                        ui.label("Depth");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut o.bits, 16, "16 bit");
+                            ui.selectable_value(&mut o.bits, 24, "24 bit");
+                            if !o.flac {
+                                ui.selectable_value(&mut o.bits, 32, "32 bit float");
+                            } else if o.bits > 24 {
+                                o.bits = 24;
+                            }
+                        });
+                    }
+                }
                 ui.end_row();
                 ui.label("Sample rate");
                 ui.horizontal(|ui| {
+                    // the lossy formats stop at 48 kHz
+                    if o.lossy != 0 && o.rate > 48_000 {
+                        o.rate = 48_000;
+                    }
                     for r in [44_100u32, 48_000, 88_200, 96_000] {
-                        ui.selectable_value(&mut o.rate, r, format!("{r}"));
+                        if o.lossy == 0 || r <= 48_000 {
+                            ui.selectable_value(&mut o.rate, r, format!("{r}"));
+                        }
                     }
                 });
                 ui.end_row();
@@ -1373,6 +1412,10 @@ impl App {
 /// Choices in the rendering window.
 struct RenderOpts {
     flac: bool,
+    /// 0 for the lossless formats above, 1 MP3, 2 Ogg Vorbis.
+    lossy: u8,
+    kbps: u32,
+    quality: f32,
     bits: u16,
     rate: u32,
     tail: f32,

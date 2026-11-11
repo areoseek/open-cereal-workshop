@@ -32,3 +32,10 @@ The WavPack reader is a Rust port of the decoding path of the WavPack reference 
     CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
     OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## rusty_mp3 and rusty_vorbis (MP3 and Ogg Vorbis export)
+
+The MP3 and Ogg Vorbis writers in `engine/src/lossy.rs` use the `rusty_mp3` and `rusty_vorbis` crates, pure
+Rust encoders by Mata Network (https://github.com/Remade-With-Rust/remade_ffmpeg_rs), used unmodified as
+dependencies under the Apache License, Version 2.0. The full licence text ships inside each crate and is at
+https://www.apache.org/licenses/LICENSE-2.0.
