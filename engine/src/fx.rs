@@ -22,6 +22,7 @@ pub enum Kind {
     FreqShift,
     Finisher,
     LowLift,
+    MorphEq,
     FastLp,
     Overdrive,
     Filter,
@@ -775,6 +776,23 @@ pub static DEFS: &[Def] = &[
             p("Diffusion mix", 48, 0, 10000, 0),
         ],
     },
+    // 31 third-octave bands, eight curves to morph between and a master curve; the curves follow the settings
+    Def {
+        kind: Kind::MorphEq,
+        ident: "EQUO",
+        title: "Morph Equaliser",
+        size: 4143,
+        fixed: &[],
+        params: &[
+            p("Shift", 4100, 0, 256, 128),
+            p("Morph", 4104, 0, 7000, 0),
+            p("Smooth", 4108, 0, 256, 170),
+            p("Volume", 4112, 0, 256, 128),
+            p("Add", 4116, 0, 1, 0),
+            p("Band width", 4120, 0, 300, 150),
+            p("Send only", 4128, 0, 1, 0),
+        ],
+    },
     // the offsets here only number the settings: the block is packed and read by its own module
     Def {
         kind: Kind::Bank,
@@ -1302,6 +1320,44 @@ fn warp_lines(state: &[u8]) -> Option<Vec<usize>> {
     (heads.len() == 2 * WARP_SLOTS).then_some(heads)
 }
 
+/// Bands and curves of the morphing equaliser, and where its curve values sit behind the listed settings.
+const MEQ_BANDS: usize = 31;
+const MEQ_HEAD: usize = 7;
+
+fn meq_fresh() -> Vec<u8> {
+    let mut v = Vec::with_capacity(4143);
+    v.extend_from_slice(&4i32.to_le_bytes());
+    for _ in 0..MEQ_BANDS {
+        for x in [1.0f32, 0.0, 1.0, 0.0, 1.0, 0.0] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    for _ in 0..9 * MEQ_BANDS * 3 {
+        v.extend_from_slice(&1.0f32.to_le_bytes());
+    }
+    v.extend_from_slice(&0.0f32.to_le_bytes());
+    for x in [128i32, 0, 170, 128, 0, 150, -1, 0, 0] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0]);
+    v
+}
+
+/// Level and pan of every band of the nine curves, appended to the settings.
+fn meq_tables(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
+    for bank in 0..9 {
+        for band in 0..MEQ_BANDS {
+            for k in 0..2 {
+                let o = 4 + (186 + bank * 93 + band * 3 + k) * 4;
+                let b = state.get(o..o + 4)?;
+                let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                p.push(if v.is_finite() { v.clamp(0.0, 2.0) } else { 1.0 });
+            }
+        }
+    }
+    Some(())
+}
+
 /// A fresh beat juggler block: every slot holds a level line (no time shift, full volume).
 fn warp_fresh() -> Vec<u8> {
     let mut v = Vec::with_capacity(6960);
@@ -1414,6 +1470,9 @@ impl Fx {
         if kind == Kind::Warp {
             return Self::decode(def(kind).ident, &warp_fresh()).expect("our own block reads back");
         }
+        if kind == Kind::MorphEq {
+            return Self::decode(def(kind).ident, &meq_fresh()).expect("our own block reads back");
+        }
         if kind == Kind::Bank {
             return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
         }
@@ -1486,6 +1545,9 @@ impl Fx {
         if d.kind == Kind::Curve {
             curve_table(state, &mut p)?;
         }
+        if d.kind == Kind::MorphEq {
+            meq_tables(state, &mut p)?;
+        }
         if d.kind == Kind::Warp {
             for head in warp_lines(state)? {
                 drawn_table_n(state, head, WARP_N, &mut p)?;
@@ -1507,6 +1569,7 @@ impl Fx {
             None if self.kind == Kind::Maxi => maxi_fresh(),
             None if self.kind == Kind::Xy => XY_FRESH.to_vec(),
             None if self.kind == Kind::Warp => warp_fresh(),
+            None if self.kind == Kind::MorphEq => meq_fresh(),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -1818,6 +1881,10 @@ impl Unit {
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
             Kind::FreqShift => u.buf = vec![[0.0; 2]; 36],
+            Kind::MorphEq => {
+                u.lines.push(vec![0.0; MEQ_BANDS * 8]);
+                u.lines.push(vec![-1.0; MEQ_BANDS * 2]);
+            }
             Kind::Tuner => {
                 u.buf = vec![[0.0; 2]; (sr * 0.2) as usize + 8];
                 u.lines.push(vec![0.0; 2048]);
@@ -1903,7 +1970,7 @@ impl Unit {
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Peak => (cx.sr * 3.0) as usize,
             Kind::Warp => (cx.step * 32.0) as usize + 64,
-            Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift | Kind::Finisher | Kind::LowLift => (cx.sr * 0.25) as usize,
+            Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift | Kind::Finisher | Kind::LowLift | Kind::MorphEq => (cx.sr * 0.25) as usize,
             Kind::Phaser => (cx.sr * 1.5) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
@@ -2825,6 +2892,76 @@ impl Unit {
                     }
                 }
             }
+            Kind::MorphEq => {
+                if p.len() < MEQ_HEAD + 9 * MEQ_BANDS * 2 || self.lines.len() < 2 {
+                    return;
+                }
+                // every band is a pair of band-pass stages; neighbours are summed with opposite signs so they
+                // add up where they cross
+                let kq = 0.2316 * (p[5] / 100.0).clamp(0.3, 3.0);
+                let pos = (p[1] / 1000.0).clamp(0.0, 7.0);
+                let (ba, t) = ((pos as usize).min(7), pos.fract());
+                let bb = (ba + 1).min(7);
+                let shift = (p[0] - 128.0) / 128.0 * 15.0;
+                let at = |bank: usize, x: f32, k: usize| -> f32 {
+                    let x = x.clamp(0.0, (MEQ_BANDS - 1) as f32);
+                    let (i, fr) = (x as usize, x.fract());
+                    let j = (i + 1).min(MEQ_BANDS - 1);
+                    p[MEQ_HEAD + bank * 62 + i * 2 + k] * (1.0 - fr) + p[MEQ_HEAD + bank * 62 + j * 2 + k] * fr
+                };
+                // what the flat sum comes to, measured between and on the bands around 1 kHz
+                let mut norm = 0.0f32;
+                for probe in [1000.0f32, 1122.0] {
+                    let (mut re, mut im) = (0.0f32, 0.0f32);
+                    for i in 0..MEQ_BANDS {
+                        let r = probe / (20.0 * 2f32.powf(i as f32 / 3.0));
+                        // one stage: j k r / (1 - r^2 + j k r)
+                        let (dr, di) = (1.0 - r * r, kq * r);
+                        let den = dr * dr + di * di;
+                        let (hr, hi) = (di * di / den, kq * r * dr / den);
+                        let (sr2, si2) = (hr * hr - hi * hi, 2.0 * hr * hi);
+                        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        re += sign * sr2;
+                        im += sign * si2;
+                    }
+                    norm += 0.5 * (re * re + im * im).sqrt();
+                }
+                let out = p[3] / 128.0 / norm.max(0.05);
+                let mut g = [0.0f32; MEQ_BANDS];
+                let mut want = [[0.0f32; 2]; MEQ_BANDS];
+                for i in 0..MEQ_BANDS {
+                    g[i] = svf_g(20.0 * 2f32.powf(i as f32 / 3.0), sr);
+                    let x = i as f32 - shift;
+                    let vol = (at(ba, x, 0) * (1.0 - t) + at(bb, x, 0) * t) * at(8, i as f32, 0);
+                    let pan = (at(ba, x, 1) * (1.0 - t) + at(bb, x, 1) * t + at(8, i as f32, 1) - 1.0).clamp(0.0, 2.0);
+                    let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    let lv = vol * vol * out * sign;
+                    want[i] = [lv * (2.0 - pan).min(1.0), lv * pan.min(1.0)];
+                }
+                let (st, rest) = self.lines.split_at_mut(1);
+                let (st, cur) = (&mut st[0], &mut rest[0]);
+                if cur[0] == -1.0 && cur[1] == -1.0 {
+                    for i in 0..MEQ_BANDS {
+                        cur[i * 2] = want[i][0];
+                        cur[i * 2 + 1] = want[i][1];
+                    }
+                }
+                let glide = 1.0 - (-1.0 / ((0.002 + p[2] / 170.0 * 0.08) * sr)).exp();
+                for f in io.iter_mut() {
+                    let mut acc = [0.0f32; 2];
+                    for i in 0..MEQ_BANDS {
+                        for c in 0..2 {
+                            let k = i * 8 + c * 4;
+                            let (_, b1, _) = svf(&mut st[k..k + 2], f[c], g[i], kq);
+                            let (_, b2, _) = svf(&mut st[k + 2..k + 4], b1 * kq, g[i], kq);
+                            let lv = &mut cur[i * 2 + c];
+                            *lv += glide * (want[i][c] - *lv);
+                            acc[c] += b2 * kq * *lv;
+                        }
+                    }
+                    *f = acc;
+                }
+            }
             Kind::Bank => {
                 if let Some(st) = &mut self.bank {
                     crate::fxbank::process(p, st, io, cx);
@@ -3636,7 +3773,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -3726,6 +3863,25 @@ mod tests {
         let peak = out.iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak <= 1.0001 && peak > 0.8, "peak {peak}");
         assert!(rms(&out[22050..]) > 0.5);
+    }
+
+    #[test]
+    fn morph_equaliser_is_about_flat_and_cuts_bands() {
+        let fx = Fx::new(Kind::MorphEq);
+        for hz in [100.0f32, 440.0, 1000.0, 1122.0, 5000.0] {
+            let tone = move |i: usize| {
+                let v = (i as f32 * hz * TAU / 44100.0).sin() * 0.5;
+                [v, v]
+            };
+            let level = rms(&run(fx.clone(), tone, 32768)[16384..]);
+            assert!((level / 0.3535 - 1.0).abs() < 0.2, "{hz} Hz comes out at {level}");
+        }
+        // silence the bands from 250 Hz up on the first curve: 440 Hz goes away
+        let mut cut = fx.clone();
+        for band in 11..MEQ_BANDS {
+            cut.p[MEQ_HEAD + band * 2] = 0.0;
+        }
+        assert!(rms(&run(cut, sine, 32768)[16384..]) < 0.02);
     }
 
     #[test]

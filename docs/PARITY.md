@@ -62,7 +62,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
 - [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
 - [ ] Emphasizer
-- [ ] EQUO
+- [~] EQUO (built as Morph Equaliser: 31 bands, eight curves with morph, master curve, per-band pan, shift, smoothing; mix knob not located in the block, band gain law and shift range estimated, sends and curve drawing missing)
 - [ ] FL Studio Mobile Rack FX
 - [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
 - [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
