@@ -51,6 +51,9 @@ pub struct Transport {
     /// The effect slot whose sound the window wants to look at (insert * 64 + slot), or all ones for none.
     tap_want: AtomicU32,
     tap: Mutex<Tap>,
+    /// The slot whose passing sound is being recorded, and what has gathered since the window last took it.
+    rec_want: AtomicU32,
+    rec: Mutex<Vec<[f32; 2]>>,
 }
 
 /// The latest stretch of sound through the watched slot, kept going round.
@@ -93,6 +96,8 @@ impl Transport {
             live: Mutex::new(Vec::new()),
             tap_want: AtomicU32::new(u32::MAX),
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
+            rec_want: AtomicU32::new(u32::MAX),
+            rec: Mutex::new(Vec::new()),
         })
     }
     pub fn playing(&self) -> bool {
@@ -166,6 +171,23 @@ impl Transport {
         self.master.store(v.clamp(0.0, 1.25).to_bits(), Relaxed);
     }
     /// Choose the effect slot whose sound is kept for the pictures of the meter units, or none.
+    /// Start or stop gathering the sound that passes a mixer slot, for the wave recorder.
+    pub fn record_slot(&self, at: Option<(usize, u16)>) {
+        if let Ok(mut r) = self.rec.lock() {
+            *r = Vec::with_capacity(if at.is_some() { 96_000 } else { 0 });
+        }
+        self.rec_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
+    }
+    pub fn recording_slot(&self) -> Option<(usize, u16)> {
+        let v = self.rec_want.load(Relaxed);
+        (v != u32::MAX).then_some(((v >> 6) as usize, (v & 63) as u16))
+    }
+    /// What has been recorded since the last call. Room for the next stretch is made here, away from the audio
+    /// thread.
+    pub fn take_recorded(&self) -> Vec<[f32; 2]> {
+        let fresh = Vec::with_capacity(96_000);
+        self.rec.lock().map(|mut r| std::mem::replace(&mut *r, fresh)).unwrap_or_default()
+    }
     pub fn watch_slot(&self, at: Option<(usize, u16)>) {
         self.tap_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
     }
@@ -1488,6 +1510,9 @@ impl Player {
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
             let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy)));
+            // a track being recorded runs through silence too, or the pauses would fall out of the take
+            let taken = self.transport.rec_want.load(Relaxed);
+            let sender = sender || (taken != u32::MAX && (taken >> 6) as usize == i);
             if i >= ni || (!self.dirty[i] && self.ring[i] == 0 && !sender) {
                 continue;
             }
@@ -1575,6 +1600,12 @@ impl Player {
                         for (w, d) in bus[..n].iter_mut().zip(&self.scratch) {
                             w[0] = d[0] + (w[0] - d[0]) * s.mix;
                             w[1] = d[1] + (w[1] - d[1]) * s.mix;
+                        }
+                    }
+                    if self.transport.rec_want.load(Relaxed) == (i as u32) << 6 | (slots_index as u32 & 63) {
+                        // the window only ever holds this for the moment it swaps the buffer out
+                        if let Ok(mut r) = self.transport.rec.lock() {
+                            r.extend_from_slice(&bus[..n]);
                         }
                     }
                     if self.transport.tap_want.load(Relaxed) == (i as u32) << 6 | (slots_index as u32 & 63) {
@@ -2041,6 +2072,39 @@ mod tests {
         let late = buf.iter().fold(0.0f32, |m, x| m.max(x.abs()));
         assert!(early < 0.02, "{early}");
         assert!(late > 0.1 && late > early * 5.0, "{late}");
+    }
+
+    #[test]
+    fn a_watched_slot_is_shown_and_recorded() {
+        let mut s = click_song();
+        let mut slot = crate::song::Slot::with_fx(2, crate::fx::Kind::Thru);
+        slot.plugin = "Edison".into();
+        s.inserts[0].slots.push(slot);
+        let (h, mut p) = new_player(s, 48_000.0);
+        let mut buf = vec![0.0f32; 2048];
+        // nothing is gathered until someone asks
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert!(h.transport.take_recorded().is_empty());
+        assert_eq!(h.transport.watched(64).1, 0);
+        h.transport.record_slot(Some((0, 2)));
+        h.transport.watch_slot(Some((0, 2)));
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        let got = h.transport.take_recorded();
+        assert_eq!(got.len(), 2048);
+        assert!(got.iter().any(|f| f[0].abs() > 0.1));
+        let (seen, count, rate) = h.transport.watched(512);
+        assert_eq!((seen.len(), count, rate), (512, 2048, 48_000.0));
+        // the pause after the click is part of the take
+        assert!(got[1800..].iter().all(|f| f[0].abs() < 1e-3));
+        // taking empties it, and stopping ends the gathering
+        assert!(h.transport.take_recorded().is_empty());
+        h.transport.record_slot(None);
+        p.render(&mut buf, 2);
+        assert!(h.transport.take_recorded().is_empty());
+        assert_eq!(h.transport.recording_slot(), None);
     }
 
     #[test]

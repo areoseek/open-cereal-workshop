@@ -19,6 +19,7 @@ pub mod analog;
 pub mod fm;
 pub mod formula;
 pub mod scope;
+pub mod waveed;
 pub mod minis;
 pub mod midifile;
 pub mod keys;

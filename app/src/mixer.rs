@@ -13,7 +13,7 @@ enum SlotAct {
     Open(u16),
     Delete(u16),
     Move(u16, u16),
-    Set(u16, cereal_engine::fx::Kind),
+    Set(u16, cereal_engine::fx::Kind, &'static str),
 }
 
 impl App {
@@ -170,11 +170,11 @@ impl App {
                                 ui.label(RichText::new("Replace with").small().color(TEXT_DIM));
                             }
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru).collect();
+                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison"].contains(&d.ident)).collect();
                                 defs.sort_by_key(|d| d.title);
                                 for d in defs {
                                     if ui.button(d.title).clicked() {
-                                        act = Some(SlotAct::Set(slot, d.kind));
+                                        act = Some(SlotAct::Set(slot, d.kind, d.ident));
                                     }
                                 }
                             });
@@ -213,9 +213,12 @@ impl App {
                                     o => o,
                                 };
                             }
-                            SlotAct::Set(s, kind) => {
+                            SlotAct::Set(s, kind, ident) => {
                                 slots.retain(|x| x.index != s);
-                                slots.push(cereal_engine::song::Slot::with_fx(s, kind));
+                                let mut new = cereal_engine::song::Slot::with_fx(s, kind);
+                                // several units share a kind; the name is what tells them apart
+                                new.plugin = ident.to_string();
+                                slots.push(new);
                                 slots.sort_by_key(|x| x.index);
                                 self.fx_open = Some((i, s));
                             }

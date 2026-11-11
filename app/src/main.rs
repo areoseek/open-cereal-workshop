@@ -10,6 +10,7 @@ mod midi;
 mod record;
 mod setup;
 mod unpack;
+mod waveed;
 
 /// Windows that take their own key commands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -160,6 +161,8 @@ pub(crate) struct App {
     link_learn: Option<cereal_engine::song::Target>,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
+    /// The takes of the open wave recorders, by mixer track and slot.
+    wave_eds: std::collections::HashMap<(usize, u16), waveed::WaveEd>,
     /// Preset files per plugin, found in the user's own content.
     preset_lists: std::collections::HashMap<String, std::rc::Rc<Vec<PathBuf>>>,
     /// The preset last loaded per plugin, for the previous / next buttons.
@@ -274,6 +277,7 @@ impl App {
             events: events::State::default(),
             link_learn: None,
             fx_open: None,
+            wave_eds: Default::default(),
             preset_lists: Default::default(),
             preset_name: Default::default(),
             chanset: Default::default(),
@@ -308,6 +312,20 @@ impl App {
                         if let (Some(i), Some(sl)) = (it.next(), it.next()) {
                             app.fx_open = Some((i, sl as u16));
                             app.sel_insert = i;
+                        }
+                    }
+                    x if x.starts_with("addfx=") => {
+                        // put a unit on the master track's first slot and open it
+                        if let Some(d) = cereal_engine::fx::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&x[6..])) {
+                            if let Some(ins) = app.song.inserts.first_mut() {
+                                ins.slots.retain(|s| s.index != 0);
+                                let mut s = cereal_engine::song::Slot::with_fx(0, d.kind);
+                                s.plugin = d.ident.to_string();
+                                ins.slots.insert(0, s);
+                                app.fx_open = Some((0, 0));
+                                app.sel_insert = 0;
+                                app.handle.publish(app.song.clone());
+                            }
                         }
                     }
                     "noplaylist" => app.show_playlist = false,

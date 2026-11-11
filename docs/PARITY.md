@@ -59,7 +59,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 ## Effects and tools (90)
 - [~] Control Surface (opens as Control Panel, block kept, sound passes through; its controls are not shown or sent yet)
 - [~] Distructor (ours: Drive Rack; four module slots, 18 drive models, 22 filters, chorus, cabinet convolution from the user's own impulse files; block read and written byte-exact; the sound of each model is ours, one cabinet per rack)
-- [~] Edison (opens as Wave Recorder, block kept, sound passes through; recording and editing are not done)
+- [~] Edison (Wave Recorder: records the sound at its slot, by hand or with the song; opens sound files; mark, trim, cut, copy, paste, delete, silence, reverse, normalize, fades, amplify, centre, swap sides, undo; zoom; plays the marked stretch; saves WAV, sends to the playlist or to a new channel. Not yet: takes kept inside the project block, regions and markers, the spectrum view, noise removal, blur, equalise, time stretch, scripts, loop tuning)
 - [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
 - [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
 - [~] Emphasizer (built as Loudener; gain range and stage laws are estimates, no meters)

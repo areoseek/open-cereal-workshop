@@ -111,6 +111,11 @@ fn band_db(kind: i32, f0: f32, gain: f32, width: f32, f: f32) -> f32 {
 impl App {
     /// Show the editor of the open effect slot, if any.
     pub(crate) fn fx_window(&mut self, ctx: &egui::Context, frame: egui::Frame) {
+        // a take only runs while its recorder is the window in front
+        let taking = self.handle.transport.recording_slot();
+        if taking.is_some() && taking != self.fx_open {
+            self.handle.transport.record_slot(None);
+        }
         let Some((ins, slot)) = self.fx_open else {
             self.handle.transport.watch_slot(None);
             return;
@@ -123,6 +128,7 @@ impl App {
         let meter = match self.song.inserts[ins].slots[si].plugin.as_str() {
             p if p.eq_ignore_ascii_case("Tuner") => 1,
             p if p.eq_ignore_ascii_case("Wave Candy") => 2,
+            p if p.eq_ignore_ascii_case("Edison") => 3,
             _ => 0,
         };
         self.handle.transport.watch_slot((meter != 0).then_some((ins, slot)));
@@ -137,6 +143,8 @@ impl App {
         let mut pick = None;
         let mut pick_ir = false;
         let mut cab_changed = false;
+        let mut wave_act = None;
+        let take_dir = crate::record::folder(self.path.as_deref());
         egui::Window::new(title).id(egui::Id::new("fxwin")).open(&mut open).frame(frame).resizable(false).default_pos([420.0, 160.0]).show(ctx, |ui| {
             if let Some(ident) = ident {
                 pick = self.preset_bar(ui, ident, false);
@@ -168,6 +176,10 @@ impl App {
                 ui.data_mut(|d| d.insert_temp(id, (count, since)));
                 let quiet = now - since > 0.25;
                 let frames = if quiet { vec![[0.0; 2]; frames.len()] } else { frames };
+                if meter == 3 {
+                    wave_act = self.wave_eds.entry((ins, slot)).or_default().ui(ui, &self.handle, (ins, slot), rate, &take_dir);
+                    return;
+                }
                 if meter == 1 {
                     tuner_ui(ui, &frames, rate);
                 } else {
@@ -523,6 +535,19 @@ impl App {
                 });
             }
         });
+        match wave_act {
+            Some(crate::waveed::WaveAct::ToPlaylist(p)) => {
+                let at = if self.handle.transport.song_mode() { self.handle.transport.tick().max(0.0) as u32 } else { 0 };
+                self.add_audio_clip(&p, at, None);
+                self.status = format!("Placed {}", p.display());
+            }
+            Some(crate::waveed::WaveAct::ToChannel(p)) => {
+                self.load_sample(&p, None);
+                self.status = format!("Loaded {}", p.display());
+            }
+            Some(crate::waveed::WaveAct::Status(s)) => self.status = s,
+            None => {}
+        }
         if cab_changed {
             let want = self.song.inserts[ins].slots[si].fx.as_ref().and_then(|f| cereal_engine::fxrack::cabinet_of(&f.p)).and_then(cereal_engine::fxrack::cabinet_file);
             let ir = want.and_then(|name| self.lib.load_stored(&name, None).map(|smp| fx::Ir { smp, path: name }));
