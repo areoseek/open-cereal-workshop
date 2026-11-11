@@ -56,6 +56,7 @@ pub enum Kind {
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
+    Conv,
 }
 
 pub struct Param {
@@ -633,6 +634,14 @@ pub static DEFS: &[Def] = &[
             p("Input", 308, 0, 10000, 10000),
             p("Output", 312, 0, 10000, 5000),
         ],
+    },
+    Def {
+        kind: Kind::Conv,
+        ident: "Fruity Convolver",
+        title: "Impulse Reverb",
+        size: 24,
+        fixed: &[(0, 14), (20, 1)],
+        params: &[p("Dry", 4, 0, 1000, 1000), p("Wet", 8, 0, 1000, 500), p("Input separation", 12, -1000, 1000, 0), p("Wet separation", 16, -1000, 1000, 0)],
     },
     Def { kind: Kind::Thru, ident: "Wave Candy", title: "Scope Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "ZGameEditor Visualizer", title: "Visual Stage", size: 0, fixed: &[], params: &[] },
@@ -1467,6 +1476,55 @@ pub fn title_for(ident: &str) -> Option<&'static str> {
 pub struct Fx {
     pub kind: Kind,
     pub p: Vec<f32>,
+    /// The impulse of a convolution unit.
+    pub ir: Option<Ir>,
+}
+
+/// An impulse and the stored path it came from (empty when the block carried the sound itself).
+#[derive(Debug, Clone)]
+pub struct Ir {
+    pub smp: std::sync::Arc<crate::sample::Sample>,
+    pub path: String,
+}
+
+impl PartialEq for Ir {
+    fn eq(&self, o: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.smp, &o.smp) && self.path == o.path
+    }
+}
+
+/// The parts of a convolution block after its fixed front: the path, the sound held inside (if any), and where
+/// the rest begins.
+fn conv_parts(state: &[u8]) -> Option<(String, Option<std::ops::Range<usize>>, std::ops::Range<usize>, usize)> {
+    let held = *state.get(20)? == 0;
+    let mut len = *state.get(21)? as usize;
+    let mut at = 22;
+    if len == 0xff {
+        len = u32::from_le_bytes(state.get(22..26)?.try_into().ok()?) as usize;
+        at = 26;
+    }
+    let path = String::from_utf8_lossy(state.get(at..at + len)?).to_string();
+    let path_range = 21..at + len;
+    at += len;
+    let mut wave = None;
+    if held {
+        if let Some(b) = state.get(at..at + 4) {
+            let size = u32::from_le_bytes(b.try_into().ok()?) as usize;
+            if size > 0 && at + 4 + size <= state.len() {
+                wave = Some(at + 4..at + 4 + size);
+                at += 4 + size;
+            }
+        }
+    }
+    Some((path, wave, path_range, at))
+}
+
+/// The sample file a stored effect block names, for units that play one.
+pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
+    if !ident.eq_ignore_ascii_case("Fruity Convolver") {
+        return None;
+    }
+    conv_parts(state).map(|x| x.0).filter(|s| !s.is_empty())
 }
 
 impl Fx {
@@ -1486,7 +1544,7 @@ impl Fx {
         if kind == Kind::Bank {
             return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
         }
-        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
+        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), ir: None }
     }
 
     /// Put setting `k` at `v` (0..=1) of its travel, as a controller does. Settings past the unit's listed
@@ -1502,7 +1560,7 @@ impl Fx {
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
         let d = DEFS.iter().find(|d| d.ident == ident)?;
         if d.kind == Kind::Bank {
-            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p });
+            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None });
         }
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
         // the oldest reverb blocks (found in presets) have no version number in front
@@ -1537,7 +1595,7 @@ impl Fx {
             for _ in 0..4 {
                 at = drawn_table(state, at, &mut p)?;
             }
-            return Some(Self { kind: d.kind, p });
+            return Some(Self { kind: d.kind, p, ir: None });
         }
         let mut p: Vec<f32> = d
             .params
@@ -1563,7 +1621,13 @@ impl Fx {
                 drawn_table_n(state, head, WARP_N, &mut p)?;
             }
         }
-        Some(Self { kind: d.kind, p })
+        let mut ir = None;
+        if d.kind == Kind::Conv {
+            if let Some((_, Some(w), _, _)) = conv_parts(state) {
+                ir = crate::sample::Sample::decode(state[w].to_vec(), "wav").ok().map(|s| Ir { smp: std::sync::Arc::new(s), path: String::new() });
+            }
+        }
+        Some(Self { kind: d.kind, p, ir })
     }
 
     /// Write the settings into a stored block: `base` when the effect came from a file (everything we do not
@@ -1574,7 +1638,27 @@ impl Fx {
         }
         let d = def(self.kind);
         let mut out = match base {
+            Some(b) if self.kind == Kind::Conv => {
+                // a newly chosen impulse replaces the stored path and any sound held inside
+                match (&self.ir, conv_parts(b)) {
+                    (Some(ir), Some((old, _, _, rest))) if !ir.path.is_empty() && ir.path != old => {
+                        let mut v = b[..20].to_vec();
+                        v.push(1);
+                        conv_path(&mut v, &ir.path);
+                        v.extend_from_slice(&b[rest..]);
+                        v
+                    }
+                    _ => b.to_vec(),
+                }
+            }
             Some(b) => b.to_vec(),
+            None if self.kind == Kind::Conv && self.ir.as_ref().is_some_and(|i| !i.path.is_empty()) => {
+                let mut v = vec![0u8; 20];
+                v[0] = 14;
+                v.push(1);
+                conv_path(&mut v, &self.ir.as_ref().unwrap().path);
+                v
+            }
             None if self.kind == Kind::Curve => curve_fresh(),
             None if self.kind == Kind::Maxi => maxi_fresh(),
             None if self.kind == Kind::Xy => XY_FRESH.to_vec(),
@@ -1607,6 +1691,17 @@ impl Fx {
         }
         out
     }
+}
+
+fn conv_path(v: &mut Vec<u8>, path: &str) {
+    let b = path.as_bytes();
+    if b.len() < 0xff {
+        v.push(b.len() as u8);
+    } else {
+        v.push(0xff);
+        v.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    }
+    v.extend_from_slice(b);
 }
 
 /// A new pad controller's block: both axes centred, the plain grid.
@@ -1711,6 +1806,7 @@ pub struct Unit {
     /// What a controller unit is putting out, 0..=1 each (level follower: both, peak, sweep).
     pub out: [f32; 3],
     bank: Option<Box<crate::fxbank::State>>,
+    conv: Option<Box<crate::conv::State>>,
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -1874,7 +1970,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None };
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
@@ -1890,6 +1986,12 @@ impl Unit {
             // two bars at 40 beats a minute and up
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
+            Kind::Conv => {
+                if let Some(ir) = &u.fx.ir {
+                    let k = crate::conv::Kernel::new(&ir.smp, sr, 512, true);
+                    u.conv = Some(Box::new(crate::conv::State::new(std::sync::Arc::new(k))));
+                }
+            }
             Kind::FreqShift => u.buf = vec![[0.0; 2]; 36],
             Kind::MorphEq => {
                 u.lines.push(vec![0.0; MEQ_BANDS * 8]);
@@ -1939,9 +2041,12 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None }.tail(cx);
         }
         let p = &self.fx.p;
+        if let Some(c) = &self.conv {
+            return c.kernel.frames;
+        }
         match self.fx.kind {
             Kind::Delay => {
                 let fb = (p[3] / 128.0).clamp(0.0, 0.98);
@@ -2264,6 +2369,19 @@ impl Unit {
                 }
             }
             Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru => {}
+            Kind::Conv => {
+                if let Some(st) = &mut self.conv {
+                    let (dry, wet) = (p[0] / 1000.0, p[1] / 1000.0);
+                    let (si, sw) = (1.0 - p[2] / 1000.0, 1.0 - p[3] / 1000.0);
+                    for f in io.iter_mut() {
+                        let (m, s) = ((f[0] + f[1]) * 0.5, (f[0] - f[1]) * 0.5 * si);
+                        let y = st.tick([m + s, m - s]);
+                        let (ym, ys) = ((y[0] + y[1]) * 0.5, (y[0] - y[1]) * 0.5 * sw);
+                        f[0] = f[0] * dry + (ym + ys) * wet;
+                        f[1] = f[1] * dry + (ym - ys) * wet;
+                    }
+                }
+            }
             Kind::Curve => {
                 if p.len() < 4 + CURVE_N {
                     return;
@@ -4073,5 +4191,31 @@ mod tests {
         let peak = |a: usize, b: usize| out[a..b].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak(16000, 16300) > 0.45, "{}", peak(16000, 16300));
         assert!(peak(17850, 18000) < 0.36, "{}", peak(17850, 18000));
+    }
+
+    #[test]
+    fn the_impulse_unit_rings_on_and_keeps_what_it_does_not_read() {
+        let mut block = vec![0u8; 20];
+        block[0] = 3;
+        block[4..8].copy_from_slice(&0i32.to_le_bytes());
+        block[8..12].copy_from_slice(&1000i32.to_le_bytes());
+        block.push(1);
+        block.push(5);
+        block.extend_from_slice(b"a.wav");
+        block.extend_from_slice(&[9, 8, 7, 6]);
+        assert_eq!(sample_named_in("Fruity Convolver", &block).as_deref(), Some("a.wav"));
+        let mut fx = Fx::decode("Fruity Convolver", &block).unwrap();
+        assert_eq!(fx.p, vec![0.0, 1000.0, 0.0, 0.0]);
+        assert_eq!(fx.encode(Some(&block)), block);
+        let mut h = vec![0f32; 2000];
+        h[0] = 1.0;
+        h[1500] = 1.0;
+        fx.ir = Some(Ir { smp: std::sync::Arc::new(crate::sample::Sample::from_mono("h", 44_100, &h)), path: "longer name.wav".into() });
+        let out = fx.encode(Some(&block));
+        assert_eq!(sample_named_in("Fruity Convolver", &out).as_deref(), Some("longer name.wav"));
+        assert_eq!(&out[out.len() - 4..], &[9, 8, 7, 6]);
+        let y = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 2000);
+        let g = y[0][0];
+        assert!(g > 0.5 && (y[1500][0] - g).abs() < 1e-3 && y[700][0].abs() < 1e-4, "{g} {}", y[1500][0]);
     }
 }

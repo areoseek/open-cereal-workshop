@@ -409,7 +409,12 @@ impl App {
         let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match pre.unit() {
             None => self.status = format!("\"{}\" is a preset for {}, which has no built-in unit yet", name, pre.ident),
-            Some(Unit::Fx(f)) => {
+            Some(Unit::Fx(mut f)) => {
+                if f.ir.is_none() {
+                    if let Some(stored) = cereal_engine::fx::sample_named_in(cereal_engine::fx::def(f.kind).ident, &pre.state) {
+                        f.ir = self.lib.load_stored(&stored, path.parent()).map(|smp| cereal_engine::fx::Ir { smp, path: stored });
+                    }
+                }
                 let same = |song: &Song, ins: usize, slot: u16| song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.index == slot)).and_then(|s| s.fx.as_ref()).is_some_and(|x| x.kind == f.kind);
                 let at = match to {
                     PresetTo::Slot(i, s) => Some((i, s)),

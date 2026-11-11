@@ -13,6 +13,7 @@ pub mod minis;
 pub mod keys;
 pub mod slicer;
 pub mod beep;
+pub mod conv;
 pub mod drumbank;
 pub mod grain;
 pub mod wavpack;

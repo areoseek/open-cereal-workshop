@@ -121,6 +121,7 @@ impl App {
         let mut changed = false;
         let ident = self.song.inserts[ins].slots[si].fx.as_ref().map(|f| fx::def(f.kind).ident);
         let mut pick = None;
+        let mut pick_ir = false;
         egui::Window::new(title).id(egui::Id::new("fxwin")).open(&mut open).frame(frame).resizable(false).default_pos([420.0, 160.0]).show(ctx, |ui| {
             if let Some(ident) = ident {
                 pick = self.preset_bar(ui, ident, false);
@@ -142,6 +143,19 @@ impl App {
             let d = fx::def(f.kind);
             if f.kind == Kind::Eq {
                 changed |= eq_curve(ui, f);
+            }
+            if f.kind == Kind::Conv {
+                ui.horizontal(|ui| {
+                    let name = match &f.ir {
+                        Some(ir) if !ir.smp.name.is_empty() => format!("{} ({:.2} s)", ir.smp.name, ir.smp.seconds()),
+                        Some(ir) => format!("Held in the project ({:.2} s)", ir.smp.seconds()),
+                        None => "No impulse loaded".to_string(),
+                    };
+                    ui.label(RichText::new(name).small());
+                    if ui.button(RichText::new("Load impulse...").small()).clicked() {
+                        pick_ir = true;
+                    }
+                });
             }
             let per_row = if f.kind == Kind::Eq { 7 } else { 6 };
             // units made of several like sections show one section at a time: (settings in front, settings per
@@ -194,6 +208,23 @@ impl App {
                 });
             }
         });
+        if pick_ir {
+            let mut dlg = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]);
+            if let Some(dir) = self.lib.factory_roots.iter().map(|r| r.join("Data/Patches/Impulses")).find(|d| d.is_dir()) {
+                dlg = dlg.set_directory(dir);
+            }
+            if let Some(path) = dlg.pick_file() {
+                match self.lib.load_path(&path) {
+                    Ok(smp) => {
+                        if let Some(f) = self.song.inserts[ins].slots[si].fx.as_mut() {
+                            f.ir = Some(fx::Ir { smp, path: path.to_string_lossy().to_string() });
+                            changed = true;
+                        }
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+        }
         if changed {
             self.dirty = true;
         }

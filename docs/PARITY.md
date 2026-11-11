@@ -75,7 +75,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Center
 - [~] Fruity Chorus (built, approximate)
 - [~] Fruity Compressor (built, approximate)
-- [ ] Fruity Convolver
+- [~] Fruity Convolver (ours: Impulse Reverb; convolution with the named or held impulse, dry/wet, separation; delay, stretch, EQ and envelopes not yet)
 - [ ] Fruity dB Meter
 - [ ] Fruity Delay
 - [~] Fruity Delay 2 (built, approximate)
