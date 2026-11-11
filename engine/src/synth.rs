@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn block_round_trips() {
-        let mut g = Gen::new(Kind::Osc3);
+        let g = Gen::new(Kind::Osc3);
         let fresh = g.encode(None);
         assert_eq!(fresh.len(), 92);
         assert_eq!(Gen::decode("3x Osc", &fresh).unwrap(), g);

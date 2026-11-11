@@ -144,11 +144,36 @@ impl App {
                 changed |= eq_curve(ui, f);
             }
             let per_row = if f.kind == Kind::Eq { 7 } else { 6 };
-            let rows = d.params.len().div_ceil(per_row);
+            // units made of several like sections show one section at a time: (settings in front, settings per
+            // section, section names)
+            let paged: Option<(usize, usize, &[&str])> = match f.kind {
+                Kind::Maxi => Some((7, 13, &["Low", "Mid", "High", "Main"])),
+                Kind::EchoBank => Some((4, 20, &["1", "2", "3", "4", "5", "6", "7", "8"])),
+                _ => None,
+            };
+            let mut shown: Vec<usize> = (0..d.params.len()).collect();
+            let mut cut = 0;
+            if let Some((head, per, names)) = paged {
+                let id = egui::Id::new(("fxpage", ins, slot));
+                let mut page = ui.data(|m| m.get_temp::<usize>(id)).unwrap_or(0).min(names.len() - 1);
+                ui.horizontal(|ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        if ui.selectable_label(page == i, RichText::new(*n).small()).clicked() {
+                            page = i;
+                        }
+                    }
+                });
+                ui.data_mut(|m| m.insert_temp(id, page));
+                shown = (0..head).chain(head + page * per..head + (page + 1) * per).collect();
+                cut = names[page].len() + 1;
+            }
+            let rows = shown.len().div_ceil(per_row);
             for r in 0..rows {
                 ui.horizontal(|ui| {
-                    for k in r * per_row..((r + 1) * per_row).min(d.params.len()) {
+                    for &k in &shown[r * per_row..((r + 1) * per_row).min(shown.len())] {
                         let p = &d.params[k];
+                        let head = paged.is_none_or(|(h, _, _)| k < h);
+                        let label = if head { p.name } else { &p.name[cut.min(p.name.len())..] };
                         let v = &mut f.p[k];
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
@@ -162,7 +187,7 @@ impl App {
                                     changed = true;
                                 }
                                 r.on_hover_text(hint(d.kind, k, p.name, *v));
-                                ui.label(RichText::new(p.name).small().color(TEXT_DIM));
+                                ui.label(RichText::new(label).small().color(TEXT_DIM));
                             });
                         });
                     }

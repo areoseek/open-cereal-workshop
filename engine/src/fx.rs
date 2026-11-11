@@ -35,6 +35,7 @@ pub enum Kind {
     BucketChorus,
     GrainShift,
     BandSplit,
+    EchoBank,
     OldEq,
     OldReverb,
     OldFlanger,
@@ -588,6 +589,180 @@ pub static DEFS: &[Def] = &[
             p("Mutes", 84, 0, 63, 0),
         ],
     },
+    Def {
+        kind: Kind::EchoBank,
+        ident: "Fruity Delay Bank",
+        title: "Echo Bank",
+        size: 792,
+        fixed: &[],
+        params: &[
+            p("Dry", 4, 0, 128, 128),
+            p("Wet", 8, 0, 128, 128),
+            p("Input", 12, 0, 128, 128),
+            p("Feedback", 16, 0, 128, 128),
+            p("1 in pan", 20, -128, 128, 0),
+            p("1 in volume", 24, 0, 160, 128),
+            p("1 cutoff", 28, 0, 65536, 33145),
+            p("1 resonance", 32, 0, 65536, 17500),
+            p("1 filter gain", 36, 0, 200, 0),
+            p("1 separation", 40, -128, 128, 0),
+            p("1 echo volume", 44, 0, 128, 64),
+            p("1 echo pan", 48, -128, 128, 0),
+            p("1 time", 52, 0, 3840, 1440),
+            p("1 offset", 56, -480, 480, 0),
+            p("1 echo cutoff", 60, 0, 65536, 33145),
+            p("1 echo resonance", 64, 0, 65536, 17500),
+            p("1 echo filter gain", 68, 0, 200, 0),
+            p("1 out pan", 72, -128, 128, 0),
+            p("1 out volume", 76, -128, 128, 128),
+            p("1 to next", 80, -160, 160, 0),
+            p("1 filter", 536, 0, 7, 0),
+            p("1 echo filter", 544, 0, 7, 0),
+            p("1 modes", 552, 0, 0x0000_0301, 256),
+            p("1 switches", 564, 0, 0x0101_0101, 0x0100_0100),
+            p("2 in pan", 84, -128, 128, 0),
+            p("2 in volume", 88, 0, 160, 128),
+            p("2 cutoff", 92, 0, 65536, 33145),
+            p("2 resonance", 96, 0, 65536, 17500),
+            p("2 filter gain", 100, 0, 200, 0),
+            p("2 separation", 104, -128, 128, 0),
+            p("2 echo volume", 108, 0, 128, 64),
+            p("2 echo pan", 112, -128, 128, 0),
+            p("2 time", 116, 0, 3840, 1440),
+            p("2 offset", 120, -480, 480, 0),
+            p("2 echo cutoff", 124, 0, 65536, 33145),
+            p("2 echo resonance", 128, 0, 65536, 17500),
+            p("2 echo filter gain", 132, 0, 200, 0),
+            p("2 out pan", 136, -128, 128, 0),
+            p("2 out volume", 140, -128, 128, 128),
+            p("2 to next", 144, -160, 160, 0),
+            p("2 filter", 568, 0, 7, 0),
+            p("2 echo filter", 576, 0, 7, 0),
+            p("2 modes", 584, 0, 0x0000_0301, 256),
+            p("2 switches", 596, 0, 0x0101_0101, 0x0100_0000),
+            p("3 in pan", 148, -128, 128, 0),
+            p("3 in volume", 152, 0, 160, 128),
+            p("3 cutoff", 156, 0, 65536, 33145),
+            p("3 resonance", 160, 0, 65536, 17500),
+            p("3 filter gain", 164, 0, 200, 0),
+            p("3 separation", 168, -128, 128, 0),
+            p("3 echo volume", 172, 0, 128, 64),
+            p("3 echo pan", 176, -128, 128, 0),
+            p("3 time", 180, 0, 3840, 1440),
+            p("3 offset", 184, -480, 480, 0),
+            p("3 echo cutoff", 188, 0, 65536, 33145),
+            p("3 echo resonance", 192, 0, 65536, 17500),
+            p("3 echo filter gain", 196, 0, 200, 0),
+            p("3 out pan", 200, -128, 128, 0),
+            p("3 out volume", 204, -128, 128, 128),
+            p("3 to next", 208, -160, 160, 0),
+            p("3 filter", 600, 0, 7, 0),
+            p("3 echo filter", 608, 0, 7, 0),
+            p("3 modes", 616, 0, 0x0000_0301, 256),
+            p("3 switches", 628, 0, 0x0101_0101, 0x0100_0000),
+            p("4 in pan", 212, -128, 128, 0),
+            p("4 in volume", 216, 0, 160, 128),
+            p("4 cutoff", 220, 0, 65536, 33145),
+            p("4 resonance", 224, 0, 65536, 17500),
+            p("4 filter gain", 228, 0, 200, 0),
+            p("4 separation", 232, -128, 128, 0),
+            p("4 echo volume", 236, 0, 128, 64),
+            p("4 echo pan", 240, -128, 128, 0),
+            p("4 time", 244, 0, 3840, 1440),
+            p("4 offset", 248, -480, 480, 0),
+            p("4 echo cutoff", 252, 0, 65536, 33145),
+            p("4 echo resonance", 256, 0, 65536, 17500),
+            p("4 echo filter gain", 260, 0, 200, 0),
+            p("4 out pan", 264, -128, 128, 0),
+            p("4 out volume", 268, -128, 128, 128),
+            p("4 to next", 272, -160, 160, 0),
+            p("4 filter", 632, 0, 7, 0),
+            p("4 echo filter", 640, 0, 7, 0),
+            p("4 modes", 648, 0, 0x0000_0301, 256),
+            p("4 switches", 660, 0, 0x0101_0101, 0x0100_0000),
+            p("5 in pan", 276, -128, 128, 0),
+            p("5 in volume", 280, 0, 160, 128),
+            p("5 cutoff", 284, 0, 65536, 33145),
+            p("5 resonance", 288, 0, 65536, 17500),
+            p("5 filter gain", 292, 0, 200, 0),
+            p("5 separation", 296, -128, 128, 0),
+            p("5 echo volume", 300, 0, 128, 64),
+            p("5 echo pan", 304, -128, 128, 0),
+            p("5 time", 308, 0, 3840, 1440),
+            p("5 offset", 312, -480, 480, 0),
+            p("5 echo cutoff", 316, 0, 65536, 33145),
+            p("5 echo resonance", 320, 0, 65536, 17500),
+            p("5 echo filter gain", 324, 0, 200, 0),
+            p("5 out pan", 328, -128, 128, 0),
+            p("5 out volume", 332, -128, 128, 128),
+            p("5 to next", 336, -160, 160, 0),
+            p("5 filter", 664, 0, 7, 0),
+            p("5 echo filter", 672, 0, 7, 0),
+            p("5 modes", 680, 0, 0x0000_0301, 256),
+            p("5 switches", 692, 0, 0x0101_0101, 0x0100_0000),
+            p("6 in pan", 340, -128, 128, 0),
+            p("6 in volume", 344, 0, 160, 128),
+            p("6 cutoff", 348, 0, 65536, 33145),
+            p("6 resonance", 352, 0, 65536, 17500),
+            p("6 filter gain", 356, 0, 200, 0),
+            p("6 separation", 360, -128, 128, 0),
+            p("6 echo volume", 364, 0, 128, 64),
+            p("6 echo pan", 368, -128, 128, 0),
+            p("6 time", 372, 0, 3840, 1440),
+            p("6 offset", 376, -480, 480, 0),
+            p("6 echo cutoff", 380, 0, 65536, 33145),
+            p("6 echo resonance", 384, 0, 65536, 17500),
+            p("6 echo filter gain", 388, 0, 200, 0),
+            p("6 out pan", 392, -128, 128, 0),
+            p("6 out volume", 396, -128, 128, 128),
+            p("6 to next", 400, -160, 160, 0),
+            p("6 filter", 696, 0, 7, 0),
+            p("6 echo filter", 704, 0, 7, 0),
+            p("6 modes", 712, 0, 0x0000_0301, 256),
+            p("6 switches", 724, 0, 0x0101_0101, 0x0100_0000),
+            p("7 in pan", 404, -128, 128, 0),
+            p("7 in volume", 408, 0, 160, 128),
+            p("7 cutoff", 412, 0, 65536, 33145),
+            p("7 resonance", 416, 0, 65536, 17500),
+            p("7 filter gain", 420, 0, 200, 0),
+            p("7 separation", 424, -128, 128, 0),
+            p("7 echo volume", 428, 0, 128, 64),
+            p("7 echo pan", 432, -128, 128, 0),
+            p("7 time", 436, 0, 3840, 1440),
+            p("7 offset", 440, -480, 480, 0),
+            p("7 echo cutoff", 444, 0, 65536, 33145),
+            p("7 echo resonance", 448, 0, 65536, 17500),
+            p("7 echo filter gain", 452, 0, 200, 0),
+            p("7 out pan", 456, -128, 128, 0),
+            p("7 out volume", 460, -128, 128, 128),
+            p("7 to next", 464, -160, 160, 0),
+            p("7 filter", 728, 0, 7, 0),
+            p("7 echo filter", 736, 0, 7, 0),
+            p("7 modes", 744, 0, 0x0000_0301, 256),
+            p("7 switches", 756, 0, 0x0101_0101, 0x0100_0000),
+            p("8 in pan", 468, -128, 128, 0),
+            p("8 in volume", 472, 0, 160, 128),
+            p("8 cutoff", 476, 0, 65536, 33145),
+            p("8 resonance", 480, 0, 65536, 17500),
+            p("8 filter gain", 484, 0, 200, 0),
+            p("8 separation", 488, -128, 128, 0),
+            p("8 echo volume", 492, 0, 128, 64),
+            p("8 echo pan", 496, -128, 128, 0),
+            p("8 time", 500, 0, 3840, 1440),
+            p("8 offset", 504, -480, 480, 0),
+            p("8 echo cutoff", 508, 0, 65536, 33145),
+            p("8 echo resonance", 512, 0, 65536, 17500),
+            p("8 echo filter gain", 516, 0, 200, 0),
+            p("8 out pan", 520, -128, 128, 0),
+            p("8 out volume", 524, -128, 128, 128),
+            p("8 to next", 528, -1, -1, -1),
+            p("8 filter", 760, 0, 7, 0),
+            p("8 echo filter", 768, 0, 7, 0),
+            p("8 modes", 776, 0, 0x0000_0301, 256),
+            p("8 switches", 788, 0, 0x0101_0101, 0x0100_0000),
+            p("Layout", 0, 15, 16, 16),
+        ],
+    },
     Def { kind: Kind::Curve, ident: "Fruity WaveShaper", title: "Curve Shaper", size: 102, fixed: &[], params: &[p("Pre", 4, 0, 256, 128), p("Mix", 8, 0, 128, 128), p("Post", 12, 0, 128, 128)] },
 ];
 
@@ -1075,6 +1250,17 @@ fn shift_delay(p: &[f32], cx: &Ctx) -> f32 {
     }
 }
 
+/// Echo time of one bank of the echo bank in frames. Tempo mode counts in parts of a step (480 to a step in
+/// the newer layout, 48 in the older one), the free mode in milliseconds.
+fn bank_time(q: &[f32], layout: f32, cx: &Ctx) -> f32 {
+    let fine = if layout >= 16.0 { 10.0 } else { 1.0 };
+    if (q[19] as i32 >> 24) & 1 != 0 {
+        q[8] / (48.0 * fine) * cx.step
+    } else {
+        q[8] / fine * 0.001 * cx.sr
+    }
+}
+
 /// Reverb line lengths in milliseconds at full room size.
 const REV_MS: [f32; 8] = [31.7, 37.1, 41.3, 47.9, 53.3, 61.7, 71.3, 83.9];
 const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
@@ -1095,6 +1281,12 @@ impl Unit {
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            Kind::EchoBank => {
+                for _ in 0..8 {
+                    u.lines.push(vec![0.0; ((sr * 2.0) as usize + 8) * 2]);
+                    u.lpos.push(0);
+                }
+            }
             Kind::GrainShift => {
                 u.buf = vec![[0.0; 2]; (sr * 0.25) as usize + 8];
                 for _ in 0..2 {
@@ -1137,6 +1329,20 @@ impl Unit {
                 (time * (n + 1.0)) as usize + 4096
             }
             Kind::Flanger | Kind::Chorus | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
+            Kind::EchoBank => {
+                // the longest ring among the banks that are switched on
+                let mut most = 0usize;
+                for b in 0..8 {
+                    let q = &p[4 + b * 20..24 + b * 20];
+                    if (q[19] as i32 >> 8) & 1 == 0 {
+                        continue;
+                    }
+                    let fb = (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995);
+                    let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
+                    most = most.max((bank_time(q, p[164], cx) * (n + 1.0)) as usize);
+                }
+                most.min((cx.sr * 60.0) as usize) + 4096
+            }
             Kind::GrainShift => {
                 let fb = (p[9] / 100.0).clamp(0.0, 0.97);
                 let time = shift_delay(p, cx);
@@ -1690,6 +1896,100 @@ impl Unit {
                     }
                 }
             }
+            Kind::EchoBank => {
+                if p.len() < 165 || self.lines.len() < 8 {
+                    return;
+                }
+                let (dry, wet, input) = (p[0] / 128.0, p[1] / 128.0, p[2] / 128.0);
+                let len = self.lines[0].len() / 2;
+                struct Bank {
+                    on: bool,
+                    pan_in: (f32, f32),
+                    filt: (i32, f32, f32, bool),
+                    echo_filt: (i32, f32, f32),
+                    fb: f32,
+                    mode: i32,
+                    pan_fb: (f32, f32),
+                    time: [usize; 2],
+                    pan_out: (f32, f32),
+                    next: f32,
+                }
+                let hz = |v: f32| 20.0 * 1000f32.powf((v / 65536.0).clamp(0.0, 1.0));
+                let damp = |v: f32| std::f32::consts::SQRT_2 / 20f32.powf(((v - 17500.0) / 48036.0).clamp(-0.3, 1.0));
+                let banks: [Bank; 8] = std::array::from_fn(|b| {
+                    let q = &p[4 + b * 20..24 + b * 20];
+                    let (modes, sw) = (q[18] as i32, q[19] as i32);
+                    let t = bank_time(q, p[164], cx);
+                    let ofs = q[9] / 48.0 * cx.step;
+                    let frames = |d: f32| (d.max(1.0) as usize).min(len - 1);
+                    let (il, ir) = balance(q[0] / 128.0);
+                    let (ol, or) = balance(q[13] / 128.0);
+                    Bank {
+                        on: (sw >> 8) & 1 != 0,
+                        pan_in: (il * q[1] / 128.0, ir * q[1] / 128.0),
+                        filt: (q[16] as i32, svf_g(hz(q[2]), sr), damp(q[3]), modes & 1 != 0),
+                        echo_filt: (q[17] as i32, svf_g(hz(q[10]), sr), damp(q[11])),
+                        fb: (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995),
+                        mode: (modes >> 8) & 0xff,
+                        pan_fb: balance(q[7] / 128.0),
+                        time: [frames(t + (-ofs).max(0.0)), frames(t + ofs.max(0.0))],
+                        pan_out: (ol * q[14] / 128.0, or * q[14] / 128.0),
+                        next: if b < 7 { q[15] / 128.0 } else { 0.0 },
+                    }
+                });
+                // filter kinds 1 to 4: low, band, notch, high; the shelving kinds pass
+                let pick = |kind: i32, (lp, bp, hp): (f32, f32, f32), x: f32, k: f32| match kind {
+                    1 => lp,
+                    2 => bp * k,
+                    3 => lp + hp,
+                    4 => hp,
+                    _ => x,
+                };
+                for f in io.iter_mut() {
+                    let x = [f[0] * input, f[1] * input];
+                    let mut sum = [0f32; 2];
+                    let mut carry = [0f32; 2];
+                    for (b, k) in banks.iter().enumerate() {
+                        if !k.on {
+                            carry = [0.0; 2];
+                            continue;
+                        }
+                        let z = &mut z[b * 8..b * 8 + 8];
+                        let line = &mut self.lines[b];
+                        let pos = self.lpos[b];
+                        let mut s = [x[0] * k.pan_in.0 + carry[0], x[1] * k.pan_in.1 + carry[1]];
+                        if (1..=4).contains(&k.filt.0) && !k.filt.3 {
+                            for c in 0..2 {
+                                s[c] = pick(k.filt.0, svf(&mut z[c * 2..], s[c], k.filt.1, k.filt.2), s[c], k.filt.2);
+                            }
+                        }
+                        let e = [line[((pos + len - k.time[0]) % len) * 2], line[((pos + len - k.time[1]) % len) * 2 + 1]];
+                        let mut back = match k.mode {
+                            0 => [0.0; 2],
+                            2 | 3 => [e[1] * k.fb, e[0] * k.fb],
+                            _ => [e[0] * k.fb, e[1] * k.fb],
+                        };
+                        if (1..=4).contains(&k.echo_filt.0) {
+                            for c in 0..2 {
+                                back[c] = pick(k.echo_filt.0, svf(&mut z[4 + c * 2..], back[c], k.echo_filt.1, k.echo_filt.2), back[c], k.echo_filt.2);
+                            }
+                        }
+                        line[pos * 2] = (s[0] + back[0] * k.pan_fb.0).clamp(-16.0, 16.0);
+                        line[pos * 2 + 1] = (s[1] + back[1] * k.pan_fb.1).clamp(-16.0, 16.0);
+                        self.lpos[b] = (pos + 1) % len;
+                        let mut o = e;
+                        if (1..=4).contains(&k.filt.0) && k.filt.3 {
+                            for c in 0..2 {
+                                o[c] = pick(k.filt.0, svf(&mut z[c * 2..], o[c], k.filt.1, k.filt.2), o[c], k.filt.2);
+                            }
+                        }
+                        sum[0] += o[0] * k.pan_out.0;
+                        sum[1] += o[1] * k.pan_out.1;
+                        carry = [o[0] * k.next, o[1] * k.next];
+                    }
+                    *f = [f[0] * dry + sum[0] * wet, f[1] * dry + sum[1] * wet];
+                }
+            }
             Kind::MultiComp => {
                 // stored cutoffs run on a logarithmic knob scale
                 let hz = |v: f32| 20.0 * 1000f32.powf((v / 20000.0).clamp(0.0, 1.0));
@@ -2190,7 +2490,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -2311,6 +2611,13 @@ mod tests {
         // bucket chorus: sounds, stays bounded
         let out = run(Fx::new(Kind::BucketChorus), sine, 16384);
         assert!(rms(&out[8192..]) > 0.05 && out.iter().all(|f| f[0].abs() < 2.0));
+
+        // echo bank: the first bank repeats a click after its echo time
+        let fx = Fx::new(Kind::EchoBank);
+        assert_eq!(Fx::decode("Fruity Delay Bank", &fx.encode(None)).unwrap(), fx);
+        let out = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 44100);
+        let at = out.iter().skip(1).position(|f| f[0].abs() > 0.5).map(|i| i + 1);
+        assert!(at.is_some_and(|i| i > 1000), "{at:?}");
 
         // equaliser: a 18 dB bell at the tone's frequency makes it much louder, a low-pass far below removes it
         let mut fx = Fx::new(Kind::Eq);
