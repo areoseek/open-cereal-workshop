@@ -389,6 +389,65 @@ pub fn buzz(p: &[f32]) -> Set {
     }
 }
 
+/// The small touch-screen synth's stored values as a voice set. The places of the values were worked out from
+/// how they move between presets: wave choice, modifier and noise at 4 to 6, the filter and its envelope at 7 to
+/// 14, fine tune at 19, the level envelope at 20 to 23. The rest (play mode, slow oscillator, effects) is not read.
+pub fn pocket(p: &[f32]) -> Set {
+    const PLAIN: [f32; 24] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.68, 0.0, 0.0, 0.37, 0.5, 0.0, 1.0, 1.0, 0.0];
+    let v = |i: usize| if p.len() >= 24 { p[i] } else { PLAIN[i] };
+    let m = v(5);
+    let apart = (m - 0.5) * 48.0;
+    let fine = (v(19) - 0.5) * 2.0;
+    let o = |shape: Shape, semis: f32, level: f32| Osc { shape, semis: semis + fine, level };
+    let none = Osc::default();
+    let mut width = 0.0;
+    let mut dual = false;
+    let mut osc = match (v(4) * 9.0).round() as u8 {
+        0 => {
+            // a saw with a pulse under it; at either end of the modifier the pulse closes and the saw is alone
+            width = (2.0 * m - 1.0).abs();
+            [o(Shape::Saw, 0.0, 1.0), o(Shape::Pulse, 0.0, (PI_F * m).sin()), none]
+        }
+        1 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, apart, 1.0), none],
+        2 => {
+            width = (2.0 * m - 1.0).abs();
+            [o(Shape::Pulse, 0.0, 1.0), o(Shape::Pulse, 0.0, 1.0), none]
+        }
+        3 => [o(Shape::Pulse, 0.0, 1.0), o(Shape::Saw, apart, 1.0), none],
+        4 => [o(Shape::Pulse, 0.0, 1.0), o(Shape::Pulse, apart, 1.0), none],
+        5 => {
+            // a stack of saws: four here, pulled apart by the modifier
+            dual = true;
+            [o(Shape::Saw, m * 0.35, 1.0), o(Shape::Saw, -m * 0.35, 1.0), o(Shape::Saw, m * 0.12, 0.7)]
+        }
+        6 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Sine, 19.02, m), o(Shape::Sine, 28.0, m * 0.5)],
+        7 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 0.0, 1.0), none],
+        8 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 12.0 + m * 0.3, 1.0), o(Shape::Saw, -12.0 - m * 0.3, 1.0)],
+        _ => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 7.0 + m * 0.3, 1.0), o(Shape::Saw, 12.0 - m * 0.3, 1.0)],
+    };
+    if osc[2].level == 0.0 && v(6) > 0.0 {
+        osc[2] = Osc { shape: Shape::Noise, semis: 0.0, level: v(6) };
+    }
+    let time = |i: usize| 0.002 + v(i) * v(i) * 5.0;
+    let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2), r: time(i + 3) };
+    Set {
+        osc,
+        width,
+        dual,
+        amp: env(20),
+        fenv: env(11),
+        filter: Filter::Low24,
+        cutoff_hz: 30.0 * 2f32.powf(v(7) * 9.5),
+        res: v(8) * 0.9,
+        env_oct: v(10) * 8.0,
+        track: v(9),
+        gain: 0.4,
+        ..Default::default()
+    }
+}
+
+const PI_F: f32 = std::f32::consts::PI;
+
 #[cfg(test)]
 mod tests {
     use super::*;
