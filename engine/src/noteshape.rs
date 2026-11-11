@@ -86,6 +86,8 @@ pub enum Shaper {
     Zones(Vec<Zone>),
     Colours { port: [u8; 16], colour: [u8; 16] },
     Levels([Level; 6]),
+    /// Moves the notes passing through for as long as they sound.
+    Motion(std::sync::Arc<Motion>),
 }
 
 /// A shaper on the way to an instrument, the output of it the cable leaves by, and which held unit it is.
@@ -154,6 +156,7 @@ impl Shaper {
                 }
                 Some(Shaper::Levels(levels))
             }
+            "vfx envelope" => Motion::decode(b).map(|m| Shaper::Motion(std::sync::Arc::new(m))),
             _ => None,
         }
     }
@@ -235,6 +238,7 @@ pub fn apply(chain: &[Link], n: Ev, chan: u16, seed: &mut u32, turns: &mut Turns
                         next.push(Ev { color: colour[c], ..e });
                     }
                 }
+                Shaper::Motion(_) => next.push(e),
                 Shaper::Levels(l) => {
                     let two = |v: f32, l: &Level, seed: &mut u32| l.map(v * 0.5 + 0.5, roll(seed)) * 2.0 - 1.0;
                     next.push(Ev {
@@ -254,9 +258,214 @@ pub fn apply(chain: &[Link], n: Ev, chan: u16, seed: &mut u32, turns: &mut Turns
     now
 }
 
+/// One line pair of the note mover: an envelope and a slow wave for one property of the note.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MotionPart {
+    /// Where the property rests (0..=1), how far the lines move it, and the slow wave's share of that.
+    pub base: f32,
+    pub amount: f32,
+    pub wave: f32,
+    pub env: crate::fm::Curve,
+    pub env_on: bool,
+    pub lfo: crate::fm::Curve,
+    pub lfo_on: bool,
+    pub lfo_hz: f32,
+}
+
+/// One of the sixteen movers: the note colour and keys it answers to, and its lines for velocity, pitch, pan and
+/// the two free axes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MotionArt {
+    pub colour: u8,
+    pub lo: i32,
+    pub hi: i32,
+    pub parts: Vec<MotionPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Motion {
+    pub arts: Vec<MotionArt>,
+}
+
+/// What the movers make of a sounding note at one moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moved {
+    pub gain: f32,
+    pub octaves: f32,
+    pub pan: f32,
+    pub mod_x: Option<f32>,
+    pub mod_y: Option<f32>,
+}
+
+/// The pitch lines reach four octaves either way.
+const MOTION_OCTAVES: f32 = 4.0;
+
+impl Motion {
+    /// The block is a version word and then tagged pieces: 1004 opens a mover (index, colour, lowest and highest
+    /// key), 1005 names the property that follows and 1006 holds its three knobs and two lines. Which of the two
+    /// later knobs is which, the on switch (the second word after a line's points) and the tempo switch (the
+    /// first) are read from how the stock presets differ, not from a description.
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let mut at = 4;
+        let mut arts: Vec<MotionArt> = Vec::new();
+        let mut part = 0usize;
+        while at + 12 <= b.len() {
+            let id = int(b, at)?;
+            let len = u64::from_le_bytes(b[at + 4..at + 12].try_into().ok()?) as usize;
+            let d = b.get(at + 12..(at + 12).checked_add(len)?)?;
+            at += 12 + len;
+            match id {
+                1004 => arts.push(MotionArt { colour: (int(d, 4)?.clamp(0, 15)) as u8, lo: int(d, 8)?, hi: int(d, 12)?, parts: Vec::new() }),
+                1005 => part = int(d, 4)?.clamp(0, 4) as usize,
+                1006 => {
+                    let Some(a) = arts.last_mut() else { continue };
+                    let f = |o: usize| d.get(o..o + 4).map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]])).filter(|v| v.is_finite());
+                    let mut env = crate::fm::Curve::read_at(d, 16)?;
+                    let e = env.span.1;
+                    let k = [int(d, e)?, int(d, e + 4)?, int(d, e + 12)?];
+                    let mut lfo = crate::fm::Curve::read_at(d, e + 16)?;
+                    let l = lfo.span.1;
+                    let speed = int(d, l)?;
+                    env.prepare([crate::fm::knob(k[0]), crate::fm::knob(k[1]), crate::fm::knob(k[2])]);
+                    lfo.prepare([1.0; 3]);
+                    let p = MotionPart {
+                        base: f(4)?.clamp(0.0, 1.0),
+                        amount: f(8)?.clamp(-1.0, 1.0),
+                        wave: f(12)?.clamp(-1.0, 1.0),
+                        env_on: int(d, e - 16)? != 0,
+                        lfo_on: int(d, l - 16)? != 0,
+                        env,
+                        lfo,
+                        lfo_hz: 0.05 * (speed.clamp(0, 65536) as f32 / 65536.0 * 11.0).exp2(),
+                    };
+                    while a.parts.len() <= part {
+                        a.parts.push(MotionPart { base: if a.parts.is_empty() { 0.0 } else { 0.5 }, amount: 1.0, wave: 1.0, env: crate::fm::Curve::flat(0.5), env_on: false, lfo: crate::fm::Curve::flat(0.5), lfo_on: false, lfo_hz: 5.0 });
+                    }
+                    a.parts[part] = p;
+                }
+                _ => {}
+            }
+        }
+        (!arts.is_empty() && at == b.len()).then_some(Motion { arts })
+    }
+
+    /// Whether any mover would touch a note at all.
+    pub fn moving(&self) -> bool {
+        self.arts.iter().any(|a| a.parts.iter().any(|p| p.env_on || p.lfo_on))
+    }
+
+    /// The note `t` seconds in (`rel` is when the key was let go); `beat_s` is the length of a beat, which the
+    /// lines switched to tempo run by.
+    pub fn at(&self, colour: u8, key: u8, t: f32, rel: Option<f32>, beat_s: f32) -> Moved {
+        let mut m = Moved { gain: 1.0, octaves: 0.0, pan: 0.0, mod_x: None, mod_y: None };
+        for a in self.arts.iter().filter(|a| a.colour == colour & 15 && (a.lo..=a.hi).contains(&(key as i32))) {
+            for (i, p) in a.parts.iter().enumerate() {
+                if !p.env_on && !p.lfo_on {
+                    continue;
+                }
+                let clock = |c: &crate::fm::Curve| if c.flags & 1 != 0 { 1.0 / beat_s.max(1e-3) } else { 1.0 };
+                let (ce, cl) = (clock(&p.env), clock(&p.lfo));
+                let l = if p.lfo_on { (std::f32::consts::TAU * p.lfo_hz * t).sin() * (p.lfo.env(t * cl, rel.map(|r| r * cl)) - 0.5) * 2.0 * p.wave } else { 0.0 };
+                if i == 0 {
+                    let e = if p.env_on { p.env.env(t * ce, rel.map(|r| r * ce)) } else { 1.0 };
+                    m.gain *= (p.base + p.amount * e * (1.0 + l)).clamp(0.0, 1.0);
+                } else {
+                    let e = if p.env_on { (p.env.env(t * ce, rel.map(|r| r * ce)) - 0.5) * 2.0 } else { 0.0 };
+                    let v = ((p.base - 0.5) * 2.0 + p.amount * (e + l)).clamp(-1.0, 1.0);
+                    match i {
+                        1 => m.octaves += v * MOTION_OCTAVES,
+                        2 => m.pan += v,
+                        3 => m.mod_x = Some(v),
+                        _ => m.mod_y = Some(v),
+                    }
+                }
+            }
+        }
+        m
+    }
+}
+
+/// The note mover nearest the instrument on a chain, when it has anything switched on.
+pub fn motion_of(chain: &[Link]) -> Option<std::sync::Arc<Motion>> {
+    chain.iter().rev().find_map(|l| match &l.shaper {
+        Shaper::Motion(m) if m.moving() => Some(m.clone()),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn part(base: f32, amount: f32, pts: &[(f32, f32)], sustain: i32, lfo: bool) -> MotionPart {
+        let mut env = crate::fm::Curve::flat(0.5);
+        env.pts = pts.iter().map(|&(x, y)| crate::fm::Pt { x, y, ..Default::default() }).collect();
+        env.sustain = sustain;
+        env.prepare([1.0; 3]);
+        let mut wave = crate::fm::Curve::flat(1.0);
+        wave.prepare([1.0; 3]);
+        MotionPart { base, amount, wave: 1.0, env, env_on: !lfo, lfo: wave, lfo_on: lfo, lfo_hz: 5.0 }
+    }
+
+    #[test]
+    fn the_note_mover_fades_bends_and_wobbles_only_the_notes_it_answers_to() {
+        let still = part(0.5, 1.0, &[(0.0, 0.5), (1.0, 0.5)], -1, false);
+        let still = MotionPart { env_on: false, ..still };
+        let fade = part(0.0, 1.0, &[(0.0, 0.0), (1.0, 1.0), (1.0, 0.0)], 1, false);
+        let rise = part(0.5, 0.25, &[(0.0, 0.5), (2.0, 1.0)], -1, false);
+        let m = Motion { arts: vec![MotionArt { colour: 3, lo: 48, hi: 72, parts: vec![fade, rise, still.clone(), still.clone(), still.clone()] }] };
+        assert!(m.moving());
+        let a = m.at(3, 60, 0.5, None, 0.5);
+        assert!((a.gain - 0.5).abs() < 0.01 && (a.octaves - 0.25).abs() < 0.01 && a.pan == 0.0 && a.mod_x.is_none(), "{a:?}");
+        // held at the marked point, then down the last stretch once the key is let go
+        assert!((m.at(3, 60, 5.0, None, 0.5).gain - 1.0).abs() < 1e-3);
+        assert!((m.at(3, 60, 5.5, Some(5.0), 0.5).gain - 0.5).abs() < 0.01);
+        // the pitch line tops out an octave up: a quarter of the four octave reach
+        assert!((m.at(3, 60, 9.0, None, 0.5).octaves - 1.0).abs() < 1e-3);
+        // another colour or a key outside the range goes through untouched
+        for other in [m.at(0, 60, 0.5, None, 0.5), m.at(3, 30, 0.5, None, 0.5)] {
+            assert_eq!((other.gain, other.octaves), (1.0, 0.0));
+        }
+        let wob = Motion { arts: vec![MotionArt { colour: 0, lo: 0, hi: 131, parts: vec![still.clone(), part(0.5, 1.0 / 128.0, &[(0.0, 0.5)], -1, true)] }] };
+        let peak = (0..480).map(|i| wob.at(0, 60, i as f32 / 480.0, None, 0.5).octaves).fold(0f32, |a, v| a.max(v.abs()));
+        assert!((peak * 12.0 - 0.375).abs() < 0.01, "{peak}");
+        assert_eq!(apply(&[Link { shaper: Shaper::Motion(std::sync::Arc::new(wob)), port: 0, node: 0 }], ev(60), 0, &mut 1, &mut Turns::new()), [ev(60)]);
+    }
+
+    #[test]
+    fn the_stock_note_mover_presets_read_as_what_their_names_say() {
+        let Ok(dir) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let get = |name: &str| {
+            let pre = crate::preset::read(&std::path::PathBuf::from(&dir).join("Patches/Plugin presets/Effects/VFX Envelope").join(name)).unwrap();
+            match Shaper::decode(&pre.ident, &pre.state).unwrap() {
+                Shaper::Motion(m) => m,
+                other => panic!("{other:?}"),
+            }
+        };
+        let on = |m: &Motion| m.arts.iter().map(|a| a.parts.iter().filter(|p| p.env_on || p.lfo_on).count()).collect::<Vec<_>>();
+        let d = get("Default.fst");
+        assert_eq!(d.arts.len(), 16);
+        assert!(d.arts.iter().all(|a| a.parts.len() == 5 && a.colour == 0 && (a.lo, a.hi) == (0, 132)));
+        assert_eq!(on(&d)[1..], [0usize; 15].map(|_| 4));
+        // every mover on, one per note colour
+        let all = get("Default (all channels).fst");
+        assert_eq!(all.arts.iter().map(|a| a.colour).collect::<Vec<_>>(), (0..16).collect::<Vec<u8>>());
+        assert!(on(&all).iter().all(|n| *n == 5));
+        // the loudness of the first mover goes round once a beat from nothing to full
+        let p = get("Pumping.fst");
+        let g = |t: f32| p.at(0, 60, t, None, 0.5).gain;
+        assert!(g(0.0) < 0.01 && g(0.3) > 0.99 && g(0.5) < 0.05 && g(0.8) > 0.99, "{} {} {} {}", g(0.0), g(0.3), g(0.5), g(0.8));
+        // a steady loudness and a shallow, quick pitch wobble
+        let v = get("Vibrato.fst");
+        let (mut lo, mut hi) = (0f32, 0f32);
+        for i in 0..2000 {
+            let m = v.at(0, 60, i as f32 / 1000.0, None, 0.5);
+            assert!((m.gain - 1.0).abs() < 1e-3);
+            lo = lo.min(m.octaves);
+            hi = hi.max(m.octaves);
+        }
+        assert!((hi * 12.0 - 0.375).abs() < 0.02 && (lo + hi).abs() < 0.01, "{lo} {hi}");
+    }
 
     fn ev(key: i32) -> Ev {
         Ev { key, vel: 1.0, pan: 0.0, fine_cents: 0.0, release: 0.5, mod_x: 0.0, mod_y: 0.0, color: 0, gain: 1.0, glide: None }

@@ -137,12 +137,12 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
 - [~] Tuner (Pitch Meter: note name, cents needle and frequency of the sound on its track; its display options are not read)
 - [~] VFX Color Mapper (works on the notes of a bay standing as an instrument: colours leave by their outputs and are recoloured; no editing window yet)
-- [~] VFX Envelope
+- [~] VFX Envelope (sixteen movers by note colour and key range; loudness, pitch and pan lines and slow waves keep moving the voice of a bay's instrument while it sounds, with sustain, loop and tempo; the on switches, which knob is the amount and the wave's speed are read from the stock presets; the two free axes do not reach instruments yet; no editing window yet)
 - [~] VFX Keyboard Splitter (sixteen zones with key and velocity lines, transpose, absolute; which switch is Random is a guess; no editing window yet)
 - [~] VFX Key Mapper (rows of targets, the five several-target modes, glide; offset and the glide's length are estimated; no editing window yet)
 - [~] VFX Level Scaler (centre, multiply, random amount per level; which numbers are tension and offset, and the random modes, are estimated; only velocity, pan and fine pitch reach the built-in instruments; no editing window yet)
 - [~] VFX Script
-- [~] VFX Sequencer
+- [~] VFX Sequencer (notes pass straight through: the demo holds no stored block of it to learn the layout from)
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [~] Vintage Phaser (built as Stone Phaser; four stages, sweep range, feedback, speed and stereo phase; its echo, noise, colour and drive sections are not run and several setting positions are guesses)
 - [~] Vocodex (Band Vocoder: bands, follower, mapping envelopes read, built-in carrier, listens to routed mixer tracks; envelopes not yet editable, noise detection and freeze missing)

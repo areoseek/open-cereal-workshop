@@ -575,7 +575,7 @@ impl Sender {
 }
 
 /// A length knob: 128 leaves the drawn length alone.
-fn knob(v: i32) -> f32 {
+pub(crate) fn knob(v: i32) -> f32 {
     let x = v.clamp(0, 256) as f32 / 128.0;
     (x * x).max(0.003)
 }

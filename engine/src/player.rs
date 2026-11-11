@@ -582,6 +582,12 @@ struct Voice {
     slide_to: f32,
     slide_inc: f32,
     color: u8,
+    /// A note mover on the way to this voice's instrument, the length of a beat for it, and what it last asked
+    /// for: loudness taken off, octaves and pan.
+    motion: Option<Arc<crate::noteshape::Motion>>,
+    mo_beat: f32,
+    mo: [f32; 3],
+    mo_inc: f32,
     sr: f32,
     /// Frames sounded, and frames since the note was let go.
     t: u32,
@@ -663,8 +669,21 @@ impl Voice {
             let d = self.slide_inc * CTL as f32;
             self.slide = if (self.slide_to - self.slide).abs() <= d { self.slide_to } else { self.slide + d * (self.slide_to - self.slide).signum() };
         }
-        if self.bend != 0.0 || self.hand != 0.0 || self.slide != 0.0 {
-            self.step_now *= ((self.bend + self.hand + self.slide) as f64).exp2();
+        if let Some(m) = &self.motion {
+            let rel = self.releasing.then(|| self.t.saturating_sub(self.rel_t) as f32 / self.sr);
+            let mv = m.at(self.color, self.key, t, rel, self.mo_beat);
+            let cut = 1.0 - mv.gain;
+            if self.t == 0 {
+                self.mo[0] = cut;
+                self.mo_inc = 0.0;
+            } else {
+                self.mo_inc = (cut - self.mo[0]) / CTL as f32;
+            }
+            self.mo[1] = mv.octaves;
+            self.mo[2] = mv.pan.clamp(-1.0, 1.0);
+        }
+        if self.bend != 0.0 || self.hand != 0.0 || self.slide != 0.0 || self.mo[1] != 0.0 {
+            self.step_now *= ((self.bend + self.hand + self.slide + self.mo[1]) as f64).exp2();
         }
         if self.fon {
             let mut x = self.fcut;
@@ -788,10 +807,11 @@ impl Voice {
             if self.fon {
                 s = self.filter(s);
             }
-            let g = self.level * self.env_now;
+            let g = self.level * self.env_now * (1.0 - self.mo[0]);
             self.env_now += self.env_inc;
-            out[0] += s[0] * self.gl * g;
-            out[1] += s[1] * self.gr * g;
+            self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
+            out[0] += s[0] * self.gl * g * (1.0 - self.mo[2]).min(1.0);
+            out[1] += s[1] * self.gr * g * (1.0 + self.mo[2]).min(1.0);
             self.t += 1;
             if self.releasing {
                 self.rel_t += 1;
@@ -1428,6 +1448,7 @@ impl Player {
                     Some(c) => crate::noteshape::apply(c, plain, n.chan, &mut self.seed, &mut self.shape_turn),
                     None => vec![plain],
                 };
+                let motion = chain.and_then(crate::noteshape::motion_of);
                 for ev in evs {
                 let shaped = ev != plain;
                 let (note_gain, gain, pl, pr, hz) = if shaped {
@@ -1446,6 +1467,9 @@ impl Player {
                     v.slide_inc = v.slide.abs() / (steps * song.ppq.max(1) as f32 / 4.0 / self.tpf as f32).max(1.0);
                 }
                 v.feed = li as u8;
+                v.color = ev.color;
+                v.mo_beat = 60.0 / self.transport.tempo().max(1.0);
+                v.motion = motion.clone();
                 if let Some(g) = g {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
                     // settings a clip or an event is driving stand in for the stored ones from this note on
@@ -2556,6 +2580,50 @@ mod tests {
         let (moved, after) = run(true);
         assert!(plain > 50.0 && (moved / plain - 2.0).abs() < 0.2, "{plain} rises, then {moved}");
         assert!(after < 1e-3, "still sounding at {after}");
+    }
+
+    #[test]
+    fn a_note_mover_in_a_bay_keeps_moving_the_voice_while_it_sounds() {
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        let run = |part: usize| {
+            let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+            ch.plugin = crate::song::BAY.to_string();
+            let mut patch = crate::fxpatch::decode(&crate::fxpatch::fresh()).unwrap();
+            if part < 5 {
+                use crate::noteshape::{Link, Motion, MotionArt, MotionPart, Shaper};
+                let line = |pts: &[(f32, f32)]| {
+                    let mut c = crate::fm::Curve::flat(0.5);
+                    c.pts = pts.iter().map(|&(x, y)| crate::fm::Pt { x, y, ..Default::default() }).collect();
+                    c.prepare([1.0; 3]);
+                    c
+                };
+                let mut parts: Vec<MotionPart> = (0..5).map(|i| MotionPart { base: if i == 0 { 0.0 } else { 0.5 }, amount: 1.0, wave: 1.0, env: line(&[(0.0, 0.5)]), env_on: false, lfo: line(&[(0.0, 0.5)]), lfo_on: false, lfo_hz: 5.0 }).collect();
+                parts[part].env_on = true;
+                // loudness: silent for a quarter second, then full; pitch: an octave up all along
+                parts[part].env = if part == 0 { line(&[(0.0, 0.0), (0.25, 0.0), (0.01, 1.0)]) } else { line(&[(0.0, 1.0)]) };
+                parts[1].amount = 0.25;
+                let m = Motion { arts: vec![MotionArt { colour: 0, lo: 0, hi: 131, parts }] };
+                patch.shape.push((0, vec![Link { shaper: Shaper::Motion(Arc::new(m)), port: 0, node: 1 }]));
+            }
+            ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![] });
+            let mut song = Song::new();
+            song.channels = vec![ch];
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            let mut buf = vec![0.0; 9_600 * 2];
+            p.render(&mut buf, 2);
+            let early = buf.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let mut buf = vec![0.0; 24_000 * 2];
+            p.render(&mut buf, 2);
+            p.render(&mut buf, 2);
+            (early, buf.iter().fold(0f32, |m, v| m.max(v.abs())), rises(&buf))
+        };
+        let plain = run(9);
+        let faded = run(0);
+        let up = run(1);
+        assert!(plain.0 > 0.01 && faded.0 < plain.0 * 0.01, "{plain:?} {faded:?}");
+        assert!((faded.1 / plain.1 - 1.0).abs() < 0.05, "{plain:?} {faded:?}");
+        assert!((up.2 / plain.2 - 2.0).abs() < 0.2, "{} rises, then {}", plain.2, up.2);
     }
 
     #[test]
