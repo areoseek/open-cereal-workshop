@@ -6,9 +6,8 @@
 //!
 //! A project started here has no file to patch, so a plain skeleton is built first and patched the same way.
 //!
-//! Known gap: when a channel is deleted the channels after it are renumbered in the channel list, in every
-//! note and in every playlist clip. Other places that refer to channels by number (layer children, automation
-//! targets) are not understood yet and are left alone.
+//! When a channel is deleted the channels after it are renumbered in the channel list and in every note,
+//! playlist clip, link (automation target) and layer child.
 
 use std::collections::HashMap;
 
@@ -16,7 +15,6 @@ use crate::flp::{self, id, latin1, u16at, u32at, version_tuple, ChannelKind, Eve
 use crate::song::{ClipSrc, Note, Song};
 
 const ITEM_BASE: u16 = 0x5000;
-const MIXER_BASE: usize = 448;
 
 /// Ids that can never belong to a channel's own run of events.
 fn ends_channel(e: u8) -> bool {
@@ -332,6 +330,37 @@ fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bo
             _ => {}
         }
     }
+    // links (automation clips and what they drive) and layer children also name channels
+    let known = |c: u16| (c as usize) < n_orig;
+    out.retain_mut(|e| match (e.id, &mut e.value) {
+        (id::LINK, Value::Data(d)) if d.len() >= 12 => {
+            if u16at(d, 0) == 0 && u32at(d, 4) == 0 {
+                let src = u16at(d, 2);
+                match remap.get(&src) {
+                    Some(&to) => put_u16(d, 2, to),
+                    None if known(src) => return false,
+                    None => {}
+                }
+            }
+            let dest = u16at(d, 10);
+            if dest < 0x2000 {
+                match remap.get(&dest) {
+                    Some(&to) => put_u16(d, 10, to),
+                    None if known(dest) => return false,
+                    None => {}
+                }
+            }
+            true
+        }
+        (id::LAYER_CHILD, Value::Word(c)) => match remap.get(c) {
+            Some(&to) => {
+                *c = to;
+                true
+            }
+            None => !known(*c),
+        },
+        _ => true,
+    });
     file.events = out;
     file.header.channels = song.channels.len() as u16;
 }
@@ -784,7 +813,7 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     }
 }
 
-fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
+fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mixer_base: usize) {
     let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
     let mut records: Vec<(u8, u16, i32)> = vec![];
 
@@ -794,7 +823,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
         while close + 1 < ev.len() && ev[close].id != id::INSERT_OUTPUT && ev[close + 1].id != id::INSERT_FLAGS {
             close += 1;
         }
-        let cd = ((k + MIXER_BASE) as u16) << 6;
+        let cd = ((k + mixer_base) as u16) << 6;
         if ins_vol(now.volume) != ins_vol(was.volume) {
             records.push((192, cd, ins_vol(now.volume)));
         }
@@ -920,7 +949,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     let mut ev = flp.file.events.clone();
     let word_insert = ev.iter().any(|e| e.id == id::CHAN_TARGET_INSERT_WORD);
 
-    patch_mixer(&mut ev, song, &base, unicode);
+    patch_mixer(&mut ev, song, &base, unicode, flp::mixer_base(ver));
     patch_tracks(&mut ev, song, &base, unicode);
     patch_playlist(&mut ev, song, &base, &flp);
     patch_patterns(&mut ev, song, &base, &flp, unicode);

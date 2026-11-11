@@ -73,6 +73,8 @@ pub mod id {
     pub const MIXER_PARAMS: u8 = 225;
     pub const PLAYLIST: u8 = 233;
     pub const CHAN_AUTOMATION: u8 = 234;
+    pub const LINK: u8 = 227;
+    pub const LAYER_CHILD: u8 = 94;
     pub const INSERT_ROUTING: u8 = 235;
     pub const INSERT_FLAGS: u8 = 236;
     pub const TRACK: u8 = 238;
@@ -376,6 +378,8 @@ pub struct FlpChannel {
     pub envelopes: Vec<Envelope>,
     /// Raw automation-clip point data, when this is an automation clip.
     pub automation: Vec<u8>,
+    /// Rack channels a layer channel plays.
+    pub children: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -542,7 +546,78 @@ pub struct Flp {
     pub patterns: Vec<FlpPattern>,
     pub arrangements: Vec<FlpArrangement>,
     pub inserts: Vec<FlpInsert>,
+    /// Automation clips and other controllers tied to the controls they drive.
+    pub links: Vec<FlpLink>,
     pub file: FlpFile,
+}
+
+/// One "this controls that" record (event 227).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlpLink {
+    /// 0 when the source is an automation clip channel; other values are other kinds of controller.
+    pub kind: u16,
+    /// Rack channel of the automation clip.
+    pub source: u16,
+    pub extra: u32,
+    /// Which control of the destination (see `param`).
+    pub param: u16,
+    /// A rack channel number, or a mixer insert and slot packed as in the mixer parameter records, or
+    /// `DEST_GLOBAL`.
+    pub dest: u16,
+}
+
+/// Control numbers used by links and by the mixer parameter records.
+pub mod param {
+    pub const CHAN_VOLUME: u16 = 0;
+    pub const CHAN_PAN: u16 = 1;
+    pub const CHAN_PITCH: u16 = 4;
+    /// Set on a channel or slot control that belongs to the plugin itself.
+    pub const PLUGIN_FLAG: u16 = 0x8000;
+    pub const SLOT_ENABLED: u16 = 0x1f00;
+    pub const SLOT_MIX: u16 = 0x1f01;
+    pub const INSERT_VOLUME: u16 = 0x1fc0;
+    pub const INSERT_PAN: u16 = 0x1fc1;
+    pub const INSERT_SEPARATION: u16 = 0x1fc2;
+    pub const GLOBAL_VOLUME: u16 = 0;
+    pub const GLOBAL_PITCH: u16 = 2;
+    pub const GLOBAL_TEMPO: u16 = 5;
+}
+
+pub const DEST_GLOBAL: u16 = 0x4000;
+
+/// Mixer inserts are numbered from here in parameter records and link destinations: 448 from 24.2 on,
+/// 128 before.
+pub fn mixer_base(ver: (u32, u32, u32, u32)) -> usize {
+    if ver >= (24, 2, 0, 0) { 448 } else { 128 }
+}
+
+/// One point of an automation clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoPoint {
+    /// Quarter notes after the previous point.
+    pub delta: f64,
+    /// 0..=1 of the control's travel.
+    pub value: f64,
+    /// Bend of the line arriving at this point, -1..=1.
+    pub tension: f32,
+    /// Shape of the line arriving at this point.
+    pub mode: u8,
+}
+
+/// The points of an automation clip record (event 234): a 21-byte head whose last word is the point count,
+/// then 24 bytes per point.
+pub fn parse_automation(d: &[u8]) -> Vec<AutoPoint> {
+    if d.len() < 21 {
+        return vec![];
+    }
+    let n = u32at(d, 17) as usize;
+    let f64at = |o: usize| f64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+    (0..n)
+        .map_while(|k| {
+            let o = 21 + 24 * k;
+            (o + 24 <= d.len()).then(|| AutoPoint { delta: f64at(o), value: f64at(o + 8), tension: f32::from_bits(u32at(d, o + 16)), mode: d[o + 20] })
+        })
+        .collect()
 }
 
 #[derive(PartialEq)]
@@ -763,6 +838,7 @@ impl Flp {
                             c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32) });
                         }
                         (id::CHAN_AUTOMATION, Value::Data(d)) => c.automation = d.clone(),
+                        (id::LAYER_CHILD, Value::Word(k)) => c.children.push(*k),
                         _ => {}
                     }
                 }
@@ -791,7 +867,16 @@ impl Flp {
             early_markers.append(&mut a.markers);
             a.markers = early_markers;
         }
-        apply_mixer_params(&mut flp.inserts, &mixer_params);
+        apply_mixer_params(&mut flp.inserts, &mixer_params, mixer_base(ver));
+        flp.links = file
+            .events
+            .iter()
+            .filter(|e| e.id == id::LINK)
+            .filter_map(|e| match &e.value {
+                Value::Data(d) if d.len() >= 12 => Some(FlpLink { kind: u16at(d, 0), source: u16at(d, 2), extra: u32at(d, 4), param: u16at(d, 8), dest: u16at(d, 10) }),
+                _ => None,
+            })
+            .collect();
         flp.file = file;
         flp
     }
@@ -821,10 +906,10 @@ fn parse_playlist(d: &[u8]) -> Vec<PlaylistItem> {
         .collect()
 }
 
-fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8]) {
-    // 12-byte records: u32 reserved, u8 parameter id, u8, u16 (insert << 6 | slot), i32 value.
-    // The insert number is offset by 448 in the files looked at; the "current" insert uses a number past the
-    // normal range and maps to the last insert.
+fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
+    // 12-byte records: u32 reserved, u16 parameter id, u16 (insert << 6 | slot), i32 value.
+    // The insert number is offset by `base`. From 24.2 on the "current" insert uses a number past the normal
+    // range and maps to the last insert; before that number 256 is the global group.
     let n = inserts.len();
     for r in d.chunks_exact(12) {
         let pid = r[4];
@@ -832,11 +917,11 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8]) {
         let raw = (cd >> 6) as usize;
         let slot = cd & 63;
         let value = u32at(r, 8) as i32;
-        if raw < 448 {
+        if raw < base || r[5] != 0x1f {
             continue;
         }
-        let idx = raw - 448;
-        let idx = if idx < n { idx } else if n > 0 { n - 1 } else { continue };
+        let idx = raw - base;
+        let idx = if idx < n { idx } else if n > 0 && base >= 448 { n - 1 } else { continue };
         let ins = &mut inserts[idx];
         match pid {
             0 => {

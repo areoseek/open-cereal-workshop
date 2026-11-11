@@ -171,7 +171,24 @@ impl App {
                             }
                         }
                     }
-                    ClipSrc::Automation(_) => {}
+                    ClipSrc::Automation(ch) => {
+                        if let Some(auto) = self.song.channels.get(ch).and_then(|c| c.auto.as_ref()) {
+                            let cp = gp.with_clip_rect(body.intersect(grid));
+                            let x_from = r.left().max(grid.left());
+                            let x_to = r.right().min(grid.right());
+                            let y_at = |x: f32| {
+                                let t = (x - r.left()) / px + c.offset as f32;
+                                body.bottom() - 1.0 - auto.value_at(t as f64).clamp(0.0, 1.0) * (body.height() - 2.0)
+                            };
+                            let mut pts = Vec::with_capacity(((x_to - x_from) / 2.0) as usize + 2);
+                            let mut x = x_from;
+                            while x <= x_to {
+                                pts.push(Pos2::new(x, y_at(x)));
+                                x += 2.0;
+                            }
+                            cp.add(egui::Shape::line(pts, Stroke::new(1.5_f32, Color32::from_gray(245))));
+                        }
+                    }
                 }
             }
             if let Some(pp) = pointer {

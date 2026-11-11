@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use crate::flp::ChannelKind;
 use crate::law;
 use crate::sample::Sample;
-use crate::song::{ClipSrc, Note, Song};
+use crate::song::{ClipSrc, Note, Song, Target};
 
 pub const MAX_VOICES: usize = 256;
 pub const MAX_METERS: usize = 256;
@@ -39,6 +39,7 @@ pub struct Transport {
     master: AtomicU32,
     peaks: Vec<[AtomicU32; 2]>,
     voices: AtomicUsize,
+    tempo: AtomicU32,
 }
 
 impl Transport {
@@ -53,6 +54,7 @@ impl Transport {
             master: AtomicU32::new(1f32.to_bits()),
             peaks: (0..MAX_METERS).map(|_| [AtomicU32::new(0), AtomicU32::new(0)]).collect(),
             voices: AtomicUsize::new(0),
+            tempo: AtomicU32::new(0f32.to_bits()),
         })
     }
     pub fn playing(&self) -> bool {
@@ -101,6 +103,10 @@ impl Transport {
             Some(p) => (f32::from_bits(p[0].swap(0, Relaxed)), f32::from_bits(p[1].swap(0, Relaxed))),
             None => (0.0, 0.0),
         }
+    }
+    /// Tempo in force while playing (automation can move it); 0 before anything has played.
+    pub fn tempo(&self) -> f32 {
+        f32::from_bits(self.tempo.load(Relaxed))
     }
     pub fn voices(&self) -> usize {
         self.voices.load(Relaxed)
@@ -156,8 +162,77 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         was_playing: false,
         chase: false,
         born: 0,
+        ov: Overrides::default(),
     };
     (handle, player)
+}
+
+/// Control values set by automation clips; they stand in for the song's own values until playback restarts.
+#[derive(Default)]
+struct Overrides {
+    tempo: Option<f32>,
+    /// Per channel: volume (0..=1) and pan (-1..=1).
+    chan: Vec<(Option<f32>, Option<f32>)>,
+    /// Per insert: volume (0..=1.25) and pan.
+    ins: Vec<(Option<f32>, Option<f32>)>,
+    any_chan: bool,
+}
+
+impl Overrides {
+    fn clear(&mut self) {
+        self.tempo = None;
+        self.any_chan = false;
+        self.chan.iter_mut().for_each(|c| *c = (None, None));
+        self.ins.iter_mut().for_each(|c| *c = (None, None));
+    }
+
+    fn fit(&mut self, song: &Song) {
+        if self.chan.len() != song.channels.len() {
+            self.chan.resize(song.channels.len(), (None, None));
+        }
+        if self.ins.len() != song.inserts.len() {
+            self.ins.resize(song.inserts.len(), (None, None));
+        }
+    }
+
+    fn chan_volume(&self, song: &Song, c: usize) -> f32 {
+        self.chan.get(c).and_then(|o| o.0).unwrap_or_else(|| song.channels[c].volume)
+    }
+
+    fn chan_pan(&self, song: &Song, c: usize) -> f32 {
+        self.chan.get(c).and_then(|o| o.1).unwrap_or_else(|| song.channels[c].pan)
+    }
+
+    fn set(&mut self, t: Target, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        match t {
+            Target::ChanVolume(c) => {
+                if let Some(o) = self.chan.get_mut(c) {
+                    o.0 = Some(v);
+                    self.any_chan = true;
+                }
+            }
+            Target::ChanPan(c) => {
+                if let Some(o) = self.chan.get_mut(c) {
+                    o.1 = Some(v * 2.0 - 1.0);
+                    self.any_chan = true;
+                }
+            }
+            Target::InsertVolume(i) => {
+                if let Some(o) = self.ins.get_mut(i) {
+                    o.0 = Some(v * 1.25);
+                }
+            }
+            Target::InsertPan(i) => {
+                if let Some(o) = self.ins.get_mut(i) {
+                    o.1 = Some(v * 2.0 - 1.0);
+                }
+            }
+            // the tempo control runs from 60 to 180 bpm
+            Target::Tempo => self.tempo = Some(60.0 + v * 120.0),
+            Target::Other { .. } => {}
+        }
+    }
 }
 
 #[derive(Default)]
@@ -185,6 +260,10 @@ struct Voice {
     live: bool,
     preview: bool,
     born: u64,
+    /// Gain and pan the note itself brought, kept so channel automation can move a sounding voice.
+    note_gain: f32,
+    note_pan: f32,
+    follow: bool,
 }
 
 impl Voice {
@@ -266,6 +345,7 @@ pub struct Player {
     /// Set after a start or a seek: clips already under the play head must be picked up mid-way.
     chase: bool,
     born: u64,
+    ov: Overrides,
 }
 
 impl Player {
@@ -286,16 +366,32 @@ impl Player {
 
     /// Start one note. `len_frames` None means "no note-off" (a step, or a live key still held).
     fn note_on(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        self.note_on_depth(song, n, delay, len_frames, live, 0);
+    }
+
+    fn note_on_depth(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool, depth: u8) {
         let Some(ch) = song.channels.get(n.chan as usize) else { return };
         if !ch.enabled || n.muted {
             return;
         }
-        let gain = law::channel_gain(ch.volume) * law::velocity_gain(n.vel);
-        let (pl, pr) = law::pan((ch.pan + n.pan).clamp(-1.0, 1.0));
+        if ch.kind == ChannelKind::Layer {
+            // a layer plays its children with the same note
+            if depth < 4 {
+                for &k in &ch.children {
+                    if k != n.chan {
+                        self.note_on_depth(song, &Note { chan: k, ..n.clone() }, delay, len_frames, live, depth + 1);
+                    }
+                }
+            }
+            return;
+        }
+        let note_gain = law::velocity_gain(n.vel);
+        let gain = law::channel_gain(self.ov.chan_volume(song, n.chan as usize)) * note_gain;
+        let (pl, pr) = law::pan((self.ov.chan_pan(song, n.chan as usize) + n.pan).clamp(-1.0, 1.0));
         let cents = (n.key as f32 - ch.root_key as f32) * 100.0 + ch.pitch_cents + n.fine_cents;
         let sr = self.sr;
         let ms = |m: f32| 1.0 / (sr * m / 1000.0).max(1.0);
-        let base = Voice { gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, ..Default::default() };
+        let base = Voice { gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
         match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => {
                 let Some(smp) = ch.sample.clone() else { return };
@@ -314,7 +410,17 @@ impl Player {
         }
     }
 
-    fn note_off(&mut self, chan: u16, key: u8) {
+    fn note_off(&mut self, song: &Song, chan: u16, key: u8) {
+        if let Some(ch) = song.channels.get(chan as usize) {
+            if ch.kind == ChannelKind::Layer {
+                for &k in &ch.children {
+                    if song.channels.get(k as usize).map(|c| c.kind != ChannelKind::Layer).unwrap_or(false) {
+                        self.note_off(song, k, key);
+                    }
+                }
+                return;
+            }
+        }
         for v in self.voices.iter_mut().filter(|v| v.active && v.live && v.chan == chan && v.key == key) {
             v.let_go();
         }
@@ -347,7 +453,7 @@ impl Player {
                     let n = Note { pos: 0, len: 0, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false };
                     self.note_on(song, &n, 0, None, true);
                 }
-                Cmd::NoteOff { chan, key } => self.note_off(chan, key),
+                Cmd::NoteOff { chan, key } => self.note_off(song, chan, key),
                 Cmd::Preview(smp) => {
                     for v in self.voices.iter_mut().filter(|v| v.preview) {
                         v.let_go();
@@ -412,6 +518,7 @@ impl Player {
         }
         if playing && !self.was_playing {
             self.chase = true;
+            self.ov.clear();
         }
         if !playing && self.was_playing {
             self.silence(false);
@@ -422,7 +529,26 @@ impl Player {
         }
         let song_mode = tr.song_mode();
         let pat = tr.pattern();
-        let tpf = (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
+        self.ov.fit(song);
+        if song_mode {
+            for plan in &song.auto_plan {
+                let Some(auto) = song.channels.get(plan.chan).and_then(|c| c.auto.as_ref()) else { continue };
+                // the clip under the play head, or the last one before it (its end value holds)
+                let k = plan.clips.partition_point(|c| c.0 as f64 <= self.pos);
+                if k == 0 {
+                    continue;
+                }
+                let (pos, len, offset) = plan.clips[k - 1];
+                let local = (self.pos - pos as f64).min(len as f64) + offset as f64;
+                let v = auto.value_at(local);
+                for &t in &auto.targets {
+                    self.ov.set(t, v);
+                }
+            }
+        }
+        let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
+        tr.tempo.store(tempo.to_bits(), Relaxed);
+        let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
         if self.pos >= loop_len {
             if tr.looping() {
@@ -472,14 +598,14 @@ impl Player {
                         let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                         // ticks into the audio at which we begin
                         let into = begin - c.pos as f64 + c.offset as f64;
-                        let secs = into / song.ppq as f64 * 60.0 / song.tempo.max(1.0) as f64;
-                        let gain = law::channel_gain(ch.volume);
-                        let (pl, pr) = law::pan(ch.pan);
+                        let secs = into / song.ppq as f64 * 60.0 / tempo as f64;
+                        let gain = law::channel_gain(self.ov.chan_volume(song, chi));
+                        let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
                         let step = smp.rate as f64 / self.sr as f64 * 2f64.powf(ch.pitch_cents as f64 / 1200.0);
                         let pos = secs * smp.rate as f64;
                         let remaining = Some(((end - begin) / tpf) as u64);
                         let rel = 1.0 / (self.sr * 0.005);
-                        self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, ..Default::default() });
+                        self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: 1.0, follow: true, ..Default::default() });
                     }
                     ClipSrc::Automation(_) => {}
                 }
@@ -504,8 +630,20 @@ impl Player {
             self.dirty = vec![false; ni];
         }
         let mut live = 0;
+        let follow = self.ov.any_chan;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             live += 1;
+            if follow && v.follow {
+                if let Some(&(vol, pan)) = self.ov.chan.get(v.chan as usize) {
+                    if vol.is_some() || pan.is_some() {
+                        let c = v.chan as usize;
+                        let g = law::channel_gain(self.ov.chan_volume(song, c)) * v.note_gain;
+                        let (pl, pr) = law::pan((self.ov.chan_pan(song, c) + v.note_pan).clamp(-1.0, 1.0));
+                        v.gl = g * pl;
+                        v.gr = g * pr;
+                    }
+                }
+            }
             let i = if v.insert < ni { v.insert } else { 0 };
             if v.render(&mut self.buses[i][..n]) {
                 self.dirty[i] = true;
@@ -522,8 +660,9 @@ impl Player {
             let ins = &song.inserts[i];
             let mut bus = std::mem::take(&mut self.buses[i]);
             if ins.enabled {
-                let g = law::fader_gain(ins.volume) * if i == 0 { master } else { 1.0 };
-                let (pl, pr) = law::pan(ins.pan);
+                let (ov, op) = self.ov.ins.get(i).copied().unwrap_or((None, None));
+                let g = law::fader_gain(ov.unwrap_or(ins.volume)) * if i == 0 { master } else { 1.0 };
+                let (pl, pr) = law::pan(op.unwrap_or(ins.pan));
                 let (gl, gr) = (g * pl, g * pr);
                 let mut peak = [0f32; 2];
                 for f in bus[..n].iter_mut() {
@@ -676,6 +815,52 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got[0] == 0 && got[1].abs_diff(192_000) <= 1, "{got:?}");
         assert!(!h.transport.playing());
+    }
+
+    #[test]
+    fn automation_moves_volume_and_tempo_and_layers_play_children() {
+        use crate::song::{AutoPt, Automation, Chan};
+        let mut s = click_song();
+        // a long tone so the fade can be heard
+        let data: Vec<f32> = (0..96_000).map(|_| 0.5).collect();
+        s.channels[0].sample = Some(Arc::new(Sample::from_mono("tone", 48_000, &data)));
+        s.patterns[0].toggle_step(0, 0);
+        let ramp = |a: f32, b: f32, t: Target| {
+            Some(Arc::new(Automation { points: vec![AutoPt { tick: 0.0, value: a, tension: 0.0, mode: 0 }, AutoPt { tick: 384.0, value: b, tension: 0.0, mode: 0 }], targets: vec![t] }))
+        };
+        s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: ramp(1.0, 0.0, Target::ChanVolume(0)), ..Default::default() });
+        let ac = s.channels.len() - 1;
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_looping(false);
+        h.transport.set_playing(true);
+        let mut buf = vec![0.0f32; 48_000 * 2 * 2];
+        for block in buf.chunks_mut(2 * 512) {
+            p.render(block, 2);
+        }
+        let at = |sec: f32| buf[(sec * 48_000.0) as usize * 2].abs();
+        assert!(at(0.05) > 0.4, "{}", at(0.05));
+        assert!(at(1.0) < at(0.05) * 0.5 && at(1.0) > 0.001, "{}", at(1.0));
+        assert!(at(1.9) < 0.01, "{}", at(1.9));
+
+        // tempo: half way up the control is 120 bpm, the top is 180
+        s.channels[ac].auto = ramp(1.0, 1.0, Target::Tempo);
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_playing(true);
+        p.render(&mut buf[..2048], 2);
+        assert_eq!(h.transport.tempo(), 180.0);
+
+        // a layer plays its children
+        let mut s = click_song();
+        s.channels.push(Chan { kind: ChannelKind::Layer, children: vec![0], ..Default::default() });
+        let layer = (s.channels.len() - 1) as u16;
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.send(Cmd::NoteOn { chan: layer, key: 60, vel: 1.0 });
+        p.render(&mut buf[..2048], 2);
+        assert!(buf[..2048].iter().any(|x| x.abs() > 0.1));
     }
 
     #[test]

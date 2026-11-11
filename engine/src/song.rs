@@ -33,11 +33,103 @@ pub struct Chan {
     pub env_on: bool,
     /// Which channel of the file this came from (None for one added since the last load or save).
     pub src: Option<u16>,
+    /// The curve and what it drives, for an automation clip channel.
+    pub auto: Option<Arc<Automation>>,
+    /// Channels a layer channel plays.
+    pub children: Vec<u16>,
+}
+
+/// A control an automation clip can drive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    ChanVolume(usize),
+    ChanPan(usize),
+    InsertVolume(usize),
+    InsertPan(usize),
+    Tempo,
+    /// Something not played back yet (plugin controls, slot levels, ...): raw control number and destination.
+    Other { param: u16, dest: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoPt {
+    /// Ticks from the start of the clip.
+    pub tick: f64,
+    /// 0..=1 of the control's travel.
+    pub value: f32,
+    /// Bend of the line arriving at this point, -1..=1.
+    pub tension: f32,
+    /// Shape of the line arriving at this point.
+    pub mode: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Automation {
+    pub points: Vec<AutoPt>,
+    pub targets: Vec<Target>,
+}
+
+/// Bend a 0..=1 ramp. Positive tension starts slowly and finishes fast. (Approximate: see docs/PARITY.md.)
+fn bend(t: f32, tension: f32) -> f32 {
+    if tension.abs() < 1e-4 {
+        t
+    } else {
+        t.powf((tension.clamp(-1.0, 1.0) * 3.0).exp2())
+    }
+}
+
+impl Automation {
+    /// Value at `tick` from the start of the clip; holds the first and last values outside the points.
+    pub fn value_at(&self, tick: f64) -> f32 {
+        let Some(first) = self.points.first() else { return 0.0 };
+        if tick <= first.tick {
+            return first.value;
+        }
+        let i = self.points.partition_point(|p| p.tick <= tick);
+        if i >= self.points.len() {
+            return self.points[self.points.len() - 1].value;
+        }
+        let (a, b) = (self.points[i - 1], self.points[i]);
+        let span = b.tick - a.tick;
+        if span <= 0.0 {
+            return b.value;
+        }
+        let t = ((tick - a.tick) / span) as f32;
+        let k = b.tension;
+        let shaped = match b.mode {
+            2 => 0.0, // hold: stay on the earlier value until this point
+            1 | 8 | 11 => {
+                if t < 0.5 {
+                    0.5 * bend(2.0 * t, k)
+                } else {
+                    1.0 - 0.5 * bend(2.0 - 2.0 * t, k)
+                }
+            }
+            3 => (t * 4.0).floor() / 4.0,
+            4 | 10 => t * t * (3.0 - 2.0 * t),
+            9 => 0.5 - 0.5 * (std::f32::consts::PI * t).cos(),
+            _ => bend(t, k),
+        };
+        a.value + (b.value - a.value) * shaped
+    }
+
+    /// Ticks from the first point to the last.
+    pub fn length(&self) -> f64 {
+        self.points.last().map(|p| p.tick).unwrap_or(0.0)
+    }
+}
+
+/// Where the clips of one automation channel sit in the playlist; built by `Song::prepare`.
+#[derive(Debug, Clone, Default)]
+pub struct AutoPlan {
+    pub chan: usize,
+    /// (position, length, offset) of every sounding clip, by position.
+    pub clips: Vec<(u32, u32, u32)>,
 }
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![] }
     }
 }
 
@@ -183,6 +275,8 @@ pub struct Song {
     pub inserts: Vec<Insert>,
     /// Order in which the mixer processes inserts so every sender runs before what it feeds.
     pub mix_order: Vec<usize>,
+    /// Automation clips that drive something, with their playlist positions (built by `prepare`).
+    pub auto_plan: Vec<AutoPlan>,
 }
 
 pub const DEFAULT_TRACKS: usize = 500;
@@ -212,6 +306,7 @@ impl Song {
             clips: vec![],
             inserts,
             mix_order: vec![],
+            auto_plan: vec![],
         };
         s.prepare();
         s
@@ -254,9 +349,71 @@ impl Song {
         }
     }
 
+    /// Remove a channel and renumber everything that refers to the ones after it.
+    pub fn remove_channel(&mut self, ci: usize) {
+        if ci >= self.channels.len() {
+            return;
+        }
+        self.channels.remove(ci);
+        for p in &mut self.patterns {
+            p.notes.retain(|n| n.chan as usize != ci);
+            for n in &mut p.notes {
+                if n.chan as usize > ci {
+                    n.chan -= 1;
+                }
+            }
+        }
+        self.clips.retain(|c| !matches!(c.src, ClipSrc::Audio(k) | ClipSrc::Automation(k) if k == ci));
+        for c in &mut self.clips {
+            match &mut c.src {
+                ClipSrc::Audio(k) | ClipSrc::Automation(k) if *k > ci => *k -= 1,
+                _ => {}
+            }
+        }
+        for ch in &mut self.channels {
+            ch.children.retain(|&k| k as usize != ci);
+            for k in &mut ch.children {
+                if *k as usize > ci {
+                    *k -= 1;
+                }
+            }
+            if let Some(a) = &ch.auto {
+                if a.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) if *k >= ci)) {
+                    let mut a2 = (**a).clone();
+                    a2.targets.retain(|t| !matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) if *k == ci));
+                    for t in &mut a2.targets {
+                        match t {
+                            Target::ChanVolume(k) | Target::ChanPan(k) if *k > ci => *k -= 1,
+                            _ => {}
+                        }
+                    }
+                    ch.auto = Some(Arc::new(a2));
+                }
+            }
+        }
+    }
+
     /// Sort what must be sorted and work out the mixer order. Call after editing, before publishing.
     pub fn prepare(&mut self) {
         self.clips.sort_by_key(|c| (c.pos, c.track));
+        let mut plan: Vec<AutoPlan> = vec![];
+        let mut slot: Vec<Option<usize>> = vec![None; self.channels.len()];
+        for c in &self.clips {
+            let ClipSrc::Automation(ch) = c.src else { continue };
+            if c.muted || !self.tracks.get(c.track as usize).map(|t| t.enabled).unwrap_or(true) {
+                continue;
+            }
+            let Some(chan) = self.channels.get(ch) else { continue };
+            if !chan.enabled || !chan.auto.as_ref().map(|a| !a.targets.is_empty() && !a.points.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            let k = *slot[ch].get_or_insert_with(|| {
+                plan.push(AutoPlan { chan: ch, clips: vec![] });
+                plan.len() - 1
+            });
+            plan[k].clips.push((c.pos, c.len, c.offset));
+        }
+        self.auto_plan = plan;
         if self.inserts.is_empty() {
             self.inserts.push(Insert { name: "Master".into(), ..Default::default() });
         }
@@ -312,6 +469,32 @@ impl Song {
         let ppq = f.header.ppq.max(1) as u32;
         let n_inserts = f.inserts.len().max(1);
 
+        let base = flp::mixer_base(f.version_tuple());
+        let target = |l: &flp::FlpLink| -> Target {
+            use flp::param::*;
+            let raw = (l.dest >> 6) as usize;
+            if l.dest < 0x2000 {
+                match l.param {
+                    CHAN_VOLUME => Target::ChanVolume(l.dest as usize),
+                    CHAN_PAN => Target::ChanPan(l.dest as usize),
+                    _ => Target::Other { param: l.param, dest: l.dest },
+                }
+            } else if l.dest == flp::DEST_GLOBAL {
+                match l.param {
+                    GLOBAL_TEMPO => Target::Tempo,
+                    _ => Target::Other { param: l.param, dest: l.dest },
+                }
+            } else if raw >= base && raw - base < n_inserts && l.dest & 63 == 0 {
+                match l.param {
+                    INSERT_VOLUME => Target::InsertVolume(raw - base),
+                    INSERT_PAN => Target::InsertPan(raw - base),
+                    _ => Target::Other { param: l.param, dest: l.dest },
+                }
+            } else {
+                Target::Other { param: l.param, dest: l.dest }
+            }
+        };
+
         let channels: Vec<Chan> = f
             .channels
             .iter()
@@ -336,6 +519,19 @@ impl Song {
                     insert: if c.insert < 0 || c.insert as usize >= n_inserts { 0 } else { c.insert as usize },
                     env_on: c.envelopes.get(1).map(|e| e.enabled).unwrap_or(false),
                     src: Some(pos as u16),
+                    auto: (c.kind == ChannelKind::AutomationClip).then(|| {
+                        let mut tick = 0.0;
+                        let points = flp::parse_automation(&c.automation)
+                            .iter()
+                            .map(|p| {
+                                tick += p.delta * ppq as f64;
+                                AutoPt { tick, value: p.value as f32, tension: p.tension, mode: p.mode }
+                            })
+                            .collect();
+                        let targets = f.links.iter().filter(|l| l.kind == 0 && l.extra == 0 && l.source as usize == pos).map(target).collect();
+                        Arc::new(Automation { points, targets })
+                    }),
+                    children: c.children.clone(),
                 }
             })
             .collect();
@@ -441,6 +637,7 @@ impl Song {
             clips,
             inserts,
             mix_order: vec![],
+            auto_plan: vec![],
         };
         song.prepare();
         song

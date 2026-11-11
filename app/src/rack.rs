@@ -218,23 +218,7 @@ impl App {
         if ci >= self.song.channels.len() {
             return;
         }
-        use cereal_engine::song::ClipSrc;
-        self.song.channels.remove(ci);
-        for p in &mut self.song.patterns {
-            p.notes.retain(|n| n.chan as usize != ci);
-            for n in &mut p.notes {
-                if n.chan as usize > ci {
-                    n.chan -= 1;
-                }
-            }
-        }
-        self.song.clips.retain(|c| !matches!(c.src, ClipSrc::Audio(k) | ClipSrc::Automation(k) if k == ci));
-        for c in &mut self.song.clips {
-            match &mut c.src {
-                ClipSrc::Audio(k) | ClipSrc::Automation(k) if *k > ci => *k -= 1,
-                _ => {}
-            }
-        }
+        self.song.remove_channel(ci);
         self.sel_chan = self.sel_chan.min(self.song.channels.len().saturating_sub(1));
         self.dirty = true;
     }
