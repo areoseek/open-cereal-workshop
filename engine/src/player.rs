@@ -975,7 +975,47 @@ impl Player {
         self.arps = arps;
     }
 
+    /// Start one note with what the channel adds to it: the offsets its hit strength and key bring, and its
+    /// echoes, each a note of its own.
     fn note_on_plain(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        let Some(ch) = song.channels.get(n.chan as usize) else { return };
+        let f = &ch.smp;
+        let mut n = n.clone();
+        if !n.slide {
+            for (t, at) in [(&f.track_vel, n.vel * 100.0), (&f.track_key, n.key as f32)] {
+                let off = (at - t[0]) / 64.0;
+                n.pan = (n.pan + t[1] * off).clamp(-1.0, 1.0);
+                n.mod_x = (n.mod_x + t[2] * off).clamp(-1.0, 1.0);
+                n.mod_y = (n.mod_y + t[3] * off).clamp(-1.0, 1.0);
+            }
+        }
+        let echoes = if f.echo_feedback > 0.0 && !n.slide && ch.kind != ChannelKind::AudioClip { f.echoes as u32 } else { 0 };
+        if echoes == 0 {
+            return self.note_on_one(song, &n, delay, len_frames, live);
+        }
+        let gap = f.echo_steps as f64 * song.step() as f64 / self.now_tpf(song);
+        for k in 0..=echoes {
+            let mut pan = n.pan + f.echo_pan * k as f32;
+            if f.echo_fat {
+                // fat mode: the echoes sit on alternate sides
+                pan = n.pan + if k == 0 { 0.0 } else if k % 2 == 1 { f.echo_pan } else { -f.echo_pan };
+            } else if f.echo_ping {
+                // ping pong: the pan turns round at each side
+                let x = (pan + 1.0).rem_euclid(4.0);
+                pan = if x > 2.0 { 3.0 - x } else { x - 1.0 };
+            }
+            let e = Note {
+                vel: n.vel * f.echo_feedback.powi(k as i32).sqrt(),
+                pan: pan.clamp(-1.0, 1.0),
+                fine_cents: n.fine_cents + f.echo_cents * k as f32,
+                porta: n.porta && k == 0,
+                ..n.clone()
+            };
+            self.note_on_one(song, &e, delay + (k as f64 * gap) as u32, len_frames, live);
+        }
+    }
+
+    fn note_on_one(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
         let mark = self.born;
         // the note a portamento glides in from: the newest one still sounding on the channel
         let from = if n.porta {
@@ -1085,16 +1125,14 @@ impl Player {
                     return;
                 }
                 let filter_on = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
-                for k in 0..=(if f.echo_feedback > 0.0 { f.echoes as u32 } else { 0 }) {
-                    let fall = f.echo_feedback.powi(k as i32);
-                    let note_gain = law::velocity_gain(n.vel) * f.gain * fall;
-                    let note_pan = (n.pan + f.echo_pan * k as f32).clamp(-1.0, 1.0);
+                {
+                    let note_gain = law::velocity_gain(n.vel) * f.gain;
+                    let note_pan = n.pan.clamp(-1.0, 1.0);
                     let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
-                    let late = (k as f64 * f.echo_steps as f64 * song.step() as f64 / self.tpf.max(1e-9)) as u32;
                     self.start(Voice {
                         sample: Some(smp.clone()),
-                        step: step * 2f64.powf((f.echo_cents * k as f32) as f64 / 1200.0),
+                        step,
                         level: 1.0,
                         attack: 1.0,
                         release: ms(8.0),
@@ -1109,7 +1147,7 @@ impl Player {
                         gl: gain * pl,
                         gr: gain * pr,
                         insert: ch.insert,
-                        delay: delay + late,
+                        delay,
                         chan: n.chan,
                         key: n.key,
                         live,
@@ -2282,6 +2320,27 @@ mod tests {
         assert_eq!(onsets(&run(s.clone(), 40_000), 200).len(), 1);
         s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 72, ..Default::default() });
         assert_eq!(onsets(&run(s, 40_000), 200).len(), 4);
+    }
+
+    #[test]
+    fn tracking_pans_by_key_and_echoes_turn_round_at_the_sides() {
+        let mut s = click_song();
+        s.channels[0].smp.track_key = [60.0, 1.0, 0.0, 0.0];
+        s.patterns[0].notes.push(Note { pos: 0, len: 0, chan: 0, key: 124, ..Default::default() });
+        let buf = run(s.clone(), 2000);
+        let side = |b: &[f32], c: usize| b.chunks(2).map(|f| f[c].abs()).fold(0.0f32, f32::max);
+        assert!(side(&buf, 0) < 1e-3 && side(&buf, 1) > 0.5);
+        // three echoes a step apart, each 0.8 further right: right, back toward the middle, then left
+        let mut s = click_song();
+        s.patterns[0].notes.push(Note { pos: 0, len: 0, chan: 0, key: 60, ..Default::default() });
+        let f = &mut s.channels[0].smp;
+        (f.echo_feedback, f.echoes, f.echo_steps, f.echo_pan, f.echo_ping) = (1.0, 3, 1.0, 0.8, true);
+        let buf = run(s, 24_000);
+        let lean: Vec<f32> = (0..4).map(|k| {
+            let b = &buf[k * 12_000..k * 12_000 + 400];
+            side(b, 1) - side(b, 0)
+        }).collect();
+        assert!(lean[0].abs() < 1e-3 && lean[1] > 0.5 && lean[2] > 0.0 && lean[2] < lean[1] && lean[3] < -0.2, "{lean:?}");
     }
 
     #[test]

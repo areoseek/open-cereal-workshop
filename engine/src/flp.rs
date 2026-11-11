@@ -87,6 +87,7 @@ pub mod id {
     pub const CHAN_CUT_GROUP: u8 = 132;
     pub const CHAN_ECHO: u8 = 209;
     pub const CHAN_POLY: u8 = 221;
+    pub const CHAN_TRACKING: u8 = 228;
     pub const CHAN_ADJUST: u8 = 229;
     pub const LAYER_CHILD: u8 = 94;
     pub const INSERT_ROUTING: u8 = 235;
@@ -413,6 +414,10 @@ pub struct FlpChannel {
     /// octaves, chord (-1 from the held notes, -2 the same but lone notes hold, 0 none, then the chord list), time
     /// (1024 = one step), gate (48 = full), repeat.
     pub arp: [i32; 6],
+    /// Echo switches: 2 ping pong, 4 fat mode.
+    pub echo_flags: u8,
+    /// Tracking, velocity first and keyboard second: middle value, then pan, mod x and mod y (-256..=256).
+    pub tracking: Vec<[i32; 4]>,
     pub arp_slide: bool,
     /// Longest a note may last, on the same scale as the arpeggiator time; 1447 and up = no limit.
     pub gate: u16,
@@ -910,6 +915,7 @@ impl Flp {
                         }
                         (id::CHAN_PARAMS, Value::Data(d)) if d.len() >= 20 => {
                             c.root_key = u32at(d, 16);
+                            c.echo_flags = d[10];
                             if d.len() >= 66 {
                                 let i = |o: usize| u32at(d, o) as i32;
                                 c.arp = [i(40), i(44), i(48), i(52), i(56), c.arp[5]];
@@ -946,6 +952,9 @@ impl Flp {
                             for k in 0..5 {
                                 c.echo[k] = u32at(d, k * 4) as i32;
                             }
+                        }
+                        (id::CHAN_TRACKING, Value::Data(d)) if d.len() >= 16 => {
+                            c.tracking.push([u32at(d, 0) as i32, u32at(d, 4) as i32, u32at(d, 8) as i32, u32at(d, 12) as i32]);
                         }
                         (id::CHAN_POLY, Value::Data(d)) if d.len() >= 9 => c.poly = (u32at(d, 0), u32at(d, 4), d[8]),
                         (id::CHAN_ADJUST, Value::Data(d)) if d.len() >= 20 => {

@@ -178,6 +178,13 @@ pub struct Sampler {
     pub shift: f32,
     /// Portamento notes ignore the gate.
     pub full_porta: bool,
+    /// Echo pan turns round at the sides; fat mode swaps the echoes from side to side.
+    pub echo_ping: bool,
+    pub echo_fat: bool,
+    /// What the hit strength and the key move on each note: the middle value where nothing moves (0..=127),
+    /// then pan, mod x and mod y, -1..=1.
+    pub track_vel: [f32; 4],
+    pub track_key: [f32; 4],
 }
 
 /// The gate knob at its right end: notes keep their length.
@@ -254,7 +261,18 @@ impl Default for Sampler {
             gate_steps: 2.0,
             shift: 0.0,
             full_porta: true,
+            echo_ping: false,
+            echo_fat: false,
+            track_vel: [100.0, 0.0, 0.0, 0.0],
+            track_key: [60.0, 0.0, 0.0, 0.0],
         }
+    }
+}
+
+fn track(t: Option<&[i32; 4]>, mid: f32) -> [f32; 4] {
+    match t {
+        Some(t) => [t[0].clamp(0, 127) as f32, t[1] as f32 / 256.0, t[2] as f32 / 256.0, t[3] as f32 / 256.0],
+        None => [mid, 0.0, 0.0, 0.0],
     }
 }
 
@@ -300,6 +318,10 @@ impl Sampler {
             gate_steps: if c.gate >= 1447 { 2.0 } else { knob_steps(c.gate as i32) },
             shift: (c.time_shift as f32 / 1024.0).clamp(0.0, 1.0),
             full_porta: c.full_porta,
+            echo_ping: c.echo_flags & 2 != 0,
+            echo_fat: c.echo_flags & 4 != 0,
+            track_vel: track(c.tracking.first(), 100.0),
+            track_key: track(c.tracking.get(1), 60.0),
         }
     }
 

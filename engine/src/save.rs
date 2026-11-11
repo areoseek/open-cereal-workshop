@@ -935,6 +935,39 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             }
         }
     }
+    if (now.echo_ping, now.echo_fat) != (was.echo_ping, was.echo_fat) {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                if d.len() > 10 {
+                    d[10] = (d[10] & !6) | (now.echo_ping as u8) << 1 | (now.echo_fat as u8) << 2;
+                }
+            }
+        }
+    }
+    if (now.track_vel, now.track_key) != (was.track_vel, was.track_key) {
+        let mut at: Vec<usize> = (start..end).filter(|&i| ev[i].id == id::CHAN_TRACKING).collect();
+        if at.len() < 2 {
+            // a channel made here has none yet: they sit just before the envelopes
+            let first = (start..end).find(|&i| ev[i].id == id::CHAN_ENVELOPE).unwrap_or(end);
+            for (k, mid) in [100u8, 60].iter().enumerate().skip(at.len()) {
+                let mut d = vec![0u8; 16];
+                d[0] = *mid;
+                ev.insert(first + k, Event::data(id::CHAN_TRACKING, d));
+                end += 1;
+            }
+            at = (start..end).filter(|&i| ev[i].id == id::CHAN_TRACKING).collect();
+        }
+        for (i, t) in at.iter().zip([&now.track_vel, &now.track_key]) {
+            if let Value::Data(d) = &mut ev[*i].value {
+                if d.len() >= 16 {
+                    put_u32(d, 0, t[0].round() as u32);
+                    for k in 1..4 {
+                        put_u32(d, k * 4, q(t[k], 256.0) as u32);
+                    }
+                }
+            }
+        }
+    }
     let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.keep_pitch);
     if par(now) != par(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
@@ -1838,6 +1871,9 @@ mod tests {
             f.gate_steps = 0.75;
             f.shift = 0.25;
             f.full_porta = false;
+            f.echo_ping = true;
+            f.track_vel = [90.0, 0.5, 0.0, -0.25];
+            f.track_key = [72.0, -0.5, 0.25, 0.0];
         }
         s.channels[1].env_on = true;
         s.prepare();
@@ -1848,6 +1884,8 @@ mod tests {
         assert_eq!((b.reverse, b.swap_stereo, b.normalize, b.mono, b.porta, b.keep_pitch), (true, true, true, true, true, true));
         assert_eq!((b.cut, b.cut_by, b.filter, b.echoes), (3, 3, 3, 6));
         assert_eq!((b.arp_dir, b.arp_range, b.arp_chord, b.arp_slide, b.arp_repeat, b.full_porta), (3, 2, 2, true, 3, false));
+        assert!(b.echo_ping && !b.echo_fat);
+        assert_eq!((a.track_vel, a.track_key), (b.track_vel, b.track_key));
         let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
         for (x, y) in [
             (a.fade_in, b.fade_in), (a.fade_out, b.fade_out), (a.swing, b.swing), (a.cutoff, b.cutoff), (a.resonance, b.resonance), (a.slide, b.slide),

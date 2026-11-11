@@ -586,7 +586,26 @@ impl App {
                         }
                     });
                 });
+                section(ui, "TRACKING");
+                for (name, t, tip) in [("Vol", &mut f.track_vel, "Hit strength where nothing moves"), ("Key", &mut f.track_key, "Key where nothing moves")] {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).color(TEXT_DIM));
+                        changed |= cap_knob(ui, "PAN", &mut t[1], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                        changed |= cap_knob(ui, "MOD X", &mut t[2], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                        changed |= cap_knob(ui, "MOD Y", &mut t[3], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                        ui.vertical(|ui| {
+                            ui.set_width(50.0);
+                            let is_key = name == "Key";
+                            changed |= ui.add(egui::DragValue::new(&mut t[0]).range(0.0..=127.0).speed(0.2).custom_formatter(move |v, _| if is_key { key_name(v as u8) } else { format!("{v:.0}") })).on_hover_text(tip).changed();
+                            ui.label(RichText::new("MID").small().color(TEXT_DIM));
+                        });
+                    });
+                }
                 section(ui, "ECHO DELAY / FAT MODE");
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut f.echo_ping, "Ping pong").on_hover_text("The echo pan turns round when it reaches a side").changed();
+                    changed |= ui.checkbox(&mut f.echo_fat, "Fat mode").on_hover_text("Echoes swap from side to side").changed();
+                });
                 ui.horizontal(|ui| {
                     changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
                     changed |= cap_knob(ui, "PAN", &mut f.echo_pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
