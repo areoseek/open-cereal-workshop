@@ -182,7 +182,7 @@ impl App {
                 }
                 ui.menu_button("Instrument", |ui| {
                     // the six-operator instrument has no fresh block of its own yet: it arrives with projects and presets
-                    for d in cereal_engine::synth::DEFS.iter().filter(|d| d.kind != cereal_engine::synth::Kind::Fm) {
+                    for d in cereal_engine::synth::DEFS.iter().filter(|d| !matches!(d.kind, cereal_engine::synth::Kind::Fm | cereal_engine::synth::Kind::Forge)) {
                         if ui.button(d.title).clicked() {
                             self.song.channels.push(Chan::instrument(d.kind));
                             self.sel_chan = self.song.channels.len() - 1;

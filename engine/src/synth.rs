@@ -21,12 +21,14 @@ pub enum Kind {
     Bass,
     /// Sampled keys read from set files (`keys.rs`).
     Keys,
+    /// The larger additive instrument, played by the additive engine (`additive.rs`).
+    Forge,
 }
 
 impl Kind {
     /// The small instruments that share the voice code of `minis.rs`.
     pub fn mini(self) -> bool {
-        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm)
+        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge)
     }
 }
 
@@ -303,6 +305,40 @@ pub static DEFS: &[Def] = &[Def {
             p("Drive", 56, 0, 1000, 0),
         ],
     },
+    Def {
+        kind: Kind::Forge,
+        ident: "Harmor",
+        title: "Harmonic Forge",
+        // only the leading settings of part A are read; everything after them stays as stored
+        size: 344,
+        fixed: &[],
+        tail: &[],
+        // order matters: `forge` below indexes this list
+        params: &[
+            p("Timbre mix", 28, 0, 1000, 0),
+            p("Phase randomness", 16, -1000, 1000, 0),
+            p("Prism", 116, -1000, 1000, 0),
+            p("Harmonizer", 120, -1000, 1000, 0),
+            p("Harmonizer width", 124, 0, 1000, 500),
+            p("Harmonizer strength", 128, 0, 1024, 256),
+            p("Unison order", 148, 1, 9, 1),
+            p("Unison pan", 160, 0, 256, 192),
+            p("Unison pitch", 164, 0, 256, 128),
+            p("Unison phase", 168, -1000, 1000, 500),
+            p("Filter 1 cutoff", 220, 0, 8192, 8192),
+            p("Filter 1 width", 228, 0, 1000, 500),
+            p("Filter 1 key tracking", 232, -1000, 1000, 0),
+            p("Filter 1 resonance", 240, 0, 1000, 0),
+            p("Filter 2 cutoff", 268, 0, 8192, 8192),
+            p("Filter 2 resonance", 288, 0, 1000, 0),
+            p("Pluck", 312, 0, 1000, 1000),
+            p("Phaser mix", 316, 0, 1000, 0),
+            p("Phaser scale", 320, 0, 2, 0),
+            p("Phaser width", 324, 0, 10000, 5000),
+            p("Phaser offset", 328, 0, 1000, 500),
+            p("Phaser speed", 332, -8000, 8000, 3000),
+        ],
+    },
 ];
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -386,6 +422,49 @@ impl Gen {
             })
             .collect();
         Some(Self { kind: d.kind, p, raw: state.to_vec(), fm: None })
+    }
+
+    /// The larger additive instrument as a patch of the additive engine: the settings both share carry over, the
+    /// saw to square mix becomes a harmonic table, and the second layer, the picture part and the drawn envelopes
+    /// are not played yet.
+    fn forge(&self) -> crate::additive::Patch {
+        use crate::additive::ix;
+        let v = |i: usize| self.p[i];
+        let mut p: Vec<f32> = def(Kind::Additive).params.iter().map(|p| p.def as f32).collect();
+        p[ix::PHASE] = 1000.0 - v(1).abs();
+        p[ix::HZ_AMOUNT] = v(3).abs();
+        p[ix::HZ_WIDTH] = v(4);
+        p[ix::HZ_STRENGTH] = v(5);
+        p[ix::UNI_ORDER] = v(6);
+        p[ix::UNI_PAN] = v(7) / 2.0;
+        p[ix::UNI_PITCH] = v(8);
+        p[ix::UNI_PHASE] = v(9).abs() / 1000.0 * 128.0;
+        // the lower of the two filters is the one heard; no envelope moves it yet
+        let (cut, res) = if v(14) < v(10) { (v(14), v(15)) } else { (v(10), v(13)) };
+        p[ix::FILTER_ON] = 1.0;
+        p[ix::F_AMOUNT] = 0.0;
+        // a low setting is nearly always opened by a drawn envelope we cannot read yet, so it is kept from closing fully
+        p[ix::CUTOFF] = 2048.0 + cut * 0.75;
+        p[ix::KEY_TRACK] = v(12);
+        p[ix::RESONANCE] = res;
+        p[ix::PLUCK] = v(16);
+        p[ix::PH_AMOUNT] = v(17);
+        p[ix::PH_SCALE] = v(18);
+        p[ix::PH_WIDTH] = v(19);
+        p[ix::PH_OFFSET] = v(20);
+        p[ix::PH_SPEED] = v(21);
+        let mix = v(0) / 1000.0;
+        let mut custom = None;
+        if mix >= 1.0 {
+            p[ix::TIMBRE] = 1.0;
+        } else if mix > 0.0 || v(2) != 0.0 {
+            // prism leans the levels toward the high or the low harmonics
+            let tilt = v(2) / 1000.0;
+            let amp: Vec<f32> = (1..=512).map(|k| (if k % 2 == 1 { 1.0 } else { 1.0 - mix }) / k as f32 * (k as f32).powf(tilt * 0.5)).collect();
+            custom = Some((amp, vec![0.0; 512]));
+            p[ix::TIMBRE] = 11.0;
+        }
+        crate::additive::Patch { p, custom }
     }
 
     /// Where the settings start in a block that opens with a name.
@@ -489,6 +568,7 @@ impl Gen {
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
+            Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
@@ -749,5 +829,31 @@ mod tests {
             let peak = (0..20000).map(|_| st.frame(&tone, 0.01)).fold(0.0f32, |m, s| m.max(s[0].abs()).max(s[1].abs()));
             assert!(peak > 0.05 && peak < 1.0, "shape {shape} peak {peak}");
         }
+    }
+    #[test]
+    fn the_larger_additive_block_becomes_an_additive_patch() {
+        use crate::additive::ix;
+        let mut b = vec![0u8; 2000];
+        let mut put = |off: usize, v: i32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        put(28, 500);
+        put(148, 5);
+        put(160, 192);
+        put(220, 4096);
+        put(268, 8192);
+        put(240, 300);
+        put(312, 600);
+        let g = Gen::decode("Harmor", &b).unwrap();
+        assert_eq!(g.kind, Kind::Forge);
+        let t = g.tone();
+        let p = t.add.expect("played by the additive engine");
+        assert_eq!(p.p[ix::UNI_ORDER], 5.0);
+        assert_eq!(p.p[ix::UNI_PAN], 96.0);
+        assert_eq!(p.p[ix::CUTOFF], 5120.0);
+        assert_eq!(p.p[ix::RESONANCE], 300.0);
+        assert_eq!(p.p[ix::PLUCK], 600.0);
+        let (amp, _) = p.custom.as_ref().expect("a half square has its own table");
+        assert!((amp[0] - 1.0).abs() < 1e-6 && (amp[1] - 0.25).abs() < 1e-6);
+        // untouched settings are stored back byte for byte
+        assert_eq!(g.encode(None), b);
     }
 }
