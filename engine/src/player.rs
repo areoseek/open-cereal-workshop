@@ -191,12 +191,15 @@ struct Overrides {
     /// Per insert: volume (0..=1.25) and pan.
     ins: Vec<(Option<f32>, Option<f32>)>,
     any_chan: bool,
+    /// Effect slot controls being driven: the target and its 0..=1 value.
+    slot: Vec<(Target, f32)>,
 }
 
 impl Overrides {
     fn clear(&mut self) {
         self.tempo = None;
         self.any_chan = false;
+        self.slot.clear();
         self.chan.iter_mut().for_each(|c| *c = (None, None));
         self.ins.iter_mut().for_each(|c| *c = (None, None));
     }
@@ -245,9 +248,19 @@ impl Overrides {
             }
             // the tempo control runs from 60 to 180 bpm
             Target::Tempo => self.tempo = Some(60.0 + v * 120.0),
+            Target::SlotMix(..) | Target::SlotOn(..) | Target::SlotParam(..) => match self.slot.iter_mut().find(|e| e.0 == t) {
+                Some(e) => e.1 = v,
+                None => self.slot.push((t, v)),
+            },
             Target::Other { .. } => {}
         }
     }
+}
+
+/// A slot's switch and mix for the block being run, after automation.
+struct SlotNow {
+    enabled: bool,
+    mix: f32,
 }
 
 /// A short decaying blip for the metronome.
@@ -1034,9 +1047,23 @@ impl Player {
                 for (s, u) in ins.slots.iter().filter(|s| s.fx.is_some()).zip(units.iter_mut()) {
                     if let Some(f) = &s.fx {
                         if u.1.fx != *f {
-                            u.1.fx = f.clone();
+                            if u.1.fx.kind == f.kind && u.1.fx.p.len() == f.p.len() {
+                                u.1.fx.p.copy_from_slice(&f.p);
+                            } else {
+                                u.1.fx = f.clone();
+                            }
                         }
                     }
+                    let (mut on, mut mix) = (s.enabled, s.mix);
+                    for &(t, v) in &self.ov.slot {
+                        match t {
+                            Target::SlotMix(a, b) if a == i && b == s.index => mix = v,
+                            Target::SlotOn(a, b) if a == i && b == s.index => on = v >= 0.5,
+                            Target::SlotParam(a, b, k) if a == i && b == s.index => u.1.fx.set_travel(k as usize, v),
+                            _ => {}
+                        }
+                    }
+                    let s = SlotNow { enabled: on, mix };
                     if !s.enabled || s.mix <= 0.0 {
                         continue;
                     }
@@ -1295,6 +1322,22 @@ mod tests {
         h.transport.set_playing(true);
         p.render(&mut buf[..2048], 2);
         assert_eq!(h.transport.tempo(), 180.0);
+
+        // an effect setting: the balance unit's volume held at the bottom silences the insert; so does its mix
+        // at zero not, since the dry sound then passes
+        s.channels[ac].auto = ramp(0.0, 0.0, Target::SlotParam(0, 0, 1));
+        s.inserts[0].slots.push(crate::song::Slot::with_fx(0, crate::fx::Kind::Balance));
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_playing(true);
+        p.render(&mut buf[..8192], 2);
+        assert!(buf[4096..8192].iter().all(|x| x.abs() < 1e-6));
+        s.channels[ac].auto = ramp(0.0, 0.0, Target::SlotOn(0, 0));
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_playing(true);
+        p.render(&mut buf[..8192], 2);
+        assert!(buf[4096..8192].iter().any(|x| x.abs() > 0.1));
 
         // a layer plays its children
         let mut s = click_song();

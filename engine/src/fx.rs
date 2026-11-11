@@ -1061,6 +1061,14 @@ impl Fx {
         Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
     }
 
+    /// Put setting `k` at `v` (0..=1) of its travel, as a controller does. Settings past the unit's listed
+    /// ones (drawn tables) are left alone.
+    pub fn set_travel(&mut self, k: usize, v: f32) {
+        if let (Some(q), Some(slot)) = (def(self.kind).params.get(k), self.p.get_mut(k)) {
+            *slot = q.min as f32 + (q.max as f32 - q.min as f32) * v.clamp(0.0, 1.0);
+        }
+    }
+
     /// Read the stored block of the effect called `ident`. None when we have no unit for it or the block is
     /// too short to hold its settings.
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {

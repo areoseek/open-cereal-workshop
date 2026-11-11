@@ -306,6 +306,12 @@ pub enum Target {
     InsertVolume(usize),
     InsertPan(usize),
     Tempo,
+    /// Dry/wet of an effect slot: insert, slot.
+    SlotMix(usize, u16),
+    /// On/off switch of an effect slot.
+    SlotOn(usize, u16),
+    /// One of the effect's own settings, counted in the order the unit lists them: insert, slot, setting.
+    SlotParam(usize, u16, u16),
     /// Something not played back yet (plugin controls, slot levels, ...): raw control number and destination.
     Other { param: u16, dest: u16 },
 }
@@ -855,10 +861,14 @@ impl Song {
                     GLOBAL_TEMPO => Target::Tempo,
                     _ => Target::Other { param: l.param, dest: l.dest },
                 }
-            } else if raw >= base && raw - base < n_inserts && l.dest & 63 == 0 {
+            } else if raw >= base && raw - base < n_inserts {
+                let slot = l.dest & 63;
                 match l.param {
-                    INSERT_VOLUME => Target::InsertVolume(raw - base),
-                    INSERT_PAN => Target::InsertPan(raw - base),
+                    INSERT_VOLUME if slot == 0 => Target::InsertVolume(raw - base),
+                    INSERT_PAN if slot == 0 => Target::InsertPan(raw - base),
+                    SLOT_MIX => Target::SlotMix(raw - base, slot),
+                    SLOT_ENABLED => Target::SlotOn(raw - base, slot),
+                    p if p & PLUGIN_FLAG != 0 => Target::SlotParam(raw - base, slot, p & !PLUGIN_FLAG),
                     _ => Target::Other { param: l.param, dest: l.dest },
                 }
             } else {
