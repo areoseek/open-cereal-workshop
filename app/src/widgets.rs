@@ -54,6 +54,7 @@ pub fn knob(ui: &mut Ui, v: &mut f32, min: f32, max: f32, default: f32, d: f32) 
 pub enum CtlAsk {
     AutoClip,
     Events,
+    Link,
 }
 
 /// The right-click menu every automatable control has. The choice is left for the app to pick up after the
@@ -66,6 +67,9 @@ pub fn control_menu(resp: &Response, target: cereal_engine::song::Target) {
         }
         if ui.button("Edit events").clicked() {
             ask = Some(CtlAsk::Events);
+        }
+        if ui.button("Link to controller...").clicked() {
+            ask = Some(CtlAsk::Link);
         }
         if let Some(a) = ask {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));

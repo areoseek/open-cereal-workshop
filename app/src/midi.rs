@@ -31,6 +31,22 @@ impl MidiIn {
 }
 
 /// Keys held by hand or by the pedal, so a release goes to the channel the note started on.
+/// Knob and slider moves heard since the app last looked: controller number and value, 0..=127.
+static CONTROLS: std::sync::Mutex<Vec<(u8, u8)>> = std::sync::Mutex::new(Vec::new());
+
+fn heard_control(number: u8, value: u8) {
+    if let Ok(mut q) = CONTROLS.lock() {
+        // only the latest value of a controller matters
+        q.retain(|c| c.0 != number);
+        q.push((number, value.min(127)));
+    }
+}
+
+/// The controller moves that came in since the last call.
+pub fn take_controls() -> Vec<(u8, u8)> {
+    CONTROLS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
 struct Held {
     down: Vec<(u8, u16)>,
     /// Released while the pedal was down.
@@ -143,6 +159,8 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 if let Some(cc) = ev.get_data::<EvCtrl>() {
                     if cc.param == 64 {
                         held.set_hold(&to, cc.value >= 64);
+                    } else {
+                        heard_control(cc.param.min(127) as u8, cc.value.clamp(0, 127) as u8);
                     }
                 }
             }
@@ -159,6 +177,7 @@ impl Held {
             0x90 if d2 > 0 => self.on(to, chan, d1 & 127, d2 & 127),
             0x80 | 0x90 => self.off(to, d1 & 127),
             0xb0 if d1 == 64 => self.set_hold(to, d2 >= 64),
+            0xb0 => heard_control(d1 & 127, d2 & 127),
             0xe0 => {
                 let v = ((d2 as i32 & 127) << 7 | (d1 as i32 & 127)) - 8192;
                 to.send(cereal_engine::Cmd::Bend { chan, octaves: v as f32 / 8192.0 * 2.0 / 12.0 });

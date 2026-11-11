@@ -731,6 +731,49 @@ fn patch_auto(ev: &mut Vec<Event>, song: &Song, base: &Song) {
     ev.splice(at..at, fresh);
 }
 
+/// Hardware controller links: when the list changed, the records are written again where the old ones
+/// stood (ahead of the channels when there were none). A record that still stands keeps its own bytes.
+fn patch_midi_links(ev: &mut Vec<Event>, song: &Song, base: &Song) {
+    if song.midi_links == base.midi_links {
+        return;
+    }
+    let key = |d: &[u8]| (d.len() >= 12).then(|| [d[0], d[1], d[2], d[3], d[8], d[9], d[10], d[11]]);
+    let mut old: Vec<([u8; 8], Vec<u8>)> = vec![];
+    let mut at = None;
+    let mut i = 0;
+    while i < ev.len() {
+        if ev[i].id == id::MIDI_LINK {
+            at.get_or_insert(i);
+            if let Value::Data(d) = ev.remove(i).value {
+                if let Some(k) = key(&d) {
+                    old.push((k, d));
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let at = at.unwrap_or_else(|| ev.iter().position(|e| e.id == id::LINK || e.id == id::NEW_CHANNEL).unwrap_or(ev.len()));
+    let fresh: Vec<Event> = song
+        .midi_links
+        .iter()
+        .map(|l| {
+            let (param, dest) = song.event_address(l.target);
+            let mut d = vec![0u8; 12];
+            put_u16(&mut d, 0, l.ctrl);
+            put_u16(&mut d, 2, l.port);
+            put_u16(&mut d, 8, param);
+            put_u16(&mut d, 10, dest);
+            d.extend(hex("04000000d5010000"));
+            match old.iter().position(|o| Some(o.0) == key(&d)) {
+                Some(k) => Event::data(id::MIDI_LINK, old.remove(k).1),
+                None => Event::data(id::MIDI_LINK, d),
+            }
+        })
+        .collect();
+    ev.splice(at..at, fresh);
+}
+
 fn env_raw(seconds: f32) -> u32 {
     if seconds <= 0.0 {
         return 100;
@@ -1497,6 +1540,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_patterns(&mut ev, song, &base, &flp, unicode);
     patch_channels(&mut ev, song, &base, unicode, word_insert);
     patch_auto(&mut ev, song, &base);
+    patch_midi_links(&mut ev, song, &base);
     patch_head(&mut ev, song, &base, unicode);
 
     let _ = latin1;
@@ -1793,6 +1837,25 @@ mod tests {
         let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
         let (r3, _) = reload(&bytes3);
         assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
+    }
+
+    #[test]
+    fn controller_links_are_saved() {
+        use crate::song::{MidiLink, Target};
+        let s = Song::new();
+        let (mut r, f) = reload(&to_bytes(&s, None).unwrap());
+        r.midi_links.push(MidiLink { ctrl: 74, port: 0, target: Target::ChanVolume(1) });
+        r.midi_links.push(MidiLink { ctrl: 7, port: 0, target: Target::InsertVolume(0) });
+        let (bytes, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes);
+        assert_eq!(r2.midi_links, r.midi_links);
+        r2.midi_links.remove(0);
+        let (bytes, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes);
+        assert_eq!(r3.midi_links, vec![MidiLink { ctrl: 7, port: 0, target: Target::InsertVolume(0) }]);
+        let mut s2 = r3.clone();
+        s2.set_travel(Target::InsertVolume(0), 0.4);
+        assert!((s2.inserts[0].volume - 0.5).abs() < 1e-6);
     }
 
     #[test]

@@ -143,6 +143,8 @@ pub(crate) struct App {
     show_chanset: bool,
     show_events: bool,
     events: events::State,
+    /// The control waiting for a knob of the MIDI device to be moved, while its link window is open.
+    link_learn: Option<cereal_engine::song::Target>,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
     /// Preset files per plugin, found in the user's own content.
@@ -255,6 +257,7 @@ impl App {
             show_chanset: false,
             show_events: false,
             events: events::State::default(),
+            link_learn: None,
             fx_open: None,
             preset_lists: Default::default(),
             preset_name: Default::default(),
@@ -493,6 +496,56 @@ impl App {
             Ok(()) => format!("Exported {}", path.display()),
             Err(e) => format!("Export failed: {e}"),
         };
+    }
+
+    /// Apply what the MIDI device's knobs and sliders sent, and run the "link to controller" window.
+    fn controllers_ui(&mut self, ctx: &egui::Context) {
+        let moves = midi::take_controls();
+        if let Some(t) = self.link_learn {
+            let have = self.song.midi_links.iter().find(|l| l.target == t).map(|l| l.ctrl);
+            let (mut open, mut done, mut unlink) = (true, false, false);
+            egui::Window::new("Remote control settings").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+                ui.label(RichText::new(self.song.target_name(t)).strong());
+                ui.label(match have {
+                    Some(c) => format!("Linked to controller {c}."),
+                    None => "Not linked.".to_string(),
+                });
+                ui.label("Move a knob or slider on your MIDI device to link it.");
+                ui.horizontal(|ui| {
+                    if have.is_some() && ui.button("Remove link").clicked() {
+                        unlink = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if unlink || !moves.is_empty() {
+                self.song.midi_links.retain(|l| l.target != t);
+                if let (Some(&(cc, v)), false) = (moves.first(), unlink) {
+                    self.song.midi_links.push(cereal_engine::song::MidiLink { ctrl: cc as u16, port: 0, target: t });
+                    self.song.set_travel(t, v as f32 / 127.0);
+                    self.status = format!("Controller {cc} linked to {}", self.song.target_name(t));
+                }
+                self.dirty = true;
+                done = true;
+            }
+            if done || !open {
+                self.link_learn = None;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        for (cc, v) in moves {
+            let hit: Vec<_> = self.song.midi_links.iter().filter(|l| l.ctrl == cc as u16 && !matches!(l.target, cereal_engine::song::Target::Other { .. })).map(|l| l.target).collect();
+            for t in hit {
+                self.song.set_travel(t, v as f32 / 127.0);
+                self.dirty = true;
+            }
+        }
+        if !self.song.midi_links.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 
     fn render_window(&mut self, ctx: &egui::Context) {
@@ -1438,8 +1491,10 @@ impl eframe::App for App {
                     self.events.wanted = self.events.target;
                     self.show_events = true;
                 }
+                widgets::CtlAsk::Link => self.link_learn = Some(target),
             }
         }
+        self.controllers_ui(ctx);
         self.setup_ui(ctx);
         // files dropped on the window
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());

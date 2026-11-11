@@ -675,6 +675,16 @@ pub struct Song {
     pub auto_plan: Vec<AutoPlan>,
     /// Controls driven by a controller unit sitting in an effect slot.
     pub ctl_links: Vec<CtlLink>,
+    /// Controls driven by a knob or slider of a MIDI device.
+    pub midi_links: Vec<MidiLink>,
+}
+
+/// One control tied to a controller number of a MIDI device.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MidiLink {
+    pub ctrl: u16,
+    pub port: u16,
+    pub target: Target,
 }
 
 /// One control driven by an output of a controller unit (insert, slot, which output).
@@ -717,6 +727,7 @@ impl Song {
             mix_order: vec![],
             auto_plan: vec![],
             ctl_links: vec![],
+            midi_links: vec![],
         };
         s.prepare();
         s
@@ -826,6 +837,13 @@ impl Song {
         for c in &mut self.clips {
             match &mut c.src {
                 ClipSrc::Audio(k) | ClipSrc::Automation(k) if *k > ci => *k -= 1,
+                _ => {}
+            }
+        }
+        self.midi_links.retain(|l| !matches!(l.target, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if k == ci));
+        for l in &mut self.midi_links {
+            match &mut l.target {
+                Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k > ci => *k -= 1,
                 _ => {}
             }
         }
@@ -1168,6 +1186,19 @@ impl Song {
             mix_order: vec![],
             auto_plan: vec![],
             mixer_base: base,
+            midi_links: f
+                .file
+                .events
+                .iter()
+                .filter(|e| e.id == flp::id::MIDI_LINK)
+                .filter_map(|e| match &e.value {
+                    flp::Value::Data(d) if d.len() >= 12 => {
+                        let w = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
+                        Some(MidiLink { ctrl: w(0), port: w(2), target: target(&flp::FlpLink { kind: 0, source: 0, extra: 0, param: w(8), dest: w(10) }) })
+                    }
+                    _ => None,
+                })
+                .collect(),
             ctl_links: f
                 .links
                 .iter()
@@ -1241,6 +1272,63 @@ impl Song {
             Target::SlotParam(i, s, k) => (k | PLUGIN_FLAG, ins(i, s)),
             Target::ChanParam(c, k) => (k | PLUGIN_FLAG, c as u16),
             Target::Other { param, dest } => (param, dest),
+        }
+    }
+
+    /// Put a control at a point of its travel, 0..=1, as turning it by hand would.
+    pub fn set_travel(&mut self, t: Target, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        fn slot(s: &mut Song, i: usize, k: u16) -> Option<&mut Slot> {
+            s.inserts.get_mut(i).and_then(|i| i.slots.iter_mut().find(|x| x.index == k))
+        }
+        match t {
+            Target::ChanVolume(c) => {
+                if let Some(c) = self.channels.get_mut(c) {
+                    c.volume = v;
+                }
+            }
+            Target::ChanPan(c) => {
+                if let Some(c) = self.channels.get_mut(c) {
+                    c.pan = v * 2.0 - 1.0;
+                }
+            }
+            Target::ChanPitch(c) => {
+                if let Some(c) = self.channels.get_mut(c) {
+                    c.pitch_cents = (v - 0.5) * 400.0;
+                }
+            }
+            Target::InsertVolume(i) => {
+                if let Some(i) = self.inserts.get_mut(i) {
+                    i.volume = v * 1.25;
+                }
+            }
+            Target::InsertPan(i) => {
+                if let Some(i) = self.inserts.get_mut(i) {
+                    i.pan = v * 2.0 - 1.0;
+                }
+            }
+            Target::Tempo => self.tempo = 60.0 + v * 120.0,
+            Target::SlotMix(i, k) => {
+                if let Some(x) = slot(self, i, k) {
+                    x.mix = v;
+                }
+            }
+            Target::SlotOn(i, k) => {
+                if let Some(x) = slot(self, i, k) {
+                    x.enabled = v >= 0.5;
+                }
+            }
+            Target::SlotParam(i, k, p) => {
+                if let Some(f) = slot(self, i, k).and_then(|x| x.fx.as_mut()) {
+                    f.set_travel(p as usize, v);
+                }
+            }
+            Target::ChanParam(c, p) => {
+                if let Some(g) = self.channels.get_mut(c).and_then(|c| c.gen.as_mut()) {
+                    g.set_travel(p as usize, v);
+                }
+            }
+            Target::Other { .. } => {}
         }
     }
 

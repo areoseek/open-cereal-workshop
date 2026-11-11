@@ -76,6 +76,8 @@ pub mod id {
     pub const PLAYLIST: u8 = 233;
     pub const CHAN_AUTOMATION: u8 = 234;
     pub const LINK: u8 = 227;
+    /// A hardware controller tied to a control: laid out like `LINK`, with the controller number first.
+    pub const MIDI_LINK: u8 = 226;
     pub const CHAN_FX_FLAGS: u8 = 70;
     pub const CHAN_PREAMP: u8 = 74;
     pub const CHAN_FADE_OUT: u8 = 75;
