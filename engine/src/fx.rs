@@ -32,6 +32,9 @@ pub enum Kind {
     Swarm,
     MultiComp,
     Maxi,
+    BucketChorus,
+    GrainShift,
+    BandSplit,
     OldEq,
     OldReverb,
     OldFlanger,
@@ -520,6 +523,71 @@ pub static DEFS: &[Def] = &[
             p("Main average", 236, 0, 1, 0),
         ],
     },
+    Def {
+        kind: Kind::BucketChorus,
+        ident: "Vintage Chorus",
+        title: "Bucket Chorus",
+        size: 72,
+        fixed: &[(0, 1)],
+        params: &[
+            p("Mode", 4, 0, 3, 0),
+            p("Speed", 12, 1, 245760, 80),
+            p("Wave", 16, 0, 1, 0),
+            p("Left right phase", 20, 0, 6000, 3000),
+            p("Time 1", 24, 0, 6000, 60),
+            p("Time 2", 28, 0, 6000, 3000),
+            p("Mix", 32, 0, 6000, 3000),
+            p("Mono input", 36, 0, 1, 0),
+            p("Invert wet", 40, 0, 1, 0),
+            p("Feedback", 44, 0, 6000, 0),
+            p("High pass", 48, 0, 6000, 3000),
+            p("Gain", 52, 0, 6000, 0),
+            p("Noise", 56, 0, 6000, 3000),
+            p("Noise gate", 60, 0, 1, 0),
+            p("Start phase", 68, 0, 6000, 0),
+        ],
+    },
+    Def {
+        kind: Kind::GrainShift,
+        ident: "Pitch Shifter",
+        title: "Grain Shifter",
+        size: 75,
+        fixed: &[(0, 7), (48, 65536), (56, 65536), (64, 256), (71, 0x0101_0000)],
+        params: &[
+            p("Pitch", 4, -1200, 1200, 0),
+            p("Formant", 8, -1200, 1200, 0),
+            p("Detector", 12, 0, 2, 0),
+            p("Density", 16, 600, 2400, 2400),
+            p("Colour", 20, 2000, 15000, 8500),
+            p("Duration", 24, 100, 500, 200),
+            p("Jitter", 28, 0, 100, 0),
+            p("Random", 32, 0, 100, 0),
+            p("Delay", 36, 1, 768, 768),
+            p("Feedback", 40, 0, 100, 0),
+            p("Delay mode", 44, 0, 3, 0),
+            p("Delay options", 60, 0, 0x0101_0101, 256),
+            p("Mix", 69, 0, 2000, 1000),
+        ],
+    },
+    Def {
+        kind: Kind::BandSplit,
+        ident: "Frequency Splitter",
+        title: "Band Splitter",
+        size: 113,
+        fixed: &[(0, 4), (28, 2), (32, 45820), (72, 2), (76, 2), (80, 12), (88, 274), (92, 768), (96, 256), (100, 512), (104, 512), (108, 512)],
+        params: &[
+            p("Low split", 4, 0, 65536, 19800),
+            p("High split", 8, 0, 65536, 48065),
+            p("Low slope", 12, 0, 7, 3),
+            p("High slope", 16, 0, 7, 3),
+            p("Link", 20, 0, 1, 0),
+            p("Three bands", 24, 0, 1, 1),
+            p("Low level", 48, -1800, 1800, 0),
+            p("Mid level", 52, -1800, 1800, 0),
+            p("High level", 56, -1800, 1800, 0),
+            p("Mutes", 84, 0, 63, 0),
+        ],
+    },
     Def { kind: Kind::Curve, ident: "Fruity WaveShaper", title: "Curve Shaper", size: 102, fixed: &[], params: &[p("Pre", 4, 0, 256, 128), p("Mix", 8, 0, 128, 128), p("Post", 12, 0, 128, 128)] },
 ];
 
@@ -625,6 +693,11 @@ fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
         p.push(v);
     }
     Some(first + n * size + 20)
+}
+
+/// The band split knob: 30 Hz to 16 kHz over its travel.
+fn split_hz(v: f32) -> f32 {
+    30.0 * (16000f32 / 30.0).powf((v / 65536.0).clamp(0.0, 1.0))
 }
 
 /// Where the maximiser's first drawn line starts: the eight lines (four bands, two states) are the last thing
@@ -993,6 +1066,15 @@ fn biquad(c: &[f32; 5], z: &mut [f32], x: f32) -> f32 {
     y
 }
 
+/// Echo time of the grain shifter in frames: steps when its tempo switch is on, milliseconds otherwise.
+fn shift_delay(p: &[f32], cx: &Ctx) -> f32 {
+    if p[11] as i32 & 1 != 0 {
+        p[8] / 48.0 * cx.step
+    } else {
+        p[8] * 0.001 * cx.sr
+    }
+}
+
 /// Reverb line lengths in milliseconds at full room size.
 const REV_MS: [f32; 8] = [31.7, 37.1, 41.3, 47.9, 53.3, 61.7, 71.3, 83.9];
 const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
@@ -1012,6 +1094,14 @@ impl Unit {
                 }
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
+            Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            Kind::GrainShift => {
+                u.buf = vec![[0.0; 2]; (sr * 0.25) as usize + 8];
+                for _ in 0..2 {
+                    u.lines.push(vec![0.0; (sr * 8.0) as usize + 8]);
+                    u.lpos.push(0);
+                }
+            }
             Kind::Reverb => {
                 u.buf = vec![[0.0; 2]; (sr * 1.1) as usize + 8];
                 for ms in REV_MS.iter().chain(&REV_AP_MS) {
@@ -1046,7 +1136,13 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + 4096
             }
-            Kind::Flanger | Kind::Chorus | Kind::Swarm => (cx.sr * 0.5) as usize,
+            Kind::Flanger | Kind::Chorus | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
+            Kind::GrainShift => {
+                let fb = (p[9] / 100.0).clamp(0.0, 0.97);
+                let time = shift_delay(p, cx);
+                let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
+                (time * (n + 1.0)) as usize + (cx.sr * 0.3) as usize
+            }
             Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -1356,9 +1452,8 @@ impl Unit {
                 if p.len() < 59 + 4 * CURVE_N {
                     return;
                 }
-                let hz = |v: f32| 20.0 * 1000f32.powf((v / 65536.0).clamp(0.0, 1.0));
-                let g_lo = svf_g(hz(p[0]), sr);
-                let g_hi = svf_g(hz(p[2]), sr);
+                let g_lo = svf_g(split_hz(p[0]), sr);
+                let g_hi = svf_g(split_hz(p[2]), sr);
                 let (steep_lo, steep_hi) = (p[1] >= 0.5, p[3] >= 0.5);
                 let mix = (p[5] / 1000.0).clamp(0.0, 1.0);
                 // the low cut knob rests at 20 Hz in the middle; -1 is off
@@ -1470,6 +1565,129 @@ impl Unit {
                     }
                     let into = [dry[0] + (sum[0] - dry[0]) * mix, dry[1] + (sum[1] - dry[1]) * mix];
                     *f = run(3, into, &mut z[26..28]);
+                }
+            }
+            Kind::BucketChorus => {
+                // modes: 0 and 1 are the two fixed settings, 3 both at once, 2 follows the knobs
+                let custom = p[0] as i32 == 2;
+                let ms = |v: f32| 0.88 + v * 0.00145;
+                let (hz, t1, t2, lr, sine) = match p[0] as i32 {
+                    2 => (12.0 * (p[1] / 245760.0).powi(2), ms(p[4]), ms(p[5]), p[3] / 6000.0, p[2] >= 0.5),
+                    1 => (0.863, 1.66, 5.35, 0.5, false),
+                    3 => (9.75, 3.3, 3.7, 0.5, true),
+                    _ => (0.513, 1.66, 5.35, 0.5, false),
+                };
+                let start = if custom { p[14] / 6000.0 } else { 0.0 };
+                let mix = (p[6] / 6000.0).clamp(0.0, 1.0);
+                let (dry, wet) = ((mix * PI * 0.5).cos(), (mix * PI * 0.5).sin() * if p[8] >= 0.5 { -1.0 } else { 1.0 });
+                let fb = (p[9] / 6000.0).clamp(0.0, 1.0) * 0.9;
+                let hp = 1.0 - (-TAU * 20.0 * 50f32.powf((p[10] / 6000.0).clamp(0.0, 1.0)) / sr).exp();
+                let gain = db(p[11] / 6000.0 * 12.0);
+                let mono = p[7] >= 0.5;
+                let n = self.buf.len();
+                let step = hz / sr;
+                for f in io.iter_mut() {
+                    let x = if mono { [(f[0] + f[1]) * 0.5; 2] } else { *f };
+                    let mut w = [0f32; 2];
+                    for c in 0..2 {
+                        let ph = (self.ph + start + lr * c as f32).fract();
+                        let l = if sine { 0.5 - 0.5 * (ph * TAU).cos() } else { 1.0 - (2.0 * ph - 1.0).abs() };
+                        let d = (t1 + (t2 - t1) * l) * 0.001 * sr;
+                        let at = self.pos as f32 + n as f32 - d.clamp(1.0, n as f32 - 4.0);
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        let v = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                        z[c] += (v - z[c]) * hp;
+                        w[c] = v - z[c];
+                    }
+                    self.buf[self.pos] = [x[0] + w[0] * fb, x[1] + w[1] * fb];
+                    self.pos = (self.pos + 1) % n;
+                    self.ph = (self.ph + step).fract();
+                    *f = [(x[0] * dry + w[0] * wet) * gain, (x[1] * dry + w[1] * wet) * gain];
+                }
+            }
+            Kind::GrainShift => {
+                let ratio = (p[0] / 1200.0).exp2();
+                let n = self.buf.len();
+                let grain = (p[5] / 10.0 * 0.001 * sr).clamp(64.0, n as f32 - 8.0);
+                let taps = ((p[3] / 600.0).round() as usize).clamp(2, 4);
+                let fb = (p[9] / 100.0).clamp(0.0, 0.97);
+                let plain = p[10] as i32 == 3;
+                let len = self.lines[0].len();
+                let delay = (shift_delay(p, cx) as usize).clamp(1, len - 1);
+                let mix = p[12] / 1000.0;
+                let (dry, wet) = ((1.0 - mix).max(0.0), mix.max(0.0));
+                let step = (1.0 - ratio) / grain;
+                for f in io.iter_mut() {
+                    let lp = self.lpos[0];
+                    let back = (lp + len - delay) % len;
+                    let echo = [self.lines[0][back] * fb, self.lines[1][back] * fb];
+                    // the echo goes round through the shifter, or beside it in the plain mode
+                    self.buf[self.pos] = if plain { *f } else { [f[0] + echo[0], f[1] + echo[1]] };
+                    let mut y = [0f32; 2];
+                    for k in 0..taps {
+                        let ph = (self.ph + k as f32 / taps as f32).rem_euclid(1.0);
+                        let win = (0.5 - 0.5 * (ph * TAU).cos()) * 2.0 / taps as f32;
+                        let at = self.pos as f32 + n as f32 - ph * grain - 1.0;
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        for c in 0..2 {
+                            y[c] += (self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr) * win;
+                        }
+                    }
+                    if p[0].abs() < 0.5 {
+                        // no shift asked for: the newest frame, not a blend of delayed ones
+                        y = self.buf[self.pos];
+                    }
+                    if plain {
+                        y = [y[0] + echo[0], y[1] + echo[1]];
+                    }
+                    self.lines[0][lp] = y[0];
+                    self.lines[1][lp] = y[1];
+                    self.lpos[0] = (lp + 1) % len;
+                    self.pos = (self.pos + 1) % n;
+                    self.ph = (self.ph + step).rem_euclid(1.0);
+                    *f = [f[0] * dry + y[0] * wet, f[1] * dry + y[1] * wet];
+                }
+            }
+            Kind::BandSplit => {
+                let (f_lo, f_hi) = (split_hz(p[0]), split_hz(p[1]));
+                let (g_lo, g_hi) = (svf_g(f_lo, sr), svf_g(f_hi, sr));
+                let (a_lo, a_hi) = (1.0 - (-TAU * f_lo / sr).exp(), 1.0 - (-TAU * f_hi / sr).exp());
+                // slopes come in 6 dB steps; two-pole stages carry them, with a one-pole stage for the odd ones
+                let order = |v: f32| (v as usize).min(7) + 1;
+                let (n_lo, n_hi) = (order(p[2]), order(p[3]));
+                let three = p[5] >= 0.5;
+                let mutes = p[9] as i32;
+                let level = |v: f32, bit: i32| if v <= -1800.0 || mutes & bit != 0 { 0.0 } else { db(v / 100.0) };
+                let (l_lo, l_mid, l_hi) = (level(p[6], 8), level(p[7], 16), level(p[8], 32));
+                const Q: f32 = std::f32::consts::SQRT_2;
+                for f in io.iter_mut() {
+                    for c in 0..2 {
+                        let z = &mut z[c * 20..c * 20 + 20];
+                        let x = f[c];
+                        let mut low = x;
+                        for k in 0..(n_lo / 2).min(4) {
+                            low = svf(&mut z[k * 2..], low, g_lo, Q).0;
+                        }
+                        if n_lo % 2 == 1 {
+                            z[16] += (low - z[16]) * a_lo;
+                            low = z[16];
+                        }
+                        if !three {
+                            f[c] = low * l_lo + (x - low) * l_hi;
+                            continue;
+                        }
+                        let mut high = x;
+                        for k in 0..(n_hi / 2).min(4) {
+                            high = svf(&mut z[8 + k * 2..], high, g_hi, Q).2;
+                        }
+                        if n_hi % 2 == 1 {
+                            z[17] += (high - z[17]) * a_hi;
+                            high -= z[17];
+                        }
+                        f[c] = low * l_lo + (x - low - high) * l_mid + high * l_hi;
+                    }
                 }
             }
             Kind::MultiComp => {
@@ -1972,7 +2190,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::Maxi | Kind::OldReverb | Kind::OldFlanger) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -2073,6 +2291,26 @@ mod tests {
         let out = run(loud, sine, 32768);
         let peak = out[16384..].iter().fold(0f32, |m, f| m.max(f[0].abs()));
         assert!(peak < 1.3 && peak > 0.7, "{peak}");
+
+        // grain shifter: an octave up doubles the number of zero crossings
+        let mut fx = Fx::new(Kind::GrainShift);
+        fx.p[0] = 1200.0;
+        let cross = |v: &[[f32; 2]]| v.windows(2).filter(|w| w[0][0] < 0.0 && w[1][0] >= 0.0).count() as f32;
+        let out = run(fx, sine, 44100);
+        let plain: Vec<_> = (0..44100).map(sine).collect();
+        let r = cross(&out[8192..]) / cross(&plain[8192..]);
+        assert!((r - 2.0).abs() < 0.15, "{r}");
+
+        // band splitter: flat when the levels are level, quieter with the band holding the tone turned off
+        let fx = Fx::new(Kind::BandSplit);
+        assert!((rms(&run(fx.clone(), sine, 16384)[8192..]) / rms(&plain[8192..16384]) - 1.0).abs() < 0.01);
+        let mut cut = fx;
+        cut.p[7] = -1800.0;
+        assert!(rms(&run(cut, sine, 16384)[8192..]) < 0.5 * rms(&plain[8192..16384]));
+
+        // bucket chorus: sounds, stays bounded
+        let out = run(Fx::new(Kind::BucketChorus), sine, 16384);
+        assert!(rms(&out[8192..]) > 0.05 && out.iter().all(|f| f[0].abs() < 2.0));
 
         // equaliser: a 18 dB bell at the tone's frequency makes it much louder, a low-pass far below removes it
         let mut fx = Fx::new(Kind::Eq);
