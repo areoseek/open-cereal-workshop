@@ -42,6 +42,19 @@ pub struct Transport {
     voices: AtomicUsize,
     tempo: AtomicU32,
     metronome: AtomicBool,
+    recording: AtomicBool,
+    /// Notes played by hand while recording is armed and the song runs, for the window to write down.
+    live: Mutex<Vec<Live>>,
+}
+
+/// A key going down or up while recording, stamped with the play position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Live {
+    pub tick: f64,
+    pub on: bool,
+    pub chan: u16,
+    pub key: u8,
+    pub vel: f32,
 }
 
 impl Transport {
@@ -58,6 +71,8 @@ impl Transport {
             voices: AtomicUsize::new(0),
             tempo: AtomicU32::new(0f32.to_bits()),
             metronome: AtomicBool::new(false),
+            recording: AtomicBool::new(false),
+            live: Mutex::new(Vec::new()),
         })
     }
     pub fn playing(&self) -> bool {
@@ -84,6 +99,29 @@ impl Transport {
     }
     pub fn set_pattern(&self, p: usize) {
         self.pattern.store(p, Relaxed);
+    }
+    pub fn recording(&self) -> bool {
+        self.recording.load(Relaxed)
+    }
+    pub fn set_recording(&self, on: bool) {
+        self.recording.store(on, Relaxed);
+    }
+    /// The hand-played notes logged since the last call.
+    pub fn take_live(&self) -> Vec<Live> {
+        self.live.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
+    }
+    fn log(&self, c: &Cmd) {
+        if !(self.recording() && self.playing()) {
+            return;
+        }
+        let ev = match *c {
+            Cmd::NoteOn { chan, key, vel } => Live { tick: self.tick(), on: true, chan, key, vel },
+            Cmd::NoteOff { chan, key } => Live { tick: self.tick(), on: false, chan, key, vel: 0.0 },
+            _ => return,
+        };
+        if let Ok(mut l) = self.live.lock() {
+            l.push(ev);
+        }
     }
     /// Play position in ticks.
     pub fn tick(&self) -> f64 {
@@ -145,6 +183,7 @@ impl Handle {
         self.song.load_full()
     }
     pub fn send(&self, c: Cmd) {
+        self.transport.log(&c);
         if let Ok(mut q) = self.cmds.lock() {
             q.push(c);
         }
@@ -152,16 +191,17 @@ impl Handle {
 
     /// A second way in for commands, for threads other than the window's (MIDI input).
     pub fn sender(&self) -> CmdSender {
-        CmdSender(self.cmds.clone())
+        CmdSender(self.cmds.clone(), self.transport.clone())
     }
 }
 
 /// Sends commands to the audio thread from anywhere.
 #[derive(Clone)]
-pub struct CmdSender(Arc<Mutex<Vec<Cmd>>>);
+pub struct CmdSender(Arc<Mutex<Vec<Cmd>>>, Arc<Transport>);
 
 impl CmdSender {
     pub fn send(&self, c: Cmd) {
+        self.1.log(&c);
         if let Ok(mut q) = self.0.lock() {
             q.push(c);
         }
@@ -1483,6 +1523,26 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn played_notes_are_logged_only_while_recording_runs() {
+        let (h, mut p) = new_player(click_song(), 48_000.0);
+        let other = h.sender();
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        assert!(h.transport.take_live().is_empty(), "nothing is logged unless armed and playing");
+        h.transport.set_recording(true);
+        h.transport.set_playing(true);
+        let mut buf = vec![0.0; 4800 * 2];
+        p.render(&mut buf, 2);
+        other.send(Cmd::NoteOn { chan: 0, key: 62, vel: 0.5 });
+        p.render(&mut buf, 2);
+        h.send(Cmd::NoteOff { chan: 0, key: 62 });
+        let got = h.transport.take_live();
+        assert_eq!(got.len(), 2);
+        assert!(got[0].on && !got[1].on && got[0].key == 62);
+        assert!(got[0].tick > 0.0 && got[1].tick > got[0].tick);
+        assert!(h.transport.take_live().is_empty());
     }
 
     #[test]

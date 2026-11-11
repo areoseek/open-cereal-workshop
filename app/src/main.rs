@@ -132,6 +132,7 @@ pub(crate) struct App {
     show_info: bool,
     show_about: bool,
     render: Option<RenderOpts>,
+    rec_held: Vec<(u16, u8, f64, f32)>,
     save_preset: Option<(String, bool)>,
     show_chanset: bool,
     /// The effect slot whose editor is open: insert, slot.
@@ -239,6 +240,7 @@ impl App {
             show_info: false,
             show_about: false,
             render: None,
+            rec_held: Vec::new(),
             save_preset: None,
             show_chanset: false,
             fx_open: None,
@@ -292,7 +294,50 @@ impl App {
 
     fn stop(&mut self) {
         self.handle.transport.set_playing(false);
+        self.record_notes(true);
         self.handle.transport.seek(0);
+    }
+
+    /// Write hand-played notes into the current pattern while recording runs. `flush` ends keys still held.
+    fn record_notes(&mut self, flush: bool) {
+        let tr = self.handle.transport.clone();
+        let mut evs = tr.take_live();
+        if flush || !tr.playing() || !tr.recording() {
+            let now = tr.tick();
+            evs.extend(self.rec_held.iter().map(|&(chan, key, _, _)| cereal_engine::Live { tick: now, on: false, chan, key, vel: 0.0 }));
+        }
+        if evs.is_empty() {
+            return;
+        }
+        let pat = tr.pattern();
+        self.song.ensure_pattern(pat);
+        let song_mode = tr.song_mode();
+        let plen = self.song.pattern_length(pat) as f64;
+        // In song mode a note lands inside the clip of this pattern the play position is over.
+        let clip = |song: &Song, tick: f64| -> f64 {
+            if !song_mode {
+                return tick;
+            }
+            song.clips.iter().find(|c| c.src == cereal_engine::song::ClipSrc::Pattern(pat) && tick >= c.pos as f64 && tick < (c.pos + c.len) as f64).map(|c| tick - c.pos as f64 + c.offset as f64).unwrap_or(tick)
+        };
+        for e in evs {
+            if e.on {
+                self.rec_held.retain(|h| (h.0, h.1) != (e.chan, e.key));
+                self.rec_held.push((e.chan, e.key, e.tick, e.vel));
+            } else if let Some(i) = self.rec_held.iter().position(|h| (h.0, h.1) == (e.chan, e.key)) {
+                let (chan, key, start, vel) = self.rec_held.remove(i);
+                let pos = clip(&self.song, start).round().max(0.0);
+                let mut len = e.tick - start;
+                if len < 0.0 && !song_mode {
+                    // the loop came round while the key was down
+                    len = (plen - start).max(1.0);
+                }
+                let note = cereal_engine::song::Note { pos: pos as u32, len: len.round().max(1.0) as u32, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false };
+                self.song.patterns[pat].notes.push(note);
+                self.song.patterns[pat].sort();
+                self.dirty = true;
+            }
+        }
     }
 
     fn new_project(&mut self) {
@@ -933,6 +978,10 @@ impl App {
                 Key::F12 if !repeat => self.close_all(),
                 Key::Plus | Key::Equals => self.step_pattern(1),
                 Key::Minus => self.step_pattern(-1),
+                Key::R if !self.typing_keys && !repeat => {
+                    let tr = &self.handle.transport;
+                    tr.set_recording(!tr.recording());
+                }
                 Key::L if !self.typing_keys && !repeat => {
                     let tr = &self.handle.transport;
                     tr.set_song_mode(!tr.song_mode());
@@ -1109,6 +1158,10 @@ impl App {
                 if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("[]").strong())).on_hover_text("Stop").clicked() {
                     self.stop();
                 }
+                let rec = tr.recording();
+                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).on_hover_text("Record what you play into the current pattern (R)").clicked() {
+                    tr.set_recording(!rec);
+                }
                 ui.separator();
                 let live = tr.tempo();
                 let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
@@ -1277,6 +1330,7 @@ impl eframe::App for App {
                 self.actions.push(Action::LoadSample(p, None));
             }
         }
+        self.record_notes(false);
         self.toolbar(ctx);
         if self.show_browser {
             egui::SidePanel::left("browser").default_width(230.0).frame(egui::Frame::new().fill(PANEL_DARK).inner_margin(6.0)).show(ctx, |ui| self.browser_ui(ui));
