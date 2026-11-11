@@ -70,6 +70,8 @@ pub enum Kind {
     Emph,
     StonePhaser,
     Amp,
+    Relooper,
+    Deck,
 }
 
 pub struct Param {
@@ -821,6 +823,28 @@ pub static DEFS: &[Def] = &[
         fixed: &[(0, 0x464c_5353), (4, 460), (8, 0x4843_5231), (60, 0x3f00_0000), (80, 0x3f00_0000), (84, 0x3f00_0000), (88, 0x3f00_0000), (92, 0x3f00_0000), (96, 0x3f00_0000), (100, 0x3f00_0000), (104, 0x3f00_0000), (108, 0x3f00_0000), (112, 0x3f00_0000), (116, 0x3f00_0000), (120, 0x3f00_0000), (124, 0x3f00_0000), (128, 0x3f00_0000), (132, 0x3f00_0000), (136, 0x3f00_0000), (140, 0x3f00_0000), (144, 0x3f00_0000), (148, 0x3f00_0000), (152, 0x3f00_0000), (156, 0x3f00_0000), (160, 0x3f00_0000), (164, 0x3f00_0000), (188, 0x3f00_0000), (208, 0x3f00_0000), (168, 0x3f80_0000), (184, 0x3f80_0000), (192, 0x3f80_0000)],
         params: &[p("Input", 12, 0, 10000, 5000), p("Output", 16, 0, 10000, 5000), p("EQ on", 20, 0, 10000, 0), p("100 Hz", 24, 0, 10000, 5000), p("200 Hz", 28, 0, 10000, 5000), p("400 Hz", 32, 0, 10000, 5000), p("800 Hz", 36, 0, 10000, 5000), p("1.6 kHz", 40, 0, 10000, 5000), p("3.2 kHz", 44, 0, 10000, 5000), p("6.4 kHz", 48, 0, 10000, 5000), p("12.8 kHz", 52, 0, 10000, 5000), p("Cabinet", 56, 0, 200000, 0), p("Drive", 64, 0, 10000, 5000), p("Comb", 68, 0, 10000, 5000), p("Body", 72, 0, 10000, 5000), p("Glass", 76, 0, 10000, 5000), p("Chorus width", 80, 0, 10000, 5000), p("Chorus speed", 84, 0, 10000, 5000), p("Chorus mix", 88, 0, 10000, 5000), p("Pedal 1 on", 172, 0, 10000, 0), p("Pedal 2 on", 176, 0, 10000, 0), p("Pedal 3 on", 180, 0, 10000, 0), p("Pedal 1", 196, 0, 200000, 0), p("Pedal 2", 200, 0, 200000, 0), p("Pedal 3", 204, 0, 200000, 0)],
     },
+    Def {
+        kind: Kind::Relooper,
+        ident: "Transporter",
+        title: "Relooper",
+        size: 94,
+        fixed: &[(0, 4), (84, 131329), (88, 65536)],
+        params: &[
+            p("Dry", 4, 0, 12800, 12800),
+            p("Loop A", 8, 0, 12800, 12800),
+            p("Loop B", 12, 0, 12800, 12800),
+            p("Reverse", 16, 0, 10000, 0),
+            p("Shift", 20, 0, 10000, 0),
+            p("Down/up", 24, 0, 10000, 0),
+            p("Sensitivity", 28, 0, 1024, 512),
+            p("Min length", 32, 1, 10000, 500),
+            p("A/B ratio", 36, 0, 64, 8),
+            p("Spread", 40, 0, 1024, 512),
+            p("Bounce rate", 44, 0, 1024, 512),
+            p("Mode", 56, 0, 3, 0),
+        ],
+    },
+    Def { kind: Kind::Deck, ident: "Fruity Scratcher", title: "Turntable", size: 64, fixed: &[(0, 1001000), (8, 0x3f800000), (16, 0x3e800000), (20, 0x3f000000), (32, 0x3f000000), (40, 0x3f000000), (44, 0x3f6872b0), (48, 0x3f7fbe77), (52, 0x3ecccccd), (56, 0x41100000)], params: &[p("Position", 4, 0, 10000, 0), p("Pan", 12, 0, 10000, 5000), p("Volume", 24, 0, 10000, 7800)] },
     Def { kind: Kind::BassBoost, ident: "Fruity Bass Boost", title: "Bass Lift", size: 12, fixed: &[(0, 1)], params: &[p("Frequency", 4, 0, 1024, 512), p("Amount", 8, 0, 1024, 768)] },
     Def {
         kind: Kind::Phaser,
@@ -1622,6 +1646,12 @@ pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
     if ident.eq_ignore_ascii_case("Distructor") {
         return crate::fxrack::cabinet_named_in(state);
     }
+    if ident.eq_ignore_ascii_case("Fruity Scratcher") {
+        // fourteen settings, then the length of the path and the path
+        let n = u32::from_le_bytes(state.get(60..64)?.try_into().ok()?) as usize;
+        let raw = state.get(64..64 + n)?;
+        return Some(String::from_utf8_lossy(raw).trim_end_matches('\0').to_string()).filter(|s| !s.is_empty());
+    }
     if !ident.eq_ignore_ascii_case("Fruity Convolver") {
         return None;
     }
@@ -1837,7 +1867,7 @@ const XY_FRESH: [u8; 71] = [1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
 
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
-    kind == Kind::Pad || kind == Kind::Amp || (kind == Kind::Tuner && off < 144)
+    kind == Kind::Pad || kind == Kind::Amp || kind == Kind::Deck || (kind == Kind::Tuner && off < 144)
 }
 
 /// What a unit needs to know about the moment it is running in.
@@ -2142,6 +2172,10 @@ impl Unit {
                 }
             }
             Kind::FreqShift => u.buf = vec![[0.0; 2]; 36],
+            Kind::Relooper => {
+                u.lines.push(vec![0.0; (sr * 20.0) as usize + 8]);
+                u.lpos.push(12345);
+            }
             Kind::MorphEq => {
                 u.lines.push(vec![0.0; MEQ_BANDS * 8]);
                 u.lines.push(vec![-1.0; MEQ_BANDS * 2]);
@@ -2247,6 +2281,7 @@ impl Unit {
             }
             Kind::Squeeze | Kind::Eq7 | Kind::DcBlock | Kind::Emph | Kind::Amp => (cx.sr * 0.25) as usize,
             Kind::StonePhaser => cx.sr as usize,
+            Kind::Relooper => (cx.sr * 4.0) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -3310,6 +3345,106 @@ impl Unit {
                 for v in z[..52].iter_mut() {
                     if !v.is_finite() || v.abs() < 1e-20 {
                         *v = 0.0;
+                    }
+                }
+            }
+            Kind::Relooper => {
+                // the mono input runs into a long ring; a sharp rise in level marks a new loop, which is the stretch
+                // since the mark before it, and both loop voices keep repeating theirs until the next mark
+                // z: 0 fast level, 1 slow level, per voice at 8 + 8 v: start, length, read place, speed, frames since mark, play length
+                let n = self.lines[0].len();
+                let (dry, la, lb) = ((p[0] / 12800.0).powi(2), (p[1] / 12800.0).powi(2), (p[2] / 12800.0).powi(2));
+                let mode = p[11] as i32;
+                let base = if mode == 3 { p[7] / 1000.0 * cx.step * 4.0 } else { p[7] / 1000.0 * sr };
+                let ratio = 1.0 + p[8] / 8.0;
+                let min_len = [base.clamp(64.0, n as f32 * 0.5), (base / ratio).clamp(64.0, n as f32 * 0.5)];
+                let thresh = 1.2 + 6.0 * (1.0 - p[6] / 1024.0);
+                let (af, asl) = (1.0 - (-1.0 / (0.002 * sr)).exp(), 1.0 - (-1.0 / (0.08 * sr)).exp());
+                let spread = ((p[9] - 512.0) / 512.0).max(0.0);
+                let sweep = ((512.0 - p[9]) / 512.0).max(0.0);
+                let bounce = (-(p[10] - 512.0) / 512.0 * 0.25).exp2();
+                let fade = (0.002 * sr).max(8.0);
+                for f in io.iter_mut() {
+                    let m = (f[0] + f[1]) * 0.5;
+                    let w = self.pos;
+                    self.lines[0][w] = m;
+                    self.pos = (w + 1) % n;
+                    z[0] += af * (m.abs() - z[0]);
+                    z[1] += asl * (m.abs() - z[1]);
+                    let hit = z[0] > 0.004 && z[0] > z[1] * thresh;
+                    self.ph += sweep * 10.0 / sr;
+                    self.ph -= self.ph.floor();
+                    let mut out = [f[0] * dry, f[1] * dry];
+                    for v in 0..2 {
+                        let s = &mut z[8 + v * 8..16 + v * 8];
+                        s[4] += 1.0;
+                        let tempo_due = mode == 3 && s[4] >= min_len[v];
+                        if (hit || tempo_due) && s[4] >= min_len[v] {
+                            // roll for this loop's direction and speed
+                            let mut roll = || {
+                                self.lpos[0] = self.lpos[0].wrapping_mul(1664525).wrapping_add(1013904223) & 0xffff_ffff;
+                                (self.lpos[0] >> 8 & 0xffff) as f32 / 65536.0
+                            };
+                            let len = s[4].min(n as f32 * 0.5);
+                            s[0] = (w as f32 - len + n as f32) % n as f32;
+                            s[1] = len;
+                            s[5] = if mode == 3 { min_len[v] } else { len };
+                            let rev = roll() < p[3] / 10000.0;
+                            let oct = if roll() < p[4] / 10000.0 { if roll() < p[5] / 10000.0 { 2.0 } else { 0.5 } } else { 1.0 };
+                            s[3] = if rev { -oct } else { oct };
+                            s[2] = if rev { s[5] - 1.0 } else { 0.0 };
+                            s[4] = 0.0;
+                        }
+                        if s[1] >= 1.0 && s[5] >= 1.0 {
+                            let at = s[0] + s[2].clamp(0.0, s[1] - 1.0);
+                            let i0 = at as usize % n;
+                            let fr = at - at.floor();
+                            let x = self.lines[0][i0] * (1.0 - fr) + self.lines[0][(i0 + 1) % n] * fr;
+                            let edge = (s[2].min(s[5] - s[2]) / fade).clamp(0.0, 1.0);
+                            s[2] += s[3];
+                            if s[2] >= s[5] || s[2] < 0.0 {
+                                if mode == 1 {
+                                    s[5] = (s[5] * bounce).clamp(64.0, s[1]);
+                                }
+                                s[2] = if s[3] < 0.0 { s[5] - 1.0 } else { 0.0 };
+                            }
+                            let side = if v == 0 { -1.0 } else { 1.0 };
+                            let pan = side * spread + side * sweep * (self.ph * TAU).sin();
+                            let (l, r) = balance(pan.clamp(-1.0, 1.0));
+                            let g = x * edge * if v == 0 { la } else { lb };
+                            out[0] += g * l;
+                            out[1] += g * r;
+                        }
+                    }
+                    *f = out;
+                }
+                for v in z[..2].iter_mut() {
+                    if v.abs() < 1e-20 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            Kind::Deck => {
+                // the record keeps turning at its own speed and is heard on top of what comes in
+                if let Some(ir) = &self.fx.ir {
+                    let n = ir.smp.frames.len();
+                    if n > 1 {
+                        let inc = ir.smp.rate as f32 / sr;
+                        let (l, r) = balance(p[1] / 5000.0 - 1.0);
+                        let vol = p[2] / 10000.0;
+                        if self.pos == 0 && self.ph == 0.0 {
+                            self.pos = ((p[0] / 10000.0).clamp(0.0, 1.0) * (n - 1) as f32) as usize;
+                        }
+                        for f in io.iter_mut() {
+                            let a = ir.smp.frames[self.pos % n];
+                            let b = ir.smp.frames[(self.pos + 1) % n];
+                            f[0] += (a[0] + (b[0] - a[0]) * self.ph) * l * vol;
+                            f[1] += (a[1] + (b[1] - a[1]) * self.ph) * r * vol;
+                            self.ph += inc;
+                            let whole = self.ph.floor();
+                            self.ph -= whole;
+                            self.pos = (self.pos + whole as usize) % n;
+                        }
                     }
                 }
             }
@@ -4381,7 +4516,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);

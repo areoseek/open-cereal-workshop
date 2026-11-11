@@ -62,7 +62,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Edison (opens as Wave Recorder, block kept, sound passes through; recording and editing are not done)
 - [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
 - [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
-- [ ] Emphasizer
+- [~] Emphasizer (built as Loudener; gain range and stage laws are estimates, no meters)
 - [~] EQUO (built as Morph Equaliser: 31 bands, eight curves with morph, master curve, per-band pan, shift, smoothing; mix knob not located in the block, band gain law and shift range estimated, sends and curve drawing missing)
 - [ ] FL Studio Mobile Rack FX
 - [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
@@ -104,7 +104,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
 - [~] Fruity Reeverb 2 (built, approximate)
-- [ ] Fruity Scratcher
+- [~] Fruity Scratcher (built as Turntable; the record plays straight on top of the input, no scratching by hand or timecode)
 - [~] Fruity Send (built as Send Tap; target taken as the n-th routed track, master left out)
 - [~] Fruity Soft Clipper (built, approximate)
 - [~] Fruity Spectroman (opens, block kept; the spectrum display is not drawn)
@@ -117,7 +117,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity X-Y Controller (built as Pad Controller; outputs its stored position, no pad window yet)
 - [ ] Fruity X-Y-Z Controller
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block, mixes, attack and release; no line editor yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
-- [ ] Hardcore
+- [~] Hardcore (built as Pedal Board; input, output, graphic equaliser, a generic speaker box, drive and chorus pedals; the other pedals and the real cabinet models are not run)
 - [~] Hyper Chorus (built, approximate)
 - [~] Low Lifter (built as Low Harmonics: band split, overtone curve, gains, mix; which stored value is which knob is partly guessed, diffusion missing)
 - [~] Luxeverb (built as Plush Reverb, approximate)
@@ -134,7 +134,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Spreader (built, approximate)
 - [~] Transient Processor (built, approximate)
 - [ ] Transmitter
-- [ ] Transporter
+- [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
 - [~] Tuner (opens, block kept; the pitch display is not drawn)
 - [ ] VFX Color Mapper
 - [ ] VFX Envelope
@@ -144,7 +144,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] VFX Script
 - [ ] VFX Sequencer
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
-- [ ] Vintage Phaser
+- [~] Vintage Phaser (built as Stone Phaser; four stages, sweep range, feedback, speed and stereo phase; its echo, noise, colour and drive sections are not run and several setting positions are guesses)
 - [~] Vocodex (Band Vocoder: bands, follower, mapping envelopes read, built-in carrier, listens to routed mixer tracks; envelopes not yet editable, noise detection and freeze missing)
 - [~] Wave Candy (opens as Scope Meter, block kept, sound passes through; the displays are not drawn)
 - [~] ZGameEditor Visualizer (opens as Visual Stage, block kept, sound passes through; no visuals)
