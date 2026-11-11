@@ -51,6 +51,8 @@ pub enum Kind {
     Poly2,
     /// The small touch-screen synth: its stored values, 0 to 1, in file order (`analog::pocket`).
     Pocket,
+    /// The saw synth: its first ninety-six stored values in file order (`analog::saw`).
+    SawSyn,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -96,7 +98,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -458,7 +460,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Metal, ident: "Ogun", title: "Metal Stack", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::MetalBank, ident: "Autogun", title: "Metal Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::SawSyn, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Buzz, ident: "Wasp", title: "Hornet", size: 169, fixed: &[(0, 1)], tail: &[], params: BUZZ },
@@ -538,6 +540,15 @@ fn trio_values(state: &[u8]) -> Vec<f32> {
     let mut p: Vec<f32> = state[..560].chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap()) as f32).collect();
     p.push(u32::from_le_bytes([state[560], state[561], state[562], state[563]]) as f32);
     p
+}
+
+/// The values of a block that opens with a four-letter mark, its length and a version mark: `count` numbers
+/// from the twelfth byte. Empty when the block is not of that make or too short.
+fn tagged_values(state: &[u8], count: usize) -> Vec<f32> {
+    if state.len() < 12 + count * 4 || &state[..4] != b"SSLF" {
+        return Vec::new();
+    }
+    state[12..12 + count * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
 fn pocket_values(state: &[u8]) -> Vec<f32> {
@@ -710,6 +721,9 @@ impl Gen {
         }
         if d.kind == Kind::Poly {
             return Some(Self { kind: d.kind, p: poly_values(state, 12), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::SawSyn {
+            return Some(Self { kind: d.kind, p: tagged_values(state, 96), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Trio {
             return Some(Self { kind: d.kind, p: trio_values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -1271,6 +1285,41 @@ mod tests {
         let patch = tone.mini.as_ref().unwrap();
         let mut voice = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
         assert!((0..4000).map(|_| voice.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
+    }
+
+    #[test]
+    fn the_saw_synth_reads_its_values_and_follows_its_cutoff() {
+        let bright = |cut: f32| {
+            let mut b = b"SSLF\x64\x02\0\x001rwS".to_vec();
+            for i in 0..152 {
+                let x: f32 = match i {
+                    0 | 6 | 7 => 0.5,
+                    4 => 1.0,
+                    17 => 0.8,
+                    27 => cut,
+                    _ => 0.0,
+                };
+                b.extend_from_slice(&x.to_le_bytes());
+            }
+            let g = Gen::decode("Sawer", &b).unwrap();
+            assert_eq!(g.p.len(), 96);
+            assert_eq!(g.encode(None), b);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 220.0 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, dp, 3);
+            let out: Vec<f32> = (0..8000).map(|_| v.frame(patch, dp)[0]).collect();
+            let level: f32 = out.iter().map(|x| x.abs()).sum();
+            let edge: f32 = out.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+            assert!(level > 50.0, "{level}");
+            edge / level
+        };
+        let (open, shut) = (bright(1.0), bright(0.3));
+        assert!(open > shut * 1.5, "{open} {shut}");
+        let tone = Gen::decode("Sawer", &[]).unwrap().tone();
+        let patch = tone.mini.as_ref().unwrap();
+        let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
+        assert!((0..4000).map(|_| v.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
     }
 
     #[test]

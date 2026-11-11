@@ -549,6 +549,45 @@ pub fn trio(p: &[f32]) -> Set {
     }
 }
 
+/// Settings of the saw synth from its stored values (0 to 1 each, in file order). Placed with fair confidence
+/// from how the presets use them: 0 level, 2-5 level envelope, 6 transpose (four octaves), 7 fine, 14 unison
+/// voices, 15 unison detune, 23 square sub, 27 cutoff, 28 resonance, 29 key follow, 47 ensemble switch. Guesses:
+/// 17 sub level, 32-35 the second envelope, 36 how far it opens the filter. The rest (sync, slow wave, phaser,
+/// echo, room, arpeggiator) is not placed yet.
+pub fn saw(p: &[f32]) -> Set {
+    let full = p.len() >= 96;
+    let v = |i: usize| -> f32 {
+        if full {
+            return p[i].clamp(0.0, 1.0);
+        }
+        match i {
+            0 | 6 | 7 => 0.5,
+            4 | 27 => 1.0,
+            _ => 0.0,
+        }
+    };
+    let time = |i: usize| 0.002 + v(i).powi(3) * 8.0;
+    let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2), r: time(i + 3) };
+    let tune = ((v(6) - 0.5) * 48.0).round() + (v(7) - 0.5) * 2.0;
+    let sub = if v(23) >= 0.5 { Shape::Square } else { Shape::Saw };
+    let voices = 1 + (v(14) * 7.0).round() as u32;
+    let apart = if voices > 1 { v(15) * 0.3 } else { 0.0 };
+    Set {
+        osc: [Osc { shape: Shape::Saw, semis: tune + apart, level: 1.0 }, Osc { shape: sub, semis: tune - 12.0 - apart, level: v(17) }, Osc::default()],
+        dual: voices > 1,
+        amp: env(2),
+        fenv: env(32),
+        filter: Filter::Low24,
+        cutoff_hz: 30.0 * 2f32.powf(v(27) * 9.4),
+        res: v(28) * 0.9,
+        env_oct: v(36) * 6.0,
+        track: v(29),
+        chorus: if v(47) >= 0.5 { 1 } else { 0 },
+        gain: 0.1 + v(0) * 0.4,
+        ..Default::default()
+    }
+}
+
 pub fn pocket(p: &[f32]) -> Set {
     const PLAIN: [f32; 24] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.68, 0.0, 0.0, 0.37, 0.5, 0.0, 1.0, 1.0, 0.0];
     let v = |i: usize| if p.len() >= 24 { p[i] } else { PLAIN[i] };
