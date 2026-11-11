@@ -31,13 +31,15 @@ pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usiz
     h.transport.set_pattern(pattern);
     h.transport.set_looping(false);
     h.transport.set_playing(true);
-    let ticks = if song_mode { song.length() } else { song.pattern_length(pattern) } as f64;
-    let secs = ticks / song.ppq as f64 * 60.0 / song.tempo.max(1.0) as f64;
-    let body = (secs * sample_rate as f64).ceil() as usize;
     let max_tail = (tail.max(0.0) * sample_rate) as usize;
-    let mut out = vec![0.0f32; body * 2];
-    for block in out.chunks_mut(2 * 1024) {
-        p.render(block, 2);
+    // automation can change the tempo, so the length is only known by playing it through
+    let cap = (sample_rate as usize) * 3600 * 4;
+    let mut out: Vec<f32> = Vec::new();
+    let _ = pattern;
+    while h.transport.playing() && out.len() / 2 < cap {
+        let at = out.len();
+        out.resize(at + 2 * 1024, 0.0);
+        p.render(&mut out[at..], 2);
     }
     let mut extra = 0;
     while p.busy() && extra < max_tail {

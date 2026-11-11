@@ -40,6 +40,7 @@ pub struct Transport {
     peaks: Vec<[AtomicU32; 2]>,
     voices: AtomicUsize,
     tempo: AtomicU32,
+    metronome: AtomicBool,
 }
 
 impl Transport {
@@ -55,6 +56,7 @@ impl Transport {
             peaks: (0..MAX_METERS).map(|_| [AtomicU32::new(0), AtomicU32::new(0)]).collect(),
             voices: AtomicUsize::new(0),
             tempo: AtomicU32::new(0f32.to_bits()),
+            metronome: AtomicBool::new(false),
         })
     }
     pub fn playing(&self) -> bool {
@@ -107,6 +109,12 @@ impl Transport {
     /// Tempo in force while playing (automation can move it); 0 before anything has played.
     pub fn tempo(&self) -> f32 {
         f32::from_bits(self.tempo.load(Relaxed))
+    }
+    pub fn metronome(&self) -> bool {
+        self.metronome.load(Relaxed)
+    }
+    pub fn set_metronome(&self, on: bool) {
+        self.metronome.store(on, Relaxed)
     }
     pub fn voices(&self) -> usize {
         self.voices.load(Relaxed)
@@ -163,6 +171,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         chase: false,
         born: 0,
         ov: Overrides::default(),
+        clicks: [click(sample_rate, 1760.0), click(sample_rate, 880.0)],
     };
     (handle, player)
 }
@@ -233,6 +242,13 @@ impl Overrides {
             Target::Other { .. } => {}
         }
     }
+}
+
+/// A short decaying blip for the metronome.
+fn click(rate: f32, hz: f32) -> Arc<Sample> {
+    let n = (rate * 0.03) as usize;
+    let data: Vec<f32> = (0..n).map(|i| (i as f32 / rate * hz * std::f32::consts::TAU).sin() * (1.0 - i as f32 / n as f32).powi(2) * 0.6).collect();
+    Arc::new(Sample::from_mono("click", rate as u32, &data))
 }
 
 #[derive(Default)]
@@ -346,6 +362,8 @@ pub struct Player {
     chase: bool,
     born: u64,
     ov: Overrides,
+    /// Metronome sounds: bar, beat.
+    clicks: [Arc<Sample>; 2],
 }
 
 impl Player {
@@ -612,6 +630,18 @@ impl Player {
             }
         } else {
             self.fire_pattern(song, pat, t0, t1, 0.0, t0, tpf, None);
+        }
+
+        if tr.metronome() {
+            let beat = (song.ppq * 4 / song.time_sig.1.max(1) as u32).max(1) as f64;
+            let bar = song.bar() as f64;
+            let mut b = (t0 / beat).ceil() * beat;
+            while b < t1 {
+                let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+                let smp = self.clicks[if (b % bar) < 0.5 { 0 } else { 1 }].clone();
+                self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+                b += beat;
+            }
         }
 
         self.pos = t0 + n as f64 * tpf;

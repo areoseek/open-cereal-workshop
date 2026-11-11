@@ -349,6 +349,48 @@ impl Song {
         }
     }
 
+    /// Remove a pattern; its clips go with it and later patterns move up one.
+    pub fn remove_pattern(&mut self, pi: usize) {
+        if pi >= self.patterns.len() {
+            return;
+        }
+        self.patterns.remove(pi);
+        if self.patterns.is_empty() {
+            self.patterns.push(Pattern::default());
+        }
+        self.clips.retain(|c| c.src != ClipSrc::Pattern(pi));
+        for c in &mut self.clips {
+            if let ClipSrc::Pattern(k) = &mut c.src {
+                if *k > pi {
+                    *k -= 1;
+                }
+            }
+        }
+    }
+
+    /// Copy a pattern to the end of the list; returns the copy's index.
+    pub fn clone_pattern(&mut self, pi: usize) -> usize {
+        self.ensure_pattern(pi);
+        let mut p = self.patterns[pi].clone();
+        if !p.name.is_empty() {
+            p.name = format!("{} #2", p.name);
+        }
+        self.patterns.push(p);
+        self.patterns.len() - 1
+    }
+
+    /// The first pattern with nothing in it and nothing placed, adding one if there is none.
+    pub fn next_empty_pattern(&mut self) -> usize {
+        let used: std::collections::HashSet<usize> = self.clips.iter().filter_map(|c| if let ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
+        match (0..self.patterns.len()).find(|i| self.patterns[*i].notes.is_empty() && !used.contains(i)) {
+            Some(i) => i,
+            None => {
+                self.patterns.push(Pattern::default());
+                self.patterns.len() - 1
+            }
+        }
+    }
+
     /// Remove a channel and renumber everything that refers to the ones after it.
     pub fn remove_channel(&mut self, ci: usize) {
         if ci >= self.channels.len() {

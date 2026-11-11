@@ -15,7 +15,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use egui::{Key, RichText, Vec2};
 
 use cereal_engine::flp::{ChannelKind, Flp};
-use cereal_engine::song::{Chan, Pattern};
+use cereal_engine::song::Chan;
 use cereal_engine::{new_player, wav, Cmd, Handle, Library, Player, Song};
 
 use widgets::*;
@@ -90,7 +90,17 @@ pub(crate) struct App {
     peaks: Vec<(f32, f32)>,
     held: HashMap<Key, (u16, u8)>,
     actions: Vec<Action>,
+    /// Undo history: snapshots of the song, oldest first; `hist_at` is the one on screen.
+    history: Vec<Song>,
+    hist_at: usize,
+    /// An edit is under way (mouse still down); it becomes one history step when it ends.
+    hist_pending: bool,
+    show_info: bool,
+    show_about: bool,
+    rename_pattern: Option<(usize, String)>,
 }
+
+const HISTORY_MAX: usize = 100;
 
 /// Computer keys that play notes, as semitones above C5.
 const TYPING: [(Key, u8); 30] = [
@@ -177,6 +187,12 @@ impl App {
             peaks: vec![],
             held: HashMap::new(),
             actions: vec![],
+            history: vec![],
+            hist_at: 0,
+            hist_pending: false,
+            show_info: false,
+            show_about: false,
+            rename_pattern: None,
         };
         if let Some(p) = open {
             app.open(&p);
@@ -314,6 +330,73 @@ impl App {
         }
     }
 
+    /// Step back through the history.
+    fn undo(&mut self) {
+        if self.hist_at > 0 {
+            self.hist_at -= 1;
+            self.restore();
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.hist_at + 1 < self.history.len() {
+            self.hist_at += 1;
+            self.restore();
+        }
+    }
+
+    /// Ctrl+Z: undo the last edit, or bring it back if it was just undone.
+    fn undo_toggle(&mut self) {
+        if self.hist_at + 1 < self.history.len() {
+            self.redo();
+        } else {
+            self.undo();
+        }
+    }
+
+    fn restore(&mut self) {
+        self.song = self.history[self.hist_at].clone();
+        self.sel_chan = self.sel_chan.min(self.song.channels.len().saturating_sub(1));
+        self.sel_insert = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
+        let tr = &self.handle.transport;
+        tr.set_pattern(tr.pattern().min(self.song.patterns.len().saturating_sub(1)));
+        self.unsaved = true;
+        self.handle.publish(self.song.clone());
+    }
+
+    fn new_pattern(&mut self) {
+        let p = self.song.next_empty_pattern();
+        self.handle.transport.set_pattern(p);
+        self.dirty = true;
+    }
+
+    fn clone_pattern(&mut self) {
+        let p = self.song.clone_pattern(self.handle.transport.pattern());
+        self.handle.transport.set_pattern(p);
+        self.dirty = true;
+    }
+
+    fn delete_pattern(&mut self) {
+        let p = self.handle.transport.pattern();
+        self.song.remove_pattern(p);
+        self.handle.transport.set_pattern(p.min(self.song.patterns.len() - 1));
+        self.dirty = true;
+    }
+
+    fn start_rename_pattern(&mut self) {
+        let p = self.handle.transport.pattern();
+        self.song.ensure_pattern(p);
+        self.rename_pattern = Some((p, self.song.patterns[p].name.clone()));
+    }
+
+    fn close_all(&mut self) {
+        self.show_playlist = false;
+        self.show_rack = false;
+        self.show_piano = false;
+        self.show_mixer = false;
+        self.show_info = false;
+    }
+
     fn step_pattern(&mut self, by: i32) {
         let p = (self.handle.transport.pattern() as i32 + by).max(0) as usize;
         self.song.ensure_pattern(p);
@@ -340,11 +423,23 @@ impl App {
                     continue;
                 }
                 match key {
+                    Key::Z if modifiers.alt => self.undo(),
+                    Key::Z => self.undo_toggle(),
                     Key::N => self.new_project(),
                     Key::O => self.open_dialog(),
                     Key::S => self.save(modifiers.shift),
                     Key::R => self.export(),
                     Key::T => self.typing_keys = !self.typing_keys,
+                    Key::M => {
+                        let tr = &self.handle.transport;
+                        tr.set_metronome(!tr.metronome());
+                    }
+                    Key::H => self.handle.send(Cmd::Panic),
+                    Key::C if modifiers.shift => self.clone_pattern(),
+                    Key::Space => {
+                        let tr = &self.handle.transport;
+                        tr.set_playing(!tr.playing());
+                    }
                     _ => {}
                 }
                 continue;
@@ -368,12 +463,10 @@ impl App {
                 Key::F6 if !repeat => self.show_rack = !self.show_rack,
                 Key::F7 if !repeat => self.show_piano = !self.show_piano,
                 Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
-                Key::F4 if !repeat => {
-                    let p = self.song.patterns.len();
-                    self.song.patterns.push(Pattern::default());
-                    self.handle.transport.set_pattern(p);
-                    self.dirty = true;
-                }
+                Key::F4 if !repeat => self.new_pattern(),
+                Key::F2 if !repeat => self.start_rename_pattern(),
+                Key::F11 if !repeat => self.show_info = !self.show_info,
+                Key::F12 if !repeat => self.close_all(),
                 Key::Plus | Key::Equals => self.step_pattern(1),
                 Key::Minus => self.step_pattern(-1),
                 Key::L if !self.typing_keys && !repeat => {
@@ -424,6 +517,24 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
+                ui.menu_button("EDIT", |ui| {
+                    let can_undo = self.hist_at > 0;
+                    let can_redo = self.hist_at + 1 < self.history.len();
+                    if ui.add_enabled(can_undo || can_redo, egui::Button::new("Undo / redo last edit     Ctrl+Z")).clicked() {
+                        self.undo_toggle();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(can_undo, egui::Button::new("Undo step by step         Ctrl+Alt+Z")).clicked() {
+                        self.undo();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).clicked() {
+                        self.redo();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label(RichText::new(format!("History: step {} of {}", self.hist_at + 1, self.history.len().max(1))).color(TEXT_DIM).small());
+                });
                 ui.menu_button("ADD", |ui| {
                     if ui.button("Sampler channel").clicked() {
                         self.song.channels.push(Chan::default());
@@ -432,10 +543,34 @@ impl App {
                         ui.close_menu();
                     }
                     if ui.button("Pattern                F4").clicked() {
-                        let p = self.song.patterns.len();
-                        self.song.patterns.push(Pattern::default());
-                        self.handle.transport.set_pattern(p);
-                        self.dirty = true;
+                        self.new_pattern();
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("PATTERNS", |ui| {
+                    if ui.button("Find first empty               F4").clicked() {
+                        self.new_pattern();
+                        ui.close_menu();
+                    }
+                    if ui.button("Clone                               Ctrl+Shift+C").clicked() {
+                        self.clone_pattern();
+                        ui.close_menu();
+                    }
+                    if ui.button("Rename and colour...      F2").clicked() {
+                        self.start_rename_pattern();
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.delete_pattern();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Next                                 +").clicked() {
+                        self.step_pattern(1);
+                        ui.close_menu();
+                    }
+                    if ui.button("Previous                           -").clicked() {
+                        self.step_pattern(-1);
                         ui.close_menu();
                     }
                 });
@@ -445,11 +580,31 @@ impl App {
                     ui.checkbox(&mut self.show_piano, "Piano roll          F7");
                     ui.checkbox(&mut self.show_mixer, "Mixer                 F9");
                     ui.checkbox(&mut self.show_browser, "Browser            Alt+F8");
+                    ui.checkbox(&mut self.show_info, "Project info       F11");
+                    ui.separator();
+                    if ui.button("Close all windows     F12").clicked() {
+                        self.close_all();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("OPTIONS", |ui| {
                     ui.checkbox(&mut self.typing_keys, "Typing keyboard to piano     Ctrl+T");
+                    let mut m = self.handle.transport.metronome();
+                    if ui.checkbox(&mut m, "Metronome                              Ctrl+M").changed() {
+                        self.handle.transport.set_metronome(m);
+                    }
+                    if ui.button("Stop all sound                          Ctrl+H").clicked() {
+                        self.handle.send(Cmd::Panic);
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.label(RichText::new(&self.audio).color(TEXT_DIM));
+                });
+                ui.menu_button("HELP", |ui| {
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&self.status).color(TEXT_DIM).small());
@@ -477,7 +632,8 @@ impl App {
                     self.stop();
                 }
                 ui.separator();
-                let mut tempo = self.song.tempo;
+                let live = tr.tempo();
+                let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
                 if ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).on_hover_text("Tempo").changed() {
                     self.song.tempo = tempo;
                     self.dirty = true;
@@ -494,10 +650,11 @@ impl App {
                     }
                 });
                 if ui.button("+").on_hover_text("New pattern (F4)").clicked() {
-                    let p = self.song.patterns.len();
-                    self.song.patterns.push(Pattern::default());
-                    tr.set_pattern(p);
-                    self.dirty = true;
+                    self.new_pattern();
+                }
+                let mut met = tr.metronome();
+                if ui.toggle_value(&mut met, "Metro").on_hover_text("Metronome (Ctrl+M)").changed() {
+                    tr.set_metronome(met);
                 }
                 ui.separator();
                 // time
@@ -528,6 +685,84 @@ impl App {
             });
             ui.add_space(2.0);
         });
+    }
+}
+
+impl App {
+    /// Project info, the pattern rename box and the about box.
+    fn small_windows(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_info;
+        egui::Window::new("Project info").open(&mut open).collapsible(false).default_width(360.0).show(ctx, |ui| {
+            let mut changed = false;
+            egui::Grid::new("info").num_columns(2).show(ui, |ui| {
+                ui.label("Title");
+                changed |= ui.text_edit_singleline(&mut self.song.title).changed();
+                ui.end_row();
+                ui.label("Artist");
+                changed |= ui.text_edit_singleline(&mut self.song.artist).changed();
+                ui.end_row();
+                ui.label("Genre");
+                changed |= ui.text_edit_singleline(&mut self.song.genre).changed();
+                ui.end_row();
+            });
+            ui.label("Comments");
+            changed |= ui.add(egui::TextEdit::multiline(&mut self.song.comment).desired_rows(6).desired_width(f32::INFINITY)).changed();
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Time signature");
+                let (mut n, mut d) = self.song.time_sig;
+                changed |= ui.add(egui::DragValue::new(&mut n).range(1..=16)).changed();
+                ui.label("/");
+                egui::ComboBox::from_id_salt("beat").width(48.0).selected_text(d.to_string()).show_ui(ui, |ui| {
+                    for v in [2u8, 4, 8, 16] {
+                        changed |= ui.selectable_value(&mut d, v, v.to_string()).changed();
+                    }
+                });
+                self.song.time_sig = (n, d);
+            });
+            if changed {
+                self.dirty = true;
+            }
+        });
+        self.show_info = open;
+
+        if let Some((pi, mut name)) = self.rename_pattern.take() {
+            let mut keep = true;
+            let mut open = true;
+            egui::Window::new("Pattern name and colour").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                let r = ui.text_edit_singleline(&mut name);
+                r.request_focus();
+                let mut col = self.song.patterns.get(pi).and_then(|p| p.color).unwrap_or([72, 81, 86]);
+                if ui.color_edit_button_srgb(&mut col).changed() {
+                    if let Some(p) = self.song.patterns.get_mut(pi) {
+                        p.color = Some(col);
+                        self.dirty = true;
+                    }
+                }
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    if let Some(p) = self.song.patterns.get_mut(pi) {
+                        p.name = name.trim().to_string();
+                        self.dirty = true;
+                    }
+                    keep = false;
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    keep = false;
+                }
+            });
+            if keep && open {
+                self.rename_pattern = Some((pi, name));
+            }
+        }
+
+        let mut open = self.show_about;
+        egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.heading("Breakfast Cereal DAW");
+            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+            ui.label("A free, open source music workstation for Linux and Windows.");
+            ui.label(RichText::new(&self.audio).color(TEXT_DIM).small());
+        });
+        self.show_about = open;
     }
 }
 
@@ -563,14 +798,32 @@ impl eframe::App for App {
         egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([300.0, 420.0]).default_size([980.0, 360.0]).show(ctx, |ui| self.mixer_ui(ui));
         self.show_mixer = open;
 
+        self.small_windows(ctx);
         self.run_actions();
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
         }
         if self.dirty {
             self.dirty = false;
-            self.unsaved = !std::mem::take(&mut self.fresh) || self.unsaved;
+            if std::mem::take(&mut self.fresh) {
+                self.history = vec![self.song.clone()];
+                self.hist_at = 0;
+                self.hist_pending = false;
+            } else {
+                self.unsaved = true;
+                self.hist_pending = true;
+            }
             self.handle.publish(self.song.clone());
+        }
+        // an edit becomes one undo step once the mouse is up and no text box is being typed in
+        if self.hist_pending && !ctx.input(|i| i.pointer.any_down()) && !ctx.wants_keyboard_input() {
+            self.hist_pending = false;
+            self.history.truncate(self.hist_at + 1);
+            self.history.push(self.song.clone());
+            if self.history.len() > HISTORY_MAX {
+                self.history.remove(0);
+            }
+            self.hist_at = self.history.len() - 1;
         }
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name}{} - Breakfast Cereal DAW", if self.unsaved { " *" } else { "" })));
@@ -585,7 +838,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let open = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Breakfast Cereal DAW"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_maximized(true).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Breakfast Cereal DAW"),
         ..Default::default()
     };
     eframe::run_native(
