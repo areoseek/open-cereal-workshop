@@ -15,6 +15,7 @@ pub enum Kind {
     Enhancer,
     Loud,
     Warp,
+    Bank,
     FastLp,
     Overdrive,
     Filter,
@@ -688,6 +689,156 @@ pub static DEFS: &[Def] = &[
             p("Tension", 28, 0, 256, 0),
         ],
     },
+    // the offsets here only number the settings: the block is packed and read by its own module
+    Def {
+        kind: Kind::Bank,
+        ident: "Fruity Love Philter",
+        title: "Filter Bank",
+        size: 0,
+        fixed: &[],
+        params: &[
+            p("Pad X", 0, 0, 1024, 512),
+            p("Pad Y", 4, 0, 1024, 512),
+            p("Follower attack", 8, 0, 16384, 4096),
+            p("Follower release", 12, 0, 16384, 8192),
+            p("1 Envelope", 16, 0, 256, 128),
+            p("1 Cutoff", 20, 0, 256, 128),
+            p("1 Resonance", 24, 0, 256, 128),
+            p("1 Low", 28, 0, 128, 128),
+            p("1 Band", 32, 0, 128, 0),
+            p("1 High", 36, 0, 128, 0),
+            p("1 Shaper drive", 40, 0, 256, 128),
+            p("1 Shaper mix", 44, 0, 128, 128),
+            p("1 Pan", 48, -64, 64, 0),
+            p("1 Volume", 52, 0, 160, 128),
+            p("1 Input", 56, 0, 160, 128),
+            p("1 To next", 60, -160, 160, 0),
+            p("1 Slope", 64, 0, 5, 1),
+            p("1 Type", 68, 0, 11, 0),
+            p("1 On", 72, 0, 1, 1),
+            p("1 Shaper on", 76, 0, 1, 0),
+            p("1 Shaper two-sided", 80, 0, 1, 0),
+            p("2 Envelope", 84, 0, 256, 128),
+            p("2 Cutoff", 88, 0, 256, 128),
+            p("2 Resonance", 92, 0, 256, 128),
+            p("2 Low", 96, 0, 128, 128),
+            p("2 Band", 100, 0, 128, 0),
+            p("2 High", 104, 0, 128, 0),
+            p("2 Shaper drive", 108, 0, 256, 128),
+            p("2 Shaper mix", 112, 0, 128, 128),
+            p("2 Pan", 116, -64, 64, 0),
+            p("2 Volume", 120, 0, 160, 128),
+            p("2 Input", 124, 0, 160, 128),
+            p("2 To next", 128, -160, 160, 0),
+            p("2 Slope", 132, 0, 5, 1),
+            p("2 Type", 136, 0, 11, 0),
+            p("2 On", 140, 0, 1, 0),
+            p("2 Shaper on", 144, 0, 1, 0),
+            p("2 Shaper two-sided", 148, 0, 1, 0),
+            p("3 Envelope", 152, 0, 256, 128),
+            p("3 Cutoff", 156, 0, 256, 128),
+            p("3 Resonance", 160, 0, 256, 128),
+            p("3 Low", 164, 0, 128, 128),
+            p("3 Band", 168, 0, 128, 0),
+            p("3 High", 172, 0, 128, 0),
+            p("3 Shaper drive", 176, 0, 256, 128),
+            p("3 Shaper mix", 180, 0, 128, 128),
+            p("3 Pan", 184, -64, 64, 0),
+            p("3 Volume", 188, 0, 160, 128),
+            p("3 Input", 192, 0, 160, 128),
+            p("3 To next", 196, -160, 160, 0),
+            p("3 Slope", 200, 0, 5, 1),
+            p("3 Type", 204, 0, 11, 0),
+            p("3 On", 208, 0, 1, 0),
+            p("3 Shaper on", 212, 0, 1, 0),
+            p("3 Shaper two-sided", 216, 0, 1, 0),
+            p("4 Envelope", 220, 0, 256, 128),
+            p("4 Cutoff", 224, 0, 256, 128),
+            p("4 Resonance", 228, 0, 256, 128),
+            p("4 Low", 232, 0, 128, 128),
+            p("4 Band", 236, 0, 128, 0),
+            p("4 High", 240, 0, 128, 0),
+            p("4 Shaper drive", 244, 0, 256, 128),
+            p("4 Shaper mix", 248, 0, 128, 128),
+            p("4 Pan", 252, -64, 64, 0),
+            p("4 Volume", 256, 0, 160, 128),
+            p("4 Input", 260, 0, 160, 128),
+            p("4 To next", 264, -160, 160, 0),
+            p("4 Slope", 268, 0, 5, 1),
+            p("4 Type", 272, 0, 11, 0),
+            p("4 On", 276, 0, 1, 0),
+            p("4 Shaper on", 280, 0, 1, 0),
+            p("4 Shaper two-sided", 284, 0, 1, 0),
+            p("5 Envelope", 288, 0, 256, 128),
+            p("5 Cutoff", 292, 0, 256, 128),
+            p("5 Resonance", 296, 0, 256, 128),
+            p("5 Low", 300, 0, 128, 128),
+            p("5 Band", 304, 0, 128, 0),
+            p("5 High", 308, 0, 128, 0),
+            p("5 Shaper drive", 312, 0, 256, 128),
+            p("5 Shaper mix", 316, 0, 128, 128),
+            p("5 Pan", 320, -64, 64, 0),
+            p("5 Volume", 324, 0, 160, 128),
+            p("5 Input", 328, 0, 160, 128),
+            p("5 To next", 332, -160, 160, 0),
+            p("5 Slope", 336, 0, 5, 1),
+            p("5 Type", 340, 0, 11, 0),
+            p("5 On", 344, 0, 1, 0),
+            p("5 Shaper on", 348, 0, 1, 0),
+            p("5 Shaper two-sided", 352, 0, 1, 0),
+            p("6 Envelope", 356, 0, 256, 128),
+            p("6 Cutoff", 360, 0, 256, 128),
+            p("6 Resonance", 364, 0, 256, 128),
+            p("6 Low", 368, 0, 128, 128),
+            p("6 Band", 372, 0, 128, 0),
+            p("6 High", 376, 0, 128, 0),
+            p("6 Shaper drive", 380, 0, 256, 128),
+            p("6 Shaper mix", 384, 0, 128, 128),
+            p("6 Pan", 388, -64, 64, 0),
+            p("6 Volume", 392, 0, 160, 128),
+            p("6 Input", 396, 0, 160, 128),
+            p("6 To next", 400, -160, 160, 0),
+            p("6 Slope", 404, 0, 5, 1),
+            p("6 Type", 408, 0, 11, 0),
+            p("6 On", 412, 0, 1, 0),
+            p("6 Shaper on", 416, 0, 1, 0),
+            p("6 Shaper two-sided", 420, 0, 1, 0),
+            p("7 Envelope", 424, 0, 256, 128),
+            p("7 Cutoff", 428, 0, 256, 128),
+            p("7 Resonance", 432, 0, 256, 128),
+            p("7 Low", 436, 0, 128, 128),
+            p("7 Band", 440, 0, 128, 0),
+            p("7 High", 444, 0, 128, 0),
+            p("7 Shaper drive", 448, 0, 256, 128),
+            p("7 Shaper mix", 452, 0, 128, 128),
+            p("7 Pan", 456, -64, 64, 0),
+            p("7 Volume", 460, 0, 160, 128),
+            p("7 Input", 464, 0, 160, 128),
+            p("7 To next", 468, -160, 160, 0),
+            p("7 Slope", 472, 0, 5, 1),
+            p("7 Type", 476, 0, 11, 0),
+            p("7 On", 480, 0, 1, 0),
+            p("7 Shaper on", 484, 0, 1, 0),
+            p("7 Shaper two-sided", 488, 0, 1, 0),
+            p("8 Envelope", 492, 0, 256, 128),
+            p("8 Cutoff", 496, 0, 256, 128),
+            p("8 Resonance", 500, 0, 256, 128),
+            p("8 Low", 504, 0, 128, 128),
+            p("8 Band", 508, 0, 128, 0),
+            p("8 High", 512, 0, 128, 0),
+            p("8 Shaper drive", 516, 0, 256, 128),
+            p("8 Shaper mix", 520, 0, 128, 128),
+            p("8 Pan", 524, -64, 64, 0),
+            p("8 Volume", 528, 0, 160, 128),
+            p("8 Input", 532, 0, 160, 128),
+            p("8 To next", 536, -160, 160, 0),
+            p("8 Slope", 540, 0, 5, 1),
+            p("8 Type", 544, 0, 11, 0),
+            p("8 On", 548, 0, 1, 0),
+            p("8 Shaper on", 552, 0, 1, 0),
+            p("8 Shaper two-sided", 556, 0, 1, 0),
+        ],
+    },
     Def {
         kind: Kind::Xy,
         ident: "Fruity X-Y Controller",
@@ -952,9 +1103,9 @@ fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
 }
 
 /// The same with a table of `count` entries.
-fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec<f32>) -> Option<usize> {
+pub(crate) fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec<f32>) -> Option<usize> {
     let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    if int(head)? != 3 {
+    if !(1..=3).contains(&int(head)?) {
         return None;
     }
     let sub = int(head + 4)?;
@@ -1177,6 +1328,9 @@ impl Fx {
         if kind == Kind::Warp {
             return Self::decode(def(kind).ident, &warp_fresh()).expect("our own block reads back");
         }
+        if kind == Kind::Bank {
+            return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
+        }
         Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
     }
 
@@ -1192,6 +1346,9 @@ impl Fx {
     /// too short to hold its settings.
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
         let d = DEFS.iter().find(|d| d.ident == ident)?;
+        if d.kind == Kind::Bank {
+            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p });
+        }
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
         // the oldest reverb blocks (found in presets) have no version number in front
         let lead;
@@ -1254,6 +1411,9 @@ impl Fx {
     /// Write the settings into a stored block: `base` when the effect came from a file (everything we do not
     /// model is kept), a fresh block otherwise.
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
+        if self.kind == Kind::Bank {
+            return crate::fxbank::encode(&self.p, base);
+        }
         let d = def(self.kind);
         let mut out = match base {
             Some(b) => b.to_vec(),
@@ -1391,6 +1551,7 @@ pub struct Unit {
     lpos: Vec<usize>,
     /// What a controller unit is putting out, 0..=1 each (level follower: both, peak, sweep).
     pub out: [f32; 3],
+    bank: Option<Box<crate::fxbank::State>>,
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -1554,7 +1715,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3] };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None };
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
@@ -1569,6 +1730,7 @@ impl Unit {
             Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
             // two bars at 40 beats a minute and up
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
+            Kind::Bank => u.bank = Some(Box::default()),
             Kind::Tuner => {
                 u.buf = vec![[0.0; 2]; (sr * 0.2) as usize + 8];
                 u.lines.push(vec![0.0; 2048]);
@@ -1613,7 +1775,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3] }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None }.tail(cx);
         }
         let p = &self.fx.p;
         match self.fx.kind {
@@ -1654,6 +1816,7 @@ impl Unit {
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Peak => (cx.sr * 3.0) as usize,
             Kind::Warp => (cx.step * 32.0) as usize + 64,
+            Kind::Bank => (cx.sr * 0.25) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2363,6 +2526,11 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Bank => {
+                if let Some(st) = &mut self.bank {
+                    crate::fxbank::process(p, st, io, cx);
+                }
+            }
             Kind::Warp => {
                 // everything heard goes into a two-bar ring; the time line says how far back to read at each
                 // moment of the bar (top = now, bottom = two bars ago) and the volume line gates the result
@@ -3169,7 +3337,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -3181,6 +3349,10 @@ mod tests {
     #[test]
     fn blocks_round_trip() {
         for d in DEFS {
+            // the filter bank's block is packed; its own module tests the trip
+            if d.kind == Kind::Bank {
+                continue;
+            }
             let mut fx = Fx::new(d.kind);
             for (v, p) in fx.p.iter_mut().zip(d.params) {
                 *v = ((p.min + p.max) / 2) as f32;

@@ -89,7 +89,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Free Filter
 - [ ] Fruity HTML NoteBook
 - [~] Fruity Limiter (built, approximate)
-- [ ] Fruity Love Philter
+- [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Not yet: slow oscillators, patterns 2 to 10 and key switching, line editors, the note text. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
 - [ ] Fruity LSD
 - [~] Fruity Multiband Compressor (built as Three Band Compressor, approximate)
 - [ ] Fruity Mute 2
