@@ -145,8 +145,12 @@ impl Voice {
                 Voice::String(Box::new(Ks { line: [a, b], pos: 0, frac: len - len.floor(), last: [0.0; 2], keep, fade: 1.0, fade_by: 1.0, wide, vel }))
             }
             Kind::Guitar => Voice::Guitar(Box::new(crate::guitar::Voice::start(s, sr, key, vel, dphase, seed))),
-            Kind::Buzz | Kind::BuzzXt | Kind::Pocket => {
-                let set = if p.kind == Kind::Pocket { crate::analog::pocket(s) } else { crate::analog::buzz(s) };
+            Kind::Buzz | Kind::BuzzXt | Kind::Pocket | Kind::Poly => {
+                let set = match p.kind {
+                    Kind::Pocket => crate::analog::pocket(s),
+                    Kind::Poly => crate::analog::poly(s),
+                    _ => crate::analog::buzz(s),
+                };
                 Voice::Analog(Box::new((crate::analog::Voice::start(&set, sr, key, vel, seed), set)))
             }
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),

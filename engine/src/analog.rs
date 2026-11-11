@@ -11,6 +11,8 @@ pub enum Shape {
     #[default]
     Saw,
     Pulse,
+    /// A pulse that ignores the width setting.
+    Square,
     Sine,
     Triangle,
     Noise,
@@ -50,6 +52,8 @@ pub struct Lfo {
     pub hz: f32,
     /// Start from the top of the wave on each note.
     pub reset: bool,
+    /// Seconds over which it fades in after the key goes down.
+    pub delay: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -99,7 +103,15 @@ pub struct Set {
     pub env_oct: f32,
     /// How much the cutoff follows the key, 0 to 1.
     pub track: f32,
-    pub lfo: [Lfo; 2],
+    pub lfo: [Lfo; 3],
+    /// White noise mixed in before the filter.
+    pub noise: f32,
+    /// A gentle low cut before the filter (0 for none).
+    pub hpf_hz: f32,
+    /// The filter envelope also narrows the pulse by this much.
+    pub width_env: f32,
+    /// Ensemble after the voice: 0 off, 1 slow, 2 faster, 3 both.
+    pub chorus: u8,
     /// Drive (0 to 1) and tone (0 dark to 1 bright), when the drive stage is on.
     pub drive: Option<(f32, f32)>,
     pub gain: f32,
@@ -147,8 +159,11 @@ pub struct Voice {
     ph: [f32; 5],
     amp: Env,
     fenv: Env,
-    lfo: [f32; 2],
-    lfo_hold: [f32; 2],
+    lfo: [f32; 3],
+    lfo_hold: [f32; 3],
+    hp: f32,
+    hpc: f32,
+    ens: Option<Box<Ensemble>>,
     seed: u32,
     t: u32,
     // control values held between updates
@@ -162,6 +177,47 @@ pub struct Voice {
     z: [f32; 4],
     tone: f32,
     last1: f32,
+}
+
+/// The ensemble of the old string machines and polys: one short delay swept slowly, heard a little early on one
+/// side and a little late on the other.
+#[derive(Debug, Clone)]
+struct Ensemble {
+    line: Vec<f32>,
+    at: usize,
+    ph: f32,
+    step: f32,
+    depth: f32,
+    mid: f32,
+}
+
+impl Ensemble {
+    fn new(mode: u8, sr: f32) -> Self {
+        // sweep rate in cycles per second, and how far the delay moves, in seconds
+        let (hz, depth) = match mode {
+            1 => (0.5, 0.0018),
+            2 => (0.83, 0.0018),
+            _ => (8.0, 0.0003),
+        };
+        Self { line: vec![0.0; (sr * 0.012) as usize + 4], at: 0, ph: 0.0, step: hz / sr, depth: depth * sr, mid: 0.0035 * sr }
+    }
+
+    fn frame(&mut self, x: f32) -> [f32; 2] {
+        let n = self.line.len();
+        self.line[self.at] = x;
+        self.ph = (self.ph + self.step).fract();
+        let tri = 1.0 - 4.0 * (self.ph - 0.5).abs();
+        let read = |d: f32| {
+            let back = d.clamp(1.0, n as f32 - 3.0);
+            let whole = back.floor();
+            let i = (self.at + n - whole as usize) % n;
+            let j = (i + n - 1) % n;
+            self.line[i] + (self.line[j] - self.line[i]) * (back - whole)
+        };
+        let out = [(x + read(self.mid + tri * self.depth)) * 0.7, (x + read(self.mid - tri * self.depth)) * 0.7];
+        self.at = (self.at + 1) % n;
+        out
+    }
 }
 
 fn rnd(seed: &mut u32) -> f32 {
@@ -193,6 +249,7 @@ fn wave(shape: Shape, ph: f32, dt: f32, width: f32, seed: &mut u32) -> f32 {
             y -= blep(if q < 0.0 { q + 1.0 } else { q }, dt);
             y
         }
+        Shape::Square => wave(Shape::Pulse, ph, dt, 0.0, seed),
         Shape::Sine => (ph * TAU).sin(),
         Shape::Triangle => 1.0 - 4.0 * (ph - 0.5).abs(),
         Shape::Noise => rnd(seed),
@@ -210,6 +267,12 @@ impl Voice {
             *p = rnd(&mut v.seed) * 0.5 + 0.5;
         }
         v.t = 0;
+        if set.hpf_hz > 0.0 {
+            v.hpc = 1.0 - (-TAU * set.hpf_hz / sr).exp();
+        }
+        if set.chorus != 0 {
+            v.ens = Some(Box::new(Ensemble::new(set.chorus, sr)));
+        }
         v
     }
 
@@ -227,15 +290,16 @@ impl Voice {
         let mut cut_oct = f * set.env_oct + (self.key - 60.0) / 12.0 * set.track;
         let mut level = 1.0;
         self.bend = [0.0; 2];
-        self.width = set.width;
+        self.width = (set.width + f * set.width_env).clamp(0.0, 1.0);
         self.mix = 0.5;
+        let since = self.t as f32 / self.sr;
         for (k, l) in set.lfo.iter().enumerate() {
             let before = self.lfo[k];
             self.lfo[k] = (before + l.hz * dt).fract();
             let ph = self.lfo[k];
             let x = match l.shape {
                 Shape::Saw => 1.0 - 2.0 * ph,
-                Shape::Pulse => {
+                Shape::Pulse | Shape::Square => {
                     if ph < 0.5 {
                         1.0
                     } else {
@@ -251,7 +315,8 @@ impl Voice {
                     }
                     self.lfo_hold[k]
                 }
-            } * l.amount;
+            } * l.amount
+                * if l.delay > 0.0 { (since / l.delay).min(1.0) } else { 1.0 };
             match l.dest {
                 Dest::None => {}
                 Dest::Pitch => {
@@ -307,7 +372,14 @@ impl Voice {
             x += wave(set.osc[2].shape, self.ph[2], d3, width, &mut self.seed) * set.osc[2].level;
             self.ph[2] = (self.ph[2] + d3).fract();
         }
+        if set.noise > 0.0 {
+            x += rnd(&mut self.seed) * set.noise;
+        }
         x *= 0.5;
+        if self.hpc > 0.0 {
+            self.hp += (x - self.hp) * self.hpc;
+            x -= self.hp;
+        }
         // two two-pole stages
         let (g, k) = (self.g, self.k);
         let stage = |z: &mut [f32], x: f32, k: f32| {
@@ -344,7 +416,10 @@ impl Voice {
             y = self.tone;
         }
         let y = y * set.gain * self.vel;
-        [y, y]
+        match &mut self.ens {
+            Some(e) => e.frame(y),
+            None => [y, y],
+        }
     }
 }
 
@@ -364,6 +439,7 @@ pub fn buzz(p: &[f32]) -> Set {
         amount: u(i + 2),
         hz: 0.05 * 2f32.powf(u(i + 3) * 9.0),
         reset: v(i + 5) != 0.0,
+        delay: 0.0,
     };
     Set {
         osc: [
@@ -383,9 +459,10 @@ pub fn buzz(p: &[f32]) -> Set {
         res: u(23),
         env_oct: u(24) * 7.0,
         track: if v(20) != 0.0 { 1.0 } else { 0.0 },
-        lfo: [lfo(25, [Dest::Pitch, Dest::Cutoff, Dest::Width]), lfo(31, [Dest::Pitch1, Dest::Mix, Dest::Level])],
+        lfo: [lfo(25, [Dest::Pitch, Dest::Cutoff, Dest::Width]), lfo(31, [Dest::Pitch1, Dest::Mix, Dest::Level]), Lfo::default()],
         drive: (v(37) != 0.0).then(|| (u(38), u(39))),
         gain: 0.5,
+        ..Default::default()
     }
 }
 
@@ -446,6 +523,44 @@ pub fn pocket(p: &[f32]) -> Set {
     }
 }
 
+/// The six-voice vintage poly's stored values (0 to 1, in file order) as a voice set. The arpeggiator, hold and
+/// tempo sync of the slow oscillator are not played.
+pub fn poly(p: &[f32]) -> Set {
+    const PLAIN: [f32; 34] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.5, 0.5];
+    let v = |i: usize| if p.len() >= 34 { p[i] } else { PLAIN[i] };
+    let on = |i: usize| v(i) >= 0.5;
+    let octave = (v(32) * 2.0).round() * 12.0 - 12.0;
+    let hz = 0.1 * 2f32.powf(v(5) * 8.2);
+    let delay = v(7) * 3.0;
+    let slow = |dest: Dest, amount: f32| Lfo { shape: Shape::Triangle, dest: if amount > 0.0 { dest } else { Dest::None }, amount, hz, reset: true, delay };
+    // where the pulse width comes from: the slow oscillator, the slider itself, or the envelope
+    let source = (v(12) * 2.0).round() as u8;
+    let env = Adsr { a: 0.0015 * 2f32.powf(v(26) * 11.0), d: 0.002 * 2f32.powf(v(27) * 12.5), s: v(28), r: 0.002 * 2f32.powf(v(29) * 12.5) };
+    Set {
+        osc: [
+            Osc { shape: Shape::Pulse, semis: octave, level: if on(13) { 1.0 } else { 0.0 } },
+            Osc { shape: Shape::Saw, semis: octave, level: if on(14) { 1.0 } else { 0.0 } },
+            Osc { shape: Shape::Square, semis: octave - 12.0, level: if on(15) { v(16) } else { 0.0 } },
+        ],
+        width: if source == 1 { v(11) } else { 0.0 },
+        width_env: if source == 2 { v(11) } else { 0.0 },
+        noise: v(17) * 0.7,
+        hpf_hz: if v(18) > 0.01 { 10.0 * 2f32.powf(v(18) * 7.0) } else { 0.0 },
+        // gated, the level simply follows the key
+        amp: if on(25) { Adsr { a: 0.002, d: 0.1, s: 1.0, r: 0.012 } } else { env },
+        fenv: env,
+        filter: Filter::Low24,
+        cutoff_hz: 12.0 * 2f32.powf(v(19) * 10.5),
+        res: v(20),
+        env_oct: v(22) * 10.0 * if on(21) { -1.0 } else { 1.0 },
+        track: v(24),
+        lfo: [slow(Dest::Pitch, v(10) * 0.6), slow(Dest::Cutoff, v(23)), slow(Dest::Width, if source == 0 { v(11) } else { 0.0 })],
+        chorus: (v(30) * 3.0).round() as u8,
+        gain: 0.25 + v(33) * 0.5,
+        ..Default::default()
+    }
+}
+
 const PI_F: f32 = std::f32::consts::PI;
 
 #[cfg(test)]
@@ -495,7 +610,11 @@ mod tests {
                 set.fm = 0.7;
                 set.dual = true;
                 set.drive = Some((0.8, 0.5));
-                set.lfo = [Lfo { shape: Shape::Noise, dest: Dest::Cutoff, amount: 1.0, hz: 9.0, reset: true }, Lfo { shape: Shape::Sine, dest: Dest::Pitch1, amount: 1.0, hz: 5.0, reset: false }];
+                set.lfo = [Lfo { shape: Shape::Noise, dest: Dest::Cutoff, amount: 1.0, hz: 9.0, reset: true, delay: 0.2 }, Lfo { shape: Shape::Sine, dest: Dest::Pitch1, amount: 1.0, hz: 5.0, reset: false, delay: 0.0 }, Lfo::default()];
+                set.noise = 0.3;
+                set.hpf_hz = 200.0;
+                set.chorus = 1 + (shape as u8) % 3;
+                set.width_env = 0.5;
                 let mut v = Voice::start(&set, 44100.0, 72, 1.0, 3);
                 for _ in 0..20000 {
                     let y = v.frame(&set, 0.02)[0];

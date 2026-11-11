@@ -43,6 +43,8 @@ pub enum Kind {
     Travel,
     /// The small three-oscillator analog-style synth and its wider sibling (`analog.rs`).
     Buzz,
+    /// The six-voice vintage poly: its stored values, 0 to 1, in file order (`analog::poly`).
+    Poly,
     /// The small touch-screen synth: its stored values, 0 to 1, in file order (`analog::pocket`).
     Pocket,
     /// The electric guitar (`guitar.rs`).
@@ -88,7 +90,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly)
     }
 }
 
@@ -465,7 +467,7 @@ pub static DEFS: &[Def] = &[Def {
         params: &[p("Decay", 0, 0, 128, 128), p("Colour", 4, 0, 128, 64), p("Even decay", 8, 0, 1, 1), p("Gate", 12, 0, 1, 0), p("Widen", 16, 0, 1, 1)],
     },
     Def { kind: Kind::Guitar, ident: "FL Slayer", title: "Six String", size: 116, fixed: &[], tail: &[], params: GUITAR },
-    Def { kind: Kind::Sub, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Poly, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Pocket, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -499,6 +501,17 @@ const SUBS: &[SubMap] = &[
     SubMap { ident: "Sawer", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "lead" },
     SubMap { ident: "Sakura", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "pluck" },
 ];
+
+/// The values of the vintage polys: a name with its length in front at `at`, a version, a count, then that many
+/// numbers from 0 to 1.
+fn poly_values(state: &[u8], at: usize) -> Vec<f32> {
+    let word = |o: usize| state.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let Some(name) = word(at).filter(|&n| n < 64) else { return Vec::new() };
+    let from = at + 4 + name + 8;
+    let Some(count) = word(from - 4).filter(|&n| n < 4096) else { return Vec::new() };
+    let Some(data) = state.get(from..from + count * 4) else { return Vec::new() };
+    data.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect()
+}
 
 /// The values of the small touch-screen synth: a tagged file whose data part holds a short head and then one
 /// number from 0 to 1 per control.
@@ -666,6 +679,9 @@ impl Gen {
             // a block without a readable picture stays with the project and plays nothing
             let img = crate::beep::Image::parse(state).map(std::sync::Arc::new);
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img, smp: None });
+        }
+        if d.kind == Kind::Poly {
+            return Some(Self { kind: d.kind, p: poly_values(state, 12), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Pocket {
             return Some(Self { kind: d.kind, p: pocket_values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -1228,6 +1244,38 @@ mod tests {
         let patch = tone.mini.as_ref().unwrap();
         let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
         assert!((0..4000).map(|_| v.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.05);
+    }
+
+    #[test]
+    fn the_vintage_poly_reads_its_values_and_sounds() {
+        let mut b = vec![0u8; 12];
+        b.extend_from_slice(&9u32.to_le_bytes());
+        b.extend_from_slice(b"Kepler-1\0");
+        b.extend_from_slice(&4u32.to_le_bytes());
+        b.extend_from_slice(&34u32.to_le_bytes());
+        for i in 0..34 {
+            let x: f32 = match i {
+                13..=15 => 1.0,
+                16 => 0.8,
+                11 | 19 | 28 | 33 => 0.5,
+                30 => 0.33,
+                _ => 0.0,
+            };
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&[0; 9]);
+        let g = Gen::decode("Kepler", &b).unwrap();
+        assert_eq!(g.p.len(), 34);
+        assert_eq!(g.encode(None), b);
+        for g in [g, Gen::decode("Kepler", &[]).unwrap()] {
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 220.0 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, dp, 3);
+            let out: Vec<[f32; 2]> = (0..12000).map(|_| v.frame(patch, dp)).collect();
+            let peak = out.iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+            assert!(peak > 0.05 && peak < 1.5, "{peak}");
+        }
     }
 
     #[test]
