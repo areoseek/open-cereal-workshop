@@ -428,6 +428,7 @@ dependencies = [
 name = "breakfast-cereal"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "cereal-engine",
  "cpal",
  "eframe",

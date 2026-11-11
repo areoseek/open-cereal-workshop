@@ -31,7 +31,7 @@ pub mod save;
 pub mod song;
 pub mod wav;
 
-pub use player::{new_player, Cmd, Handle, Player, Transport};
+pub use player::{new_player, Cmd, CmdSender, Handle, Player, Transport};
 pub use sample::{Library, Sample};
 pub use song::Song;
 

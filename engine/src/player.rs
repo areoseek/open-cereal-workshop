@@ -149,6 +149,23 @@ impl Handle {
             q.push(c);
         }
     }
+
+    /// A second way in for commands, for threads other than the window's (MIDI input).
+    pub fn sender(&self) -> CmdSender {
+        CmdSender(self.cmds.clone())
+    }
+}
+
+/// Sends commands to the audio thread from anywhere.
+#[derive(Clone)]
+pub struct CmdSender(Arc<Mutex<Vec<Cmd>>>);
+
+impl CmdSender {
+    pub fn send(&self, c: Cmd) {
+        if let Ok(mut q) = self.0.lock() {
+            q.push(c);
+        }
+    }
 }
 
 /// Make the two ends.

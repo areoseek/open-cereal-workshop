@@ -162,7 +162,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Plugin hosting (VST/CLAP)
 - [~] Project files: .flp read/write done; .fst presets, .fsc scores to do
 - [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)
-- [ ] MIDI devices, controller linking
+- [~] MIDI devices: keyboards and pads play the selected channel (Linux; hold pedal kept). Windows input, bend and wheels, controller linking, recording to do
 - [~] Rendering/export: WAV done; MP3, OGG, FLAC, MIDI to do
 
 ## What "approximate" means

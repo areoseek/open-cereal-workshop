@@ -4,6 +4,7 @@
 mod browser;
 mod chanset;
 mod fxwin;
+mod midi;
 mod setup;
 mod unpack;
 
@@ -111,6 +112,8 @@ pub(crate) struct App {
     pub(crate) setup: setup::State,
     pub(crate) settings: setup::Settings,
     sel_chan: usize,
+    /// MIDI keyboards and pads.
+    midi: midi::MidiIn,
     sel_insert: usize,
     rack: rack::State,
     piano: pianoroll::State,
@@ -194,6 +197,7 @@ impl App {
             browser.add_root("Music", home.join("Music"));
             browser.add_root("Documents", home.join("Documents"));
         }
+        let midi = midi::MidiIn::start(handle.sender());
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -216,6 +220,7 @@ impl App {
             setup: Default::default(),
             settings,
             sel_chan: 0,
+            midi,
             sel_insert: 0,
             rack: Default::default(),
             piano: Default::default(),
@@ -1028,6 +1033,7 @@ impl eframe::App for App {
         if !self.setup.open {
             self.keys(ctx);
         }
+        self.midi.chan.store(self.sel_chan, std::sync::atomic::Ordering::Relaxed);
         self.setup_ui(ctx);
         // files dropped on the window
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
