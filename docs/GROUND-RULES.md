@@ -17,3 +17,11 @@ Never
 Every sound and preset shipped here is made by us (synthesized or recorded) or comes from a source whose licence allows redistribution, recorded in docs/CONTENT-SOURCES.md when the first one is added.
 
 Feature notes go in docs/features/ as plain descriptions of behaviour ("the step button toggles a note at that 16th"), never as copied text or screenshots of the original.
+
+## Compatibility target (Devin, 2026-11-10)
+
+An experienced FL Studio user must be able to sit down and work from muscle memory.
+- Same behaviour and workflow for every feature, same keyboard and mouse bindings, same window roles and layout logic.
+- Reads and writes .flp projects and the related preset/score formats. The format is worked out only from files we save ourselves with the demo and from public format notes; never from the program's code.
+- Our own drawing of the interface: same places and same behaviour, our own artwork, icons and colours.
+- Stock sounds are ours. A project that points at the original's stock samples plays them only from the user's own installed copy.
