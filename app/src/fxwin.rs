@@ -133,7 +133,9 @@ impl App {
                     s.enabled = !s.enabled;
                     changed = true;
                 }
-                changed |= knob(ui, &mut s.mix, 0.0, 1.0, 1.0, 20.0).on_hover_text(format!("Mix level: {:.0} %", s.mix * 100.0)).changed();
+                let r = knob(ui, &mut s.mix, 0.0, 1.0, 1.0, 20.0).on_hover_text(format!("Mix level: {:.0} %", s.mix * 100.0));
+                control_menu(&r, cereal_engine::song::Target::SlotMix(ins, slot));
+                changed |= r.changed();
                 ui.label(RichText::new("Mix").small().color(TEXT_DIM));
             });
             ui.separator();
@@ -474,6 +476,7 @@ impl App {
                                 if r.changed() && *v != before {
                                     changed = true;
                                 }
+                                control_menu(&r, cereal_engine::song::Target::SlotParam(ins, slot, k as u16));
                                 r.on_hover_text(hint(d.kind, k, p.name, *v));
                                 ui.label(RichText::new(label).small().color(TEXT_DIM));
                             });

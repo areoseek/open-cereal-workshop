@@ -46,10 +46,14 @@ impl App {
                         self.dirty = true;
                     }
                     let c = &mut self.song.channels[ci];
-                    if knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).on_hover_text("Channel panning").changed() {
+                    let r = knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).on_hover_text("Channel panning");
+                    control_menu(&r, cereal_engine::song::Target::ChanPan(ci));
+                    if r.changed() {
                         self.dirty = true;
                     }
-                    if knob(ui, &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, 18.0).on_hover_text("Channel volume").changed() {
+                    let r = knob(ui, &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, 18.0).on_hover_text("Channel volume");
+                    control_menu(&r, cereal_engine::song::Target::ChanVolume(ci));
+                    if r.changed() {
                         self.dirty = true;
                     }
                     let n_ins = self.song.inserts.len().saturating_sub(1);

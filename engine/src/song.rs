@@ -325,6 +325,8 @@ pub enum Target {
     SlotOn(usize, u16),
     /// One of the effect's own settings, counted in the order the unit lists them: insert, slot, setting.
     SlotParam(usize, u16, u16),
+    /// A setting of a channel's own instrument: channel and the setting's place in its table.
+    ChanParam(usize, u16),
     /// Something not played back yet (plugin controls, slot levels, ...): raw control number and destination.
     Other { param: u16, dest: u16 },
 }
@@ -812,6 +814,13 @@ impl Song {
                     n.chan -= 1;
                 }
             }
+            // recorded movements of the channel's own controls go with it
+            p.events.retain(|e| e.dest >= 0x2000 || e.dest as usize != ci);
+            for e in &mut p.events {
+                if e.dest < 0x2000 && e.dest as usize > ci {
+                    e.dest -= 1;
+                }
+            }
         }
         self.clips.retain(|c| !matches!(c.src, ClipSrc::Audio(k) | ClipSrc::Automation(k) if k == ci));
         for c in &mut self.clips {
@@ -828,12 +837,12 @@ impl Song {
                 }
             }
             if let Some(a) = &ch.auto {
-                if a.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k >= ci)) {
+                if a.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k >= ci)) {
                     let mut a2 = (**a).clone();
-                    a2.targets.retain(|t| !matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k == ci));
+                    a2.targets.retain(|t| !matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k == ci));
                     for t in &mut a2.targets {
                         match t {
-                            Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k > ci => *k -= 1,
+                            Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k > ci => *k -= 1,
                             _ => {}
                         }
                     }
@@ -928,6 +937,7 @@ impl Song {
                     CHAN_VOLUME => Target::ChanVolume(l.dest as usize),
                     CHAN_PAN => Target::ChanPan(l.dest as usize),
                     CHAN_PITCH => Target::ChanPitch(l.dest as usize),
+                    p if p & PLUGIN_FLAG != 0 => Target::ChanParam(l.dest as usize, p & !PLUGIN_FLAG),
                     _ => Target::Other { param: l.param, dest: l.dest },
                 }
             } else if l.dest == flp::DEST_GLOBAL {
@@ -1190,6 +1200,7 @@ impl Song {
                 CHAN_VOLUME => Target::ChanVolume(dest as usize),
                 CHAN_PAN => Target::ChanPan(dest as usize),
                 CHAN_PITCH => Target::ChanPitch(dest as usize),
+                p if p & PLUGIN_FLAG != 0 => Target::ChanParam(dest as usize, p & !PLUGIN_FLAG),
                 _ => other,
             }
         } else if dest == flp::DEST_GLOBAL {
@@ -1227,6 +1238,7 @@ impl Song {
             Target::SlotMix(i, s) => (SLOT_MIX, ins(i, s)),
             Target::SlotOn(i, s) => (SLOT_ENABLED, ins(i, s)),
             Target::SlotParam(i, s, k) => (k | PLUGIN_FLAG, ins(i, s)),
+            Target::ChanParam(c, k) => (k | PLUGIN_FLAG, c as u16),
             Target::Other { param, dest } => (param, dest),
         }
     }
@@ -1245,6 +1257,11 @@ impl Song {
             Target::SlotParam(i, s, k) => {
                 let fx = self.inserts.get(i)?.slots.iter().find(|x| x.index == s)?.fx.as_ref()?;
                 let q = crate::fx::def(fx.kind).params.get(k as usize)?;
+                (q.min, q.max)
+            }
+            Target::ChanParam(c, k) => {
+                let g = self.channels.get(c)?.gen.as_ref()?;
+                let q = crate::synth::def(g.kind).params.get(k as usize)?;
                 (q.min, q.max)
             }
             Target::Other { .. } => return None,
@@ -1272,6 +1289,10 @@ impl Song {
             Target::SlotParam(i, s, k) => {
                 let name = self.inserts.get(i).and_then(|x| x.slots.iter().find(|x| x.index == s)).and_then(|x| x.fx.as_ref()).and_then(|f| crate::fx::def(f.kind).params.get(k as usize)).map(|q| q.name.to_string()).unwrap_or_else(|| format!("control {}", k + 1));
                 format!("{} - {} - {}", ins(i), slot(i, s), name)
+            }
+            Target::ChanParam(c, k) => {
+                let name = self.channels.get(c).and_then(|x| x.gen.as_ref()).and_then(|g| crate::synth::def(g.kind).params.get(k as usize)).map(|q| q.name.to_string()).unwrap_or_else(|| format!("control {}", k + 1));
+                format!("{} - {}", chan(c), name)
             }
             Target::Other { param, dest } => format!("Control {param:#06x} of {dest:#06x}"),
         }

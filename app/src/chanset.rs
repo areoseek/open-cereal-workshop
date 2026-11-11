@@ -32,12 +32,22 @@ pub fn key_name(key: u8) -> String {
 
 /// A knob with a caption under it. Returns true when the value moved.
 fn cap_knob(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, default: f32, hint: impl Fn(f32) -> String) -> bool {
+    cap_knob_for(ui, label, v, min, max, default, hint, None)
+}
+
+/// As `cap_knob`, for a control that clips and events can drive.
+#[allow(clippy::too_many_arguments)]
+fn cap_knob_for(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, default: f32, hint: impl Fn(f32) -> String, target: Option<cereal_engine::song::Target>) -> bool {
     let mut changed = false;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         ui.set_width(44.0);
         ui.vertical_centered(|ui| {
-            changed = knob(ui, v, min, max, default, 26.0).on_hover_text(hint(*v)).changed();
+            let r = knob(ui, v, min, max, default, 26.0).on_hover_text(hint(*v));
+            if let Some(t) = target {
+                control_menu(&r, t);
+            }
+            changed = r.changed();
             ui.label(RichText::new(label).small().color(TEXT_DIM));
         });
     });
@@ -128,9 +138,10 @@ impl App {
         // the strip every channel has: level, pan, pitch, mixer track
         ui.horizontal(|ui| {
             let c = &mut self.song.channels[ci];
-            changed |= cap_knob(ui, "PAN", &mut c.pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
-            changed |= cap_knob(ui, "VOL", &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, |v: f32| format!("{:.0} %", v * 128.0));
-            changed |= cap_knob(ui, "PITCH", &mut c.pitch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+            use cereal_engine::song::Target;
+            changed |= cap_knob_for(ui, "PAN", &mut c.pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0), Some(Target::ChanPan(ci)));
+            changed |= cap_knob_for(ui, "VOL", &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, |v: f32| format!("{:.0} %", v * 128.0), Some(Target::ChanVolume(ci)));
+            changed |= cap_knob_for(ui, "PITCH", &mut c.pitch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v), Some(Target::ChanPitch(ci)));
             ui.vertical(|ui| {
                 ui.set_width(52.0);
                 let mut ins = c.insert;
@@ -252,7 +263,7 @@ impl App {
                     self.actions.push(crate::Action::LoadPreset(p, crate::PresetTo::Chan(ci)));
                 }
                 ui.add_space(4.0);
-                changed |= instrument_panel(ui, self.song.channels[ci].gen.as_mut().unwrap());
+                changed |= instrument_panel(ui, ci, self.song.channels[ci].gen.as_mut().unwrap());
             }
             Tab::Sample => {
                 let mut pick = false;
@@ -431,7 +442,7 @@ impl App {
 }
 
 /// The knobs of a built-in instrument.
-fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
+fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -> bool {
     use cereal_engine::synth::{def, Kind, OSC_FIELDS, SHAPES};
     let mut changed = false;
     match g.kind {
@@ -490,7 +501,7 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                     let mut kn = |ui: &mut Ui, label: &str, idx: usize, hint: &dyn Fn(f32) -> String| {
                         let p = &d.params[idx];
                         let mut v = g.p[idx];
-                        if cap_knob(ui, label, &mut v, p.min as f32, p.max as f32, p.def as f32, hint) {
+                        if cap_knob_for(ui, label, &mut v, p.min as f32, p.max as f32, p.def as f32, hint, Some(cereal_engine::song::Target::ChanParam(ci, idx as u16))) {
                             g.p[idx] = v.round();
                             changed = true;
                         }
@@ -561,7 +572,7 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                         // a short cap from the setting's name: the last word, or its number
                         let cap: String = p.name.rsplit(' ').next().unwrap_or(p.name).chars().take(7).collect::<String>().to_uppercase();
                         let name = p.name;
-                        if cap_knob(ui, &cap, &mut v, p.min as f32, p.max as f32, p.def as f32, &|v| format!("{name}: {v:.0}")) {
+                        if cap_knob_for(ui, &cap, &mut v, p.min as f32, p.max as f32, p.def as f32, &|v| format!("{name}: {v:.0}"), Some(cereal_engine::song::Target::ChanParam(ci, i as u16))) {
                             g.p[i] = v.round();
                             changed = true;
                         }
@@ -687,7 +698,7 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                         let mut v = g.p[idx];
                         let span = (p.max - p.min) as f32;
                         let label = p.name.to_uppercase();
-                        if cap_knob(ui, &label, &mut v, p.min as f32, p.max as f32, p.def as f32, |v| if span > 1000.0 { format!("{:.0} %", (v - p.min as f32) / span * 100.0) } else { format!("{v:.0}") }) {
+                        if cap_knob_for(ui, &label, &mut v, p.min as f32, p.max as f32, p.def as f32, |v| if span > 1000.0 { format!("{:.0} %", (v - p.min as f32) / span * 100.0) } else { format!("{v:.0}") }, Some(cereal_engine::song::Target::ChanParam(ci, idx as u16))) {
                             g.p[idx] = v.round();
                             changed = true;
                         }

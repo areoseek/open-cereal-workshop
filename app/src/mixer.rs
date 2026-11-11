@@ -67,11 +67,14 @@ impl App {
                                         ins.enabled = !ins.enabled;
                                         self.dirty = true;
                                     }
-                                    if knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).on_hover_text("Panning").changed() {
+                                    let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).on_hover_text("Panning");
+                                    control_menu(&r, cereal_engine::song::Target::InsertPan(i));
+                                    if r.changed() {
                                         self.dirty = true;
                                     }
                                     let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
                                     let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), self.peaks[i]);
+                                    control_menu(&r, cereal_engine::song::Target::InsertVolume(i));
                                     if r.changed() {
                                         self.dirty = true;
                                     }

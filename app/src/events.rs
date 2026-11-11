@@ -15,6 +15,8 @@ use crate::App;
 pub struct State {
     /// The control shown: its number and destination as the file writes them.
     pub target: Option<(u16, u16)>,
+    /// A control asked for from elsewhere; it is on offer even when the lists below would not name it.
+    pub wanted: Option<(u16, u16)>,
     /// Where a line drag began: tick and raw value.
     line: Option<(u32, i32)>,
     /// The last point a free-hand drag wrote, so fast strokes leave no holes.
@@ -31,6 +33,9 @@ impl App {
                 out.push(a);
             }
         };
+        if let Some(w) = self.events.wanted {
+            add(w);
+        }
         for e in &self.song.patterns[pat].events {
             add((e.param, e.dest));
         }

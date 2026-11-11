@@ -918,6 +918,13 @@ impl Gen {
         out
     }
 
+    /// Put setting `k` at `v` of its travel (0..=1).
+    pub fn set_travel(&mut self, k: usize, v: f32) {
+        if let (Some(q), Some(slot)) = (def(self.kind).params.get(k), self.p.get_mut(k)) {
+            *slot = q.min as f32 + (q.max as f32 - q.min as f32) * v.clamp(0.0, 1.0);
+        }
+    }
+
     /// What a voice needs to sound this instrument.
     pub fn tone(&self) -> Tone {
         match self.kind {

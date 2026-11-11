@@ -598,6 +598,96 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
     }
 }
 
+/// The record of an automation clip's points (event 234). The head and the tail of `old` are kept; a fresh
+/// record gets the ones every clip in a current project carries.
+fn automation_bytes(points: &[crate::song::AutoPt], ppq: u32, old: Option<&[u8]>) -> Vec<u8> {
+    let old_n = old.filter(|d| d.len() >= 21).map(|d| u32at(d, 17) as usize);
+    let mut d: Vec<u8> = match old.filter(|d| d.len() >= 21) {
+        Some(o) => o[..17].to_vec(),
+        None => hex("0100000040000000000400000003000000"),
+    };
+    d.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    let mut prev = 0.0f64;
+    for (i, p) in points.iter().enumerate() {
+        let delta = if i == 0 { 0.0 } else { (p.tick - prev) / ppq.max(1) as f64 };
+        prev = p.tick;
+        d.extend_from_slice(&delta.to_le_bytes());
+        d.extend_from_slice(&(p.value as f64).to_le_bytes());
+        d.extend_from_slice(&p.tension.to_le_bytes());
+        // the shape, then which way the line bends: 1 up, 255 down, 2 for a straight one
+        let bend = if i == 0 { 0 } else if p.tension > 0.0 { 1 } else if p.tension < 0.0 { 255 } else { 2 };
+        d.extend_from_slice(&[p.mode, 0, 0, bend]);
+    }
+    match (old, old_n) {
+        (Some(o), Some(n)) if o.len() >= 21 + 24 * n => d.extend_from_slice(&o[21 + 24 * n..]),
+        _ => d.extend(hex("01000000ffffffffffffffffffffffffffffffff800000008000000000000000800000000500000003000000010000000000000000000000000000000000f03f00000000000000000100000000000000fffffffffffffffffffffffffbb2000000000000000000000000000000000000")),
+    }
+    d
+}
+
+/// Automation clips: the points of each and the controls it drives.
+fn patch_auto(ev: &mut Vec<Event>, song: &Song, base: &Song) {
+    let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::NEW_CHANNEL).map(|(i, _)| i).collect();
+    let mut relink: Vec<usize> = vec![];
+    for (ci, &start) in starts.iter().enumerate().rev() {
+        let Some(now) = song.channels.get(ci) else { continue };
+        let Some(auto) = now.auto.as_ref().filter(|_| now.kind == ChannelKind::AutomationClip) else { continue };
+        let was = base.channels.get(ci);
+        let was_auto = was.and_then(|c| c.auto.as_ref());
+        let mut end = start + 1;
+        while end < ev.len() && !ends_channel(ev[end].id) {
+            end += 1;
+        }
+        let find = |ev: &Vec<Event>, eid: u8| (start..end).find(|&i| ev[i].id == eid);
+        if was.map(|c| &c.kind) != Some(&ChannelKind::AutomationClip) {
+            if let Some(i) = find(ev, id::CHAN_TYPE) {
+                ev[i].value = Value::Byte(5);
+            }
+        }
+        if was_auto.map(|a| &a.points) != Some(&auto.points) {
+            let at = find(ev, id::CHAN_AUTOMATION);
+            let old = at.and_then(|i| match &ev[i].value {
+                Value::Data(d) => Some(d.clone()),
+                _ => None,
+            });
+            let d = automation_bytes(&auto.points, song.ppq, old.as_deref());
+            match at {
+                Some(i) => ev[i] = Event::data(id::CHAN_AUTOMATION, d),
+                None => {
+                    let i = find(ev, id::CHAN_ENVELOPE).unwrap_or(end);
+                    ev.insert(i, Event::data(id::CHAN_AUTOMATION, d));
+                }
+            }
+        }
+        if was_auto.map(|a| &a.targets) != Some(&auto.targets) {
+            relink.push(ci);
+        }
+    }
+    if relink.is_empty() {
+        return;
+    }
+    // the links of the clips whose targets changed are written afresh, ahead of the first channel
+    ev.retain(|e| match (e.id, &e.value) {
+        (id::LINK, Value::Data(d)) if d.len() >= 12 => !(u16at(d, 0) == 0 && u32at(d, 4) == 0 && relink.contains(&(u16at(d, 2) as usize))),
+        _ => true,
+    });
+    let at = ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(ev.len());
+    let mut fresh = vec![];
+    relink.sort_unstable();
+    for ci in relink {
+        for t in &song.channels[ci].auto.as_ref().unwrap().targets {
+            let (param, dest) = song.event_address(*t);
+            let mut d = vec![0u8; 12];
+            put_u16(&mut d, 2, ci as u16);
+            put_u16(&mut d, 8, param);
+            put_u16(&mut d, 10, dest);
+            d.extend(hex("08000000d5010000"));
+            fresh.push(Event::data(id::LINK, d));
+        }
+    }
+    ev.splice(at..at, fresh);
+}
+
 fn env_raw(seconds: f32) -> u32 {
     if seconds <= 0.0 {
         return 100;
@@ -1363,6 +1453,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_playlist(&mut ev, song, &base, &flp);
     patch_patterns(&mut ev, song, &base, &flp, unicode);
     patch_channels(&mut ev, song, &base, unicode, word_insert);
+    patch_auto(&mut ev, song, &base);
     patch_head(&mut ev, song, &base, unicode);
 
     let _ = latin1;
@@ -1634,6 +1725,36 @@ mod tests {
         assert_eq!(got, [(2, 24), (3, 48)]);
         // and it is stable from there
         assert_eq!(to_bytes(&r, Some(&f2)).unwrap(), bytes2);
+    }
+
+    #[test]
+    fn automation_clips_can_be_made_and_edited() {
+        use crate::song::{AutoPt, Automation, Chan, ClipSrc, Target};
+        let s = Song::new();
+        let bytes = to_bytes(&s, None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        let pts = vec![AutoPt { tick: 0.0, value: 0.25, tension: 0.0, mode: 0 }, AutoPt { tick: 96.0, value: 1.0, tension: 0.5, mode: 0 }, AutoPt { tick: 384.0, value: 0.0, tension: -0.25, mode: 2 }];
+        let ac = r.channels.len();
+        r.channels.push(Chan { name: "Kick - Volume".into(), kind: ChannelKind::AutomationClip, auto: Some(std::sync::Arc::new(Automation { points: pts.clone(), targets: vec![Target::ChanVolume(0), Target::InsertPan(2)] })), ..Default::default() });
+        r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+        r.prepare();
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        let a = r2.channels[ac].auto.clone().expect("an automation clip");
+        assert_eq!(r2.channels[ac].kind, ChannelKind::AutomationClip);
+        assert_eq!(a.points, pts);
+        assert_eq!(a.targets, vec![Target::ChanVolume(0), Target::InsertPan(2)]);
+        assert!(r2.clips.iter().any(|c| c.src == ClipSrc::Automation(ac)));
+        assert_eq!(to_bytes(&r, Some(&f2)).unwrap(), bytes2);
+
+        // move a point and change what it drives
+        let mut a2 = (*a).clone();
+        a2.points[1].value = 0.5;
+        a2.targets = vec![Target::Tempo];
+        r2.channels[ac].auto = Some(std::sync::Arc::new(a2.clone()));
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        assert_eq!(**r3.channels[ac].auto.as_ref().unwrap(), a2);
     }
 
     /// With CEREAL_FLP_CORPUS set: every real project saves byte-identical when untouched, and an edit to each

@@ -260,6 +260,8 @@ struct Overrides {
     pitch: Vec<Option<f32>>,
     /// Effect slot controls being driven: the target and its 0..=1 value.
     slot: Vec<(Target, f32)>,
+    /// Instrument settings being driven: channel, the setting's place in its table, and its 0..=1 value.
+    gen: Vec<(usize, u16, f32)>,
 }
 
 impl Overrides {
@@ -267,6 +269,7 @@ impl Overrides {
         self.tempo = None;
         self.any_chan = false;
         self.slot.clear();
+        self.gen.clear();
         self.pitch.iter_mut().for_each(|c| *c = None);
         self.chan.iter_mut().for_each(|c| *c = (None, None));
         self.ins.iter_mut().for_each(|c| *c = (None, None));
@@ -328,6 +331,10 @@ impl Overrides {
             Target::SlotMix(..) | Target::SlotOn(..) | Target::SlotParam(..) => match self.slot.iter_mut().find(|e| e.0 == t) {
                 Some(e) => e.1 = v,
                 None => self.slot.push((t, v)),
+            },
+            Target::ChanParam(c, k) => match self.gen.iter_mut().find(|e| e.0 == c && e.1 == k) {
+                Some(e) => e.2 = v,
+                None => self.gen.push((c, k, v)),
             },
             Target::Other { .. } => {}
         }
@@ -907,7 +914,17 @@ impl Player {
                 v.feed = li as u8;
                 if let Some(g) = g {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
-                    let tone = g.tone();
+                    // settings a clip or an event is driving stand in for the stored ones from this note on
+                    let driven = li == 0 && self.ov.gen.iter().any(|e| e.0 == n.chan as usize);
+                    let tone = if driven {
+                        let mut g = g.clone();
+                        for e in self.ov.gen.iter().filter(|e| e.0 == n.chan as usize) {
+                            g.set_travel(e.1 as usize, e.2);
+                        }
+                        g.tone()
+                    } else {
+                        g.tone()
+                    };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(n.key as u32));
                     v.tstate.note(&tone, sr, n.key, note_gain.min(1.0), hz / sr);
                     v.attack = ms(1.5);

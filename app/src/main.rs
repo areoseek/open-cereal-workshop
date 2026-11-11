@@ -1385,6 +1385,18 @@ impl eframe::App for App {
             self.keys(ctx);
         }
         self.midi.chan.store(self.sel_chan, std::sync::atomic::Ordering::Relaxed);
+        // what a control's right-click menu asked for last frame
+        let ask_id = egui::Id::new("ctl_ask");
+        if let Some((target, ask)) = ctx.data_mut(|d| d.remove_temp::<Option<(cereal_engine::song::Target, widgets::CtlAsk)>>(ask_id)).flatten() {
+            match ask {
+                widgets::CtlAsk::AutoClip => self.make_auto_clip(target),
+                widgets::CtlAsk::Events => {
+                    self.events.target = Some(self.song.event_address(target));
+                    self.events.wanted = self.events.target;
+                    self.show_events = true;
+                }
+            }
+        }
         self.setup_ui(ctx);
         // files dropped on the window
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());

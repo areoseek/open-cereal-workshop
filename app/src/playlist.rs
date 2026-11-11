@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
-use cereal_engine::song::{Clip, ClipSrc};
+use cereal_engine::song::{Clip, ClipSrc, Target};
 
 use crate::pianoroll::SNAPS;
 use crate::widgets::*;
@@ -51,7 +51,16 @@ enum Drag {
     Paint,
     Slice { tick: u32 },
     Seek,
+    /// A point of an automation clip: channel, point, clip, and where the clip's picture sits.
+    AutoPt { chan: usize, idx: usize, clip: usize, left: f32, top: f32, bottom: f32, offset: u32 },
+    /// The bend of the line arriving at a point.
+    AutoBend { chan: usize, idx: usize, y0: f32, t0: f32 },
+    /// A press that has done its work and waits for the button to come up.
+    Spent,
 }
+
+/// The shapes a line between two automation points can take, with the number the file gives each.
+const AUTO_MODES: [(u8, &str); 6] = [(0, "Single curve"), (1, "Double curve"), (2, "Hold"), (3, "Stairs"), (4, "Smooth stairs"), (9, "Half sine")];
 
 pub struct State {
     scroll_x: f32,
@@ -69,11 +78,13 @@ pub struct State {
     brush_pat: usize,
     grid_line: u32,
     left_tick: u32,
+    /// The open menu of an automation point: channel, point, and where it was opened.
+    auto_menu: Option<(usize, usize, Pos2)>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None }
     }
 }
 
@@ -81,6 +92,91 @@ const HEAD_W: f32 = 112.0;
 const RULER_H: f32 = 18.0;
 
 impl App {
+    /// The menu of an automation point: the shape of the line arriving at it, and its removal.
+    fn auto_point_menu(&mut self, ctx: &egui::Context) {
+        let Some((chan, idx, at)) = self.playlist.auto_menu else { return };
+        let Some(mode) = self.song.channels.get(chan).and_then(|c| c.auto.as_ref()).and_then(|a| a.points.get(idx)).map(|q| q.mode) else {
+            self.playlist.auto_menu = None;
+            return;
+        };
+        let mut close = false;
+        let area = egui::Area::new(egui::Id::new("auto_point_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(130.0);
+                let mut edit: Option<Box<dyn FnOnce(&mut cereal_engine::song::Automation)>> = None;
+                if ui.button("Delete").clicked() {
+                    edit = Some(Box::new(move |a| {
+                        if a.points.len() > 1 {
+                            a.points.remove(idx);
+                        }
+                    }));
+                }
+                ui.separator();
+                for (m, name) in AUTO_MODES {
+                    if ui.selectable_label(mode == m, name).clicked() {
+                        edit = Some(Box::new(move |a| a.points[idx].mode = m));
+                    }
+                }
+                if let Some(f) = edit {
+                    if let Some(a) = self.song.channels[chan].auto.as_mut() {
+                        f(std::sync::Arc::make_mut(a));
+                        self.dirty = true;
+                    }
+                    close = true;
+                }
+            });
+        });
+        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
+        if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.playlist.auto_menu = None;
+        }
+    }
+
+    /// How far along its travel a control stands in the song, 0..=1.
+    fn target_travel(&self, t: Target) -> f32 {
+        let s = &self.song;
+        let v = match t {
+            Target::ChanVolume(c) => s.channels.get(c).map(|c| c.volume),
+            Target::ChanPan(c) => s.channels.get(c).map(|c| c.pan * 0.5 + 0.5),
+            Target::ChanPitch(c) => s.channels.get(c).map(|c| c.pitch_cents / 400.0 + 0.5),
+            Target::InsertVolume(i) => s.inserts.get(i).map(|i| i.volume / 1.25),
+            Target::InsertPan(i) => s.inserts.get(i).map(|i| i.pan * 0.5 + 0.5),
+            Target::Tempo => Some((s.tempo - 60.0) / 120.0),
+            Target::SlotMix(i, k) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).map(|x| x.mix),
+            Target::SlotOn(i, k) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).map(|x| x.enabled as u8 as f32),
+            Target::SlotParam(i, k, p) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).and_then(|x| x.fx.as_ref()).and_then(|f| {
+                let q = cereal_engine::fx::def(f.kind).params.get(p as usize)?;
+                Some((f.p.get(p as usize)? - q.min as f32) / (q.max - q.min).max(1) as f32)
+            }),
+            Target::ChanParam(c, p) => s.channels.get(c).and_then(|c| c.gen.as_ref()).and_then(|g| {
+                let q = cereal_engine::synth::def(g.kind).params.get(p as usize)?;
+                Some((g.p.get(p as usize)? - q.min as f32) / (q.max - q.min).max(1) as f32)
+            }),
+            Target::Other { .. } => None,
+        };
+        v.unwrap_or(0.5).clamp(0.0, 1.0)
+    }
+
+    /// Make an automation clip for a control: a flat line at where the control stands now, as long as the song,
+    /// on the first track with room for it.
+    pub(crate) fn make_auto_clip(&mut self, t: Target) {
+        let v = self.target_travel(t);
+        let len = self.song.length().max(self.song.bar() * 4);
+        let pt = |tick: f64| cereal_engine::song::AutoPt { tick, value: v, tension: 0.0, mode: 0 };
+        let mut c = cereal_engine::song::Chan::default();
+        c.name = self.song.target_name(t);
+        c.kind = cereal_engine::flp::ChannelKind::AutomationClip;
+        c.auto = Some(std::sync::Arc::new(cereal_engine::song::Automation { points: vec![pt(0.0), pt(len as f64)], targets: vec![t] }));
+        self.song.channels.push(c);
+        let ci = self.song.channels.len() - 1;
+        let ntracks = self.song.tracks.len().max(1) as u16;
+        let track = (0..ntracks).find(|&tr| !self.song.clips.iter().any(|c| c.track == tr)).unwrap_or(0);
+        self.song.clips.push(Clip { pos: 0, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false });
+        self.show_playlist = true;
+        self.dirty = true;
+        self.status = format!("Automation clip made for {}", self.song.target_name(t));
+    }
+
     fn clip_look(&self, c: &Clip) -> (String, Color32) {
         match c.src {
             ClipSrc::Pattern(p) => (self.song.pattern_name(p), self.song.patterns.get(p).and_then(|p| p.color).map(rgb).unwrap_or(Color32::from_rgb(86, 110, 130))),
@@ -176,6 +272,8 @@ impl App {
         // clips
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let mut hit: Option<(usize, i8)> = None;
+        // the automation clip whose picture the pointer is over: clip, channel, picture, left edge, offset
+        let mut auto_under: Option<(usize, usize, Rect, f32, u32)> = None;
         let gp = ui.painter_at(grid);
         let font = FontId::proportional(10.5);
         for (i, c) in self.song.clips.iter().enumerate() {
@@ -259,6 +357,25 @@ impl App {
                                 x += 2.0;
                             }
                             cp.add(egui::Shape::line(pts, Stroke::new(1.5_f32, Color32::from_gray(245))));
+                            if body.height() > 14.0 {
+                                // the points, and between each pair the handle that bends the line
+                                let mut before: Option<&cereal_engine::song::AutoPt> = None;
+                                for q in &auto.points {
+                                    let x = r.left() + (q.tick as f32 - c.offset as f32) * px;
+                                    if let Some(a) = before {
+                                        let mid = (a.tick + q.tick) * 0.5;
+                                        let mx = r.left() + (mid as f32 - c.offset as f32) * px;
+                                        if x - mx > 7.0 && q.mode != 2 {
+                                            cp.circle_stroke(Pos2::new(mx, y_at(mx)), 2.5, Stroke::new(1.0_f32, Color32::from_gray(245)));
+                                        }
+                                    }
+                                    cp.circle_filled(Pos2::new(x, body.bottom() - 1.0 - q.value.clamp(0.0, 1.0) * (body.height() - 2.0)), 3.0, Color32::from_gray(250));
+                                    before = Some(q);
+                                }
+                                if pointer.map(|pp| body.expand(4.0).contains(pp) && grid.contains(pp)).unwrap_or(false) {
+                                    auto_under = Some((i, ch, body, r.left(), c.offset));
+                                }
+                            }
                         }
                     }
                 }
@@ -337,6 +454,42 @@ impl App {
         }
         let tool = self.playlist.tool;
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
+        // the points of an automation clip come before the clip itself
+        if let (Some(pp), Some((clip, chan, body, left, offset))) = (over, auto_under) {
+            if self.playlist.drag.is_none() && matches!(tool, Tool::Draw | Tool::Paint) && (pressed || sec_pressed) {
+                let auto = self.song.channels[chan].auto.clone().unwrap();
+                let pos_of = |tick: f64, value: f32| Pos2::new(left + (tick as f32 - offset as f32) * px, body.bottom() - 1.0 - value.clamp(0.0, 1.0) * (body.height() - 2.0));
+                let on_point = auto.points.iter().position(|q| pos_of(q.tick, q.value).distance(pp) <= 6.0);
+                let on_bend = (1..auto.points.len()).find(|&k| {
+                    let mid = (auto.points[k - 1].tick + auto.points[k].tick) * 0.5;
+                    auto.points[k].mode != 2 && pos_of(mid, auto.value_at(mid)).distance(pp) <= 5.0
+                });
+                if pressed {
+                    if let Some(idx) = on_point {
+                        self.playlist.drag = Some(Drag::AutoPt { chan, idx, clip, left, top: body.top(), bottom: body.bottom(), offset });
+                    } else if let Some(idx) = on_bend {
+                        self.playlist.drag = Some(Drag::AutoBend { chan, idx, y0: pp.y, t0: auto.points[idx].tension });
+                    }
+                } else if let Some(idx) = on_point {
+                    self.playlist.auto_menu = Some((chan, idx, pp));
+                    self.playlist.drag = Some(Drag::Spent);
+                } else if let Some(idx) = on_bend {
+                    // a right click on the handle straightens the line
+                    std::sync::Arc::make_mut(self.song.channels[chan].auto.as_mut().unwrap()).points[idx].tension = 0.0;
+                    self.dirty = true;
+                    self.playlist.drag = Some(Drag::Spent);
+                } else if body.contains(pp) {
+                    // a right click on the picture puts a point there
+                    let tick = (snap((pp.x - left) / px + offset as f32) as f64).max(0.0);
+                    let value = ((body.bottom() - 1.0 - pp.y) / (body.height() - 2.0)).clamp(0.0, 1.0);
+                    let a = std::sync::Arc::make_mut(self.song.channels[chan].auto.as_mut().unwrap());
+                    let at = a.points.partition_point(|q| q.tick <= tick);
+                    a.points.insert(at, cereal_engine::song::AutoPt { tick, value, tension: 0.0, mode: 0 });
+                    self.dirty = true;
+                    self.playlist.drag = Some(Drag::AutoPt { chan, idx: at, clip, left, top: body.top(), bottom: body.bottom(), offset });
+                }
+            }
+        }
         if let Some(pp) = over {
             if pressed && self.playlist.drag.is_none() {
                 if ruler.contains(pp) {
@@ -531,6 +684,56 @@ impl App {
                         done = true;
                     }
                 }
+                Drag::AutoPt { chan, idx, clip, left, top, bottom, offset } => {
+                    let (chan, idx, clip) = (*chan, *idx, *clip);
+                    if down || sec_down {
+                        let value = ((bottom - 1.0 - pp.y) / (bottom - top - 2.0)).clamp(0.0, 1.0);
+                        let want = snap((pp.x - left) / px + *offset as f32) as f64;
+                        if let Some(a) = self.song.channels.get_mut(chan).and_then(|c| c.auto.as_mut()) {
+                            let a = std::sync::Arc::make_mut(a);
+                            if idx < a.points.len() {
+                                // a point stays between its neighbours, and the first one stays at the start
+                                let lo = if idx == 0 { 0.0 } else { a.points[idx - 1].tick };
+                                let hi = a.points.get(idx + 1).map(|q| q.tick).unwrap_or(f64::MAX);
+                                let tick = if idx == 0 { 0.0 } else { want.clamp(lo, hi) };
+                                let was = a.points[idx];
+                                // Ctrl keeps the time, Shift keeps the level
+                                a.points[idx].value = if mods.shift { was.value } else { value };
+                                a.points[idx].tick = if mods.command { was.tick } else { tick };
+                                let end = a.length().ceil() as u32;
+                                if let Some(c) = self.song.clips.get_mut(clip) {
+                                    if idx + 1 == a.points.len() && end > c.offset {
+                                        c.len = (end - c.offset).max(1);
+                                    }
+                                }
+                                self.dirty = true;
+                            }
+                        }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::AutoBend { chan, idx, y0, t0 } => {
+                    if down {
+                        if let Some(a) = self.song.channels.get_mut(*chan).and_then(|c| c.auto.as_mut()) {
+                            let a = std::sync::Arc::make_mut(a);
+                            if let Some(k) = (*idx).checked_sub(1).filter(|_| *idx < a.points.len()) {
+                                // pull towards the higher end to reach it sooner
+                                let rising = a.points[*idx].value >= a.points[k].value;
+                                let pull = (y0 - pp.y) / 60.0 * if rising { -1.0 } else { 1.0 };
+                                a.points[*idx].tension = (t0 + pull).clamp(-1.0, 1.0);
+                                self.dirty = true;
+                            }
+                        }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::Spent => {
+                    if !down && !sec_down {
+                        done = true;
+                    }
+                }
                 Drag::Seek => {
                     if down {
                         if !self.handle.transport.song_mode() {
@@ -548,6 +751,7 @@ impl App {
         if done {
             self.playlist.drag = None;
         }
+        self.auto_point_menu(ui.ctx());
     }
 
     fn pl_snap(&self) -> u32 {

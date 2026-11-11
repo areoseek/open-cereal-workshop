@@ -49,6 +49,31 @@ pub fn knob(ui: &mut Ui, v: &mut f32, min: f32, max: f32, default: f32, d: f32) 
 }
 
 /// A round on/off light. Returns the response; the caller flips the value.
+/// What the right-click menu of a control asked for.
+#[derive(Clone, Copy, PartialEq)]
+pub enum CtlAsk {
+    AutoClip,
+    Events,
+}
+
+/// The right-click menu every automatable control has. The choice is left for the app to pick up after the
+/// frame, since the control itself is usually borrowed from the song while it is drawn.
+pub fn control_menu(resp: &Response, target: cereal_engine::song::Target) {
+    resp.context_menu(|ui| {
+        let mut ask = None;
+        if ui.button("Create automation clip").clicked() {
+            ask = Some(CtlAsk::AutoClip);
+        }
+        if ui.button("Edit events").clicked() {
+            ask = Some(CtlAsk::Events);
+        }
+        if let Some(a) = ask {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));
+            ui.close_menu();
+        }
+    });
+}
+
 pub fn led(ui: &mut Ui, on: bool, d: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(d), Sense::click());
     let p = ui.painter();

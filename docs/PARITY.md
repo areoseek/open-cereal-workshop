@@ -156,7 +156,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Mixer (inserts, sends, routing, EQ, effect slots; docking and metering details still to do)
 - [~] Browser (folders, preview, drag to channel)
 - [~] Transport, toolbars, hint bar
-- [~] Automation clips (channel levels and pitch, mixer levels, slot mix and switch, effect settings; instrument settings still to do)
+- [~] Automation clips (channel levels and pitch, mixer levels, slot mix and switch, effect and instrument settings; made from a control's right-click menu, points added, moved, bent, reshaped and removed in the playlist, saved to the project; instrument settings take effect from the next note)
 - [x] Event editor
 - [~] Audio recording and audio editor: sound from the input device records to a file and lands on the playlist as an audio clip (REC with MIC on); sounds dragged to the playlist become audio clips. Input choice per mixer track, latency correction and the audio editor to do
 - [ ] Plugin hosting (VST/CLAP)
