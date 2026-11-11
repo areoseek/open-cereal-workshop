@@ -1316,6 +1316,7 @@ impl Player {
         }
         let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
         tr.tempo.store(tempo.to_bits(), Relaxed);
+        crate::minis::set_tempo(tempo);
         let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;

@@ -86,6 +86,11 @@ fn store() -> &'static Mutex<Store> {
 }
 
 /// Tell the instrument about a folder of the user's own content (an install root).
+/// The user's content folders known so far.
+pub fn roots() -> Vec<PathBuf> {
+    store().lock().unwrap().roots.clone()
+}
+
 pub fn add_root(root: &Path) {
     let mut s = store().lock().unwrap();
     if !s.roots.iter().any(|r| r == root) {
@@ -95,7 +100,7 @@ pub fn add_root(root: &Path) {
     }
 }
 
-fn child_ci(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn child_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     let direct = dir.join(name);
     if direct.exists() {
         return Some(direct);

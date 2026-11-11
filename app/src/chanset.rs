@@ -972,6 +972,29 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
         }
+        Kind::Triple => {
+            use cereal_engine::triple::{params, set_wave_name, wave_name, wave_names, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
+                return false;
+            }
+            ui.horizontal(|ui| {
+                let names = wave_names();
+                for k in 0..3 {
+                    let now = wave_name(&g.raw, k);
+                    egui::ComboBox::from_id_salt(("triple_wave", ci, k)).selected_text(format!("Wave {}: {now}", k + 1)).show_ui(ui, |ui| {
+                        for name in &names {
+                            if ui.selectable_label(name.eq_ignore_ascii_case(&now), name).clicked() && !name.eq_ignore_ascii_case(&now) {
+                                set_wave_name(&mut g.raw, k, name);
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+            });
+            changed |= float_panel(ui, ci, g, &GROUPS, params());
+            ui.label(RichText::new("Waves beyond the four built ones come from your own imported content. The slow oscillators of the single effects and the wheel and key-strength links are kept in the file but not worked yet.").small().color(TEXT_DIM));
+        }
         Kind::StrModel => {
             use cereal_engine::strmodel::{params, COUNT, GROUPS};
             if g.p.len() < COUNT {

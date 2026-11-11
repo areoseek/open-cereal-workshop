@@ -20,6 +20,7 @@ pub mod analog;
 pub mod duo;
 pub mod tailfx;
 pub mod strmodel;
+pub mod triple;
 pub mod fm;
 pub mod formula;
 pub mod scope;

@@ -17,6 +17,18 @@ pub struct Patch {
     pub smp: Option<(std::sync::Arc<crate::sample::Sample>, crate::grain::Set)>,
 }
 
+static TEMPO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The player notes the tempo here for voices whose slow parts keep step with the song.
+pub fn set_tempo(bpm: f32) {
+    TEMPO.store(bpm.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tempo() -> f32 {
+    let t = f32::from_bits(TEMPO.load(std::sync::atomic::Ordering::Relaxed));
+    if t > 1.0 { t } else { 120.0 }
+}
+
 /// Cycles per second of key 60.
 const C5: f32 = 261.6256;
 
@@ -34,6 +46,7 @@ pub enum Voice {
     Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
     Duo(Box<(crate::duo::Voice, crate::duo::Set)>),
     Str(Box<(crate::strmodel::Voice, crate::strmodel::Set)>),
+    Triple(Box<(crate::triple::Voice, crate::triple::Set)>),
     Quiet,
 }
 
@@ -162,6 +175,10 @@ impl Voice {
             Kind::Duo => {
                 let set = crate::duo::set(s);
                 Voice::Duo(Box::new((crate::duo::Voice::start(&set, sr, key, vel, seed), set)))
+            }
+            Kind::Triple => {
+                let set = crate::triple::set(s);
+                Voice::Triple(Box::new((crate::triple::Voice::start(&set, sr, key, vel, seed), set)))
             }
             Kind::StrModel => {
                 let set = crate::strmodel::set(s);
@@ -297,6 +314,10 @@ impl Voice {
                 let (v, set) = &mut **v;
                 v.release(set)
             }
+            Voice::Triple(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Str(v) => {
                 let (v, set) = &mut **v;
                 v.release(set)
@@ -343,6 +364,10 @@ impl Voice {
                 v.frame(set, dphase)
             }
             Voice::Duo(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set, dphase)
+            }
+            Voice::Triple(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set, dphase)
             }

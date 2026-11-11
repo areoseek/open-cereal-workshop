@@ -57,8 +57,64 @@ pub struct Gate {
     pub len: f32,
 }
 
+/// A row of simple effects an instrument carries: the first six run before the echo, the rest after the room.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Rack {
+    /// Overdrive: amount 0 to 1, then a high cut in Hz.
+    pub drive: Option<[f32; 2]>,
+    /// Held samples: how many frames (at 44.1 kHz) each one is held, then a high cut in Hz.
+    pub crush: Option<[f32; 2]>,
+    /// A short swept echo: depth and feedback, each 0 to 1.
+    pub flange: Option<[f32; 2]>,
+    /// Swept all-pass stages: depth and feedback, each 0 to 1.
+    pub phase: Option<[f32; 2]>,
+    /// Low pass: Hz and resonance 0 to 1.
+    pub low: Option<[f32; 2]>,
+    /// High pass: Hz and resonance 0 to 1.
+    pub high: Option<[f32; 2]>,
+    /// Left (-1) to right (1).
+    pub pan: Option<f32>,
+    /// A dip on every beat: sixteenth notes to recover, and how deep (0 to 1).
+    pub pump: Option<[f32; 2]>,
+    /// Five bands (60, 220, 1500, 8000, 12000 Hz), each in dB.
+    pub eq: Option<[f32; 5]>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RackState {
+    drive_lp: [f32; 2],
+    crush_lp: [f32; 2],
+    held: [f32; 2],
+    count: f32,
+    fl: Vec<[f32; 2]>,
+    fl_at: usize,
+    fl_ph: f32,
+    ph: [[f32; 2]; 4],
+    ph_last: [f32; 2],
+    ph_ph: f32,
+    low: [[f32; 2]; 2],
+    high: [[f32; 2]; 2],
+    pump: f32,
+    clock: f64,
+    eq: [[[f32; 2]; 2]; 5],
+}
+
+/// One step of a state-variable filter; gives (low, band, high).
+#[inline]
+fn svf(s: &mut [f32; 2], x: f32, g: f32, k: f32) -> (f32, f32, f32) {
+    let a1 = 1.0 / (1.0 + g * (g + k));
+    let a2 = g * a1;
+    let v3 = x - s[1];
+    let v1 = a1 * s[0] + a2 * v3;
+    let v2 = s[1] + a2 * s[0] + g * a2 * v3;
+    s[0] = 2.0 * v1 - s[0];
+    s[1] = 2.0 * v2 - s[1];
+    (v2, v1, x - k * v1 - v2)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Set {
+    pub rack: Option<Rack>,
     pub delay: Option<Delay>,
     pub chorus: Option<Chorus>,
     pub gate: Option<Gate>,
@@ -68,7 +124,7 @@ pub struct Set {
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
@@ -79,7 +135,7 @@ impl Set {
             let repeats = if d.fb > 0.001 { (0.001f32.ln() / d.fb.ln()).ceil().min(60.0) } else { 1.0 };
             n += time * (repeats + 1.0);
         }
-        if self.chorus.is_some() {
+        if self.chorus.is_some() || self.rack.is_some() {
             n += sr * 0.05;
         }
         if self.body.is_some() {
@@ -109,6 +165,7 @@ pub struct State {
     body: [[[f32; 2]; 2]; 8],
     combs: Vec<(Vec<f32>, usize, f32)>,
     passes: Vec<(Vec<f32>, usize)>,
+    rack: Box<RackState>,
 }
 
 /// Comb and all-pass lengths of the room at 44.1 kHz; the right side is a little longer.
@@ -117,13 +174,16 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new() }
+        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default() }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
     /// sixteenth notes while it plays, so the gate keeps its place in the bar.
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
         let sr = self.sr;
+        if let Some(r) = &set.rack {
+            self.rack_first(r, buf);
+        }
         if let Some(b) = &set.body {
             for k in 0..8 {
                 if b.fb[k] <= 0.0 {
@@ -274,6 +334,152 @@ impl State {
                         sum = y;
                     }
                     f[side] = f[side] * (1.0 - r.wet * 0.5) + sum * r.wet;
+                }
+            }
+        }
+        if let Some(r) = &set.rack {
+            self.rack_last(r, buf, step, song);
+        }
+    }
+
+    fn rack_first(&mut self, r: &Rack, buf: &mut [[f32; 2]]) {
+        let sr = self.sr;
+        let st = &mut *self.rack;
+        let pole = |hz: f32| 1.0 - (-TAU * hz.clamp(20.0, sr * 0.45) / sr).exp();
+        if let Some([amount, hz]) = r.drive {
+            let push = 1.0 + amount * amount * 40.0;
+            // louder in, about as loud out
+            let back = 1.0 / (1.0 + amount * 2.0);
+            let c = pole(hz);
+            for f in buf.iter_mut() {
+                for side in 0..2 {
+                    let y = (f[side] * push).tanh() * back * (1.0 + amount);
+                    st.drive_lp[side] += (y - st.drive_lp[side]) * c;
+                    f[side] = st.drive_lp[side];
+                }
+            }
+        }
+        if let Some([hold, hz]) = r.crush {
+            let hold = (hold * sr / 44100.0).max(1.0);
+            let c = pole(hz);
+            for f in buf.iter_mut() {
+                st.count += 1.0;
+                if st.count >= hold {
+                    st.count -= hold;
+                    st.held = *f;
+                }
+                for side in 0..2 {
+                    st.crush_lp[side] += (st.held[side] - st.crush_lp[side]) * c;
+                    f[side] = st.crush_lp[side];
+                }
+            }
+        }
+        if let Some([depth, fb]) = r.flange {
+            let n = (sr * 0.012) as usize + 8;
+            if st.fl.len() != n {
+                st.fl = vec![[0.0; 2]; n];
+                st.fl_at = 0;
+            }
+            let fb = fb.clamp(0.0, 1.0) * 0.9;
+            for f in buf.iter_mut() {
+                st.fl_ph = (st.fl_ph + 0.25 / sr).fract();
+                let mut wet = [0.0f32; 2];
+                for side in 0..2 {
+                    let ph = (st.fl_ph + side as f32 * 0.25).fract();
+                    let back = (0.0005 + (0.5 - 0.5 * (ph * TAU).cos()) * depth * 0.008) * sr + 1.0;
+                    let whole = back.floor();
+                    let i = (st.fl_at + n - whole as usize) % n;
+                    let j = (i + n - 1) % n;
+                    wet[side] = st.fl[i][side] + (st.fl[j][side] - st.fl[i][side]) * (back - whole);
+                }
+                st.fl[st.fl_at] = [f[0] + wet[0] * fb, f[1] + wet[1] * fb];
+                st.fl_at = (st.fl_at + 1) % n;
+                f[0] = (f[0] + wet[0]) * 0.7;
+                f[1] = (f[1] + wet[1]) * 0.7;
+            }
+        }
+        if let Some([depth, fb]) = r.phase {
+            let fb = fb.clamp(0.0, 1.0) * 0.85;
+            for f in buf.iter_mut() {
+                st.ph_ph = (st.ph_ph + 0.3 / sr).fract();
+                for side in 0..2 {
+                    let ph = (st.ph_ph + side as f32 * 0.25).fract();
+                    let hz = 300.0 * (1.0 + depth * 12.0 * (0.5 - 0.5 * (ph * TAU).cos()));
+                    let t = (std::f32::consts::PI * hz.min(sr * 0.4) / sr).tan();
+                    let a = (t - 1.0) / (t + 1.0);
+                    let mut y = f[side] + st.ph_last[side] * fb;
+                    for stage in st.ph.iter_mut() {
+                        let out = a * y + stage[side];
+                        stage[side] = y - a * out;
+                        y = out;
+                    }
+                    st.ph_last[side] = y;
+                    f[side] = (f[side] + y) * 0.6;
+                }
+            }
+        }
+        for (which, low) in [(r.low, true), (r.high, false)] {
+            let Some([hz, res]) = which else { continue };
+            let g = (std::f32::consts::PI * hz.clamp(20.0, sr * 0.45) / sr).tan();
+            let k = 1.0 / (0.7 + res.clamp(0.0, 1.0) * res * 9.0);
+            let state = if low { &mut st.low } else { &mut st.high };
+            for f in buf.iter_mut() {
+                for side in 0..2 {
+                    let (lo, _, hi) = svf(&mut state[side], f[side], g, k);
+                    f[side] = if low { lo } else { hi };
+                }
+            }
+        }
+    }
+
+    fn rack_last(&mut self, r: &Rack, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        let sr = self.sr;
+        let st = &mut *self.rack;
+        if let Some(pan) = r.pan {
+            let (l, rt) = ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0));
+            for f in buf.iter_mut() {
+                f[0] *= l;
+                f[1] *= rt;
+            }
+        }
+        if let Some(at) = song {
+            st.clock = at;
+        }
+        let per = 1.0 / step.max(1.0) as f64;
+        if let Some([recover, drop]) = r.pump {
+            let c = 1.0 - (-1.0 / (recover.max(0.05) * step * 0.35)).exp();
+            for f in buf.iter_mut() {
+                let before = st.clock;
+                st.clock += per;
+                if (before / 4.0).floor() != (st.clock / 4.0).floor() || before == 0.0 {
+                    st.pump = drop.clamp(0.0, 1.0);
+                }
+                st.pump -= st.pump * c;
+                let gain = 1.0 - st.pump;
+                f[0] *= gain;
+                f[1] *= gain;
+            }
+        } else {
+            st.clock += per * buf.len() as f64;
+        }
+        if let Some(db) = r.eq {
+            for (band, (&gain, hz)) in db.iter().zip([60.0f32, 220.0, 1500.0, 8000.0, 12000.0]).enumerate() {
+                if gain.abs() < 0.05 {
+                    continue;
+                }
+                // a band lift or cut: the band-pass part of the filter, added back scaled
+                let g = (std::f32::consts::PI * hz.min(sr * 0.45) / sr).tan();
+                let k = 1.2;
+                let lift = 10f32.powf(gain / 20.0) - 1.0;
+                for f in buf.iter_mut() {
+                    for side in 0..2 {
+                        let (lo, bp, hi) = svf(&mut st.eq[band][side], f[side], g, k);
+                        f[side] += lift * match band {
+                            0 => lo,
+                            4 => hi,
+                            _ => bp * k,
+                        };
+                    }
                 }
             }
         }

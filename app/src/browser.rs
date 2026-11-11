@@ -42,7 +42,7 @@ impl State {
                             let is_dir = p.is_dir();
                             let ext = ext_of(&p);
                             let hidden = e.file_name().to_string_lossy().starts_with('.');
-                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid"].contains(&ext.as_str()))).then_some((p, is_dir))
+                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid", "gmsynth"].contains(&ext.as_str()))).then_some((p, is_dir))
                         })
                         .collect()
                 })
@@ -72,7 +72,7 @@ impl App {
             } else {
                 let ext = ext_of(&path);
                 let project = ext == "flp";
-                let preset = ext == "fst";
+                let preset = cereal_engine::preset::EXTS.contains(&ext.as_str());
                 let score = ext == "fsc" || ext == "mid";
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
                 let text = RichText::new(&name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });

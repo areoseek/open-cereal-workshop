@@ -1077,7 +1077,7 @@ impl App {
                     let p = e.path();
                     if p.is_dir() {
                         stack.push(p);
-                    } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    } else if cereal_engine::preset::is_file(&p) {
                         out.push(p);
                     }
                 }
@@ -1134,7 +1134,7 @@ impl App {
             StateAsk::OpenChan(_) | StateAsk::SaveChan(_) => ("Channel presets", "Channel state file"),
             _ => ("Mixer presets", "Mixer track state file"),
         };
-        let mut d = rfd::FileDialog::new().add_filter(kind, &["fst"]);
+        let mut d = rfd::FileDialog::new().add_filter(kind, &cereal_engine::preset::EXTS);
         if let Some(dir) = folder(&self.lib, sub) {
             d = d.set_directory(dir);
         }

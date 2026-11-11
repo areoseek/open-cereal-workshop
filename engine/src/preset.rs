@@ -49,7 +49,19 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
 }
 
 pub fn read(path: &std::path::Path) -> Result<Preset, String> {
-    parse(&std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // some instruments keep their sounds in files of their own: the file is the settings block as it stands
+    if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("gmsynth")) {
+        return Ok(Preset { ident: "GMS".into(), state: crate::triple::wrap(&bytes) });
+    }
+    parse(&bytes)
+}
+
+/// File endings that hold the settings of one plugin.
+pub const EXTS: [&str; 2] = ["fst", "gmsynth"];
+
+pub fn is_file(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|x| EXTS.iter().any(|e| x.eq_ignore_ascii_case(e)))
 }
 
 /// A preset file for one plugin's settings, in the layout the reference program writes.

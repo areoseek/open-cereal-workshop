@@ -270,6 +270,7 @@ pub fn tail(p: &[f32]) -> tailfx::Set {
     }
     let sync = SYNC[if p[112].is_finite() { (p[112].round().max(0.0) as usize).min(8) } else { 0 }];
     tailfx::Set {
+        rack: None,
         body: fb.iter().any(|&f| f > 0.0).then_some(tailfx::Body { hz, fb, flip }),
         delay: (p[63] >= 0.5 && u(69) > 0.0).then(|| tailfx::Delay {
             left: sync,
