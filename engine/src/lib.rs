@@ -15,6 +15,7 @@ pub mod additive;
 pub mod analog;
 pub mod fm;
 pub mod minis;
+pub mod midifile;
 pub mod keys;
 pub mod slicer;
 pub mod beep;

@@ -378,6 +378,63 @@ impl App {
         };
     }
 
+    fn export_midi(&mut self) {
+        let default = self.path.as_ref().map(|p| p.with_extension("mid")).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "untitled.mid".into());
+        let Some(path) = rfd::FileDialog::new().add_filter("MIDI file", &["mid"]).set_file_name(default).save_file() else { return };
+        let bytes = cereal_engine::midifile::export(&self.song, self.handle.transport.song_mode(), self.handle.transport.pattern());
+        self.status = match std::fs::write(&path, bytes) {
+            Ok(()) => format!("Exported {}", path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        };
+    }
+
+    fn import_midi_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("MIDI file", &["mid", "midi", "rmi", "kar"]).pick_file() {
+            self.import_midi(&p);
+        }
+    }
+
+    /// Each part of the file lands on a new channel, all in one free pattern.
+    fn import_midi(&mut self, path: &Path) {
+        let got = std::fs::read(path).map_err(|e| e.to_string()).and_then(|d| cereal_engine::midifile::import(&d, self.song.ppq));
+        let m = match got {
+            Ok(m) if !m.parts.is_empty() => m,
+            Ok(_) => {
+                self.status = "That MIDI file holds no notes".into();
+                return;
+            }
+            Err(e) => {
+                self.status = format!("Import failed: {e}");
+                return;
+            }
+        };
+        let pat = self.song.next_empty_pattern();
+        let count = m.parts.len();
+        for part in m.parts {
+            let mut c = Chan::instrument(cereal_engine::synth::Kind::Osc3);
+            c.name = part.name;
+            self.song.channels.push(c);
+            let ci = (self.song.channels.len() - 1) as u16;
+            self.song.patterns[pat].notes.extend(part.notes.into_iter().map(|n| cereal_engine::song::Note { chan: ci, ..n }));
+        }
+        self.song.patterns[pat].sort();
+        if self.song.patterns[pat].name.is_empty() {
+            self.song.patterns[pat].name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        }
+        if self.song.clips.is_empty() {
+            if let Some(t) = m.tempo {
+                self.song.tempo = t.clamp(10.0, 522.0);
+            }
+            if let Some(ts) = m.time_sig {
+                self.song.time_sig = ts;
+            }
+        }
+        self.handle.transport.set_pattern(pat);
+        self.sel_chan = self.song.channels.len() - 1;
+        self.dirty = true;
+        self.status = format!("Imported {count} part{} from {}", if count == 1 { "" } else { "s" }, path.display());
+    }
+
     fn load_sample(&mut self, path: &Path, into: Option<usize>) {
         match self.lib.load_path(path) {
             Ok(s) => {
@@ -686,6 +743,7 @@ impl App {
                     Key::S => self.save(modifiers.shift),
                     Key::R => self.export(),
                     Key::T => self.typing_keys = !self.typing_keys,
+                    Key::M if modifiers.shift => self.export_midi(),
                     Key::M => {
                         let tr = &self.handle.transport;
                         tr.set_metronome(!tr.metronome());
@@ -767,6 +825,14 @@ impl App {
                     if ui.button("Export WAV...     Ctrl+R").clicked() {
                         ui.close_menu();
                         self.export();
+                    }
+                    if ui.button("Export MIDI file...     Ctrl+Shift+M").clicked() {
+                        ui.close_menu();
+                        self.export_midi();
+                    }
+                    if ui.button("Import MIDI file...").clicked() {
+                        ui.close_menu();
+                        self.import_midi_dialog();
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
@@ -1040,6 +1106,8 @@ impl eframe::App for App {
         for p in dropped {
             if p.extension().map(|e| e.eq_ignore_ascii_case("flp")).unwrap_or(false) {
                 self.actions.push(Action::Open(p));
+            } else if p.extension().map(|e| ["mid", "midi", "rmi", "kar"].iter().any(|x| e.eq_ignore_ascii_case(x))).unwrap_or(false) {
+                self.import_midi(&p);
             } else {
                 self.actions.push(Action::LoadSample(p, None));
             }
