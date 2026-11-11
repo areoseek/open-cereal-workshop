@@ -138,7 +138,7 @@ pub struct Sampler {
     pub slide: f32,
     /// Share of the project swing this channel takes, 0..=1.
     pub swing: f32,
-    /// Echoes: how many, level kept from one to the next (0 = off), pan and pitch moved per echo, gap in steps.
+    /// Echoes: how many, level kept from one to the next (0 = no echoes), pan and pitch moved per echo, gap in steps.
     pub echoes: u8,
     pub echo_feedback: f32,
     pub echo_pan: f32,
@@ -175,7 +175,7 @@ impl Default for Sampler {
             porta: false,
             slide: 0.1,
             swing: 1.0,
-            echoes: 0,
+            echoes: 4,
             echo_feedback: 0.0,
             echo_pan: 0.0,
             echo_cents: 0.0,
@@ -211,7 +211,7 @@ impl Sampler {
             porta: c.poly.2 & 2 != 0,
             slide: c.poly.1 as f32 / 5000.0,
             swing: (c.swing as f32 / 128.0).clamp(0.0, 1.0),
-            echoes: if c.echo[0] > 0 { c.echo[3].clamp(0, 10) as u8 } else { 0 },
+            echoes: c.echo[3].clamp(0, 10) as u8,
             echo_feedback: (c.echo[0] as f32 / 12800.0).clamp(0.0, 1.0),
             echo_pan: (c.echo[1] as f32 - 6400.0) / 6400.0,
             echo_cents: c.echo[2] as f32,

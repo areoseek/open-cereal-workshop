@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::flp::{self, id, latin1, u16at, u32at, version_tuple, ChannelKind, Event, Flp, FlpFile, Header, Value, NOTE_SIZE};
-use crate::song::{ClipSrc, Note, Song};
+use crate::song::{ClipSrc, Note, Sampler, Song};
 
 const ITEM_BASE: u16 = 0x5000;
 
@@ -516,6 +516,164 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
             if let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(1) {
                 if let Value::Data(d) = &mut ev[i].value {
                     put_u32(d, 4, now.env_on as u32);
+                }
+            }
+        }
+        if now.smp != was.smp {
+            patch_sampler(ev, start, end, &now.smp, &was.smp);
+        }
+    }
+}
+
+fn env_raw(seconds: f32) -> u32 {
+    if seconds <= 0.0 {
+        return 100;
+    }
+    ((seconds / 16.0).cbrt() * 65536.0).round().clamp(100.0, 65536.0) as u32
+}
+
+/// Write the sampler settings that changed into the events of one channel (`start..end`).
+fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sampler, was: &Sampler) {
+    use crate::song::Env;
+    // a word or int setting: replace it, or add it ahead of the levels block
+    fn put(ev: &mut Vec<Event>, start: usize, end: &mut usize, e: Event) {
+        match (start..*end).find(|&i| ev[i].id == e.id) {
+            Some(i) => ev[i].value = e.value,
+            None => {
+                let at = (start..*end).find(|&i| ev[i].id == id::CHAN_LEVELS).unwrap_or(*end);
+                ev.insert(at, e);
+                *end += 1;
+            }
+        }
+    }
+    // a block: change it in place, or add `blank` after the channel parameters first
+    fn block(ev: &mut Vec<Event>, start: usize, end: &mut usize, eid: u8, blank: &str, f: impl FnOnce(&mut Vec<u8>)) {
+        let at = match (start..*end).find(|&i| ev[i].id == eid) {
+            Some(i) => i,
+            None => {
+                let at = (start..*end).find(|&i| ev[i].id == id::CHAN_PARAMS).map(|i| i + 1).unwrap_or(*end);
+                ev.insert(at, Event::data(eid, hex(blank)));
+                *end += 1;
+                at
+            }
+        };
+        if let Value::Data(d) = &mut ev[at].value {
+            f(d);
+        }
+    }
+    let q = |v: f32, scale: f32| (v * scale).round() as i32;
+
+    let flags = |f: &Sampler| (f.reverse as u16) << 1 | (f.swap_stereo as u16) << 8;
+    if flags(now) != flags(was) {
+        let old = (start..end).find(|&i| ev[i].id == id::CHAN_FX_FLAGS).and_then(|i| ev[i].as_u32()).unwrap_or(0) as u16;
+        put(ev, start, &mut end, Event::word(id::CHAN_FX_FLAGS, (old & !0x102) | flags(now)));
+    }
+    if q(now.fade_in, 1024.0) != q(was.fade_in, 1024.0) {
+        put(ev, start, &mut end, Event::word(id::CHAN_FADE_IN, q(now.fade_in, 1024.0) as u16));
+    }
+    if q(now.fade_out, 1024.0) != q(was.fade_out, 1024.0) {
+        put(ev, start, &mut end, Event::word(id::CHAN_FADE_OUT, q(now.fade_out, 1024.0) as u16));
+    }
+    if q(now.swing, 128.0) != q(was.swing, 128.0) {
+        put(ev, start, &mut end, Event::word(id::CHAN_SWING, q(now.swing, 128.0) as u16));
+    }
+    if (now.cut, now.cut_by) != (was.cut, was.cut_by) {
+        put(ev, start, &mut end, Event::int(id::CHAN_CUT_GROUP, now.cut as u32 | (now.cut_by as u32) << 16));
+    }
+    let filt = |f: &Sampler| (q(f.cutoff, 256.0), q(f.resonance, 256.0), f.filter);
+    if filt(now) != filt(was) {
+        let (c, r, t) = filt(now);
+        block(ev, start, &mut end, id::CHAN_LEVELS, "001900001027000000000000000100000000000000000000", |d| {
+            if d.len() < 24 {
+                d.resize(24, 0);
+            }
+            put_u32(d, 12, c as u32);
+            put_u32(d, 16, r as u32);
+            put_u32(d, 20, t as u32);
+        });
+    }
+    let poly = |f: &Sampler| (q(f.slide, 5000.0), f.mono as u8 | (f.porta as u8) << 1);
+    if poly(now) != poly(was) {
+        let (slide, fl) = poly(now);
+        block(ev, start, &mut end, id::CHAN_POLY, "00000000f401000000", |d| {
+            if d.len() < 9 {
+                d.resize(9, 0);
+            }
+            put_u32(d, 4, slide as u32);
+            d[8] = (d[8] & !3) | fl;
+        });
+    }
+    let echo = |f: &Sampler| (q(f.echo_feedback, 12800.0), q(f.echo_pan, 6400.0) + 6400, q(f.echo_cents, 1.0), f.echoes, q(f.echo_steps, 48.0));
+    if echo(now) != echo(was) {
+        let (fb, pan, cents, n, time) = echo(now);
+        block(ev, start, &mut end, id::CHAN_ECHO, "0000000000190000000000000400000090000000", |d| {
+            if d.len() < 20 {
+                d.resize(20, 0);
+            }
+            put_u32(d, 0, fb as u32);
+            put_u32(d, 4, pan as u32);
+            put_u32(d, 8, cents as u32);
+            put_u32(d, 12, n as u32);
+            put_u32(d, 16, time as u32);
+        });
+    }
+    let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.keep_pitch);
+    if par(now) != par(was) {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                if d.len() >= 112 {
+                    let (a, b) = (par(now), par(was));
+                    d[80] = a.0 as u8;
+                    d[81] = a.1 as u8;
+                    if a.2 != b.2 {
+                        // newer files keep the length as a float, older ones as a whole number
+                        let raw = u32::from_le_bytes([d[96], d[97], d[98], d[99]]);
+                        let float = raw >= 0x3000_0000 || (raw == 0 && d.len() >= 156);
+                        put_u32(d, 96, if float { (now.stretch_beats * 384.0).to_bits() } else { a.2 as u32 });
+                    }
+                    if a.3 != b.3 {
+                        put_u32(d, 100, a.3 as u32);
+                    }
+                    if a.4 != b.4 {
+                        put_u32(d, 104, a.4 as u32);
+                    }
+                    if a.5 != b.5 {
+                        put_u32(d, 108, if a.5 { -1i32 as u32 } else { 0 });
+                    }
+                }
+            }
+        }
+    }
+    // envelopes: volume is the second block, the filter one the third, pitch the fifth
+    let envs: [(usize, &Env, &Env, f32); 3] = [(1, &now.vol_env, &was.vol_env, 1.0), (2, &now.cut_env, &was.cut_env, 128.0), (4, &now.pitch_env, &was.pitch_env, 1.0)];
+    for (nth, a, b, amount) in envs {
+        if a == b {
+            continue;
+        }
+        let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(nth) else { continue };
+        let Value::Data(d) = &mut ev[i].value else { continue };
+        if d.len() < 36 {
+            continue;
+        }
+        // the volume envelope's switch is the channel's own `env_on`
+        if nth != 1 && a.on != b.on {
+            put_u32(d, 4, if a.on { u32::MAX } else { 0 });
+        }
+        for (o, x, y) in [(8, a.delay, b.delay), (12, a.attack, b.attack), (16, a.hold, b.hold), (20, a.decay, b.decay), (28, a.release, b.release)] {
+            if env_raw(x) != env_raw(y) {
+                put_u32(d, o, env_raw(x));
+            }
+        }
+        if q(a.sustain, 128.0) != q(b.sustain, 128.0) {
+            put_u32(d, 24, q(a.sustain, 128.0) as u32);
+        }
+        if q(a.amount, amount) != q(b.amount, amount) {
+            put_u32(d, 32, q(a.amount, amount) as u32);
+        }
+        if d.len() >= 68 {
+            for k in 0..3 {
+                if q(a.tension[k], 128.0) != q(b.tension[k], 128.0) {
+                    put_u32(d, 56 + 4 * k, q(a.tension[k], 128.0) as u32);
                 }
             }
         }
@@ -1034,6 +1192,68 @@ mod tests {
         let (mut r2, f2) = reload(&bytes);
         r2.prepare();
         assert_eq!(to_bytes(&r2, Some(&f2)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn sampler_settings_round_trip() {
+        let mut s = Song::new();
+        {
+            let f = &mut s.channels[1].smp;
+            f.reverse = true;
+            f.swap_stereo = true;
+            f.normalize = true;
+            f.fade_in = 0.25;
+            f.fade_out = 0.5;
+            f.swing = 0.5;
+            f.cut = 3;
+            f.cut_by = 3;
+            f.cutoff = 0.5;
+            f.resonance = 0.25;
+            f.filter = 3;
+            f.mono = true;
+            f.porta = true;
+            f.slide = 0.2;
+            f.echo_feedback = 0.5;
+            f.echoes = 6;
+            f.echo_steps = 2.0;
+            f.echo_cents = 100.0;
+            f.stretch_beats = 4.0;
+            f.stretch_cents = -200.0;
+            f.keep_pitch = true;
+            f.vol_env.attack = 0.5;
+            f.vol_env.sustain = 0.25;
+            f.vol_env.release = 1.0;
+            f.vol_env.tension = [0.5, -0.5, 0.25];
+            f.pitch_env.on = true;
+            f.pitch_env.amount = 1200.0;
+            f.pitch_env.decay = 0.3;
+            f.cut_env.on = true;
+            f.cut_env.amount = -0.5;
+        }
+        s.channels[1].env_on = true;
+        s.prepare();
+        let bytes = to_bytes(&s, None).unwrap();
+        let (r, f) = reload(&bytes);
+        let (a, b) = (&s.channels[1].smp, &r.channels[1].smp);
+        assert!(r.channels[1].env_on);
+        assert_eq!((b.reverse, b.swap_stereo, b.normalize, b.mono, b.porta, b.keep_pitch), (true, true, true, true, true, true));
+        assert_eq!((b.cut, b.cut_by, b.filter, b.echoes), (3, 3, 3, 6));
+        let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
+        for (x, y) in [
+            (a.fade_in, b.fade_in), (a.fade_out, b.fade_out), (a.swing, b.swing), (a.cutoff, b.cutoff), (a.resonance, b.resonance), (a.slide, b.slide),
+            (a.echo_feedback, b.echo_feedback), (a.echo_steps, b.echo_steps), (a.echo_cents, b.echo_cents), (a.stretch_beats, b.stretch_beats),
+            (a.stretch_cents, b.stretch_cents), (a.vol_env.attack, b.vol_env.attack), (a.vol_env.sustain, b.vol_env.sustain), (a.vol_env.release, b.vol_env.release),
+            (a.vol_env.tension[0], b.vol_env.tension[0]), (a.vol_env.tension[1], b.vol_env.tension[1]), (a.pitch_env.amount, b.pitch_env.amount),
+            (a.pitch_env.decay, b.pitch_env.decay), (a.cut_env.amount, b.cut_env.amount),
+        ] {
+            assert!(near(x, y), "{x} != {y}");
+        }
+        assert!(b.pitch_env.on && b.cut_env.on);
+        // untouched channels keep their defaults, and a second save is the same file
+        assert_eq!(r.channels[0].smp, Song::new().channels[0].smp);
+        let mut r2 = r.clone();
+        r2.prepare();
+        assert_eq!(to_bytes(&r2, Some(&f)).unwrap(), bytes);
     }
 
     #[test]

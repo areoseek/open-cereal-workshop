@@ -2,6 +2,7 @@
 //! channel rack, piano roll, playlist and mixer as windows on the workspace.
 
 mod browser;
+mod chanset;
 mod mixer;
 mod pianoroll;
 mod playlist;
@@ -97,6 +98,8 @@ pub(crate) struct App {
     hist_pending: bool,
     show_info: bool,
     show_about: bool,
+    show_chanset: bool,
+    chanset: chanset::State,
     rename_pattern: Option<(usize, String)>,
 }
 
@@ -192,10 +195,29 @@ impl App {
             hist_pending: false,
             show_info: false,
             show_about: false,
+            show_chanset: false,
+            chanset: Default::default(),
             rename_pattern: None,
         };
         if let Some(p) = open {
             app.open(&p);
+        }
+        // windows to show at start, for screenshots and tests: CEREAL_SHOW=mixer,piano,channel
+        if let Ok(show) = std::env::var("CEREAL_SHOW") {
+            for w in show.split(',') {
+                match w.trim() {
+                    "mixer" => app.show_mixer = true,
+                    "piano" => app.show_piano = true,
+                    "channel" => app.show_chanset = true,
+                    "noplaylist" => app.show_playlist = false,
+                    "norack" => app.show_rack = false,
+                    w => {
+                        if let Some(n) = w.strip_prefix("chan=").and_then(|n| n.parse().ok()) {
+                            app.sel_chan = n;
+                        }
+                    }
+                }
+            }
         }
         app
     }
@@ -309,7 +331,7 @@ impl App {
                 c.kind = ChannelKind::Sampler;
                 c.plugin.clear();
                 c.sample_path = path.to_string_lossy().to_string();
-                c.sample = Some(s);
+                c.set_sample(Some(s));
                 self.sel_chan = ci;
                 self.dirty = true;
             }
@@ -395,6 +417,7 @@ impl App {
         self.show_piano = false;
         self.show_mixer = false;
         self.show_info = false;
+        self.show_chanset = false;
     }
 
     fn step_pattern(&mut self, by: i32) {
@@ -797,6 +820,10 @@ impl eframe::App for App {
         let mut open = self.show_mixer;
         egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([300.0, 420.0]).default_size([980.0, 360.0]).show(ctx, |ui| self.mixer_ui(ui));
         self.show_mixer = open;
+        let mut open = self.show_chanset;
+        let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
+        egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([940.0, 520.0]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
+        self.show_chanset = open;
 
         self.small_windows(ctx);
         self.run_actions();

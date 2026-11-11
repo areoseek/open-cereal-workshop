@@ -596,7 +596,7 @@ impl Player {
                     return;
                 }
                 let filter_on = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
-                for k in 0..=f.echoes as u32 {
+                for k in 0..=(if f.echo_feedback > 0.0 { f.echoes as u32 } else { 0 }) {
                     let fall = f.echo_feedback.powi(k as i32);
                     let note_gain = law::velocity_gain(n.vel) * f.gain * fall;
                     let note_pan = (n.pan + f.echo_pan * k as f32).clamp(-1.0, 1.0);

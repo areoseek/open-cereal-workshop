@@ -1,0 +1,366 @@
+//! The channel settings window: sample treatment, envelopes and filter, and the miscellaneous note functions of
+//! the selected sampler channel.
+
+use egui::{Color32, Pos2, RichText, Sense, Stroke, Ui, Vec2};
+
+use cereal_engine::flp::ChannelKind;
+use cereal_engine::song::{Env, Sampler};
+
+use crate::widgets::*;
+use crate::App;
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Tab {
+    #[default]
+    Sample,
+    Envelope,
+    Misc,
+}
+
+#[derive(Default)]
+pub struct State {
+    tab: Tab,
+    /// 0 volume, 1 filter cutoff, 2 pitch.
+    env: usize,
+}
+
+const KEY_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+pub fn key_name(key: u8) -> String {
+    format!("{}{}", KEY_NAMES[key as usize % 12], key / 12)
+}
+
+/// A knob with a caption under it. Returns true when the value moved.
+fn cap_knob(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, default: f32, hint: impl Fn(f32) -> String) -> bool {
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.set_width(44.0);
+        ui.vertical_centered(|ui| {
+            changed = knob(ui, v, min, max, default, 26.0).on_hover_text(hint(*v)).changed();
+            ui.label(RichText::new(label).small().color(TEXT_DIM));
+        });
+    });
+    changed
+}
+
+fn secs(v: f32) -> String {
+    if v < 1.0 {
+        format!("{:.0} ms", v * 1000.0)
+    } else {
+        format!("{v:.2} s")
+    }
+}
+
+/// Envelope times sit on a cubic knob so the short end has room.
+fn time_knob(ui: &mut Ui, label: &str, v: &mut f32) -> bool {
+    let mut x = (*v / 16.0).cbrt();
+    let hit = cap_knob(ui, label, &mut x, 0.0, 1.0, 0.0, |v: f32| secs(16.0 * v * v * v));
+    if hit {
+        *v = 16.0 * x * x * x;
+    }
+    hit
+}
+
+fn section(ui: &mut Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(title).small().strong().color(TEXT_DIM));
+}
+
+fn draw_env(ui: &mut Ui, e: &Env, on: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), 90.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, PANEL_DARK);
+    let held = e.delay + e.attack + e.hold + e.decay;
+    let sustain_for = (held * 0.3).max(0.15);
+    let total = (held + sustain_for + e.release).max(0.05);
+    let n = rect.width() as usize;
+    let mut pts = Vec::with_capacity(n);
+    let top = held + sustain_for;
+    let from = e.held(top);
+    for i in 0..n {
+        let t = i as f32 / n as f32 * total;
+        let y = if t < top { e.held(t) } else { e.released(from, t - top).unwrap_or(0.0) };
+        pts.push(Pos2::new(rect.left() + i as f32, rect.bottom() - 4.0 - y * (rect.height() - 8.0)));
+    }
+    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, if on { ACCENT } else { TEXT_DIM })));
+    let x = rect.left() + top / total * rect.width();
+    p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+}
+
+fn draw_wave(ui: &mut Ui, frames: &[[f32; 2]], color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), 70.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, PANEL_DARK);
+    if frames.is_empty() {
+        return;
+    }
+    let n = rect.width() as usize;
+    let mid = rect.center().y;
+    let half = rect.height() * 0.5 - 2.0;
+    for i in 0..n {
+        let a = i * frames.len() / n;
+        let b = ((i + 1) * frames.len() / n).max(a + 1).min(frames.len());
+        let stride = ((b - a) / 64).max(1);
+        let (mut lo, mut hi) = (0f32, 0f32);
+        for f in frames[a..b].iter().step_by(stride) {
+            let m = (f[0] + f[1]) * 0.5;
+            lo = lo.min(m);
+            hi = hi.max(m);
+        }
+        let x = rect.left() + i as f32;
+        p.line_segment([Pos2::new(x, mid - hi.min(1.0) * half), Pos2::new(x, mid - lo.max(-1.0) * half + 1.0)], Stroke::new(1.0_f32, color));
+    }
+}
+
+impl App {
+    pub(crate) fn chanset_ui(&mut self, ui: &mut Ui) {
+        let ci = self.sel_chan;
+        if ci >= self.song.channels.len() {
+            ui.label("No channel selected.");
+            return;
+        }
+        let mut changed = false;
+        let mut rebake = false;
+        let n_ins = self.song.inserts.len().saturating_sub(1);
+        let kind = self.song.channels[ci].kind;
+
+        // the strip every channel has: level, pan, pitch, mixer track
+        ui.horizontal(|ui| {
+            let c = &mut self.song.channels[ci];
+            changed |= cap_knob(ui, "PAN", &mut c.pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+            changed |= cap_knob(ui, "VOL", &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, |v: f32| format!("{:.0} %", v * 128.0));
+            changed |= cap_knob(ui, "PITCH", &mut c.pitch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+            ui.vertical(|ui| {
+                ui.set_width(52.0);
+                let mut ins = c.insert;
+                let dv = egui::DragValue::new(&mut ins).range(0..=n_ins).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "---".into() } else { format!("{v:.0}") });
+                if ui.add_sized([44.0, 22.0], dv).changed() {
+                    c.insert = ins;
+                    changed = true;
+                }
+                ui.label(RichText::new("TRACK").small().color(TEXT_DIM));
+            });
+            ui.vertical(|ui| {
+                ui.label(RichText::new(&c.name).strong());
+                let what = match c.kind {
+                    ChannelKind::Sampler => "Sampler".to_string(),
+                    ChannelKind::AudioClip => "Audio clip".to_string(),
+                    ChannelKind::Layer => "Layer".to_string(),
+                    ChannelKind::AutomationClip => "Automation clip".to_string(),
+                    _ => c.plugin.clone(),
+                };
+                ui.label(RichText::new(what).small().color(TEXT_DIM));
+            });
+        });
+        ui.separator();
+        if !matches!(kind, ChannelKind::Sampler | ChannelKind::AudioClip) {
+            let c = &self.song.channels[ci];
+            match kind {
+                ChannelKind::Layer => {
+                    ui.label("This layer plays these channels:");
+                    for k in &c.children {
+                        if let Some(ch) = self.song.channels.get(*k as usize) {
+                            ui.label(format!("  {}", ch.name));
+                        }
+                    }
+                }
+                ChannelKind::AutomationClip => {
+                    ui.label("Automation clip. Its curve is drawn in the playlist.");
+                }
+                _ => {
+                    ui.label(format!("Instrument: {}", c.plugin));
+                    ui.label(RichText::new("This instrument is not built in yet, so a plain stand-in voice plays its notes.").color(TEXT_DIM).small());
+                }
+            }
+            if changed {
+                self.dirty = true;
+            }
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            for (t, name) in [(Tab::Sample, "Sample"), (Tab::Envelope, "Envelope / filter"), (Tab::Misc, "Miscellaneous")] {
+                if ui.selectable_label(self.chanset.tab == t, name).clicked() {
+                    self.chanset.tab = t;
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        match self.chanset.tab {
+            Tab::Sample => {
+                let mut pick = false;
+                {
+                    let c = &mut self.song.channels[ci];
+                    ui.horizontal(|ui| {
+                        if ui.button("Open...").on_hover_text("Load a sample into this channel").clicked() {
+                            pick = true;
+                        }
+                        let file = c.sample_path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+                        let missing = c.sample.is_none() && !c.sample_path.is_empty();
+                        ui.label(RichText::new(if file.is_empty() { "(no sample)".to_string() } else { file }).color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })).on_hover_text(c.sample_path.clone());
+                    });
+                    if let Some(s) = &c.sample {
+                        draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                        let len = s.frames.len() as f32 / s.rate.max(1) as f32;
+                        ui.label(RichText::new(format!("{} Hz, {}, {}", s.rate, if s.mono { "mono" } else { "stereo" }, secs(len))).small().color(TEXT_DIM));
+                    }
+                    let f = &mut c.smp;
+                    section(ui, "PRECOMPUTED EFFECTS");
+                    ui.horizontal_wrapped(|ui| {
+                        rebake |= ui.checkbox(&mut f.normalize, "Normalize").changed();
+                        rebake |= ui.checkbox(&mut f.reverse, "Reverse").changed();
+                        rebake |= ui.checkbox(&mut f.invert, "Reverse polarity").changed();
+                        rebake |= ui.checkbox(&mut f.swap_stereo, "Swap stereo").changed();
+                    });
+                    ui.horizontal(|ui| {
+                        rebake |= cap_knob(ui, "IN", &mut f.fade_in, 0.0, 1.0, 0.0, |v: f32| format!("Fade in {:.0} %", v * 100.0));
+                        rebake |= cap_knob(ui, "OUT", &mut f.fade_out, 0.0, 1.0, 0.0, |v: f32| format!("Fade out {:.0} %", v * 100.0));
+                    });
+                    section(ui, "TIME STRETCHING");
+                    ui.horizontal(|ui| {
+                        changed |= cap_knob(ui, "PITCH", &mut f.stretch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+                        let mut m = f.stretch_mul.max(1e-6).log2();
+                        if cap_knob(ui, "MUL", &mut m, -2.0, 2.0, 0.0, |v: f32| format!("x {:.3}", v.exp2())) {
+                            f.stretch_mul = m.exp2();
+                            changed = true;
+                        }
+                        ui.vertical(|ui| {
+                            ui.set_width(70.0);
+                            changed |= ui.add(egui::DragValue::new(&mut f.stretch_beats).range(0.0..=1024.0).speed(0.05).custom_formatter(|v, _| if v <= 0.0 { "none".into() } else { format!("{v:.2} beats") })).on_hover_text("Length the sample is fitted to; none keeps its own length").changed();
+                            ui.label(RichText::new("TIME").small().color(TEXT_DIM));
+                        });
+                        ui.vertical(|ui| {
+                            egui::ComboBox::from_id_salt("stretch-mode").width(110.0).selected_text(if f.keep_pitch { "Stretch" } else { "Resample" }).show_ui(ui, |ui| {
+                                changed |= ui.selectable_value(&mut f.keep_pitch, false, "Resample").changed();
+                                changed |= ui.selectable_value(&mut f.keep_pitch, true, "Stretch").changed();
+                            });
+                            ui.label(RichText::new("MODE").small().color(TEXT_DIM));
+                        });
+                    });
+                }
+                if pick {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff"]).pick_file() {
+                        self.actions.push(crate::Action::LoadSample(p, Some(ci)));
+                    }
+                }
+            }
+            Tab::Envelope => {
+                ui.horizontal(|ui| {
+                    for (k, name) in ["Volume", "Cutoff", "Pitch"].into_iter().enumerate() {
+                        if ui.selectable_label(self.chanset.env == k, name).clicked() {
+                            self.chanset.env = k;
+                        }
+                    }
+                });
+                let which = self.chanset.env;
+                let c = &mut self.song.channels[ci];
+                let mut on = if which == 0 { c.env_on } else if which == 1 { c.smp.cut_env.on } else { c.smp.pitch_env.on };
+                let e: &mut Env = match which {
+                    0 => &mut c.smp.vol_env,
+                    1 => &mut c.smp.cut_env,
+                    _ => &mut c.smp.pitch_env,
+                };
+                let shown = *e;
+                draw_env(ui, &shown, on);
+                ui.horizontal(|ui| {
+                    if led(ui, on, 18.0).on_hover_text("Envelope on / off").clicked() {
+                        on = !on;
+                        changed = true;
+                    }
+                    changed |= time_knob(ui, "DEL", &mut e.delay);
+                    changed |= time_knob(ui, "ATT", &mut e.attack);
+                    changed |= time_knob(ui, "HOLD", &mut e.hold);
+                    changed |= time_knob(ui, "DEC", &mut e.decay);
+                    changed |= cap_knob(ui, "SUS", &mut e.sustain, 0.0, 1.0, 0.5, |v: f32| format!("{:.0} %", v * 100.0));
+                    changed |= time_knob(ui, "REL", &mut e.release);
+                    match which {
+                        1 => changed |= cap_knob(ui, "AMT", &mut e.amount, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0)),
+                        2 => changed |= cap_knob(ui, "AMT", &mut e.amount, -4800.0, 4800.0, 0.0, |v: f32| format!("{:+.0} cents", v)),
+                        _ => {}
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(22.0);
+                    for (k, name) in ["ATT T", "DEC T", "REL T"].into_iter().enumerate() {
+                        changed |= cap_knob(ui, name, &mut e.tension[k], -1.0, 1.0, 0.0, |v: f32| format!("Tension {:+.0} %", v * 100.0));
+                    }
+                });
+                e.on = on;
+                if which == 0 {
+                    c.env_on = on;
+                }
+                let f = &mut c.smp;
+                section(ui, "FILTER");
+                ui.horizontal(|ui| {
+                    changed |= cap_knob(ui, "MOD X", &mut f.cutoff, 0.0, 1.0, 1.0, |v: f32| format!("Cutoff {:.0} %", v * 100.0));
+                    changed |= cap_knob(ui, "MOD Y", &mut f.resonance, 0.0, 1.0, 0.0, |v: f32| format!("Resonance {:.0} %", v * 100.0));
+                    const TYPES: [&str; 8] = ["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LPx2"];
+                    ui.vertical(|ui| {
+                        egui::ComboBox::from_id_salt("filter-type").width(100.0).selected_text(TYPES[f.filter.min(7) as usize]).show_ui(ui, |ui| {
+                            for (k, name) in TYPES.into_iter().enumerate() {
+                                changed |= ui.selectable_value(&mut f.filter, k as u8, name).changed();
+                            }
+                        });
+                        ui.label(RichText::new("TYPE").small().color(TEXT_DIM));
+                    });
+                });
+            }
+            Tab::Misc => {
+                let c = &mut self.song.channels[ci];
+                let mut key = c.root_key;
+                let f: &mut Sampler = &mut c.smp;
+                section(ui, "LEVELS ADJUSTMENT");
+                ui.horizontal(|ui| {
+                    changed |= cap_knob(ui, "VOL", &mut f.gain, 0.0, 4.0, 1.0, |v: f32| format!("x {:.2}", v));
+                    ui.vertical(|ui| {
+                        ui.set_width(60.0);
+                        changed |= ui.add(egui::DragValue::new(&mut key).range(0..=131).speed(0.1).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("Root note").changed();
+                        ui.label(RichText::new("ROOT").small().color(TEXT_DIM));
+                    });
+                    changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
+                });
+                section(ui, "POLYPHONY");
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut f.mono, "Mono").changed();
+                    changed |= ui.checkbox(&mut f.porta, "Porta").changed();
+                    changed |= cap_knob(ui, "SLIDE", &mut f.slide, 0.0, 2.0, 0.1, |v: f32| secs(v));
+                });
+                section(ui, "GROUP");
+                ui.horizontal(|ui| {
+                    ui.label("Cut");
+                    changed |= ui.add(egui::DragValue::new(&mut f.cut).range(0..=99).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "--".into() } else { format!("{v:.0}") })).changed();
+                    ui.label("Cut by");
+                    changed |= ui.add(egui::DragValue::new(&mut f.cut_by).range(0..=99).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "--".into() } else { format!("{v:.0}") })).changed();
+                    if ui.button("Cut itself").clicked() {
+                        let g = ci as u16 + 1;
+                        f.cut = g;
+                        f.cut_by = g;
+                        changed = true;
+                    }
+                });
+                section(ui, "ECHO DELAY / FAT MODE");
+                ui.horizontal(|ui| {
+                    changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
+                    changed |= cap_knob(ui, "PAN", &mut f.echo_pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                    changed |= cap_knob(ui, "PITCH", &mut f.echo_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+                    changed |= cap_knob(ui, "TIME", &mut f.echo_steps, 0.0, 8.0, 3.0, |v: f32| format!("{:.2} steps", v));
+                    ui.vertical(|ui| {
+                        ui.set_width(50.0);
+                        changed |= ui.add(egui::DragValue::new(&mut f.echoes).range(1..=10).speed(0.1)).changed();
+                        ui.label(RichText::new("ECHOES").small().color(TEXT_DIM));
+                    });
+                });
+                c.root_key = key;
+            }
+        }
+        if rebake {
+            self.song.channels[ci].bake();
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+        }
+    }
+}

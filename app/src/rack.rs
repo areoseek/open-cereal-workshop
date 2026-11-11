@@ -75,11 +75,9 @@ impl App {
                         ui.painter().rect_filled(Rect::from_min_size(rect.right_top() + Vec2::new(2.0, 4.0), Vec2::new(3.0, STEP_H - 8.0)), 1.0, GREEN);
                     }
                     if resp.clicked() {
+                        // a click on the name opens that channel's settings; a second click closes them
+                        self.show_chanset = !(self.show_chanset && self.sel_chan == ci);
                         self.sel_chan = ci;
-                    }
-                    if resp.double_clicked() {
-                        self.sel_chan = ci;
-                        self.show_piano = true;
                     }
                     if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
                         self.actions.push(crate::Action::LoadSample((*path).clone(), Some(ci)));
