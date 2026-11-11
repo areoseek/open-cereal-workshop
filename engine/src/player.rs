@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use crate::flp::ChannelKind;
 use crate::law;
 use crate::sample::Sample;
-use crate::song::{ClipSrc, Note, Song, Target};
+use crate::song::{Env, ClipSrc, Note, Song, Target};
 
 pub const MAX_VOICES: usize = 256;
 pub const MAX_METERS: usize = 256;
@@ -171,6 +171,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         chase: false,
         born: 0,
         ov: Overrides::default(),
+        tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
         clicks: [click(sample_rate, 1760.0), click(sample_rate, 880.0)],
     };
     (handle, player)
@@ -251,12 +252,20 @@ fn click(rate: f32, hz: f32) -> Arc<Sample> {
     Arc::new(Sample::from_mono("click", rate as u32, &data))
 }
 
+/// Frames between envelope and filter updates.
+const CTL: u32 = 32;
+
 #[derive(Default)]
 struct Voice {
     active: bool,
     sample: Option<Arc<Sample>>,
     pos: f64,
+    /// Source frames per output frame at the note's own pitch, and where a glide is taking it.
     step: f64,
+    step_to: f64,
+    glide: f64,
+    /// `step` with the pitch envelope applied.
+    step_now: f64,
     phase: f32,
     dphase: f32,
     lp: f32,
@@ -271,6 +280,8 @@ struct Voice {
     attack: f32,
     release: f32,
     releasing: bool,
+    /// Stop with the short linear fade whatever the envelope says.
+    kill: bool,
     chan: u16,
     key: u8,
     live: bool,
@@ -280,12 +291,115 @@ struct Voice {
     note_gain: f32,
     note_pan: f32,
     follow: bool,
+    sr: f32,
+    /// Frames sounded, and frames since the note was let go.
+    t: u32,
+    rel_t: u32,
+    rel_from: f32,
+    ctl: u32,
+    venv: Env,
+    penv: Env,
+    cenv: Env,
+    env_now: f32,
+    env_inc: f32,
+    /// Filter: type, knob positions, coefficients and state (two stages, two channels).
+    ftype: u8,
+    fcut: f32,
+    fres: f32,
+    fon: bool,
+    fg: f32,
+    fk: f32,
+    fs: [[f32; 2]; 4],
+    /// Time stretch: source frames used per output frame, while `step` stays the pitch.
+    stretch: bool,
+    rate: f64,
+    hop: u32,
+    hop_t: u32,
+    a_pos: f64,
+    b_pos: f64,
 }
 
 impl Voice {
     fn let_go(&mut self) {
-        self.releasing = true;
+        if !self.releasing {
+            self.releasing = true;
+            self.rel_from = self.env_now;
+            self.rel_t = 0;
+            self.ctl = 0;
+        }
         self.remaining = None;
+    }
+
+    /// Work out the envelopes and the filter for the next few frames.
+    fn control(&mut self) {
+        let t = self.t as f32 / self.sr;
+        if self.venv.on {
+            let target = if self.releasing {
+                self.venv.released(self.rel_from, self.rel_t as f32 / self.sr).unwrap_or(-1.0)
+            } else {
+                self.venv.held(t)
+            };
+            if target < 0.0 {
+                if !self.kill {
+                    self.active = false;
+                }
+                self.env_inc = -self.env_now / CTL as f32;
+            } else if self.t == 0 {
+                self.env_now = target;
+                self.env_inc = 0.0;
+            } else {
+                self.env_inc = (target - self.env_now) / CTL as f32;
+            }
+        } else {
+            self.env_now = 1.0;
+            self.env_inc = 0.0;
+        }
+        if self.step_to != self.step {
+            self.step += (self.step_to - self.step) * self.glide;
+            if (self.step_to - self.step).abs() < self.step_to * 1e-4 {
+                self.step = self.step_to;
+            }
+        }
+        self.step_now = if self.penv.on && self.penv.amount != 0.0 {
+            self.step * ((self.penv.amount * self.penv.held(t)) as f64 / 1200.0).exp2()
+        } else {
+            self.step
+        };
+        if self.fon {
+            let mut x = self.fcut;
+            if self.cenv.on {
+                x += self.cenv.amount * self.cenv.held(t);
+            }
+            let hz = (20.0 * 1000f32.powf(x.clamp(0.0, 1.0))).min(self.sr * 0.45);
+            self.fg = (std::f32::consts::PI * hz / self.sr).tan();
+            self.fk = 1.0 / (0.707 + self.fres * 10.0);
+        }
+    }
+
+    #[inline]
+    fn filter(&mut self, x: [f32; 2]) -> [f32; 2] {
+        let (g, k) = (self.fg, self.fk);
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        let stages = if matches!(self.ftype, 5 | 7) { 2 } else { 1 };
+        let mut x = x;
+        for st in 0..stages {
+            for c in 0..2 {
+                let [ic1, ic2] = self.fs[st * 2 + c];
+                let v3 = x[c] - ic2;
+                let v1 = a1 * ic1 + a2 * v3;
+                let v2 = ic2 + a2 * ic1 + a3 * v3;
+                self.fs[st * 2 + c] = [2.0 * v1 - ic1, 2.0 * v2 - ic2];
+                x[c] = match self.ftype {
+                    2 => v1 * k,
+                    3 => x[c] - k * v1 - v2,
+                    4 => x[c] - k * v1,
+                    _ => v2,
+                };
+            }
+        }
+        x
     }
 
     fn render(&mut self, bus: &mut [[f32; 2]]) -> bool {
@@ -297,13 +411,20 @@ impl Voice {
             }
             if let Some(r) = self.remaining.as_mut() {
                 if *r == 0 {
-                    self.releasing = true;
-                    self.remaining = None;
+                    self.let_go();
                 } else {
                     *r -= 1;
                 }
             }
-            if self.releasing {
+            if self.ctl == 0 {
+                self.control();
+                self.ctl = CTL;
+                if !self.active {
+                    break;
+                }
+            }
+            self.ctl -= 1;
+            if self.releasing && (self.kill || !self.venv.on) {
                 self.level -= self.release;
                 if self.level <= 0.0 {
                     self.active = false;
@@ -312,15 +433,32 @@ impl Voice {
             } else if self.level < 1.0 {
                 self.level = (self.level + self.attack).min(1.0);
             }
-            let s = match &self.sample {
+            let mut s = match &self.sample {
                 Some(smp) => {
                     if self.pos >= smp.frames.len() as f64 {
                         self.active = false;
                         break;
                     }
-                    let s = smp.at(self.pos);
-                    self.pos += self.step;
-                    s
+                    if self.stretch {
+                        // two overlapping grains read at the note's pitch while the read point moves at `rate`
+                        let w = self.hop_t as f32 / self.hop as f32;
+                        let wb = 0.5 - 0.5 * (std::f32::consts::PI * w).cos();
+                        let (sa, sb) = (smp.at(self.a_pos), smp.at(self.b_pos));
+                        self.a_pos += self.step_now;
+                        self.b_pos += self.step_now;
+                        self.pos += self.rate;
+                        self.hop_t += 1;
+                        if self.hop_t >= self.hop {
+                            self.hop_t = 0;
+                            self.a_pos = self.b_pos;
+                            self.b_pos = self.pos;
+                        }
+                        [sa[0] + (sb[0] - sa[0]) * wb, sa[1] + (sb[1] - sa[1]) * wb]
+                    } else {
+                        let s = smp.at(self.pos);
+                        self.pos += self.step_now;
+                        s
+                    }
                 }
                 None => {
                     // stand-in voice for generators we cannot run yet: a softened saw
@@ -335,8 +473,17 @@ impl Voice {
                     [self.lp * 0.3, self.lp * 0.3]
                 }
             };
-            out[0] += s[0] * self.gl * self.level;
-            out[1] += s[1] * self.gr * self.level;
+            if self.fon {
+                s = self.filter(s);
+            }
+            let g = self.level * self.env_now;
+            self.env_now += self.env_inc;
+            out[0] += s[0] * self.gl * g;
+            out[1] += s[1] * self.gr * g;
+            self.t += 1;
+            if self.releasing {
+                self.rel_t += 1;
+            }
             wrote = true;
         }
         if !self.active {
@@ -362,6 +509,8 @@ pub struct Player {
     chase: bool,
     born: u64,
     ov: Overrides,
+    /// Ticks per frame at the tempo of the block being played.
+    tpf: f64,
     /// Metronome sounds: bar, beat.
     clicks: [Arc<Sample>; 2],
 }
@@ -375,6 +524,14 @@ impl Player {
         self.born += 1;
         v.born = self.born;
         v.active = true;
+        v.sr = self.sr;
+        if v.step_to == 0.0 {
+            v.step_to = v.step;
+        }
+        v.step_now = v.step;
+        if !v.venv.on {
+            v.env_now = 1.0;
+        }
         let slot = match self.voices.iter().position(|x| !x.active) {
             Some(i) => i,
             None => self.voices.iter().enumerate().min_by_key(|(_, x)| x.born).map(|(i, _)| i).unwrap_or(0),
@@ -403,26 +560,85 @@ impl Player {
             }
             return;
         }
-        let note_gain = law::velocity_gain(n.vel);
-        let gain = law::channel_gain(self.ov.chan_volume(song, n.chan as usize)) * note_gain;
-        let (pl, pr) = law::pan((self.ov.chan_pan(song, n.chan as usize) + n.pan).clamp(-1.0, 1.0));
-        let cents = (n.key as f32 - ch.root_key as f32) * 100.0 + ch.pitch_cents + n.fine_cents;
+        let f = ch.smp;
         let sr = self.sr;
         let ms = |m: f32| 1.0 / (sr * m / 1000.0).max(1.0);
-        let base = Voice { gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
+        let chan_vol = law::channel_gain(self.ov.chan_volume(song, n.chan as usize));
+        let chan_pan = self.ov.chan_pan(song, n.chan as usize);
         match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => {
                 let Some(smp) = ch.sample.clone() else { return };
+                let cents = (n.key as f32 - ch.root_key as f32) * 100.0 + ch.pitch_cents + n.fine_cents + f.stretch_cents;
                 let step = smp.rate as f64 / sr as f64 * 2f64.powf(cents as f64 / 1200.0);
+                let venv = Env { on: ch.env_on, ..f.vol_env };
                 // without a volume envelope a sampler plays its sample out whatever the note length
                 let remaining = if ch.env_on || live { len_frames } else { None };
-                self.start(Voice { sample: Some(smp), step, level: 1.0, attack: 1.0, release: ms(if ch.env_on { 30.0 } else { 8.0 }), remaining, ..base });
+                // a note in a cut group, or on a one-voice channel, stops what it replaces at the moment it starts
+                let fade = ms(4.0);
+                let mut glided = false;
+                for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.sample.is_some()) {
+                    let same = v.chan == n.chan;
+                    let cut = f.cut != 0 && song.channels.get(v.chan as usize).map(|c| c.smp.cut_by == f.cut).unwrap_or(false);
+                    if same && f.mono && f.porta && !glided && v.delay == 0 {
+                        // portamento: the sounding voice slides to the new note instead of starting again
+                        v.step_to = step;
+                        v.glide = 1.0 - (-(CTL as f64) / (f.slide.max(0.001) as f64 * sr as f64 / 3.0)).exp();
+                        v.key = n.key;
+                        v.remaining = remaining.map(|r| r + delay as u64);
+                        glided = true;
+                    } else if (same && f.mono) || cut {
+                        v.kill = true;
+                        v.release = v.release.max(fade);
+                        v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
+                    }
+                }
+                if glided {
+                    return;
+                }
+                let filter_on = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
+                for k in 0..=f.echoes as u32 {
+                    let fall = f.echo_feedback.powi(k as i32);
+                    let note_gain = law::velocity_gain(n.vel) * f.gain * fall;
+                    let note_pan = (n.pan + f.echo_pan * k as f32).clamp(-1.0, 1.0);
+                    let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
+                    let gain = chan_vol * note_gain;
+                    let late = (k as f64 * f.echo_steps as f64 * song.step() as f64 / self.tpf.max(1e-9)) as u32;
+                    self.start(Voice {
+                        sample: Some(smp.clone()),
+                        step: step * 2f64.powf((f.echo_cents * k as f32) as f64 / 1200.0),
+                        level: 1.0,
+                        attack: 1.0,
+                        release: ms(8.0),
+                        remaining,
+                        venv,
+                        penv: f.pitch_env,
+                        cenv: f.cut_env,
+                        ftype: f.filter,
+                        fcut: f.cutoff,
+                        fres: f.resonance,
+                        fon: filter_on,
+                        gl: gain * pl,
+                        gr: gain * pr,
+                        insert: ch.insert,
+                        delay: delay + late,
+                        chan: n.chan,
+                        key: n.key,
+                        live,
+                        note_gain,
+                        note_pan,
+                        follow: true,
+                        ..Default::default()
+                    });
+                }
             }
             ChannelKind::Plugin | ChannelKind::Other(_) => {
+                let note_gain = law::velocity_gain(n.vel);
+                let gain = chan_vol * note_gain;
+                let (pl, pr) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
                 let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + n.fine_cents) / 1200.0);
                 let min_len = (sr * 0.12) as u64;
                 let remaining = if live { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
-                self.start(Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, ..base });
+                self.start(Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() });
             }
             ChannelKind::Layer | ChannelKind::AutomationClip => {}
         }
@@ -447,6 +663,7 @@ impl Player {
     fn silence(&mut self, fast: bool) {
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });
         for v in self.voices.iter_mut().filter(|v| v.active && !v.preview) {
+            v.kill = true;
             v.release = v.release.max(rel);
             v.let_go();
             if v.delay > 0 {
@@ -508,7 +725,13 @@ impl Player {
             if n.pos as f64 >= b {
                 break;
             }
-            let delay = ((((n.pos as f64 + shift) - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+            // swing pushes every second step late, up to a third of a step
+            let mut at = n.pos as f64;
+            if song.swing > 0.0 && (n.pos / song.step().max(1)) % 2 == 1 {
+                let share = song.channels.get(n.chan as usize).map(|c| c.smp.swing).unwrap_or(1.0);
+                at += (song.swing * share) as f64 * song.step() as f64 / 3.0;
+            }
+            let delay = ((((at + shift) - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
             let len = if n.len == 0 {
                 None
             } else {
@@ -567,6 +790,7 @@ impl Player {
         let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
         tr.tempo.store(tempo.to_bits(), Relaxed);
         let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
+        self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
         if self.pos >= loop_len {
             if tr.looping() {
@@ -617,13 +841,25 @@ impl Player {
                         // ticks into the audio at which we begin
                         let into = begin - c.pos as f64 + c.offset as f64;
                         let secs = into / song.ppq as f64 * 60.0 / tempo as f64;
-                        let gain = law::channel_gain(self.ov.chan_volume(song, chi));
+                        let f = &ch.smp;
+                        let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * f.gain;
                         let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
-                        let step = smp.rate as f64 / self.sr as f64 * 2f64.powf(ch.pitch_cents as f64 / 1200.0);
-                        let pos = secs * smp.rate as f64;
+                        // the pitch the clip sounds at, and how fast the read point crosses the sample
+                        let step = smp.rate as f64 / self.sr as f64 * 2f64.powf((ch.pitch_cents + f.stretch_cents) as f64 / 1200.0);
+                        let rate = if f.stretch_beats > 0.0 {
+                            let want = f.stretch_beats as f64 * 60.0 / tempo as f64 * f.stretch_mul as f64;
+                            smp.frames.len() as f64 / (want * self.sr as f64).max(1.0)
+                        } else if f.keep_pitch {
+                            smp.rate as f64 / self.sr as f64 / f.stretch_mul as f64
+                        } else {
+                            step / f.stretch_mul as f64
+                        };
+                        let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
+                        let step = if f.keep_pitch { step } else { rate };
+                        let pos = secs * self.sr as f64 * rate;
                         let remaining = Some(((end - begin) / tpf) as u64);
                         let rel = 1.0 / (self.sr * 0.005);
-                        self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: 1.0, follow: true, ..Default::default() });
+                        self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: f.gain, follow: true, ..Default::default() });
                     }
                     ClipSrc::Automation(_) => {}
                 }
@@ -768,7 +1004,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::song::{Clip, ClipSrc};
+    use crate::song::{Chan, Clip, ClipSrc};
 
     fn click_song() -> Song {
         let mut s = Song::new();
@@ -849,7 +1085,7 @@ mod tests {
 
     #[test]
     fn automation_moves_volume_and_tempo_and_layers_play_children() {
-        use crate::song::{AutoPt, Automation, Chan};
+        use crate::song::{AutoPt, Automation};
         let mut s = click_song();
         // a long tone so the fade can be heard
         let data: Vec<f32> = (0..96_000).map(|_| 0.5).collect();
@@ -910,5 +1146,71 @@ mod tests {
         assert!(buf.iter().any(|x| x.abs() > 0.1));
         assert!(h.transport.take_peak(3).0 > 0.1);
         assert!(h.transport.take_peak(0).0 > 0.1);
+    }
+
+    fn tone_song(secs: f32) -> Song {
+        let mut s = Song::new();
+        s.tempo = 120.0;
+        let data: Vec<f32> = (0..(48_000.0 * secs) as usize).map(|i| (i as f32 * 0.06).sin() * 0.5).collect();
+        s.channels[0].set_sample(Some(Arc::new(Sample::from_mono("tone", 48_000, &data))));
+        s.channels[0].volume = 1.0;
+        s
+    }
+
+    fn loud(buf: &[f32], from: f32, to: f32) -> f32 {
+        buf[(from * 48_000.0) as usize * 2..(to * 48_000.0) as usize * 2].iter().fold(0.0, |m, x| m.max(x.abs()))
+    }
+
+    #[test]
+    fn volume_envelope_shapes_and_releases_a_note() {
+        let mut s = tone_song(2.0);
+        s.channels[0].env_on = true;
+        s.channels[0].smp.vol_env = Env { on: true, decay: 0.1, sustain: 0.0, ..Env::default() };
+        s.patterns[0].toggle_step(0, 0);
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 0.05) > 0.2);
+        assert!(loud(&buf, 0.2, 1.0) < 1e-3, "the decay to a zero sustain silences the note");
+
+        // a held note stops through its release when the note ends
+        s.channels[0].smp.vol_env = Env { on: true, release: 0.05, ..Env::default() };
+        s.patterns[0].notes[0].len = 96; // one beat = 0.5 s
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.3, 0.45) > 0.2);
+        assert!(loud(&buf, 0.6, 1.0) < 1e-3);
+    }
+
+    #[test]
+    fn cut_groups_reverse_and_stretch() {
+        let mut s = tone_song(2.0);
+        s.channels.push(Chan { name: "quiet".into(), volume: 0.0, ..s.channels[0].clone() });
+        let last = s.channels.len() - 1;
+        s.channels[0].smp.cut_by = 1;
+        s.channels[last].smp.cut = 1;
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].toggle_step(last as u16, 96);
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.1, 0.45) > 0.2);
+        assert!(loud(&buf, 0.6, 1.5) < 1e-3, "the second channel cuts the first");
+
+        // a fade-in over the whole sample starts from nothing; reversed, it ends in nothing
+        let mut s = tone_song(1.0);
+        s.channels[0].smp.fade_in = 1.0;
+        s.channels[0].bake();
+        let smp = s.channels[0].sample.clone().unwrap();
+        assert!(smp.frames[..480].iter().all(|f| f[0].abs() < 0.01));
+        s.channels[0].smp.reverse = true;
+        s.channels[0].bake();
+        let smp = s.channels[0].sample.clone().unwrap();
+        assert!(smp.frames[..480].iter().all(|f| f[0].abs() < 0.01), "fades are applied after reversing");
+
+        // a one second clip fitted to four beats at 120 bpm lasts two seconds
+        let mut s = tone_song(1.0);
+        s.channels[0].kind = ChannelKind::AudioClip;
+        s.channels[0].smp.stretch_beats = 4.0;
+        s.channels[0].smp.keep_pitch = true;
+        s.clips.push(Clip { pos: 0, len: 96 * 8, track: 0, src: ClipSrc::Audio(0), offset: 0, muted: false });
+        let buf = crate::render_song(&s, 48_000.0, true, 0, 0.0);
+        assert!(loud(&buf, 1.5, 1.9) > 0.1, "still sounding in its second second");
+        assert!(loud(&buf, 2.1, 3.0) < 1e-3);
     }
 }

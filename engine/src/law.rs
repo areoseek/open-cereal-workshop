@@ -26,6 +26,15 @@ pub fn pan(p: f32) -> (f32, f32) {
     (a.cos() * std::f32::consts::SQRT_2, a.sin() * std::f32::consts::SQRT_2)
 }
 
+/// Envelope time knob to seconds. The file holds 100 (shortest) to 65536. (Approximate: see docs/PARITY.md.)
+pub fn env_seconds(raw: i32) -> f32 {
+    if raw <= 100 {
+        return 0.0;
+    }
+    let x = (raw as f32 / 65536.0).min(1.0);
+    16.0 * x * x * x
+}
+
 pub fn semitones(st: f32) -> f32 {
     (st / 12.0).exp2()
 }

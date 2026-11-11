@@ -74,6 +74,16 @@ pub mod id {
     pub const PLAYLIST: u8 = 233;
     pub const CHAN_AUTOMATION: u8 = 234;
     pub const LINK: u8 = 227;
+    pub const CHAN_FX_FLAGS: u8 = 70;
+    pub const CHAN_PREAMP: u8 = 74;
+    pub const CHAN_FADE_OUT: u8 = 75;
+    pub const CHAN_FADE_IN: u8 = 76;
+    pub const CHAN_TIME_SHIFT: u8 = 89;
+    pub const CHAN_SWING: u8 = 97;
+    pub const CHAN_CUT_GROUP: u8 = 132;
+    pub const CHAN_ECHO: u8 = 209;
+    pub const CHAN_POLY: u8 = 221;
+    pub const CHAN_ADJUST: u8 = 229;
     pub const LAYER_CHILD: u8 = 94;
     pub const INSERT_ROUTING: u8 = 235;
     pub const INSERT_FLAGS: u8 = 236;
@@ -353,6 +363,10 @@ pub struct Envelope {
     pub sustain: i32,
     pub release: i32,
     pub amount: i32,
+    /// Bit 0: times snap to the tempo.
+    pub flags: i32,
+    /// Bend of the attack, decay and release lines, -128..=128.
+    pub tension: [i32; 3],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -380,6 +394,30 @@ pub struct FlpChannel {
     pub automation: Vec<u8>,
     /// Rack channels a layer channel plays.
     pub children: Vec<u16>,
+    /// Sample treatment switches: 1 fade stereo, 2 reverse, 4 clip, 256 swap stereo.
+    pub fx_flags: u16,
+    pub preamp: u16,
+    /// Fades, 0..=1024 of the sample.
+    pub fade_in: u16,
+    pub fade_out: u16,
+    /// (cut, cut by) groups; 0 = none.
+    pub cut_group: (u16, u16),
+    pub time_shift: u16,
+    /// How much of the project swing this channel takes, 0..=128.
+    pub swing: u16,
+    /// Echo: feedback (0..=12800), pan (centre 6400), pitch step in cents, count, time (48 = one step).
+    pub echo: [i32; 5],
+    /// Filter: cutoff and resonance (0..=256) and type.
+    pub filter: (u32, u32, u32),
+    /// Polyphony: max voices, slide time, flags (1 mono, 2 portamento).
+    pub poly: (u32, u32, u8),
+    /// Level adjustments: pan, volume (12800 = none), unused, mod x, mod y.
+    pub adjust: [i32; 5],
+    pub normalize: bool,
+    pub invert: bool,
+    /// Stretch: length (384 = one beat, 0 = natural), pitch shift in cents, length multiplier as log2 * 10000, mode
+    /// (0 resample, anything else keeps the pitch).
+    pub stretch: (f32, i32, i32, i32),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -690,7 +728,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     scope = Scope::Arrangement;
@@ -831,11 +869,44 @@ impl Flp {
                             c.pan = u32at(d, 0);
                             c.volume = u32at(d, 4);
                             c.pitch_cents = u32at(d, 8) as i32;
+                            if d.len() >= 24 {
+                                c.filter = (u32at(d, 12), u32at(d, 16), u32at(d, 20));
+                            }
                         }
-                        (id::CHAN_PARAMS, Value::Data(d)) if d.len() >= 20 => c.root_key = u32at(d, 16),
+                        (id::CHAN_PARAMS, Value::Data(d)) if d.len() >= 20 => {
+                            c.root_key = u32at(d, 16);
+                            if d.len() >= 84 {
+                                c.normalize = d[80] != 0;
+                                c.invert = d[81] != 0;
+                            }
+                            if d.len() >= 112 {
+                                // the length is a whole number in older files and a float in newer ones
+                                let raw = u32at(d, 96);
+                                let len = if raw >= 0x3000_0000 { f32at(d, 96) } else { raw as f32 };
+                                c.stretch = (if len.is_finite() { len } else { 0.0 }, u32at(d, 100) as i32, u32at(d, 104) as i32, u32at(d, 108) as i32);
+                            }
+                        }
                         (id::CHAN_ENVELOPE, Value::Data(d)) if d.len() >= 36 => {
-                            let i = |o: usize| u32at(d, o) as i32;
-                            c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32) });
+                            let i = |o: usize| if d.len() >= o + 4 { u32at(d, o) as i32 } else { 0 };
+                            c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32), flags: i(0), tension: [i(56), i(60), i(64)] });
+                        }
+                        (id::CHAN_FX_FLAGS, Value::Word(v)) => c.fx_flags = *v,
+                        (id::CHAN_PREAMP, Value::Word(v)) => c.preamp = *v,
+                        (id::CHAN_FADE_IN, Value::Word(v)) => c.fade_in = *v,
+                        (id::CHAN_FADE_OUT, Value::Word(v)) => c.fade_out = *v,
+                        (id::CHAN_TIME_SHIFT, Value::Word(v)) => c.time_shift = *v,
+                        (id::CHAN_SWING, Value::Word(v)) => c.swing = *v,
+                        (id::CHAN_CUT_GROUP, Value::Int(v)) => c.cut_group = ((*v & 0xffff) as u16, (*v >> 16) as u16),
+                        (id::CHAN_ECHO, Value::Data(d)) if d.len() >= 20 => {
+                            for k in 0..5 {
+                                c.echo[k] = u32at(d, k * 4) as i32;
+                            }
+                        }
+                        (id::CHAN_POLY, Value::Data(d)) if d.len() >= 9 => c.poly = (u32at(d, 0), u32at(d, 4), d[8]),
+                        (id::CHAN_ADJUST, Value::Data(d)) if d.len() >= 20 => {
+                            for k in 0..5 {
+                                c.adjust[k] = u32at(d, k * 4) as i32;
+                            }
                         }
                         (id::CHAN_AUTOMATION, Value::Data(d)) => c.automation = d.clone(),
                         (id::LAYER_CHILD, Value::Word(k)) => c.children.push(*k),

@@ -37,6 +37,257 @@ pub struct Chan {
     pub auto: Option<Arc<Automation>>,
     /// Channels a layer channel plays.
     pub children: Vec<u16>,
+    /// Sampler settings.
+    pub smp: Sampler,
+    /// The sample as loaded, when `sample` is a treated copy (reversed, faded, ...).
+    pub raw: Option<Arc<Sample>>,
+}
+
+/// One envelope of a sampler channel. Times are seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Env {
+    pub on: bool,
+    pub delay: f32,
+    pub attack: f32,
+    pub hold: f32,
+    pub decay: f32,
+    /// 0..=1.
+    pub sustain: f32,
+    pub release: f32,
+    /// Depth: cents for pitch, -1..=1 of the knob for the filter.
+    pub amount: f32,
+    /// Bend of the attack, decay and release lines, -1..=1.
+    pub tension: [f32; 3],
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3] }
+    }
+}
+
+impl Env {
+    fn from_flp(e: &flp::Envelope, amount_scale: f32) -> Self {
+        let t = |v: i32| (v as f32 / 128.0).clamp(-1.0, 1.0);
+        Self {
+            on: e.enabled,
+            delay: crate::law::env_seconds(e.predelay),
+            attack: crate::law::env_seconds(e.attack),
+            hold: crate::law::env_seconds(e.hold),
+            decay: crate::law::env_seconds(e.decay),
+            sustain: (e.sustain as f32 / 128.0).clamp(0.0, 1.0),
+            release: crate::law::env_seconds(e.release),
+            amount: e.amount as f32 * amount_scale,
+            tension: [t(e.tension[0]), t(e.tension[1]), t(e.tension[2])],
+        }
+    }
+
+    /// Level `t` seconds after the note began, while it is held.
+    pub fn held(&self, t: f32) -> f32 {
+        let mut t = t - self.delay;
+        if t < 0.0 {
+            return 0.0;
+        }
+        if t < self.attack {
+            return bend(t / self.attack, self.tension[0]);
+        }
+        t -= self.attack;
+        if t < self.hold {
+            return 1.0;
+        }
+        t -= self.hold;
+        if t < self.decay {
+            return self.sustain + (1.0 - self.sustain) * bend(1.0 - t / self.decay, -self.tension[1]);
+        }
+        self.sustain
+    }
+
+    /// Level `t` seconds after the note was let go at level `from`; None once it has died away.
+    pub fn released(&self, from: f32, t: f32) -> Option<f32> {
+        if t >= self.release {
+            return None;
+        }
+        Some(from * bend(1.0 - t / self.release.max(1e-6), -self.tension[2]))
+    }
+}
+
+/// What the sampler does to a note beyond level, pan and pitch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sampler {
+    pub vol_env: Env,
+    pub cut_env: Env,
+    pub pitch_env: Env,
+    /// Filter cutoff and resonance, 0..=1 of the knobs, and the filter type (0 and 1 low pass, 2 band pass,
+    /// 3 high pass, 4 band stop, 5 to 7 steeper low passes).
+    pub cutoff: f32,
+    pub resonance: f32,
+    pub filter: u8,
+    /// Fades as a share of the sample, 0..=1.
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub reverse: bool,
+    pub swap_stereo: bool,
+    pub normalize: bool,
+    pub invert: bool,
+    /// A note here silences sounding notes of channels whose `cut_by` matches. 0 = none.
+    pub cut: u16,
+    pub cut_by: u16,
+    pub mono: bool,
+    pub porta: bool,
+    /// Glide time in seconds.
+    pub slide: f32,
+    /// Share of the project swing this channel takes, 0..=1.
+    pub swing: f32,
+    /// Echoes: how many, level kept from one to the next (0 = off), pan and pitch moved per echo, gap in steps.
+    pub echoes: u8,
+    pub echo_feedback: f32,
+    pub echo_pan: f32,
+    pub echo_cents: f32,
+    pub echo_steps: f32,
+    /// Beats the sample is fitted to (0 = its own length), extra pitch in cents, length multiplier, and whether
+    /// pitch follows speed (plain resampling) or is kept.
+    pub stretch_beats: f32,
+    pub stretch_cents: f32,
+    pub stretch_mul: f32,
+    pub keep_pitch: bool,
+    /// Extra gain from the level adjustment.
+    pub gain: f32,
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            vol_env: Env::default(),
+            cut_env: Env::default(),
+            pitch_env: Env::default(),
+            cutoff: 1.0,
+            resonance: 0.0,
+            filter: 0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            reverse: false,
+            swap_stereo: false,
+            normalize: false,
+            invert: false,
+            cut: 0,
+            cut_by: 0,
+            mono: false,
+            porta: false,
+            slide: 0.1,
+            swing: 1.0,
+            echoes: 0,
+            echo_feedback: 0.0,
+            echo_pan: 0.0,
+            echo_cents: 0.0,
+            echo_steps: 3.0,
+            stretch_beats: 0.0,
+            stretch_cents: 0.0,
+            stretch_mul: 1.0,
+            keep_pitch: false,
+            gain: 1.0,
+        }
+    }
+}
+
+impl Sampler {
+    fn from_flp(c: &flp::FlpChannel) -> Self {
+        let env = |i: usize, scale: f32| c.envelopes.get(i).map(|e| Env::from_flp(e, scale)).unwrap_or_default();
+        Self {
+            vol_env: env(1, 1.0),
+            cut_env: env(2, 1.0 / 128.0),
+            pitch_env: env(4, 1.0),
+            cutoff: (c.filter.0 as f32 / 256.0).clamp(0.0, 1.0),
+            resonance: (c.filter.1 as f32 / 256.0).clamp(0.0, 1.0),
+            filter: c.filter.2.min(7) as u8,
+            fade_in: (c.fade_in as f32 / 1024.0).min(1.0),
+            fade_out: (c.fade_out as f32 / 1024.0).min(1.0),
+            reverse: c.fx_flags & 2 != 0,
+            swap_stereo: c.fx_flags & 256 != 0,
+            normalize: c.normalize,
+            invert: c.invert,
+            cut: c.cut_group.0,
+            cut_by: c.cut_group.1,
+            mono: c.poly.2 & 1 != 0,
+            porta: c.poly.2 & 2 != 0,
+            slide: c.poly.1 as f32 / 5000.0,
+            swing: (c.swing as f32 / 128.0).clamp(0.0, 1.0),
+            echoes: if c.echo[0] > 0 { c.echo[3].clamp(0, 10) as u8 } else { 0 },
+            echo_feedback: (c.echo[0] as f32 / 12800.0).clamp(0.0, 1.0),
+            echo_pan: (c.echo[1] as f32 - 6400.0) / 6400.0,
+            echo_cents: c.echo[2] as f32,
+            echo_steps: c.echo[4] as f32 / 48.0,
+            stretch_beats: (c.stretch.0 / 384.0).max(0.0),
+            stretch_cents: c.stretch.1 as f32,
+            stretch_mul: (c.stretch.2 as f32 / 10000.0).exp2(),
+            keep_pitch: c.stretch.3 != 0,
+            gain: (c.adjust[1] as f32 / 12800.0).clamp(0.0, 4.0),
+        }
+    }
+
+    fn treats_sample(&self) -> bool {
+        self.reverse || self.swap_stereo || self.normalize || self.invert || self.fade_in > 0.0 || self.fade_out > 0.0
+    }
+}
+
+impl Chan {
+    /// Set the sample this channel plays, applying the treatments that are worked out ahead of time.
+    pub fn set_sample(&mut self, raw: Option<Arc<Sample>>) {
+        self.raw = raw;
+        self.bake();
+    }
+
+    /// Redo the treated copy after changing reverse, fades, normalise or stereo swap.
+    pub fn bake(&mut self) {
+        if self.raw.is_none() {
+            self.raw = self.sample.clone();
+        }
+        let Some(raw) = self.raw.clone() else {
+            self.sample = None;
+            return;
+        };
+        let f = &self.smp;
+        if !f.treats_sample() {
+            self.sample = Some(raw);
+            return;
+        }
+        let mut frames = raw.frames.clone();
+        if f.normalize {
+            let peak = frames.iter().fold(0f32, |m, s| m.max(s[0].abs()).max(s[1].abs()));
+            if peak > 1e-6 {
+                let g = 1.0 / peak;
+                for s in &mut frames {
+                    s[0] *= g;
+                    s[1] *= g;
+                }
+            }
+        }
+        if f.reverse {
+            frames.reverse();
+        }
+        let n = frames.len();
+        let fi = (f.fade_in * n as f32) as usize;
+        for (i, s) in frames.iter_mut().take(fi).enumerate() {
+            let g = i as f32 / fi as f32;
+            s[0] *= g;
+            s[1] *= g;
+        }
+        let fo = (f.fade_out * n as f32) as usize;
+        for (i, s) in frames.iter_mut().rev().take(fo).enumerate() {
+            let g = i as f32 / fo as f32;
+            s[0] *= g;
+            s[1] *= g;
+        }
+        for s in &mut frames {
+            if f.swap_stereo {
+                s.swap(0, 1);
+            }
+            if f.invert {
+                s[0] = -s[0];
+                s[1] = -s[1];
+            }
+        }
+        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo, frames }));
+    }
 }
 
 /// A control an automation clip can drive.
@@ -129,7 +380,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![] }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None }
     }
 }
 
@@ -265,6 +516,8 @@ pub struct Song {
     pub ppq: u32,
     pub tempo: f32,
     pub time_sig: (u8, u8),
+    /// Project swing, 0..=1.
+    pub swing: f32,
     pub channels: Vec<Chan>,
     /// patterns[0] is "Pattern 1".
     pub patterns: Vec<Pattern>,
@@ -300,6 +553,7 @@ impl Song {
             ppq: 96,
             tempo: 130.0,
             time_sig: (4, 4),
+            swing: 0.0,
             channels: names.iter().map(|n| Chan { name: n.to_string(), ..Default::default() }).collect(),
             patterns: vec![Pattern::default()],
             tracks: vec![Track::default(); DEFAULT_TRACKS],
@@ -546,7 +800,7 @@ impl Song {
                     (ChannelKind::Sampler | ChannelKind::AudioClip, Some(lib)) => lib.load_stored(&c.sample_path, project_dir),
                     _ => None,
                 };
-                Chan {
+                let mut ch = Chan {
                     name: if c.name.is_empty() { if c.plugin.is_empty() { "Sampler".into() } else { c.plugin.clone() } } else { c.name.clone() },
                     kind: c.kind,
                     plugin: c.plugin.clone(),
@@ -574,7 +828,11 @@ impl Song {
                         Arc::new(Automation { points, targets })
                     }),
                     children: c.children.clone(),
-                }
+                    smp: Sampler::from_flp(c),
+                    raw: None,
+                };
+                ch.bake();
+                ch
             })
             .collect();
 
@@ -673,6 +931,7 @@ impl Song {
             ppq,
             tempo: if f.tempo > 0.0 { f.tempo } else { 130.0 },
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
+            swing: (f.shuffle as f32 / 128.0).min(1.0),
             channels,
             patterns,
             tracks,
