@@ -24,6 +24,9 @@ pub enum Kind {
     Eq,
     Reverb,
     Limiter,
+    Flanger,
+    Chorus,
+    Echo,
 }
 
 pub struct Param {
@@ -221,6 +224,64 @@ pub static DEFS: &[Def] = &[
             p("Gate gain", 64, 0, 1000, 1000),
             p("Gate threshold", 68, 0, 1000, 0),
             p("Gate release", 72, 0, 10000, 4187),
+        ],
+    },
+    Def {
+        kind: Kind::Flanger,
+        ident: "Fruity Flangus",
+        title: "Flanger",
+        size: 32,
+        fixed: &[],
+        params: &[p("Delay", 0, 1, 1024, 4), p("Depth", 4, 0, 1024, 512), p("Rate", 8, 0, 1024, 768), p("Phase", 12, 0, 360, 8), p("Damp", 16, 0, 128, 128), p("Feedback", 20, -128, 128, -32), p("Dry", 24, -128, 128, 128), p("Wet", 28, -128, 128, 96)],
+    },
+    Def {
+        kind: Kind::Chorus,
+        ident: "Fruity Chorus",
+        title: "Chorus",
+        size: 52,
+        fixed: &[(0, 1)],
+        params: &[
+            p("Delay", 4, 0, 1024, 512),
+            p("Depth", 8, 0, 5000, 2250),
+            p("Stereo", 12, 0, 1024, 341),
+            p("LFO 1 rate", 16, 0, 5000, 1500),
+            p("LFO 2 rate", 20, 0, 5000, 2500),
+            p("LFO 3 rate", 24, 0, 5000, 3500),
+            p("LFO 1 wave", 28, 0, 1024, 0),
+            p("LFO 2 wave", 32, 0, 1024, 0),
+            p("LFO 3 wave", 36, 0, 1024, 0),
+            p("Cross type", 40, 0, 1024, 0),
+            p("Cross cutoff", 44, 0, 5000, 2500),
+            p("Wet only", 48, 0, 1024, 0),
+        ],
+    },
+    Def {
+        kind: Kind::Echo,
+        ident: "Fruity Delay 3",
+        title: "Echo Lab",
+        size: 108,
+        fixed: &[(0, 1), (32, 6000), (36, 3000), (56, 1)],
+        params: &[
+            p("Input level", 4, 0, 6000, 6000),
+            p("Model", 8, 0, 2, 2),
+            p("Tempo sync", 12, 0, 1, 1),
+            p("Keep pitch", 16, 0, 1, 0),
+            p("Time", 20, 0, 768, 192),
+            p("Stereo offset", 24, 0, 6000, 3000),
+            p("Smoothing", 28, 0, 1000, 500),
+            p("Mod rate", 40, 0, 6000, 0),
+            p("Mod time", 44, 0, 6000, 0),
+            p("Mod cutoff", 48, 0, 6000, 0),
+            p("Diffusion", 52, 0, 6000, 0),
+            p("Feedback", 60, 0, 6000, 3000),
+            p("Cutoff", 68, 0, 6000, 6000),
+            p("Resonance", 72, 0, 6000, 0),
+            p("Distortion", 76, 0, 6000, 0),
+            p("Sample rate", 88, 0, 60000, 60000),
+            p("Bits", 92, 0, 6000, 6000),
+            p("Wet", 96, 0, 6000, 6000),
+            p("Tone", 100, -6000, 6000, 0),
+            p("Dry", 104, 0, 6000, 6000),
         ],
     },
 ];
@@ -424,6 +485,15 @@ fn band_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5
 }
 
 #[inline]
+/// Echo time of the echo unit in frames: steps when synced to tempo, otherwise a fixed scale.
+fn echo_time(p: &[f32], cx: &Ctx) -> f32 {
+    if p[2] >= 0.5 {
+        p[4] / 48.0 * cx.step
+    } else {
+        p[4] / 48.0 * 0.125 * cx.sr
+    }
+}
+
 fn biquad(c: &[f32; 5], z: &mut [f32], x: f32) -> f32 {
     let y = c[0] * x + z[0];
     z[0] = c[1] * x - c[3] * y + z[1];
@@ -439,7 +509,8 @@ impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let mut u = Self { fx, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] };
         match u.fx.kind {
-            Kind::Delay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
+            Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
+            Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::Reverb => {
                 u.buf = vec![[0.0; 2]; (sr * 1.1) as usize + 8];
@@ -464,6 +535,13 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + 4096
             }
+            Kind::Echo => {
+                let fb = (p[11] / 6000.0).clamp(0.0, 0.97);
+                let time = echo_time(p, cx);
+                let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
+                (time * (n + 1.0)) as usize + 4096
+            }
+            Kind::Flanger | Kind::Chorus => (cx.sr * 0.5) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
             Kind::Comp | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
@@ -900,6 +978,128 @@ impl Unit {
                     f[1] = (r * g).clamp(-ceil, ceil);
                 }
             }
+            Kind::Flanger => {
+                let n = self.buf.len();
+                let base = (p[0] * 0.001 * sr).clamp(1.0, n as f32 * 0.4);
+                let depth = (p[1] / 1024.0 * 0.004 * sr).min(n as f32 * 0.4);
+                let inc = 0.02 * 250f32.powf(p[2] / 1024.0) / sr;
+                let spread = p[3] / 360.0;
+                let a = 1.0 - (-TAU * knob_hz(0.45 + 0.55 * p[4] / 128.0) / sr).exp();
+                let fb = (p[5] / 128.0).clamp(-0.95, 0.95);
+                let (dry, wet) = (p[6] / 128.0, p[7] / 128.0);
+                for f in io.iter_mut() {
+                    self.ph += inc;
+                    if self.ph >= 1.0 {
+                        self.ph -= 1.0;
+                    }
+                    let mut out = [0.0f32; 2];
+                    for c in 0..2 {
+                        let l = 0.5 - 0.5 * ((self.ph + spread * c as f32) * TAU).cos();
+                        let d = base + depth * l;
+                        let at = self.pos as f32 + n as f32 - d;
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        let y = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                        z[c] += a * (y - z[c]);
+                        out[c] = y;
+                    }
+                    self.buf[self.pos] = [f[0] + z[0] * fb, f[1] + z[1] * fb];
+                    self.pos = (self.pos + 1) % n;
+                    *f = [f[0] * dry + out[0] * wet, f[1] * dry + out[1] * wet];
+                }
+            }
+            Kind::Chorus => {
+                let n = self.buf.len();
+                let base = (0.004 + p[0] / 1024.0 * 0.026) * sr;
+                let depth = p[1] / 5000.0 * 0.006 * sr;
+                let stereo = p[2] / 1024.0 * 0.5;
+                let wet_only = p[11] >= 512.0;
+                // a high-pass on what feeds the voices, so the low end stays where it was
+                let cross = p[9] >= 512.0;
+                let a = 1.0 - (-TAU * (20.0 * 1000f32.powf(p[10] / 5000.0 * 0.5)) / sr).exp();
+                for f in io.iter_mut() {
+                    let mut x = *f;
+                    if cross {
+                        for c in 0..2 {
+                            z[8 + c] += a * (x[c] - z[8 + c]);
+                            x[c] -= z[8 + c];
+                        }
+                    }
+                    self.buf[self.pos] = x;
+                    let mut out = [0.0f32; 2];
+                    for v in 0..3 {
+                        z[v] += (p[3 + v] / 1000.0).max(0.01) / sr;
+                        if z[v] >= 1.0 {
+                            z[v] -= 1.0;
+                        }
+                        let tri = p[6 + v] >= 512.0;
+                        for c in 0..2 {
+                            let ph = (z[v] + stereo * c as f32 + v as f32 / 3.0).fract();
+                            let l = if tri { 1.0 - (2.0 * ph - 1.0).abs() } else { 0.5 - 0.5 * (ph * TAU).cos() };
+                            let d = base + depth * l;
+                            let at = self.pos as f32 + n as f32 - d;
+                            let i = at as usize;
+                            let fr = at - i as f32;
+                            out[c] += self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                        }
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    let dry = if wet_only { 0.0 } else { 0.7 };
+                    let wet = if wet_only { 1.0 / 3.0 } else { 0.7 / 3.0 };
+                    *f = [f[0] * dry + out[0] * wet + if cross && !wet_only { z[8] * 0.3 } else { 0.0 }, f[1] * dry + out[1] * wet + if cross && !wet_only { z[9] * 0.3 } else { 0.0 }];
+                }
+            }
+            Kind::Echo => {
+                let n = self.buf.len();
+                let iv = p[0] / 6000.0;
+                let model = p[1] as i32;
+                let time = echo_time(p, cx).clamp(2.0, n as f32 - 4.0);
+                let off = (p[5] - 3000.0) / 3000.0 * 0.25 * time;
+                let fb = (p[11] / 6000.0).clamp(0.0, 0.97);
+                let a = if p[12] >= 5999.0 { 1.0 } else { 1.0 - (-TAU * (20.0 * 1000f32.powf(p[12] / 6000.0)).min(sr * 0.45) / sr).exp() };
+                let drive = p[14] / 6000.0 * 8.0;
+                let (wet, dry) = (p[17] / 6000.0, p[19] / 6000.0);
+                let tone = p[18] / 6000.0;
+                let ta = 1.0 - (-TAU * 900.0 / sr).exp();
+                let inc = if p[7] > 0.0 { 0.05 * 200f32.powf(p[7] / 6000.0) / sr } else { 0.0 };
+                let wob = p[8] / 6000.0 * 0.01 * time;
+                for f in io.iter_mut() {
+                    self.ph += inc;
+                    if self.ph >= 1.0 {
+                        self.ph -= 1.0;
+                    }
+                    let m = wob * (self.ph * TAU).sin();
+                    let mut y = [0.0f32; 2];
+                    for c in 0..2 {
+                        let d = (time + m + if c == 0 { (-off).max(0.0) } else { off.max(0.0) }).clamp(1.0, n as f32 - 3.0);
+                        let at = self.pos as f32 + n as f32 - d;
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        y[c] = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                        let mut w = y[c] * fb;
+                        if drive > 0.0 {
+                            w = (w * (1.0 + drive)).tanh() / (1.0 + drive * 0.5);
+                        }
+                        z[c] += a * (w - z[c]);
+                    }
+                    let x = [f[0] * iv, f[1] * iv];
+                    self.buf[self.pos] = match model {
+                        0 => {
+                            let s = (x[0] + x[1]) * 0.5 + (z[0] + z[1]) * 0.5;
+                            [s, s]
+                        }
+                        2 => [(x[0] + x[1]) * 0.5 + z[1], z[0]],
+                        _ => [x[0] + z[0], x[1] + z[1]],
+                    };
+                    self.pos = (self.pos + 1) % n;
+                    for c in 0..2 {
+                        // tone tilts the echoes darker (left of centre) or thinner (right)
+                        z[4 + c] += ta * (y[c] - z[4 + c]);
+                        let shaped = if tone < 0.0 { y[c] + (z[4 + c] - y[c]) * -tone } else { y[c] - z[4 + c] * tone };
+                        f[c] = f[c] * dry + shaped * wet;
+                    }
+                }
+            }
         }
         for v in self.z.iter_mut() {
             if !v.is_finite() || v.abs() < 1e-20 {
@@ -936,7 +1136,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -960,6 +1160,30 @@ mod tests {
             base = fx.encode(Some(&base));
             assert_eq!(base.len(), d.size + 9);
             assert_eq!(base[d.size + 8], 0xAA);
+        }
+    }
+
+    #[test]
+    fn time_units_echo_and_stay_bounded() {
+        let click = |i: usize| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] };
+        // echo: the default time is four steps, the default feedback a half
+        let t = (44100.0f32 * 60.0 / 130.0) as usize;
+        let mut fx = Fx::new(Kind::Echo);
+        fx.p[1] = 1.0;
+        let out = run(fx, click, t * 2 + 400);
+        let near = |at: usize| out[at - 3..at + 4].iter().map(|f| f[0]).sum::<f32>();
+        assert!((near(t) - 1.0).abs() < 0.05, "{}", near(t));
+        assert!((near(2 * t) - 0.5).abs() < 0.05, "{}", near(2 * t));
+        assert!(out[t / 2][0].abs() < 1e-3);
+        for kind in [Kind::Flanger, Kind::Chorus, Kind::Echo] {
+            let mut fx = Fx::new(kind);
+            for (v, p) in fx.p.iter_mut().zip(def(kind).params) {
+                *v = p.max as f32;
+            }
+            let out = run(fx, sine, 30000);
+            assert!(out.iter().all(|f| f[0].is_finite() && f[0].abs() < 40.0), "{kind:?}");
+            let out = run(Fx::new(kind), sine, 8000);
+            assert!(rms(&out[4000..]) > 0.05, "{kind:?}");
         }
     }
 
