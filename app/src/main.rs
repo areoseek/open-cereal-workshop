@@ -547,6 +547,13 @@ impl App {
                         }
                     }
                 }
+                for (c, ch) in self.song.channels.iter().enumerate() {
+                    if ch.plugin.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
+                        for (k, o) in ["note", "velocity"].iter().enumerate() {
+                            senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): {o}", ch.name, c + 1)));
+                        }
+                    }
+                }
                 let held = self.song.ctl_links.iter().find(|l| l.target == t).copied();
                 if !senders.is_empty() {
                     ui.separator();
@@ -963,12 +970,15 @@ impl App {
                     PresetTo::Chan(c) => Some(c),
                     _ => Some(self.sel_chan),
                 }
-                .filter(|&c| self.song.channels.get(c).and_then(|c| c.gen.as_ref()).is_some_and(|x| x.kind == g.kind));
+                .filter(|&c| self.song.channels.get(c).is_some_and(|c| c.plugin.eq_ignore_ascii_case(&pre.ident) && c.gen.as_ref().is_some_and(|x| x.kind == g.kind)));
                 let kind = g.kind;
+                // several silent units share one kind, so the name the file gives decides which this is
+                let ident = cereal_engine::synth::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&pre.ident)).map(|d| d.ident).unwrap_or(cereal_engine::synth::def(kind).ident);
                 let ci = match target {
                     Some(c) => c,
                     None => {
                         let mut c = Chan::instrument(kind);
+                        c.plugin = ident.into();
                         c.name = name.clone();
                         self.song.channels.push(c);
                         self.song.channels.len() - 1
@@ -976,7 +986,7 @@ impl App {
                 };
                 self.song.channels[ci].gen = Some(g);
                 self.sel_chan = ci;
-                self.preset_name.insert(cereal_engine::synth::def(kind).ident.to_string(), path.to_path_buf());
+                self.preset_name.insert(ident.to_string(), path.to_path_buf());
                 self.status = format!("Preset: {name}");
                 self.dirty = true;
             }

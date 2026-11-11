@@ -696,6 +696,19 @@ pub struct CtlLink {
     pub target: Target,
 }
 
+impl CtlLink {
+    /// The `ins` of a link whose sender is a channel of the rack; `slot` then holds the channel.
+    pub const CHAN: usize = usize::MAX;
+
+    pub fn from_chan(chan: usize, out: u16, target: Target) -> Self {
+        Self { ins: Self::CHAN, slot: chan as u16, out, target }
+    }
+
+    pub fn chan(&self) -> Option<usize> {
+        (self.ins == Self::CHAN).then_some(self.slot as usize)
+    }
+}
+
 pub const DEFAULT_TRACKS: usize = 500;
 pub const DEFAULT_INSERTS: usize = 127;
 
@@ -840,6 +853,16 @@ impl Song {
                 _ => {}
             }
         }
+        self.ctl_links.retain(|l| l.chan() != Some(ci) && !matches!(l.target, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if k == ci));
+        for l in &mut self.ctl_links {
+            if l.chan().is_some_and(|k| k > ci) {
+                l.slot -= 1;
+            }
+            match &mut l.target {
+                Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k > ci => *k -= 1,
+                _ => {}
+            }
+        }
         self.midi_links.retain(|l| !matches!(l.target, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if k == ci));
         for l in &mut self.midi_links {
             match &mut l.target {
@@ -945,6 +968,7 @@ impl Song {
     pub fn from_flp_with(f: &Flp, mut lib: Option<&mut Library>, project_dir: Option<&Path>) -> Self {
         let ppq = f.header.ppq.max(1) as u32;
         let n_inserts = f.inserts.len().max(1);
+        let n_chans = f.channels.len();
 
         let base = flp::mixer_base(f.version_tuple());
         let target = |l: &flp::FlpLink| -> Target {
@@ -1207,6 +1231,7 @@ impl Song {
                     let raw = (l.source >> 6) as usize;
                     (raw >= base && raw - base < n_inserts).then(|| CtlLink { ins: raw - base, slot: l.source & 63, out: l.kind & 0x7fff, target: target(l) })
                 })
+                .chain(f.links.iter().filter(|l| l.kind & 0xe000 == 0x2000 && (l.source as usize) < n_chans).map(|l| CtlLink::from_chan(l.source as usize, l.kind & 0x1fff, target(l))))
                 .filter(|c| !matches!(c.target, Target::Other { .. }))
                 .collect(),
         };

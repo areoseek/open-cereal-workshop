@@ -654,6 +654,46 @@ pub fn title_for(ident: &str) -> Option<&'static str> {
 }
 
 /// One instrument's settings, in file units, in the order of its table.
+/// The file name of the key sender, the silent channel that turns notes into control movements.
+pub const KEY_SENDER: &str = "Fruity Keyboard Controller";
+
+/// What the key sender gives for a key: its stored table has a value per key after two leading words;
+/// without a table the keys run evenly from the bottom of the keyboard to the top.
+pub fn key_sender_value(raw: &[u8], key: u8) -> f32 {
+    let at = 8 + 4 * key as usize;
+    if key < 120 && raw.len() >= 8 + 480 {
+        return f32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]).clamp(0.0, 1.0);
+    }
+    (key as f32 / 119.0).min(1.0)
+}
+
+/// Writes a key's value into the key sender's table, making the table first when there is none.
+pub fn key_sender_set(raw: &mut Vec<u8>, key: u8, v: f32) {
+    if raw.len() < 501 {
+        let mut b = vec![0u8; 501];
+        for k in 0..120u8 {
+            b[8 + 4 * k as usize..12 + 4 * k as usize].copy_from_slice(&(k as f32 / 119.0).to_le_bytes());
+        }
+        b[488] = 0;
+        b[492] = 119;
+        *raw = b;
+    }
+    if key < 120 {
+        let at = 8 + 4 * key as usize;
+        raw[at..at + 4].copy_from_slice(&v.clamp(0.0, 1.0).to_le_bytes());
+    }
+}
+
+/// The key range the key sender's automatic mappings work over.
+pub fn key_sender_range(raw: &[u8]) -> (u8, u8) {
+    if raw.len() < 496 {
+        return (0, 119);
+    }
+    let lo = u32::from_le_bytes([raw[488], raw[489], raw[490], raw[491]]).min(119) as u8;
+    let hi = u32::from_le_bytes([raw[492], raw[493], raw[494], raw[495]]).min(119) as u8;
+    (lo.min(hi), hi.max(lo))
+}
+
 #[derive(Debug, Clone)]
 pub struct Gen {
     pub kind: Kind,

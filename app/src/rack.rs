@@ -205,6 +205,18 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    if ui.button("Key Controller").on_hover_text("A silent channel whose notes move the controls linked to it").clicked() {
+                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+                        c.plugin = cereal_engine::synth::KEY_SENDER.into();
+                        c.name = "Key Controller".into();
+                        if let Some(g) = c.gen.as_mut() {
+                            cereal_engine::synth::key_sender_set(&mut g.raw, 255, 0.0);
+                        }
+                        self.song.channels.push(c);
+                        self.sel_chan = self.song.channels.len() - 1;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Sound Bank Player").clicked() {
                         let mut c = Chan { name: "Sound Bank Player".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
                         c.zones = cereal_engine::sf2::open(&c.plugin, &[], None, None).map(std::sync::Arc::new);

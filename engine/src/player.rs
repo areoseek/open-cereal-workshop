@@ -750,6 +750,21 @@ impl Player {
             }
             return;
         }
+        if ch.plugin.eq_ignore_ascii_case(crate::synth::KEY_SENDER) {
+            // the key sender makes no sound: the key and how hard it was hit go to whatever is linked to it
+            let outs = [crate::synth::key_sender_value(ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]), n.key), n.vel.clamp(0.0, 1.0)];
+            let mut fitted = false;
+            for l in song.ctl_links.iter().filter(|l| l.chan() == Some(n.chan as usize)) {
+                if let Some(&v) = outs.get(l.out as usize) {
+                    if !fitted {
+                        self.ov.fit(song);
+                        fitted = true;
+                    }
+                    self.ov.set(l.target, v);
+                }
+            }
+            return;
+        }
         if n.slide {
             // a slide note bends what is sounding in its colour to its own pitch over its length
             let frames = len_frames.unwrap_or(1).max(1) as f32;
@@ -1877,6 +1892,32 @@ mod tests {
         h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
         p.render(&mut buf, 2);
         assert!(buf.iter().any(|x| x.abs() > 0.01));
+    }
+
+    #[test]
+    fn a_key_sender_moves_a_linked_control() {
+        let mut s = click_song();
+        s.channels.push(crate::song::Chan { name: "Keys".into(), kind: ChannelKind::Plugin, plugin: crate::synth::KEY_SENDER.into(), ..Default::default() });
+        let k = s.channels.len() - 1;
+        s.ctl_links.push(crate::song::CtlLink::from_chan(k, 0, Target::InsertVolume(0)));
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        let mut buf = vec![0.0f32; 4096];
+        // the bottom key sends nothing: the master fader goes down
+        h.send(Cmd::NoteOn { chan: k as u16, key: 0, vel: 1.0 });
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert!(buf.iter().all(|x| x.abs() < 1e-6));
+        // a high key opens it again
+        h.send(Cmd::NoteOn { chan: k as u16, key: 110, vel: 1.0 });
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert!(buf.iter().any(|x| x.abs() > 0.01));
+        // a stored table decides what each key sends
+        let mut raw = vec![];
+        crate::synth::key_sender_set(&mut raw, 110, 0.0);
+        assert_eq!(crate::synth::key_sender_value(&raw, 110), 0.0);
+        assert!((crate::synth::key_sender_value(&raw, 60) - 60.0 / 119.0).abs() < 1e-6);
+        assert_eq!(crate::synth::key_sender_range(&raw), (0, 119));
     }
 
     #[test]

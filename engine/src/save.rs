@@ -742,8 +742,16 @@ fn patch_ctl_links(ev: &mut Vec<Event>, song: &Song, base: &Song, mixer_base: us
     let record = |l: &crate::song::CtlLink| {
         let (param, dest) = song.event_address(l.target);
         let mut d = vec![0u8; 12];
-        put_u16(&mut d, 0, 0x8000 | l.out);
-        put_u16(&mut d, 2, (((l.ins + mixer_base) as u16) << 6) | (l.slot & 63));
+        match l.chan() {
+            Some(c) => {
+                put_u16(&mut d, 0, 0x2000 | l.out);
+                put_u16(&mut d, 2, c as u16);
+            }
+            None => {
+                put_u16(&mut d, 0, 0x8000 | l.out);
+                put_u16(&mut d, 2, (((l.ins + mixer_base) as u16) << 6) | (l.slot & 63));
+            }
+        }
         put_u16(&mut d, 8, param);
         put_u16(&mut d, 10, dest);
         d
@@ -1887,6 +1895,7 @@ mod tests {
         song.inserts[4].slots.push(slot);
         song.ctl_links.push(CtlLink { ins: 4, slot: 2, out: 0, target: Target::InsertVolume(7) });
         song.ctl_links.push(CtlLink { ins: 4, slot: 2, out: 0, target: Target::InsertPan(3) });
+        song.ctl_links.push(CtlLink::from_chan(0, 1, Target::InsertVolume(2)));
         let (bytes, flp) = save(&mut song, None).unwrap();
         let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
         assert_eq!(back.ctl_links, song.ctl_links);

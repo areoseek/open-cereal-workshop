@@ -302,12 +302,16 @@ impl App {
 
         match self.chanset.tab {
             Tab::Sample if built_in => {
-                let ident = cereal_engine::synth::def(self.song.channels[ci].gen.as_ref().unwrap().kind).ident;
-                if let Some(p) = self.preset_bar(ui, ident, true) {
+                let ident = self.song.channels[ci].plugin.clone();
+                if let Some(p) = self.preset_bar(ui, &ident, true) {
                     self.actions.push(crate::Action::LoadPreset(p, crate::PresetTo::Chan(ci)));
                 }
                 ui.add_space(4.0);
-                changed |= instrument_panel(ui, ci, self.song.channels[ci].gen.as_mut().unwrap());
+                if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
+                    changed |= key_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
+                } else {
+                    changed |= instrument_panel(ui, ci, self.song.channels[ci].gen.as_mut().unwrap());
+                }
             }
             Tab::Sample => {
                 let mut pick = false;
@@ -483,6 +487,96 @@ impl App {
             self.dirty = true;
         }
     }
+}
+
+/// The key sender: what each key sends to the controls linked to it, drawn as a bar per key.
+fn key_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
+    use cereal_engine::synth::{key_sender_range, key_sender_set, key_sender_value};
+    const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let black = |k: u8| matches!(k % 12, 1 | 3 | 6 | 8 | 10);
+    let mut changed = false;
+    ui.label(RichText::new("Makes no sound. Each note sends its key's value (output: note) and how hard it was hit (output: velocity) to the controls linked to this channel. Link a control with right-click, Link to controller.").color(TEXT_DIM));
+    let sel_id = ui.id().with("keysel");
+    let mut sel: u8 = ui.data(|d| d.get_temp(sel_id)).unwrap_or(60);
+    let (mut lo, mut hi) = key_sender_range(raw);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(120.0 * 5.0, 120.0), egui::Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 2.0, Color32::from_rgb(28, 32, 36));
+    for k in 0..120u8 {
+        let x = rect.left() + k as f32 * 5.0;
+        let v = key_sender_value(raw, k);
+        let inside = k >= lo && k <= hi;
+        let col = match (k == sel, black(k), inside) {
+            (true, _, _) => Color32::from_rgb(90, 160, 240),
+            (_, true, true) => Color32::from_rgb(110, 110, 120),
+            (_, false, true) => Color32::from_rgb(200, 200, 210),
+            (_, true, false) => Color32::from_rgb(60, 60, 66),
+            (_, false, false) => Color32::from_rgb(95, 95, 102),
+        };
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x + 0.5, rect.bottom() - v * rect.height()), egui::pos2(x + 4.5, rect.bottom())), 0.0, col);
+        if k % 12 == 0 {
+            p.text(egui::pos2(x + 1.0, rect.top() + 1.0), egui::Align2::LEFT_TOP, format!("C{}", k / 12), egui::FontId::proportional(9.0), TEXT_DIM);
+        }
+    }
+    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+        let k = (((pos.x - rect.left()) / 5.0).floor().clamp(0.0, 119.0)) as u8;
+        sel = k;
+        if resp.dragged() {
+            key_sender_set(raw, k, ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0));
+            changed = true;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    ui.horizontal(|ui| {
+        ui.label(format!("Value for {}{}", NAMES[sel as usize % 12], sel / 12));
+        let mut v = key_sender_value(raw, sel) * 100.0;
+        if ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %")).changed() {
+            key_sender_set(raw, sel, v / 100.0);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Key range");
+        let mut range_changed = false;
+        range_changed |= ui.add(egui::DragValue::new(&mut lo).range(0..=119).custom_formatter(|v, _| format!("{}{}", NAMES[v as usize % 12], v as usize / 12))).changed();
+        ui.label("to");
+        range_changed |= ui.add(egui::DragValue::new(&mut hi).range(0..=119).custom_formatter(|v, _| format!("{}{}", NAMES[v as usize % 12], v as usize / 12))).changed();
+        if range_changed {
+            key_sender_set(raw, 255, 0.0);
+            let (a, b) = (lo.min(hi), hi.max(lo));
+            raw[488..492].copy_from_slice(&(a as u32).to_le_bytes());
+            raw[492..496].copy_from_slice(&(b as u32).to_le_bytes());
+            changed = true;
+        }
+        ui.menu_button("Auto mapping", |ui| {
+            let mut map: Option<bool> = None;
+            if ui.button("White and black keys").clicked() {
+                map = Some(false);
+            }
+            if ui.button("White keys only").clicked() {
+                map = Some(true);
+            }
+            if let Some(white_only) = map {
+                // the range runs from nothing at its lowest key to full at its highest; with white keys only a black key sends what the white key under it sends
+                let keys: Vec<u8> = (lo..=hi).filter(|&k| !white_only || !black(k)).collect();
+                let top = keys.len().saturating_sub(1).max(1) as f32;
+                for k in 0..120u8 {
+                    let v = if k < lo {
+                        0.0
+                    } else if k > hi {
+                        1.0
+                    } else {
+                        keys.iter().rposition(|&q| q <= k).map(|i| i as f32 / top).unwrap_or(0.0)
+                    };
+                    key_sender_set(raw, k, v);
+                }
+                changed = true;
+                ui.close_menu();
+            }
+        });
+    });
+    ui.label(RichText::new("Drag over the bars to draw values. The note-off value and smoothing settings are kept in the file but are not worked yet.").small().color(TEXT_DIM));
+    changed
 }
 
 /// The knobs of a built-in instrument.
