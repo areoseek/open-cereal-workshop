@@ -379,6 +379,23 @@ impl App {
                             }
                         }
                     }
+                    "kit" => {
+                        // a pad machine on the first channel, with a couple of layers, and its settings open
+                        use cereal_engine::zones::{Kit, Layer, Map};
+                        let mut kit = Kit::fresh();
+                        kit.pads[1].put_name("Kick");
+                        kit.pads[1].layers[0].put_path("kick soft.wav");
+                        kit.pads[1].layers.push(Layer::fresh());
+                        kit.pads[1].layers[1].put_path("kick hard.wav");
+                        kit.pads[1].spread_even();
+                        if let Some(c) = app.song.channels.first_mut() {
+                            *c = cereal_engine::song::Chan { name: "Pad Machine".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: Kit::IDENT.into(), ..Default::default() };
+                            c.zones = Map::parse(Kit::IDENT, &kit.write()).map(std::sync::Arc::new);
+                            app.sel_chan = 0;
+                            app.show_chanset = true;
+                            app.handle.publish(app.song.clone());
+                        }
+                    }
                     "noplaylist" => app.show_playlist = false,
                     "norack" => app.show_rack = false,
                     w => {

@@ -241,6 +241,14 @@ impl App {
                         self.dirty = true;
                         ui.close_menu();
                     }
+                    if ui.button("Pad Machine").clicked() {
+                        let mut c = Chan { name: "Pad Machine".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: cereal_engine::zones::Kit::IDENT.into(), ..Chan::default() };
+                        c.zones = cereal_engine::zones::Map::parse(&c.plugin, &cereal_engine::zones::Kit::fresh().write()).map(std::sync::Arc::new);
+                        self.song.channels.push(c);
+                        self.sel_chan = self.song.channels.len() - 1;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Sound Bank Player").clicked() {
                         let mut c = Chan { name: "Sound Bank Player".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
                         c.zones = cereal_engine::sf2::open(&c.plugin, &[], None, None).map(std::sync::Arc::new);
