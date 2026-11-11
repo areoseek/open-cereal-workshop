@@ -33,6 +33,8 @@ pub enum Kind {
     Sub,
     /// Drum synths we cannot read in full yet: played by the swept sine drum.
     Thump,
+    /// One drum patch per key (`drumbank.rs`).
+    DrumBank,
 }
 
 impl Kind {
@@ -69,7 +71,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank)
     }
 }
 
@@ -369,6 +371,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Sub, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::DrumBank, ident: "Fruity DrumSynth Live", title: "Drum Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
 ];
@@ -526,6 +529,9 @@ impl Gen {
         }
         if d.kind == Kind::Sub {
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(sub_patch(ident, state))) });
+        }
+        if d.kind == Kind::DrumBank {
+            return Some(Self { kind: d.kind, p: crate::drumbank::parse(state), raw: state.to_vec(), fm: None, pre: None });
         }
         if d.kind == Kind::Thump {
             return Some(Self { kind: d.kind, p: thump(ident, state), raw: state.to_vec(), fm: None, pre: None });

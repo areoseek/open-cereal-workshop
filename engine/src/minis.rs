@@ -22,6 +22,7 @@ pub enum Voice {
     Fm2(Box<Fm2>),
     Pluck(Box<Pluck>),
     Keys(Box<crate::keys::Voice>),
+    Bank(Box<crate::drumbank::Voice>),
 }
 
 /// A carrier bent by two sine modulators, after the public two-operator design this instrument descends from.
@@ -76,6 +77,7 @@ impl Voice {
             return Voice::Keys(Box::new(crate::keys::Voice::start(set, s, sr, key, vel, dphase)));
         }
         match p.kind {
+            Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
             Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel },
             Kind::Fm2 => {
                 let ifs = 1.0 / sr;
@@ -183,6 +185,7 @@ impl Voice {
                 0.12
             }
             Voice::Keys(v) => v.release(),
+            Voice::Bank(v) => v.left(),
         }
     }
 
@@ -190,6 +193,7 @@ impl Voice {
         let s = &p.p;
         match self {
             Voice::Keys(v) => v.frame(dphase),
+            Voice::Bank(v) => v.frame(),
             Voice::Kick { sr, t, ph, scale, vel } => {
                 let sec = *t as f32 / *sr;
                 *t += 1;
