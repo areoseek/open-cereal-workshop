@@ -1214,6 +1214,21 @@ impl Player {
                                 self.driven.push((l.target, v));
                             }
                         }
+                    } else if u.1.fx.kind == fx::Kind::SendTap {
+                        // takes the sound off at this point of the chain and adds it to one of the tracks this one is routed to
+                        u.1.process(&mut bus[..n], &cx);
+                        let k = u.1.fx.p[3] as i32;
+                        let ok = |d: usize| d != 0 && d != i && d < ni;
+                        let to = ins.sends.iter().copied().find(|&d| ok(d) && ins.sends.iter().filter(|&&e| ok(e) && e < d).count() as i32 == k);
+                        if let Some(d) = to {
+                            if u.1.tap.len() >= n {
+                                for (o, f) in self.buses[d][..n].iter_mut().zip(&u.1.tap[..n]) {
+                                    o[0] += f[0];
+                                    o[1] += f[1];
+                                }
+                                self.dirty[d] = true;
+                            }
+                        }
                     } else if s.mix >= 1.0 {
                         u.1.process(&mut bus[..n], &cx);
                     } else {

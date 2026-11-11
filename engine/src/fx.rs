@@ -60,6 +60,13 @@ pub enum Kind {
     Rack,
     Voc,
     OldVoc,
+    OldDelay,
+    SendTap,
+    Squeeze,
+    DcBlock,
+    Eq7,
+    Mute,
+    Flip,
 }
 
 pub struct Param {
@@ -729,6 +736,53 @@ pub static DEFS: &[Def] = &[
         fixed: &[(0, 2), (17, 0x0100_0000)],
         params: &[p("Type", 4, 0, 700, 100), p("Frequency", 8, 0, 1024, 1024), p("Q", 12, 0, 1024, 0), p("Gain", 16, 0, 1024, 676)],
     },
+    Def {
+        kind: Kind::OldDelay,
+        ident: "Fruity Delay",
+        title: "Plain Echo",
+        size: 28,
+        fixed: &[(0, 1)],
+        params: &[p("Input", 4, 0, 1024, 338), p("Feedback", 8, 0, 1024, 512), p("Cutoff", 12, 0, 1024, 1024), p("Tempo", 16, 0, 1024, 0), p("Steps", 20, 1, 16, 3), p("Mode", 24, 0, 1024, 0)],
+    },
+    Def { kind: Kind::SendTap, ident: "Fruity Send", title: "Send Tap", size: 16, fixed: &[], params: &[p("Pan", 0, -128, 127, 0), p("Dry", 4, 0, 256, 256), p("Volume", 8, 0, 256, 256), p("Send to", 12, -1, 125, -1)] },
+    Def {
+        kind: Kind::Squeeze,
+        ident: "Fruity Squeeze",
+        title: "Crusher",
+        size: 52,
+        fixed: &[],
+        params: &[
+            p("Mix", 4, 0, 127, 127),
+            p("Gain", 8, 0, 127, 64),
+            p("Squarize", 12, 0, 65535, 1),
+            p("Squarize on", 16, 0, 1, 0),
+            p("Relation", 20, 0, 4, 0),
+            p("Preserve", 24, 0, 65535, 32768),
+            p("Impact", 28, 0, 65535, 32768),
+            p("Puncher on", 32, 0, 1, 0),
+            p("Filter post", 36, 0, 1, 0),
+            p("Resonance", 40, 0, 16383, 0),
+            p("Cutoff", 44, 0, 16383, 7500),
+            p("Punch level", 48, 0, 16383, 0),
+        ],
+    },
+    Def { kind: Kind::DcBlock, ident: "Fruity Center", title: "Centre", size: 8, fixed: &[(0, 1)], params: &[p("On", 4, 0, 1, 1)] },
+    Def {
+        kind: Kind::Eq7,
+        ident: "Fruity 7 Band EQ",
+        title: "Seven Band EQ",
+        size: 32,
+        fixed: &[(0, 1)],
+        params: &[p("63 Hz", 4, -1800, 1800, 0), p("250 Hz", 8, -1800, 1800, 0), p("500 Hz", 12, -1800, 1800, 0), p("1.5 kHz", 16, -1800, 1800, 0), p("3 kHz", 20, -1800, 1800, 0), p("5 kHz", 24, -1800, 1800, 0), p("8 kHz", 28, -1800, 1800, 0)],
+    },
+    Def { kind: Kind::Mute, ident: "Fruity Mute 2", title: "Mute Switch", size: 8, fixed: &[], params: &[p("Mute", 0, 0, 1, 0), p("Channel", 4, 0, 2, 0)] },
+    Def { kind: Kind::Flip, ident: "Fruity Phase Inverter", title: "Polarity Flip", size: 4, fixed: &[], params: &[p("State", 0, 0, 2, 0)] },
+    Def { kind: Kind::Thru, ident: "Fruity dB Meter", title: "Level Meter", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity Big Clock", title: "Big Clock", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity Spectroman", title: "Spectrum View", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity LSD", title: "Bank Player", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Tuner", title: "Pitch Meter", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Razer Chroma", title: "Key Lights", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::BassBoost, ident: "Fruity Bass Boost", title: "Bass Lift", size: 12, fixed: &[(0, 1)], params: &[p("Frequency", 4, 0, 1024, 512), p("Amount", 8, 0, 1024, 768)] },
     Def {
         kind: Kind::Phaser,
@@ -1474,7 +1528,7 @@ pub fn def(kind: Kind) -> &'static Def {
 
 /// Our title for an effect identifier from a project file, when we have a unit for it.
 pub fn title_for(ident: &str) -> Option<&'static str> {
-    DEFS.iter().find(|d| d.ident == ident).map(|d| d.title)
+    DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident)).map(|d| d.title)
 }
 
 /// An effect's settings, in file units, in the order of its table.
@@ -1576,7 +1630,7 @@ impl Fx {
     /// Read the stored block of the effect called `ident`. None when we have no unit for it or the block is
     /// too short to hold its settings.
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
-        let d = DEFS.iter().find(|d| d.ident == ident)?;
+        let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if d.kind == Kind::Bank {
             return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None });
         }
@@ -1846,6 +1900,8 @@ pub struct Unit {
     rack: Option<Box<crate::fxrack::State>>,
     voc: Option<Box<crate::fxvoc::State>>,
     oldvoc: Option<Box<crate::fxvoc::classic::State>>,
+    /// What a send tap took off the signal in the last block, for the player to add to the target track.
+    pub tap: Vec<[f32; 2]>,
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -1975,6 +2031,12 @@ fn echo_time(p: &[f32], cx: &Ctx) -> f32 {
     }
 }
 
+/// Echo time of the plain echo in frames: the song's steps, or steps of its own tempo.
+fn old_delay_time(p: &[f32], cx: &Ctx) -> f32 {
+    let step = if p[3] < 1.0 { cx.step } else { 15.0 / (280.0 * p[3] / 1024.0).max(20.0) * cx.sr };
+    (p[4].max(1.0) * step).max(1.0)
+}
+
 fn biquad(c: &[f32; 5], z: &mut [f32], x: f32) -> f32 {
     let y = c[0] * x + z[0];
     z[0] = c[1] * x - c[3] * y + z[1];
@@ -2009,9 +2071,9 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None, tap: Vec::new() };
         match u.fx.kind {
-            Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
+            Kind::Delay | Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Spread => {
@@ -2090,7 +2152,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, oldvoc: None, tap: Vec::new() }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -2139,6 +2201,13 @@ impl Unit {
             Kind::Warp => (cx.step * 32.0) as usize + 64,
             Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift | Kind::Finisher | Kind::LowLift | Kind::MorphEq => (cx.sr * 0.25) as usize,
             Kind::Phaser => (cx.sr * 1.5) as usize,
+            Kind::OldDelay => {
+                let fb = (p[1] / 1024.0).clamp(0.0, 0.97);
+                let time = old_delay_time(p, cx);
+                let echoes = if fb < 0.01 { 1.0 } else { (0.001f32.ln() / fb.ln()).min(60.0) };
+                (time * (echoes + 1.0)) as usize
+            }
+            Kind::Squeeze | Kind::Eq7 | Kind::DcBlock => (cx.sr * 0.25) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2912,6 +2981,140 @@ impl Unit {
                 for f in io.iter_mut() {
                     f[0] = biquad(&co, &mut z[0..2], f[0]);
                     f[1] = biquad(&co, &mut z[2..4], f[1]);
+                }
+            }
+            Kind::OldDelay => {
+                let n = self.buf.len();
+                let len = (old_delay_time(p, cx) as usize).clamp(1, n - 1);
+                let (ing, fb) = (p[0] / 1024.0, p[1] / 1024.0);
+                let a = if p[2] >= 1024.0 { 1.0 } else { 1.0 - (-TAU * knob_hz(p[2] / 1024.0) / sr).exp() };
+                let (swap_out, cross) = (p[5] >= 341.0 && p[5] < 683.0, p[5] >= 683.0);
+                for f in io.iter_mut() {
+                    let d = self.buf[(self.pos + n - len) % n];
+                    z[0] += a * (d[0] - z[0]);
+                    z[1] += a * (d[1] - z[1]);
+                    let e = [z[0], z[1]];
+                    self.buf[self.pos] = if cross { [f[0] * ing + e[1] * fb, f[1] * ing + e[0] * fb] } else { [f[0] * ing + e[0] * fb, f[1] * ing + e[1] * fb] };
+                    self.pos = (self.pos + 1) % n;
+                    if swap_out {
+                        f[0] += e[1];
+                        f[1] += e[0];
+                    } else {
+                        f[0] += e[0];
+                        f[1] += e[1];
+                    }
+                }
+                for v in z[..2].iter_mut() {
+                    if v.abs() < 1e-20 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            Kind::SendTap => {
+                let (l, r) = balance(p[0] / 128.0);
+                let (dry, vol) = (p[1] / 256.0, p[2] / 256.0);
+                self.tap.clear();
+                if p[3] >= 0.0 {
+                    self.tap.extend(io.iter().map(|f| [f[0] * l * vol, f[1] * r * vol]));
+                }
+                for f in io.iter_mut() {
+                    f[0] *= dry;
+                    f[1] *= dry;
+                }
+            }
+            Kind::Squeeze => {
+                let (mix, gain) = (p[0] / 127.0, p[1] / 64.0);
+                let q = (2f32).powf(15.0 - 13.0 * p[2] / 65535.0);
+                let (sq_on, punch_on, post) = (p[3] >= 0.5, p[7] >= 0.5, p[8] >= 0.5);
+                let keep = (p[5] / 65535.0 * sr) as usize;
+                let hit = (p[6] / 65535.0 * sr) as usize;
+                let level = p[11] / 16383.0;
+                let g = svf_g((p[10].max(20.0)).min(sr * 0.45), sr);
+                let k = 2.0 - 1.9 * (p[9] / 16383.0).clamp(0.0, 1.0);
+                let open = p[10] >= 16383.0;
+                for f in io.iter_mut() {
+                    let dry = *f;
+                    let mut y = *f;
+                    if !post && !open {
+                        y[0] = svf(&mut z[0..2], y[0], g, k).0;
+                        y[1] = svf(&mut z[2..4], y[1], g, k).0;
+                    }
+                    if sq_on {
+                        y[0] = (y[0] * q).round() / q;
+                        y[1] = (y[1] * q).round() / q;
+                    }
+                    if punch_on && hit > 0 {
+                        if self.pos >= keep {
+                            y = [level; 2];
+                        }
+                        self.pos += 1;
+                        if self.pos >= keep + hit {
+                            self.pos = 0;
+                        }
+                    }
+                    if post && !open {
+                        y[0] = svf(&mut z[0..2], y[0], g, k).0;
+                        y[1] = svf(&mut z[2..4], y[1], g, k).0;
+                    }
+                    f[0] = (dry[0] + (y[0] - dry[0]) * mix) * gain;
+                    f[1] = (dry[1] + (y[1] - dry[1]) * mix) * gain;
+                }
+                for v in z[..4].iter_mut() {
+                    if !v.is_finite() || v.abs() < 1e-20 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            Kind::DcBlock => {
+                if p[0] >= 0.5 {
+                    let a = 1.0 - (-TAU * 5.0 / sr).exp();
+                    for f in io.iter_mut() {
+                        for c in 0..2 {
+                            z[c] += a * (f[c] - z[c]);
+                            f[c] -= z[c];
+                        }
+                    }
+                }
+            }
+            Kind::Eq7 => {
+                const HZ: [f32; 7] = [63.0, 250.0, 500.0, 1500.0, 3000.0, 5000.0, 8000.0];
+                for b in 0..7 {
+                    if p[b].abs() < 1.0 {
+                        continue;
+                    }
+                    let kind = if b == 0 { 5 } else if b == 6 { 7 } else { 6 };
+                    let co = band_coeffs(kind, HZ[b], p[b] / 100.0, 0.5, sr);
+                    let st = &mut z[b * 4..b * 4 + 4];
+                    for f in io.iter_mut() {
+                        f[0] = biquad(&co, &mut st[0..2], f[0]);
+                        f[1] = biquad(&co, &mut st[2..4], f[1]);
+                    }
+                    for v in st.iter_mut() {
+                        if !v.is_finite() || v.abs() < 1e-20 {
+                            *v = 0.0;
+                        }
+                    }
+                }
+            }
+            Kind::Mute => {
+                if p[0] >= 0.5 {
+                    let which = p[1] as i32;
+                    for f in io.iter_mut() {
+                        if which != 2 {
+                            f[0] = 0.0;
+                        }
+                        if which != 1 {
+                            f[1] = 0.0;
+                        }
+                    }
+                }
+            }
+            Kind::Flip => {
+                let which = p[0] as i32;
+                if which > 0 {
+                    for f in io.iter_mut() {
+                        f[which as usize - 1] = -f[which as usize - 1];
+                    }
                 }
             }
             Kind::BassBoost => {
@@ -3982,7 +4185,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);

@@ -67,17 +67,17 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] FL Studio Mobile Rack FX
 - [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
 - [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
-- [ ] Fruity 7 Band EQ
+- [~] Fruity 7 Band EQ (built as Seven Band EQ; band centres and widths are estimates)
 - [~] Fruity Balance (built, approximate)
 - [~] Fruity Bass Boost (built as Bass Lift; frequency and amount scales estimated)
-- [ ] Fruity Big Clock
+- [~] Fruity Big Clock (opens, block kept; the display itself is not drawn)
 - [~] Fruity Blood Overdrive (built, approximate)
-- [ ] Fruity Center
+- [~] Fruity Center (built as Centre)
 - [~] Fruity Chorus (built, approximate)
 - [~] Fruity Compressor (built, approximate)
 - [~] Fruity Convolver (ours: Impulse Reverb; convolution with the named or held impulse, dry/wet, separation; delay, stretch, EQ and envelopes not yet)
-- [ ] Fruity dB Meter
-- [ ] Fruity Delay
+- [~] Fruity dB Meter (opens, block kept; the meter display is not drawn)
+- [~] Fruity Delay (built as Plain Echo; own-tempo scale and filter law are estimates)
 - [~] Fruity Delay 2 (built, approximate)
 - [~] Fruity Delay 3 (built, approximate)
 - [~] Fruity Delay Bank (built as Echo Bank; grain, shelf filters and filter gains not run)
@@ -91,24 +91,24 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity HTML NoteBook (opens as Web Notes, block kept, sound passes through; the page is not shown)
 - [~] Fruity Limiter (built, approximate)
 - [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Not yet: slow oscillators, patterns 2 to 10 and key switching, line editors, the note text. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
-- [ ] Fruity LSD
+- [~] Fruity LSD (opens, block kept; no bank playback)
 - [~] Fruity Multiband Compressor (built as Three Band Compressor, approximate)
-- [ ] Fruity Mute 2
+- [~] Fruity Mute 2 (built as Mute Switch; no stored block seen, layout is a guess)
 - [~] Fruity NoteBook (opens as Note Pad, block kept, sound passes through; the notes are not shown)
 - [~] Fruity NoteBook 2 (opens as Note Pages, block kept, sound passes through; the notes are not shown)
 - [~] Fruity PanOMatic (built, approximate)
 - [~] Fruity Parametric EQ (built as Seven Band EQ (classic), settings carried onto the newer unit)
 - [~] Fruity Parametric EQ 2 (built, approximate)
 - [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas not run)
-- [ ] Fruity Phase Inverter
+- [~] Fruity Phase Inverter (built as Polarity Flip; no stored block seen, layout is a guess)
 - [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
 - [~] Fruity Reeverb 2 (built, approximate)
 - [ ] Fruity Scratcher
-- [ ] Fruity Send
+- [~] Fruity Send (built as Send Tap; target taken as the n-th routed track, master left out)
 - [~] Fruity Soft Clipper (built, approximate)
-- [ ] Fruity Spectroman
-- [ ] Fruity Squeeze
+- [~] Fruity Spectroman (opens, block kept; the spectrum display is not drawn)
+- [~] Fruity Squeeze (built as Crusher; order of the last settings and the puncher relation are guesses)
 - [~] Fruity Stereo Enhancer (built, approximate)
 - [~] Fruity Stereo Shaper (built, approximate)
 - [~] Fruity Vocoder (Classic Vocoder: left gates right, per-band levels; solo and swap switches not read)
@@ -118,9 +118,9 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity X-Y-Z Controller
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block, mixes, attack and release; no line editor yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
 - [ ] Hardcore
-- [ ] Hyper Chorus
+- [~] Hyper Chorus (built, approximate)
 - [~] Low Lifter (built as Low Harmonics: band split, overtone curve, gains, mix; which stored value is which knob is partly guessed, diffusion missing)
-- [ ] Luxeverb
+- [~] Luxeverb (built as Plush Reverb, approximate)
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read, no editor, look-ahead and second state not run)
 - [ ] Multiband Delay
@@ -129,13 +129,13 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Patcher
 - [~] Pitcher (built as Voice Tuner; automatic correction only, note-driven modes, harmony voices, formant and gender not run)
 - [~] Pitch Shifter (built as Grain Shifter; formant setting not run)
-- [ ] Razer Chroma
+- [~] Razer Chroma (opens, block kept; no keyboard lights)
 - [~] Soundgoodizer (built, approximate)
-- [ ] Spreader
-- [ ] Transient Processor
+- [~] Spreader (built, approximate)
+- [~] Transient Processor (built, approximate)
 - [ ] Transmitter
 - [ ] Transporter
-- [ ] Tuner
+- [~] Tuner (opens, block kept; the pitch display is not drawn)
 - [ ] VFX Color Mapper
 - [ ] VFX Envelope
 - [ ] VFX Keyboard Splitter
