@@ -436,6 +436,9 @@ impl App {
                 Kind::EchoBank => Some((4, 20, &["1", "2", "3", "4", "5", "6", "7", "8"])),
                 _ => None,
             };
+            if f.kind == Kind::Patch {
+                changed |= bay_ui(ui, f);
+            }
             let mut shown: Vec<usize> = (0..d.params.len()).collect();
             let mut cut = 0;
             if let Some((head, per, names)) = paged {
@@ -516,6 +519,74 @@ impl App {
 }
 
 /// The equaliser's response picture with a handle per band. Returns true when a handle moved a setting.
+/// The held units of a patch bay, in the order they run, each with its own settings to turn.
+pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
+    use cereal_engine::fxpatch::End;
+    let Some(sub) = f.sub.as_mut() else { return false };
+    let mut changed = false;
+    let title = |n: &cereal_engine::fxpatch::Node| match &n.fx {
+        Some(g) => fx::def(g.kind).title.to_string(),
+        None => cereal_engine::synth::title_for(&n.ident).map(str::to_string).unwrap_or_else(|| "Unit not built yet".to_string()),
+    };
+    let end = |e: End, bay: &str| match e {
+        End::Bay => bay.to_string(),
+        End::Node(i) => format!("{}", i + 1),
+    };
+    let cables: Vec<String> = sub.cables.iter().map(|c| format!("{} > {}", end(c.from, "in"), end(c.to, "out"))).collect();
+    ui.label(RichText::new(format!("{} units, {} sound cables", sub.nodes.len(), sub.cables.len())).small().color(TEXT_DIM));
+    if !cables.is_empty() {
+        ui.add(egui::Label::new(RichText::new(cables.join("   ")).small().color(TEXT_DIM)).wrap());
+    }
+    ui.set_max_width(520.0);
+    egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+        for at in 0..sub.order.len() {
+            let i = sub.order[at];
+            let head = format!("{}. {}", i + 1, title(&sub.nodes[i]));
+            let Some(kind) = sub.nodes[i].fx.as_ref().map(|g| g.kind) else {
+                ui.label(RichText::new(head).small());
+                continue;
+            };
+            let d = fx::def(kind);
+            if d.params.is_empty() && kind != Kind::Patch {
+                ui.label(RichText::new(head).small());
+                continue;
+            }
+            egui::CollapsingHeader::new(RichText::new(head).small()).id_salt(("bayunit", i)).show(ui, |ui| {
+                if kind == Kind::Patch {
+                    // a bay inside a bay
+                    let mut inner = sub.nodes[i].fx.clone().unwrap();
+                    if bay_ui(ui, &mut inner) {
+                        std::sync::Arc::make_mut(sub).nodes[i].fx = Some(inner);
+                        changed = true;
+                    }
+                    return;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (k, p) in d.params.iter().enumerate() {
+                        let mut v = sub.nodes[i].fx.as_ref().unwrap().p[k];
+                        let before = v;
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.set_width(58.0);
+                            ui.vertical_centered(|ui| {
+                                let r = knob(ui, &mut v, p.min as f32, p.max as f32, p.def as f32, 26.0);
+                                v = v.round();
+                                r.on_hover_text(hint(kind, k, p.name, v));
+                                ui.label(RichText::new(p.name).small().color(TEXT_DIM));
+                            });
+                        });
+                        if v != before {
+                            std::sync::Arc::make_mut(sub).nodes[i].fx.as_mut().unwrap().p[k] = v;
+                            changed = true;
+                        }
+                    }
+                });
+            });
+        }
+    });
+    changed
+}
+
 fn eq_curve(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(7.0 * 66.0 - 8.0, 150.0), Sense::click_and_drag());
     let pt = ui.painter_at(rect);

@@ -170,6 +170,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         fx: vec![],
         driven: Vec::with_capacity(64),
         ring: vec![],
+        chan_fx: vec![],
         scratch: Vec::with_capacity(BLOCK),
         cap: Vec::new(),
         cap_at: Vec::new(),
@@ -570,6 +571,8 @@ pub struct Player {
     driven: Vec<(Target, f32)>,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
+    /// The patch bay of each channel whose generator is one, with the sound its notes made this block.
+    chan_fx: Vec<Option<ChanFx>>,
     scratch: Vec<[f32; 2]>,
     /// What each insert put out this block, kept for units on other inserts that listen to it.
     cap: Vec<Vec<[f32; 2]>>,
@@ -1112,6 +1115,13 @@ fn eq_coeffs(band: usize, b: &crate::song::Band, rate: f32) -> [f32; 5] {
     [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
 }
 
+struct ChanFx {
+    unit: fx::Unit,
+    buf: Vec<[f32; 2]>,
+    dirty: bool,
+    ring: usize,
+}
+
 impl Player {
     fn mix(&mut self, song: &Song, out: &mut [f32], channels: usize) {
         let n = out.len() / channels;
@@ -1123,6 +1133,17 @@ impl Player {
             self.ring = vec![0; ni];
         }
         let cx = fx::Ctx { sr: self.sr, step: (song.step() as f64 / self.tpf.max(1e-9)) as f32 };
+        if self.chan_fx.len() != song.channels.len() {
+            self.chan_fx.resize_with(song.channels.len(), || None);
+        }
+        for (ch, slot) in song.channels.iter().zip(self.chan_fx.iter_mut()) {
+            match (ch.bay(), slot.as_mut()) {
+                (None, None) => {}
+                (None, Some(_)) => *slot = None,
+                (Some((f, _)), Some(cf)) if cf.unit.fx.sub.as_ref().zip(f.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
+                (Some((f, _)), _) => *slot = Some(ChanFx { unit: fx::Unit::new(f.clone(), self.sr), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+            }
+        }
         let mut live = 0;
         let follow = self.ov.any_chan;
         for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -1141,10 +1162,33 @@ impl Player {
                     v.bend = (cents - song.channels[v.chan as usize].pitch_cents) / 1200.0;
                 }
             }
+            if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {
+                if v.render(&mut cf.buf[..n]) {
+                    cf.dirty = true;
+                }
+                continue;
+            }
             let i = if v.insert < ni { v.insert } else { 0 };
             if v.render(&mut self.buses[i][..n]) {
                 self.dirty[i] = true;
             }
+        }
+        for (c, cf) in self.chan_fx.iter_mut().enumerate() {
+            let Some(cf) = cf else { continue };
+            if !cf.dirty && cf.ring == 0 {
+                continue;
+            }
+            cf.unit.process(&mut cf.buf[..n], &cx);
+            cf.ring = if cf.dirty { cf.unit.tail(&cx) } else { cf.ring.saturating_sub(n) };
+            let i = song.channels[c].insert as usize;
+            let i = if i < ni { i } else { 0 };
+            for (o, f) in self.buses[i][..n].iter_mut().zip(&mut cf.buf[..n]) {
+                o[0] += f[0];
+                o[1] += f[1];
+                *f = [0.0; 2];
+            }
+            self.dirty[i] = true;
+            cf.dirty = false;
         }
         self.transport.voices.store(live, Relaxed);
 
@@ -1173,6 +1217,9 @@ impl Player {
                         if u.1.fx != *f {
                             if u.1.fx.kind == f.kind && u.1.fx.p.len() == f.p.len() {
                                 u.1.fx.p.copy_from_slice(&f.p);
+                                if u.1.fx.sub != f.sub {
+                                    u.1.fx.sub = f.sub.clone();
+                                }
                             } else {
                                 u.1.fx = f.clone();
                             }

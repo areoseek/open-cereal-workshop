@@ -455,7 +455,16 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 }
             }
         }
-        if let Some(g) = now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind) {
+        if let (Some((_, k)), Some(g), true) = (now.bay(), now.gen.as_ref(), was.bay().is_some()) {
+            // still a patch bay: only its instrument's settings go back, inside the bay's own block
+            if now.gen != was.gen {
+                if let Some(i) = find(ev, end, id::PLUGIN_PARAMS) {
+                    if let Value::Data(d) = &mut ev[i].value {
+                        *d = crate::fxpatch::encode_gen(d, *k, g);
+                    }
+                }
+            }
+        } else if let Some(g) = now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind) {
             // a built-in instrument: the channel becomes (or stays) a generator channel carrying its settings
             let ident = crate::synth::def(g.kind).ident;
             if let Some(i) = find(ev, end, id::CHAN_TYPE) {

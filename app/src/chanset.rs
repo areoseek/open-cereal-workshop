@@ -148,6 +148,7 @@ impl App {
                     ChannelKind::AudioClip => "Audio clip".to_string(),
                     ChannelKind::Layer => "Layer".to_string(),
                     ChannelKind::AutomationClip => "Automation clip".to_string(),
+                    _ if c.bay().is_some() => format!("Patch Bay ({})", c.gen.as_ref().map_or("", |g| cereal_engine::synth::def(g.kind).title)),
                     _ => cereal_engine::synth::title_for(&c.plugin).map(str::to_string).unwrap_or_else(|| c.plugin.clone()),
                 };
                 ui.label(RichText::new(what).small().color(TEXT_DIM));

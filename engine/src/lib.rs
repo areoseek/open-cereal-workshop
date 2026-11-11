@@ -4,6 +4,7 @@
 pub mod flp;
 pub mod fx;
 pub mod fxbank;
+pub mod fxpatch;
 pub mod fxrack;
 pub mod fxvoc;
 pub mod synth;

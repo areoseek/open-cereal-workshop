@@ -43,6 +43,9 @@ pub struct Chan {
     pub raw: Option<Arc<Sample>>,
     /// Settings of a built-in instrument, when the channel's generator is one we can run.
     pub gen: Option<crate::synth::Gen>,
+    /// When the channel's generator is a patch bay: the bay its instrument plays through, and which of the
+    /// bay's held units that instrument is. Read through [`Channel::bay`].
+    pub bay: Option<(crate::fx::Fx, usize)>,
     /// The cuts of a loop slicer channel; its loop is in `sample`.
     pub slices: Option<Arc<crate::slicer::Slices>>,
     /// The sample map of a pad machine or multi-sample player.
@@ -236,11 +239,15 @@ impl Sampler {
 }
 
 impl Chan {
+    /// The patch bay this channel's instrument plays through, while the channel is still a bay.
+    pub fn bay(&self) -> Option<&(crate::fx::Fx, usize)> {
+        self.bay.as_ref().filter(|_| self.kind == ChannelKind::Plugin && self.plugin.eq_ignore_ascii_case(BAY))
+    }
     /// Set the sample this channel plays, applying the treatments that are worked out ahead of time.
     /// A new channel playing one of the built-in instruments.
     pub fn instrument(kind: crate::synth::Kind) -> Self {
         let d = crate::synth::def(kind);
-        Self { name: d.title.into(), kind: ChannelKind::Plugin, plugin: d.ident.into(), gen: Some(crate::synth::Gen::new(kind)), ..Default::default() }
+        Self { name: d.title.into(), kind: ChannelKind::Plugin, plugin: d.ident.into(), gen: Some(crate::synth::Gen::new(kind)), bay: None, ..Default::default() }
     }
 
     pub fn set_sample(&mut self, raw: Option<Arc<Sample>>) {
@@ -400,7 +407,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, slices: None, zones: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None }
     }
 }
 
@@ -513,6 +520,9 @@ pub struct Slot {
     /// Where the slot sits in the file the project came from (insert, slot); None for one added since.
     pub src: Option<(u16, u16)>,
 }
+
+/// The stored identifier of the patch bay.
+pub const BAY: &str = "Patcher";
 
 impl Slot {
     /// A new slot holding one of our units at its default settings.
@@ -950,9 +960,16 @@ impl Song {
                     smp: Sampler::from_flp(c),
                     raw: None,
                     gen: if c.kind == ChannelKind::Plugin { crate::synth::Gen::decode(&c.plugin, &c.state) } else { None },
+                    bay: None,
                     slices,
                     zones,
                 };
+                if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
+                    if let Some((p, k, g)) = crate::fxpatch::decode_gen(&c.state) {
+                        ch.gen = Some(g);
+                        ch.bay = Some((crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)) }, k));
+                    }
+                }
                 if let Some(g) = ch.gen.as_mut().filter(|g| matches!(g.kind, crate::synth::Kind::Grain | crate::synth::Kind::Travel)) {
                     g.smp = ch.sample.clone();
                 }

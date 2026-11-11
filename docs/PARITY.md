@@ -40,7 +40,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] MiniSynth (opens as Pocket Synth and keeps its block; a stand-in voice plays; the real synthesis and its editing are not done)
 - [~] Morphine (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Ogun (plays as Metal Stack: seeds, fullness, morph, decay, release, pitch and level are read at estimated scales and give our own seeded spread of harmonics; richness, drawn maps, envelopes, unison, filter, effects and editing are not done)
-- [ ] Patcher
+- [~] Patcher (as an instrument: one held instrument plays through the bay's effects; layered instruments, note shapers and setting cables are not built)
 - [ ] Plucked!
 - [~] PoiZone (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] ReWired
@@ -126,7 +126,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Multiband Delay
 - [ ] Newtime
 - [ ] Newtone
-- [ ] Patcher
+- [~] Patcher (held effects run along the sound cables and can be edited; setting cables, side inputs and rewiring are not built)
 - [~] Pitcher (built as Voice Tuner; automatic correction only, note-driven modes, harmony voices, formant and gender not run)
 - [~] Pitch Shifter (built as Grain Shifter; formant setting not run)
 - [~] Razer Chroma (opens, block kept; no keyboard lights)
