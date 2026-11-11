@@ -883,8 +883,23 @@ impl Player {
     /// Start one note as the channel's time settings shape it: shifted late, cut at the gate, or handed to the
     /// channel's arpeggiator. `len_frames` None means "no note-off" (a step, or a live key still held).
     fn note_on(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        self.note_on_at(song, n, delay, len_frames, live, 0);
+    }
+
+    fn note_on_at(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool, depth: u8) {
         let Some(ch) = song.channels.get(n.chan as usize) else { return };
         let f = &ch.smp;
+        if ch.kind == ChannelKind::Layer {
+            // a layer hands the note to its children, and each shapes it by its own time settings and arpeggiator
+            if ch.enabled && !n.muted && depth < 4 && (f.key_lo..=f.key_hi).contains(&(n.key as u32)) {
+                for &k in &ch.children {
+                    if k != n.chan {
+                        self.note_on_at(song, &Note { chan: k, ..n.clone() }, delay, len_frames, live, depth + 1);
+                    }
+                }
+            }
+            return;
+        }
         let step = song.step() as f64 / self.now_tpf(song);
         let delay = if live { delay } else { delay + (f.shift as f64 * step) as u32 };
         let mut len_frames = len_frames;
@@ -2970,6 +2985,20 @@ mod tests {
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
         s.channels[0].root_key = 72;
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
+    }
+
+    #[test]
+    fn a_layers_child_runs_its_own_arpeggiator() {
+        let mut s = tone_song(0.05);
+        s.channels.push(crate::song::Chan { kind: ChannelKind::Layer, children: vec![0], ..Default::default() });
+        let layer = s.channels.len() as u16 - 1;
+        s.patterns[0].notes.push(Note { len: s.ppq * 2, ..Note::step(0, layer) });
+        let plain = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&plain, 0.0, 0.04) > 0.1 && loud(&plain, 0.2, 0.9) < 1e-6, "one short hit {} {}", loud(&plain, 0.0, 0.04), loud(&plain, 0.2, 0.9));
+        s.channels[0].smp.arp_dir = 1;
+        s.channels[0].smp.arp_steps = 1.0;
+        let arp = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&arp, 0.2, 0.9) > 0.1, "the child repeats the note while the layer's note is held");
     }
 
     #[test]
