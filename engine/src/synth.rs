@@ -53,6 +53,8 @@ pub enum Kind {
     Pocket,
     /// The saw synth: its first ninety-six stored values in file order (`analog::saw`).
     SawSyn,
+    /// The two-oscillator synth with sync, ring, a gate and its own echo: its stored values in file order (`duo.rs`).
+    Duo,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -459,7 +461,7 @@ pub static DEFS: &[Def] = &[Def {
     },
     Def { kind: Kind::Metal, ident: "Ogun", title: "Metal Stack", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::MetalBank, ident: "Autogun", title: "Metal Bank", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Duo, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::SawSyn, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -514,7 +516,6 @@ struct SubMap {
 }
 
 const SUBS: &[SubMap] = &[
-    SubMap { ident: "PoiZone", base: 12, adsr: Some([22, 23, 24, 25]), cutoff: Some(5), voice: "lead" },
     SubMap { ident: "Sawer", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "lead" },
     SubMap { ident: "Sakura", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "pluck" },
 ];
@@ -732,6 +733,10 @@ impl Gen {
     pub fn new(kind: Kind) -> Self {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
         g.raw = g.encode(None);
+        if kind == Kind::Duo {
+            g.p = crate::duo::defaults();
+            g.raw = crate::duo::fresh();
+        }
         if kind == Kind::Fm {
             // a new one carries a full block of its own, so every page of its window can be edited and saved
             g.raw = crate::fm::Patch::blank_state();
@@ -763,6 +768,9 @@ impl Gen {
         }
         if d.kind == Kind::Poly {
             return Some(Self { kind: d.kind, p: poly_values(state, 12), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::Duo {
+            return Some(Self { kind: d.kind, p: tagged_values(state, crate::duo::COUNT), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::SawSyn {
             return Some(Self { kind: d.kind, p: tagged_values(state, 96), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -935,6 +943,16 @@ impl Gen {
                 v
             }
         };
+        if self.kind == Kind::Duo {
+            // a list of numbers from the twelfth byte: only the ones that were moved are written
+            for (i, &v) in self.p.iter().enumerate() {
+                let o = 12 + i * 4;
+                if out.len() >= o + 4 && f32::from_le_bytes(out[o..o + 4].try_into().unwrap()) != v {
+                    out[o..o + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            return out;
+        }
         let shift = Self::shift(self.kind, &out);
         for (p, &v) in d.params.iter().zip(&self.p) {
             let v = (v.round() as i32).clamp(p.min, p.max);
@@ -962,6 +980,22 @@ impl Gen {
     pub fn set_travel(&mut self, k: usize, v: f32) {
         if let (Some(q), Some(slot)) = (def(self.kind).params.get(k), self.p.get_mut(k)) {
             *slot = q.min as f32 + (q.max as f32 - q.min as f32) * v.clamp(0.0, 1.0);
+        }
+    }
+
+    /// The effects this instrument carries after its voices.
+    pub fn tail(&self) -> crate::tailfx::Set {
+        match self.kind {
+            Kind::Duo => crate::duo::tail(&self.p),
+            _ => Default::default(),
+        }
+    }
+
+    /// For an instrument set to one voice at a time: the seconds a held note takes to slide to the next.
+    pub fn mono(&self) -> Option<f32> {
+        match self.kind {
+            Kind::Duo => crate::duo::set(&self.p).mono,
+            _ => None,
         }
     }
 
@@ -1337,6 +1371,74 @@ mod tests {
     }
 
     #[test]
+    fn the_duo_synth_keeps_its_block_and_writes_only_what_moved() {
+        let mut b = crate::duo::fresh();
+        // bytes of ours after the numbers must come back untouched
+        b[660..664].copy_from_slice(b"Lead");
+        let mut g = Gen::decode("PoiZone", &b).unwrap();
+        assert_eq!(g.kind, Kind::Duo);
+        assert_eq!(g.p, crate::duo::defaults());
+        assert_eq!(g.encode(None), b);
+        g.p[18] = 0.25;
+        let out = g.encode(None);
+        let moved: Vec<usize> = (0..b.len()).filter(|&i| out[i] != b[i]).collect();
+        assert!(!moved.is_empty() && moved.iter().all(|&i| (12 + 18 * 4..12 + 19 * 4).contains(&i)), "{moved:?}");
+        assert_eq!(Gen::decode("PoiZone", &out).unwrap().p[18], 0.25);
+        // a new one carries a whole block and sounds
+        let g = Gen::new(Kind::Duo);
+        assert_eq!(g.raw.len(), 700);
+        assert!(!def(Kind::Duo).arrives_only());
+        let tone = g.tone();
+        let patch = tone.mini.as_ref().unwrap();
+        let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
+        assert!((0..4000).map(|_| v.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
+        // a block of another make is kept and plays the default sound
+        let odd = vec![7u8; 40];
+        let g = Gen::decode("PoiZone", &odd).unwrap();
+        assert!(g.p.is_empty() && g.encode(None) == odd && g.mono().is_none() && !g.tail().any());
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every stored sound of the duo synth there reads, plays and stays in range.
+    #[test]
+    fn every_stored_duo_sound_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let dir = std::path::Path::new(&root).join("Patches/Plugin presets/Generators/PoiZone");
+        let (mut seen, mut quiet, mut top) = (0, Vec::new(), 0.0f32);
+        let mut stack = vec![dir];
+        let mut files = Vec::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    files.push(path);
+                }
+            }
+        }
+        for path in files {
+            let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+            assert_eq!(g.p.len(), crate::duo::COUNT, "{path:?}");
+            assert_eq!(g.encode(None), g.raw);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 261.63 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+            let peak = (0..44100).map(|_| v.frame(patch, dp)).fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            assert!(peak.is_finite() && peak < 3.0, "{path:?}: {peak}");
+            top = top.max(peak);
+            if peak < 0.003 {
+                quiet.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            seen += 1;
+        }
+        if seen > 0 {
+            eprintln!("duo sounds: {seen}, loudest {top}, quiet {}: {:?}", quiet.len(), &quiet[..quiet.len().min(12)]);
+            assert!(quiet.len() * 20 < seen, "{} of {seen} stay silent: {quiet:?}", quiet.len());
+        }
+    }
+
+    #[test]
     fn the_saw_synth_reads_its_values_and_follows_its_cutoff() {
         let bright = |cut: f32| {
             let mut b = b"SSLF\x64\x02\0\x001rwS".to_vec();
@@ -1504,13 +1606,12 @@ mod tests {
         use crate::additive::ix;
         let mut b = vec![0u8; 700];
         let mut put = |i: usize, v: f32| b[12 + i * 4..16 + i * 4].copy_from_slice(&v.to_le_bytes());
-        put(22, 0.5);
-        put(24, 0.9);
-        put(25, 0.4);
-        put(5, 1.0);
-        let g = Gen::decode("PoiZone", &b).unwrap();
+        put(2, 0.5);
+        put(4, 0.9);
+        put(5, 0.4);
+        let g = Gen::decode("Sakura", &b).unwrap();
         let p = g.tone().add.unwrap();
-        assert_eq!((p.p[ix::ATTACK], p.p[ix::RELEASE], p.p[ix::DECAY], p.p[ix::CUTOFF]), (500.0, 400.0, 1000.0, 8192.0));
+        assert_eq!((p.p[ix::ATTACK], p.p[ix::RELEASE], p.p[ix::DECAY]), (500.0, 400.0, 1000.0));
         assert_eq!(g.encode(None), b);
         let mut k = vec![0u8; 1384];
         for (i, v) in [(1usize, 0.5f32), (2, 0.5), (3, 1.0), (4, 0.5)] {

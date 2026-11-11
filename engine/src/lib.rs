@@ -17,6 +17,8 @@ pub mod notes;
 pub mod player;
 pub mod additive;
 pub mod analog;
+pub mod duo;
+pub mod tailfx;
 pub mod fm;
 pub mod formula;
 pub mod scope;

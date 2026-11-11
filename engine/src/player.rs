@@ -1050,6 +1050,35 @@ impl Player {
                 let min_len = (sr * 0.12) as u64;
                 let remaining = if live { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
                 let layers = ch.bay().map_or(&[][..], |b| &b.layers[..]);
+                if let Some(glide) = ch.gen.as_ref().filter(|_| layers.is_empty()).and_then(|g| g.mono()) {
+                    // one voice at a time: a note that arrives while another is held bends that one to its
+                    // own pitch; anything already fading is cut short
+                    let mut held = false;
+                    let cut = ms(4.0);
+                    for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && v.chan == n.chan) {
+                        if held || v.releasing {
+                            v.kill = true;
+                            v.release = v.release.max(cut);
+                            v.let_go();
+                            if v.delay > 0 {
+                                v.active = false;
+                            }
+                            continue;
+                        }
+                        let now = v.key as f32 / 12.0 + v.slide;
+                        v.key = n.key;
+                        v.dphase = hz / sr;
+                        v.slide = now - n.key as f32 / 12.0;
+                        v.slide_to = 0.0;
+                        v.slide_inc = if glide <= 0.0 { f32::MAX } else { v.slide.abs() / (glide * sr) };
+                        v.remaining = remaining.map(|r| r + delay as u64);
+                        v.live = live;
+                        held = true;
+                    }
+                    if held {
+                        return;
+                    }
+                }
                 for li in 0..=layers.len() {
                 let g = if li == 0 { ch.gen.as_ref() } else { Some(&layers[li - 1].1) };
                 let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
@@ -1427,7 +1456,10 @@ fn eq_coeffs(band: usize, b: &crate::song::Band, rate: f32) -> [f32; 5] {
 }
 
 struct ChanFx {
-    unit: fx::Unit,
+    /// The patch bay the channel plays through.
+    unit: Option<fx::Unit>,
+    /// The effects the channel's own instrument carries after its voices.
+    tail: Option<(crate::tailfx::Set, crate::tailfx::State)>,
     buf: Vec<[f32; 2]>,
     dirty: bool,
     ring: usize,
@@ -1448,11 +1480,15 @@ impl Player {
             self.chan_fx.resize_with(song.channels.len(), || None);
         }
         for (ch, slot) in song.channels.iter().zip(self.chan_fx.iter_mut()) {
-            match (ch.bay(), slot.as_mut()) {
-                (None, None) => {}
-                (None, Some(_)) => *slot = None,
-                (Some(b), Some(cf)) if cf.unit.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
-                (Some(b), _) => *slot = Some(ChanFx { unit: fx::Unit::new(b.fx.clone(), self.sr), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+            let bay = ch.bay();
+            let tail = if bay.is_none() && ch.kind == ChannelKind::Plugin { ch.gen.as_ref().map(|g| g.tail()).filter(|t| t.any()) } else { None };
+            match (bay, tail, slot.as_mut()) {
+                (None, None, None) => {}
+                (None, None, Some(_)) => *slot = None,
+                (None, Some(t), Some(ChanFx { tail: Some(have), .. })) => have.0 = t,
+                (None, Some(t), _) => *slot = Some(ChanFx { unit: None, tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+                (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
+                (Some(b), _, _) => *slot = Some(ChanFx { unit: Some(fx::Unit::new(b.fx.clone(), self.sr)), tail: None, buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
             }
         }
         let mut live = 0;
@@ -1477,7 +1513,7 @@ impl Player {
                 }
             }
             if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {
-                let into = if v.feed == 0 { Some(&mut cf.buf[..n]) } else { cf.unit.bay_feed(v.feed as usize - 1, n) };
+                let into = if v.feed == 0 { Some(&mut cf.buf[..n]) } else { cf.unit.as_mut().and_then(|u| u.bay_feed(v.feed as usize - 1, n)) };
                 if into.is_some_and(|b| v.render(b)) {
                     cf.dirty = true;
                 }
@@ -1488,13 +1524,23 @@ impl Player {
                 self.dirty[i] = true;
             }
         }
+        // where the song stands in sixteenth notes, for effects that keep step with it
+        let at_step = self.transport.playing().then(|| self.pos / song.step().max(1) as f64);
         for (c, cf) in self.chan_fx.iter_mut().enumerate() {
             let Some(cf) = cf else { continue };
             if !cf.dirty && cf.ring == 0 {
                 continue;
             }
-            cf.unit.process(&mut cf.buf[..n], &cx);
-            cf.ring = if cf.dirty { cf.unit.tail(&cx) } else { cf.ring.saturating_sub(n) };
+            let mut ring = 0;
+            if let Some(u) = &mut cf.unit {
+                u.process(&mut cf.buf[..n], &cx);
+                ring = u.tail(&cx);
+            }
+            if let Some((set, st)) = &mut cf.tail {
+                st.process(set, &mut cf.buf[..n], cx.step, at_step);
+                ring = set.tail(cx.sr, cx.step);
+            }
+            cf.ring = if cf.dirty { ring } else { cf.ring.saturating_sub(n) };
             let i = song.channels[c].insert as usize;
             let i = if i < ni { i } else { 0 };
             for (o, f) in self.buses[i][..n].iter_mut().zip(&mut cf.buf[..n]) {
@@ -1936,6 +1982,64 @@ mod tests {
         };
         let (flat, up) = (run(false), run(true));
         assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
+    }
+
+    fn duo_song(set: &[(usize, f32)]) -> Song {
+        let mut song = Song::new();
+        let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Duo);
+        let g = ch.gen.as_mut().unwrap();
+        for &(i, v) in set {
+            g.p[i] = v;
+        }
+        g.raw = g.encode(None);
+        song.channels = vec![ch];
+        song
+    }
+
+    #[test]
+    fn a_one_voice_instrument_bends_the_held_note_to_the_next() {
+        let (h, mut p) = new_player(duo_song(&[(44, 1.0), (46, 0.1)]), 48_000.0);
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        let mut buf = vec![0.0; 24_000 * 2];
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        let low = rises(&buf);
+        h.send(Cmd::NoteOn { chan: 0, key: 72, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert_eq!(h.transport.voices.load(Relaxed), 1);
+        p.render(&mut buf, 2);
+        let high = rises(&buf);
+        assert!(low > 50.0 && (high / low - 2.0).abs() < 0.2, "{low} rises, then {high}");
+        // letting the second key go ends the one voice
+        h.send(Cmd::NoteOff { chan: 0, key: 72 });
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        assert!(buf.iter().all(|x| x.abs() < 1e-3));
+    }
+
+    #[test]
+    fn an_instruments_own_gate_and_echo_run_after_its_voices() {
+        let run = |set: &[(usize, f32)], len: u32| {
+            let mut song = duo_song(set);
+            let q = song.ppq / 4;
+            song.patterns[0].notes.push(Note { pos: 0, len: q * len, ..Default::default() });
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.transport.set_playing(true);
+            // 130 beats a minute: a sixteenth is 5538 frames
+            let mut buf = vec![0.0; 5538 * 8 * 2];
+            p.render(&mut buf, 2);
+            let level = |k: usize| (buf[k * 5538 * 2 + 2000..(k + 1) * 5538 * 2 - 2000].iter().map(|x| x * x).sum::<f32>() / 7076.0).sqrt();
+            (0..8).map(level).collect::<Vec<f32>>()
+        };
+        // the default pattern lets steps 1, 3, 5, 6, 7 through
+        let open = run(&[], 8);
+        let gated = run(&[(47, 1.0)], 8);
+        assert!(open[1] > 0.01 && gated[0] > open[0] * 0.8 && gated[1] < open[1] * 0.02 && gated[4] > open[4] * 0.8, "{open:?} {gated:?}");
+        // a short note comes back four sixteenths later
+        let dry = run(&[], 1);
+        let wet = run(&[(31, 1.0), (34, 0.5), (38, 1.0)], 1);
+        assert!(dry[4] < 1e-4 && wet[4] > dry[0] * 0.3 && wet[2] < wet[4] * 0.2, "{dry:?} {wet:?}");
     }
 
     #[test]
