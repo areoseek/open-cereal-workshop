@@ -7,7 +7,27 @@ use std::f32::consts::TAU;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
+pub mod project;
+pub mod wav;
+
+pub use project::Project;
+
 pub const STEPS: usize = 16;
+
+/// Render `bars` bars of a project offline into a mono f32 buffer at `sample_rate`. No audio device is
+/// touched, so this is what WAV export and the tests use.
+pub fn render_project(project: &Project, sample_rate: f32, bars: u32) -> Vec<f32> {
+    let shared = project.to_shared();
+    shared.set_playing(true);
+    let mut engine = Engine::new(shared.clone(), sample_rate);
+    let step_len = sample_rate as f64 * 60.0 / project.bpm.max(1.0) as f64 / 4.0;
+    let total = (step_len * STEPS as f64 * bars as f64).ceil() as usize;
+    let mut buf = vec![0.0f32; total];
+    for block in buf.chunks_mut(2048) {
+        engine.render(block, 1);
+    }
+    buf
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Drum {
@@ -69,16 +89,24 @@ pub struct Shared {
 
 impl Shared {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            channels: vec![
+        Self::from_parts(
+            vec![
                 Channel::new("Kick", Drum::Kick, &[0, 4, 8, 12], 0.9),
                 Channel::new("Clap", Drum::Clap, &[4, 12], 0.7),
                 Channel::new("Hat", Drum::Hat, &[2, 6, 10, 14], 0.5),
                 Channel::new("Snare", Drum::Snare, &[], 0.7),
             ],
+            130.0,
+            0.8,
+        )
+    }
+
+    pub fn from_parts(channels: Vec<Channel>, bpm: f32, master: f32) -> Arc<Self> {
+        Arc::new(Self {
+            channels,
             playing: AtomicBool::new(false),
-            bpm: AtomicU32::new(130.0f32.to_bits()),
-            master: AtomicU32::new(0.8f32.to_bits()),
+            bpm: AtomicU32::new(bpm.to_bits()),
+            master: AtomicU32::new(master.to_bits()),
             step: AtomicUsize::new(0),
         })
     }

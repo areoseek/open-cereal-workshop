@@ -1,9 +1,58 @@
 //! Breakfast Cereal DAW, first slice: transport bar and a channel rack with a 16-step sequencer.
 
-use cereal_engine::{Engine, Shared, STEPS};
+use cereal_engine::{render_project, wav, Engine, Project, Shared, STEPS};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use egui::{Color32, RichText, Sense, Vec2};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Where projects and renders live until there is a file dialog (docs/ROADMAP.md).
+fn projects_dir() -> PathBuf {
+    let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("breakfast-cereal-projects");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn save_project(sh: &Shared, name: &str) -> Result<PathBuf, String> {
+    let name = sanitize(name);
+    let path = projects_dir().join(format!("{name}.{}", cereal_engine::project::EXT));
+    let text = Project::from_shared(sh, &name).to_text();
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn load_project(sh: &Shared, name: &str) -> Result<(), String> {
+    let path = projects_dir().join(format!("{}.{}", sanitize(name), cereal_engine::project::EXT));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let p = Project::from_text(&text)?;
+    if p.channels.len() != sh.channels.len() {
+        return Err("that project has a different channel layout than this build".into());
+    }
+    p.apply_to(sh);
+    Ok(())
+}
+
+fn export_wav(sh: &Shared, name: &str, bars: u32) -> Result<PathBuf, String> {
+    let name = sanitize(name);
+    let project = Project::from_shared(sh, &name);
+    let rate = 44_100.0;
+    let samples = render_project(&project, rate, bars.max(1));
+    let path = projects_dir().join(format!("{name}.wav"));
+    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    wav::write_pcm16(std::io::BufWriter::new(file), &samples, rate as u32, 1).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn sanitize(name: &str) -> String {
+    let s: String = name.chars().map(|c| if c.is_alphanumeric() || " -_".contains(c) { c } else { '_' }).collect();
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        "untitled".into()
+    } else {
+        s
+    }
+}
 
 fn start_audio(shared: Arc<Shared>) -> Result<(cpal::Stream, String), String> {
     let host = cpal::default_host();
@@ -48,13 +97,49 @@ struct App {
     _stream: Option<cpal::Stream>,
     audio: String,
     paint: Option<bool>, // while dragging across steps: the value being painted
+    proj_name: String,
+    export_bars: u32,
+    status: String,
+}
+
+impl App {
+    fn report(&mut self, r: Result<PathBuf, String>, verb: &str) {
+        self.status = match r {
+            Ok(p) => format!("{verb}: {}", p.display()),
+            Err(e) => format!("{verb} failed: {e}"),
+        };
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        let sh = &self.shared;
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        let sh = self.shared.clone();
+        let sh = &sh;
+        let (space, ctrl_s, ctrl_o, ctrl_r) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.modifiers.command && i.key_pressed(egui::Key::S),
+                i.modifiers.command && i.key_pressed(egui::Key::O),
+                i.modifiers.command && i.key_pressed(egui::Key::R),
+            )
+        });
+        if space {
             sh.set_playing(!sh.playing());
+        }
+        if ctrl_s {
+            let r = save_project(sh, &self.proj_name);
+            self.report(r, "Saved");
+        }
+        if ctrl_o {
+            let r = load_project(sh, &self.proj_name);
+            self.status = match r {
+                Ok(()) => format!("Loaded {}", self.proj_name),
+                Err(e) => format!("Load failed: {e}"),
+            };
+        }
+        if ctrl_r {
+            let r = export_wav(sh, &self.proj_name, self.export_bars);
+            self.report(r, "Exported");
         }
         egui::TopBottomPanel::top("transport").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -79,6 +164,31 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label(RichText::new(&self.audio).weak());
             });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Project");
+                ui.add(egui::TextEdit::singleline(&mut self.proj_name).desired_width(140.0));
+                if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
+                    let r = save_project(sh, &self.proj_name);
+                    self.report(r, "Saved");
+                }
+                if ui.button("Load").on_hover_text("Ctrl+O").clicked() {
+                    match load_project(sh, &self.proj_name) {
+                        Ok(()) => self.status = format!("Loaded {}", self.proj_name),
+                        Err(e) => self.status = format!("Load failed: {e}"),
+                    }
+                }
+                ui.separator();
+                ui.label("Bars");
+                ui.add(egui::DragValue::new(&mut self.export_bars).range(1..=64).speed(0.1));
+                if ui.button("Export WAV").on_hover_text("Ctrl+R").clicked() {
+                    let r = export_wav(sh, &self.proj_name, self.export_bars);
+                    self.report(r, "Exported");
+                }
+            });
+            if !self.status.is_empty() {
+                ui.label(RichText::new(&self.status).weak());
+            }
             ui.add_space(6.0);
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -150,6 +260,16 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "breakfast-cereal",
         options,
-        Box::new(move |_| Ok(Box::new(App { shared, _stream: stream, audio, paint: None }))),
+        Box::new(move |_| {
+            Ok(Box::new(App {
+                shared,
+                _stream: stream,
+                audio,
+                paint: None,
+                proj_name: "untitled".into(),
+                export_bars: 2,
+                status: String::new(),
+            }))
+        }),
     )
 }
