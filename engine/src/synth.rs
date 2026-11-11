@@ -485,6 +485,8 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Quiet, ident: "Fruity Video Player", title: "Video Player", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "ReWired", title: "Rewire Link", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "FL Studio Mobile", title: "Mobile Rack", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "FL Studio Mobile Rack", title: "Mobile Modules", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Slicer 2", title: "Loop Slicer 2", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Pocket, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },

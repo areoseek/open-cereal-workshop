@@ -16,7 +16,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
 - [~] FL Slayer (opens as Six String: seven string types, pickups, tone, slap, fret noise, damping, four amps, tone stack, four cabinets, hold and power chords play; the amp works per note; the effects unit, feedback, second pitch wheel and the strummed and gliding play modes are not done)
 - [~] FL Studio Mobile (opens as Mobile Rack and keeps its block; silent, the embedded mobile project is not played)
-- [ ] FL Studio Mobile Rack
+- [~] FL Studio Mobile Rack (opens as Mobile Modules and keeps its block; silent)
 - [~] FPC: pads, their velocity layers, levels, pans, layer tune, cut groups and output offsets are read and played, with a pad page to audition them. Pad envelopes, the scale-volume and random-layer switches, the built-in pattern loops and editing are not done. The tune knob's reach is an estimate.
 - [~] Fruit Kick: all six knobs read; the end pitch is exact (taken from the step the block stores), the start pitch base, sweep and decay times, click and distortion scales are estimates.
 - [~] Fruity Dance (opens as Dancer and keeps its block; the animated figure is artwork we do not have, nothing is drawn)
@@ -26,7 +26,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Granulizer (opens as Grain Player and plays the channel's sample as grains: hold, fade, grain spacing, wave spacing incl. backwards; scales are estimates; pan and depth effects, random, start by key, transients and editing are not done)
 - [~] Fruity Keyboard Controller (opens as Key Controller, block kept, correctly silent; sending key and velocity to linked controls is not done)
 - [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
-- [ ] Fruity Slicer 2
+- [~] Fruity Slicer 2 (opens as Loop Slicer 2 and keeps its block; silent, slicing not built)
 - [~] Fruity Video Player (opens as Video Player and keeps its block; no video is shown or heard)
 - [~] Fruity Voltage Controller (opens as Voltage Sender, block kept, correctly silent; sending to hardware is not done)
 - [ ] Fruity Wrapper
@@ -64,7 +64,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
 - [~] Emphasizer (built as Loudener; gain range and stage laws are estimates, no meters)
 - [~] EQUO (built as Morph Equaliser: 31 bands, eight curves with morph, master curve, per-band pan, shift, smoothing; mix knob not located in the block, band gain law and shift range estimated, sends and curve drawing missing)
-- [ ] FL Studio Mobile Rack FX
+- [~] FL Studio Mobile Rack FX (opens as Mobile Modules FX and keeps its block; passes sound through)
 - [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
 - [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
 - [~] Fruity 7 Band EQ (built as Seven Band EQ; band centres and widths are estimates)

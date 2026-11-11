@@ -667,6 +667,7 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Thru, ident: "Newtime", title: "Time Editor", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Newtone", title: "Pitch Editor", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Transmitter", title: "Sender", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "FL Studio Mobile Rack FX", title: "Mobile Modules FX", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "VFX Color Mapper", title: "Colour Router", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "VFX Envelope", title: "Note Envelope", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "VFX Keyboard Splitter", title: "Key Zones", size: 0, fixed: &[], params: &[] },
