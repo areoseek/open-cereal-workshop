@@ -23,6 +23,7 @@ pub mod strmodel;
 pub mod hybrid;
 pub mod morph;
 pub mod kickd;
+pub mod membrane;
 pub mod triple;
 pub mod fm;
 pub mod formula;

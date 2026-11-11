@@ -49,6 +49,7 @@ pub enum Voice {
     Triple(Box<(crate::triple::Voice, crate::triple::Set)>),
     Hybrid(Box<(crate::hybrid::Voice, crate::hybrid::Set)>),
     KickD(Box<(crate::kickd::Voice, crate::kickd::Set)>),
+    Skin(Box<(crate::membrane::Voice, crate::membrane::Set)>),
     Morph(Box<(crate::morph::Voice, crate::morph::Set)>),
     Quiet,
 }
@@ -182,6 +183,10 @@ impl Voice {
             Kind::Hybrid => {
                 let set = crate::hybrid::set(s);
                 Voice::Hybrid(Box::new((crate::hybrid::Voice::start(&set, sr, key, vel, seed), set)))
+            }
+            Kind::Skin => {
+                let set = crate::membrane::set(s);
+                Voice::Skin(Box::new((crate::membrane::Voice::start(&set, sr, vel, dphase * sr / C5, seed), set)))
             }
             Kind::KickD => {
                 let set = crate::kickd::set(s);
@@ -341,6 +346,10 @@ impl Voice {
                 let (v, set) = &mut **v;
                 v.release(set)
             }
+            Voice::Skin(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Morph(v) => {
                 let (v, set) = &mut **v;
                 v.release(set)
@@ -403,6 +412,10 @@ impl Voice {
                 v.frame(set, dphase)
             }
             Voice::KickD(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set)
+            }
+            Voice::Skin(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set)
             }

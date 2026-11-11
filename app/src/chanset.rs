@@ -972,6 +972,15 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
         }
+        Kind::Skin => {
+            use cereal_engine::membrane::{params, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default drum plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, &GROUPS[..8], params());
+            ui.label(RichText::new("The drum rings out by itself whatever the length of the note. How hard a hit lands only matters through the four links.").small().color(TEXT_DIM));
+        }
         Kind::KickD => {
             use cereal_engine::kickd::{params, sample_list, sample_name, sample_path, set_sample_path, COUNT, GROUPS};
             if g.p.len() < COUNT {

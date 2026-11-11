@@ -63,6 +63,7 @@ pub enum Kind {
     /// Four generators of sine overtones blended along a path.
     Morph,
     KickD,
+    Skin,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -500,7 +501,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Morph, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Trio, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::KickD, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Skin, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Image, ident: "BeepMap", title: "Picture Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Fruity Keyboard Controller", title: "Key Controller", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Fruity Envelope Controller", title: "Envelope Sender", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -748,6 +749,10 @@ impl Gen {
             g.p = crate::hybrid::defaults();
             g.raw = crate::hybrid::fresh();
         }
+        if kind == Kind::Skin {
+            g.p = crate::membrane::defaults();
+            g.raw = crate::membrane::fresh();
+        }
         if kind == Kind::KickD {
             g.p = crate::kickd::defaults();
             g.raw = crate::kickd::fresh();
@@ -796,6 +801,9 @@ impl Gen {
         }
         if d.kind == Kind::Hybrid {
             return Some(Self { kind: d.kind, p: crate::hybrid::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::Skin {
+            return Some(Self { kind: d.kind, p: crate::membrane::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::KickD {
             return Some(Self { kind: d.kind, p: crate::kickd::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -977,13 +985,14 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::Hybrid => crate::hybrid::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::Morph => crate::morph::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::KickD => crate::kickd::FIRST,
+                Kind::Skin => crate::membrane::FIRST,
                 _ => 12,
             };
             for (i, &v) in self.p.iter().enumerate() {
@@ -1620,6 +1629,48 @@ mod tests {
             assert!(crate::triple::wave_names().len() > 4 || !root.parent().is_some_and(|r| r.join("Plugins").is_dir()));
             assert!(top < 4.0, "{worst}: {top}");
             assert!(quiet.len() * 10 < seen, "{} of {seen} stay silent: {quiet:?}", quiet.len());
+        }
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every stored membrane drum there reads, plays and stays in range.
+    #[test]
+    fn every_stored_membrane_drum_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Generators/Drumpad")];
+        let (mut seen, mut peaks, mut odd) = (0, Vec::new(), Vec::new());
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    continue;
+                }
+                let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+                assert_eq!(g.kind, Kind::Skin);
+                assert_eq!(g.p.len(), crate::membrane::COUNT, "{path:?}");
+                assert_eq!(g.encode(None), g.raw);
+                let tone = g.tone();
+                let patch = tone.mini.as_ref().unwrap();
+                let dp = 261.63 / 44100.0;
+                let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+                let buf: Vec<[f32; 2]> = (0..44100).map(|_| v.frame(patch, dp)).collect();
+                let peak = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()));
+                assert!(peak.is_finite(), "{path:?}: {peak}");
+                if !(0.02..2.0).contains(&peak) {
+                    odd.push(format!("{} {peak:.3}", path.file_stem().unwrap().to_string_lossy()));
+                }
+                peaks.push(peak);
+                seen += 1;
+            }
+        }
+        if seen > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            eprintln!("membrane drums: {seen}, loudest {}, ninth tenth {}, middle {}, tenth {}, softest {}, out of range {}: {:?}", peaks[seen - 1], peaks[seen * 9 / 10], peaks[seen / 2], peaks[seen / 10], peaks[0], odd.len(), &odd[..odd.len().min(12)]);
+            assert!(peaks[seen - 1] < 4.0);
+            assert!(odd.len() * 10 < seen, "{} of {seen} are out of range", odd.len());
         }
     }
 
