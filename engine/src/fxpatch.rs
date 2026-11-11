@@ -56,6 +56,8 @@ pub struct Patch {
     pub order: Vec<usize>,
     /// Held instruments, besides the first, whose notes are played outside and handed in as sound.
     pub feeds: Vec<usize>,
+    /// For a held instrument (by its number), the note units its notes pass on the way in.
+    pub shape: Vec<(usize, Vec<crate::noteshape::Link>)>,
 }
 
 fn u32at(b: &[u8], at: usize) -> Option<u32> {
@@ -191,21 +193,31 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
     let mut main_in = raw.iter().map(|c| c.1).filter(sound).min();
     let mut lead = None;
     let mut layers: Layers = Vec::new();
+    let mut shape: Vec<(usize, Vec<crate::noteshape::Link>)> = Vec::new();
     if as_gen {
         main_in = None;
         // follow the note cables from the bay's note sockets, through any note-shaping units, to instruments
         let mut reached: Vec<usize> = Vec::new();
-        let mut live: Vec<Option<usize>> = vec![None];
-        while let Some(at) = live.pop() {
+        let mut live: Vec<(Option<usize>, Vec<crate::noteshape::Link>)> = vec![(None, vec![])];
+        while let Some((at, path)) = live.pop() {
             for &(to, from, _) in &raw {
-                let starts = match at {
-                    None => own.get(&from) == Some(&1),
-                    Some(n) => matches!(pins.get(&from), Some(&(m, 1, _, _)) if m == n),
+                let (starts, port) = match (at, pins.get(&from)) {
+                    (None, _) => (own.get(&from) == Some(&1), 0),
+                    // a note unit's first socket is its input; its outputs count from there
+                    (Some(n), Some(&(m, 1, k, _))) => (m == n, k.saturating_sub(1)),
+                    _ => (false, 0),
                 };
                 if let (true, Some(&(n, 1, _, _))) = (starts, pins.get(&to)) {
                     if !reached.contains(&n) {
                         reached.push(n);
-                        live.push(Some(n));
+                        let mut path = path.clone();
+                        if let Some(shaper) = at.and_then(|m| crate::noteshape::Shaper::decode(&nodes[m].ident, blocks[m])) {
+                            path.push(crate::noteshape::Link { shaper, port, node: at.unwrap_or(0) });
+                        }
+                        if !path.is_empty() {
+                            shape.push((n, path.clone()));
+                        }
+                        live.push((Some(n), path));
                     }
                 }
             }
@@ -246,8 +258,9 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
         cables.push(Cable { from, to, level });
     }
     let order = sort(nodes.len(), &cables);
-    let feeds = layers.iter().map(|l| l.0).collect();
-    Some((Patch { nodes, cables, order, feeds }, lead, layers))
+    let feeds: Vec<usize> = layers.iter().map(|l| l.0).collect();
+    shape.retain(|s| lead.as_ref().is_some_and(|l| l.0 == s.0) || feeds.contains(&s.0));
+    Some((Patch { nodes, cables, order, feeds, shape }, lead, layers))
 }
 
 /// Units in an order where each comes after the ones feeding it. Units caught in a loop of cables go last,

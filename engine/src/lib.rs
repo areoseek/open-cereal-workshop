@@ -10,6 +10,7 @@ pub mod fxpatch;
 pub mod fxrack;
 pub mod fxmulti;
 pub mod fxsplit;
+pub mod noteshape;
 pub mod fxvoc;
 pub mod synth;
 pub mod law;

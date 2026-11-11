@@ -136,11 +136,11 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Transmitter (built as Attack Splitter: all 47 stored numbers read and saved back; a burst detector with sensitivity, three modes, hold and release opens a gate that divides the sound into attacks and the rest, which add up to the input again; each part has its level, tilt, switch and one of saturation, bounce, diffusion or echo (free or tempo time) with its own mix; side linking and 5 ms look-ahead; the gate is offered to linked controls. Which number is which was worked out from the presets, the times, gains and the look-ahead's place are estimates; side-chain input and separate outputs for the parts are not run, no moving display, latency is not reported)
 - [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
 - [~] Tuner (Pitch Meter: note name, cents needle and frequency of the sound on its track; its display options are not read)
-- [~] VFX Color Mapper
+- [~] VFX Color Mapper (works on the notes of a bay standing as an instrument: colours leave by their outputs and are recoloured; no editing window yet)
 - [~] VFX Envelope
-- [~] VFX Keyboard Splitter
-- [~] VFX Key Mapper
-- [~] VFX Level Scaler
+- [~] VFX Keyboard Splitter (sixteen zones with key and velocity lines, transpose, absolute; which switch is Random is a guess; no editing window yet)
+- [~] VFX Key Mapper (rows of targets, the five several-target modes, glide; offset and the glide's length are estimated; no editing window yet)
+- [~] VFX Level Scaler (centre, multiply, random amount per level; which numbers are tension and offset, and the random modes, are estimated; only velocity, pan and fine pitch reach the built-in instruments; no editing window yet)
 - [~] VFX Script
 - [~] VFX Sequencer
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)

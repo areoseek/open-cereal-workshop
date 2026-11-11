@@ -383,6 +383,7 @@ impl Handle {
             midi_seen: Vec::new(),
             midi_ran: false,
             seed: 0x2545_f491,
+            shape_turn: Vec::new(),
             ring: vec![],
             chan_fx: vec![],
             scratch: Vec::with_capacity(BLOCK),
@@ -842,6 +843,8 @@ pub struct Player {
     midi_seen: Vec<MidiSeen>,
     midi_ran: bool,
     seed: u32,
+    /// Whose turn it is at the note units that hand their targets out one at a time.
+    shape_turn: crate::noteshape::Turns,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
     /// The patch bay of each channel whose generator is one, with the sound its notes made this block.
@@ -1415,7 +1418,33 @@ impl Player {
                 }
                 for li in 0..=layers.len() {
                 let g = if li == 0 { ch.gen.as_ref() } else { Some(&layers[li - 1].1) };
-                let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
+                // note units on the cables to this instrument have their say first
+                let chain = ch.bay().and_then(|b| {
+                    let node = if li == 0 { b.lead } else { b.layers[li - 1].0 };
+                    b.fx.sub.as_ref()?.shape.iter().find(|s| s.0 == node).map(|s| &s.1[..])
+                });
+                let plain = crate::noteshape::Ev::of(n);
+                let evs = match chain {
+                    Some(c) => crate::noteshape::apply(c, plain, n.chan, &mut self.seed, &mut self.shape_turn),
+                    None => vec![plain],
+                };
+                for ev in evs {
+                let shaped = ev != plain;
+                let (note_gain, gain, pl, pr, hz) = if shaped {
+                    let note_gain = law::velocity_gain(ev.vel) * ev.gain;
+                    let (pl, pr) = law::pan((chan_pan + ev.pan).clamp(-1.0, 1.0));
+                    (note_gain, chan_vol * note_gain, pl, pr, 440.0 * 2f32.powf((ev.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + ev.fine_cents) / 1200.0))
+                } else {
+                    (note_gain, gain, pl, pr, hz)
+                };
+                let key = ev.key.clamp(0, 131) as u8;
+                // the voice goes by the key that was pressed, so that letting go of it finds the voice
+                let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: ev.pan, follow: true, ..Default::default() };
+                if let Some((from, steps)) = ev.glide {
+                    v.slide = (from - ev.key) as f32 / 12.0;
+                    v.slide_to = 0.0;
+                    v.slide_inc = v.slide.abs() / (steps * song.ppq.max(1) as f32 / 4.0 / self.tpf as f32).max(1.0);
+                }
                 v.feed = li as u8;
                 if let Some(g) = g {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
@@ -1430,8 +1459,8 @@ impl Player {
                     } else {
                         g.tone()
                     };
-                    v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(n.key as u32));
-                    v.tstate.note(&tone, sr, n.key, note_gain.min(1.0), hz / sr);
+                    v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
+                    v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
                     v.attack = ms(1.5);
                     v.release = ms(12.0);
                     if let Some(p) = &tone.add {
@@ -1456,6 +1485,7 @@ impl Player {
                     v.fon = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
                 }
                 self.start(v);
+                }
                 }
             }
             ChannelKind::Layer | ChannelKind::AutomationClip => {}
@@ -2490,6 +2520,42 @@ mod tests {
         p.render(&mut buf, 2);
         let up = rises(&buf);
         assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
+    }
+
+    #[test]
+    fn a_key_remapper_in_a_bay_moves_the_notes_of_the_instrument_behind_it() {
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        let run = |up: bool| {
+            let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+            ch.plugin = crate::song::BAY.to_string();
+            let mut patch = crate::fxpatch::decode(&crate::fxpatch::fresh()).unwrap();
+            if up {
+                let mut rows: [Vec<i16>; 12] = Default::default();
+                for (k, r) in rows.iter_mut().enumerate() {
+                    r.push(k as i16 + 12);
+                }
+                let shaper = crate::noteshape::Shaper::Keys { on: true, offset: 0, mode: 0, glide: 0.0, rows };
+                patch.shape.push((0, vec![crate::noteshape::Link { shaper, port: 0, node: 1 }]));
+            }
+            ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![] });
+            let mut song = Song::new();
+            song.channels = vec![ch];
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            let mut buf = vec![0.0; 24_000 * 2];
+            p.render(&mut buf, 2);
+            p.render(&mut buf, 2);
+            let held = rises(&buf);
+            // letting go of the key that was pressed ends the voice that went out under another key
+            h.send(Cmd::NoteOff { chan: 0, key: 60 });
+            p.render(&mut buf, 2);
+            p.render(&mut buf, 2);
+            (held, buf.iter().fold(0f32, |m, v| m.max(v.abs())))
+        };
+        let (plain, _) = run(false);
+        let (moved, after) = run(true);
+        assert!(plain > 50.0 && (moved / plain - 2.0).abs() < 0.2, "{plain} rises, then {moved}");
+        assert!(after < 1e-3, "still sounding at {after}");
     }
 
     #[test]
