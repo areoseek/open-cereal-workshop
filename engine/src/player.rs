@@ -191,6 +191,8 @@ struct Overrides {
     /// Per insert: volume (0..=1.25) and pan.
     ins: Vec<(Option<f32>, Option<f32>)>,
     any_chan: bool,
+    /// Per channel: pitch knob in cents.
+    pitch: Vec<Option<f32>>,
     /// Effect slot controls being driven: the target and its 0..=1 value.
     slot: Vec<(Target, f32)>,
 }
@@ -200,6 +202,7 @@ impl Overrides {
         self.tempo = None;
         self.any_chan = false;
         self.slot.clear();
+        self.pitch.iter_mut().for_each(|c| *c = None);
         self.chan.iter_mut().for_each(|c| *c = (None, None));
         self.ins.iter_mut().for_each(|c| *c = (None, None));
     }
@@ -207,6 +210,9 @@ impl Overrides {
     fn fit(&mut self, song: &Song) {
         if self.chan.len() != song.channels.len() {
             self.chan.resize(song.channels.len(), (None, None));
+        }
+        if self.pitch.len() != song.channels.len() {
+            self.pitch.resize(song.channels.len(), None);
         }
         if self.ins.len() != song.inserts.len() {
             self.ins.resize(song.inserts.len(), (None, None));
@@ -233,6 +239,12 @@ impl Overrides {
             Target::ChanPan(c) => {
                 if let Some(o) = self.chan.get_mut(c) {
                     o.1 = Some(v * 2.0 - 1.0);
+                    self.any_chan = true;
+                }
+            }
+            Target::ChanPitch(c) => {
+                if let Some(o) = self.pitch.get_mut(c) {
+                    *o = Some((v * 2.0 - 1.0) * 200.0);
                     self.any_chan = true;
                 }
             }
@@ -314,6 +326,8 @@ struct Voice {
     note_gain: f32,
     note_pan: f32,
     follow: bool,
+    /// Octaves the channel's pitch automation has moved the note by.
+    bend: f32,
     sr: f32,
     /// Frames sounded, and frames since the note was let go.
     t: u32,
@@ -391,6 +405,9 @@ impl Voice {
         } else {
             self.step
         };
+        if self.bend != 0.0 {
+            self.step_now *= (self.bend as f64).exp2();
+        }
         if self.fon {
             let mut x = self.fcut;
             if self.cenv.on {
@@ -1020,6 +1037,9 @@ impl Player {
                         v.gl = g * pl;
                         v.gr = g * pr;
                     }
+                }
+                if let Some(Some(cents)) = self.ov.pitch.get(v.chan as usize) {
+                    v.bend = (cents - song.channels[v.chan as usize].pitch_cents) / 1200.0;
                 }
             }
             let i = if v.insert < ni { v.insert } else { 0 };

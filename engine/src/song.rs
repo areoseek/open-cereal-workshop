@@ -303,6 +303,8 @@ impl Chan {
 pub enum Target {
     ChanVolume(usize),
     ChanPan(usize),
+    /// The channel's pitch knob (taken as two semitones either way).
+    ChanPitch(usize),
     InsertVolume(usize),
     InsertPan(usize),
     Tempo,
@@ -755,12 +757,12 @@ impl Song {
                 }
             }
             if let Some(a) = &ch.auto {
-                if a.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) if *k >= ci)) {
+                if a.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k >= ci)) {
                     let mut a2 = (**a).clone();
-                    a2.targets.retain(|t| !matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) if *k == ci));
+                    a2.targets.retain(|t| !matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k == ci));
                     for t in &mut a2.targets {
                         match t {
-                            Target::ChanVolume(k) | Target::ChanPan(k) if *k > ci => *k -= 1,
+                            Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) if *k > ci => *k -= 1,
                             _ => {}
                         }
                     }
@@ -854,6 +856,7 @@ impl Song {
                 match l.param {
                     CHAN_VOLUME => Target::ChanVolume(l.dest as usize),
                     CHAN_PAN => Target::ChanPan(l.dest as usize),
+                    CHAN_PITCH => Target::ChanPitch(l.dest as usize),
                     _ => Target::Other { param: l.param, dest: l.dest },
                 }
             } else if l.dest == flp::DEST_GLOBAL {
