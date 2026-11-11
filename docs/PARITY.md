@@ -60,7 +60,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Distructor
 - [ ] Edison
 - [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
-- [ ] Emphasis
+- [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
 - [ ] Emphasizer
 - [ ] EQUO
 - [ ] FL Studio Mobile Rack FX
@@ -118,7 +118,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Gross Beat (built as Beat Juggler: two-bar ring, 36 time and 36 volume lines read from the block, mixes, attack and release; no line editor yet, no scratch dial, hold button or key switching of slots; follows its own bar count from the start of play; attack and release times are estimates)
 - [ ] Hardcore
 - [ ] Hyper Chorus
-- [ ] Low Lifter
+- [~] Low Lifter (built as Low Harmonics: band split, overtone curve, gains, mix; which stored value is which knob is partly guessed, diffusion missing)
 - [ ] Luxeverb
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read, no editor, look-ahead and second state not run)

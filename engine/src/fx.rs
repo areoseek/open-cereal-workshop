@@ -20,6 +20,8 @@ pub enum Kind {
     BassBoost,
     Phaser,
     FreqShift,
+    Finisher,
+    LowLift,
     FastLp,
     Overdrive,
     Filter,
@@ -737,6 +739,40 @@ pub static DEFS: &[Def] = &[
             p("Width", 32, 0, 10000, 10000),
             p("Range", 36, 0, 2, 1),
             p("Start phase", 40, 0, 10000, 5000),
+        ],
+    },
+    Def {
+        kind: Kind::Finisher,
+        ident: "Emphasis",
+        title: "Finisher",
+        size: 67,
+        fixed: &[(0, 10), (12, 1), (60, 1), (63, 0x0101_0000)],
+        params: &[
+            p("Mode", 24, 0, 3, 0),
+            p("Input", 28, 0, 10000, 0),
+            p("Ceiling", 32, 0, 10000, 10000),
+            p("Amount", 36, 0, 10000, 10000),
+            p("Linking", 40, 0, 10000, 9912),
+            p("Envelope", 48, 0, 4, 2),
+            p("Hardness", 52, 0, 9, 7),
+        ],
+    },
+    Def {
+        kind: Kind::LowLift,
+        ident: "Low Lifter",
+        title: "Low Harmonics",
+        size: 82,
+        fixed: &[(0, 6), (4, 1), (20, 1), (56, 1), (60, 1), (64, 196609), (68, 196608), (72, 131072), (76, 131072)],
+        params: &[
+            p("Mix", 8, 0, 10000, 10000),
+            p("High gain", 12, 0, 10000, 5000),
+            p("Cutoff", 16, 0, 10000, 6993),
+            p("Multi band", 24, 0, 1, 0),
+            p("Drive", 28, 0, 10000, 4998),
+            p("Diffusion depth", 32, 0, 10000, 0),
+            p("Low gain", 36, 0, 10000, 5000),
+            p("Slope", 44, 0, 10000, 8920),
+            p("Diffusion mix", 48, 0, 10000, 0),
         ],
     },
     // the offsets here only number the settings: the block is packed and read by its own module
@@ -1867,7 +1903,7 @@ impl Unit {
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Peak => (cx.sr * 3.0) as usize,
             Kind::Warp => (cx.step * 32.0) as usize + 64,
-            Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift => (cx.sr * 0.25) as usize,
+            Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift | Kind::Finisher | Kind::LowLift => (cx.sr * 0.25) as usize,
             Kind::Phaser => (cx.sr * 1.5) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
@@ -2728,6 +2764,67 @@ impl Unit {
                     f[1] = f[1] * (1.0 - mix) + (m - s) * mix;
                 }
             }
+            Kind::Finisher => {
+                // two stages: a clean gain rider holds the level near the ceiling, and a shaper takes off what
+                // the rider lets through; the mode and the amount decide how the work is split between them
+                let mode = p[0] as i32;
+                let drive = db(p[1] / 10000.0 * 24.0);
+                let ceil = db((p[2] / 10000.0 - 1.0) * 24.0);
+                let amt = (p[3] / 10000.0).clamp(0.0, 1.0);
+                let link = (p[4] / 10000.0).clamp(0.0, 1.0);
+                let order = p[5].clamp(0.0, 4.0);
+                let hard = (p[6] / 9.0).clamp(0.0, 1.0);
+                let over = db(match mode {
+                    0 => hard * 3.0 * amt,
+                    1 => hard * 6.0 * amt,
+                    2 => hard * 6.0 * amt,
+                    _ => amt * 24.0,
+                });
+                let att_ms = if mode == 2 { 0.3 + 4.0 * amt } else { 0.3 };
+                let att = 1.0 - (-1.0 / (att_ms * 0.001 * sr)).exp();
+                let rel = 1.0 - (-1.0 / ((0.05 + 0.05 * order) * sr)).exp();
+                let knee = hard.min(0.999);
+                for f in io.iter_mut() {
+                    let x = [f[0] * drive, f[1] * drive];
+                    let both = x[0].abs().max(x[1].abs());
+                    for c in 0..2 {
+                        let pk = x[c].abs() + (both - x[c].abs()) * link;
+                        let want = if pk > over { over / pk } else { 1.0 };
+                        // z holds the reduction in force: down fast, back up slowly
+                        let g = &mut z[c];
+                        let have = 1.0 - *g;
+                        let next = if want < have { have + (want - have) * att } else { have + (want - have) * rel };
+                        *g = 1.0 - next;
+                        let y = x[c] * next;
+                        let a = y.abs();
+                        let shaped = if a <= knee { a } else if hard >= 0.999 { 1.0 } else { knee + (1.0 - knee) * ((a - knee) / (1.0 - knee)).tanh() };
+                        f[c] = y.signum() * shaped.min(1.0) * ceil;
+                    }
+                }
+            }
+            Kind::LowLift => {
+                // the band under the cutoff is driven through a curve that adds overtones, then put back
+                let mix = (p[0] / 10000.0).clamp(0.0, 1.0);
+                let high = db((p[1] / 5000.0 - 1.0) * 12.0);
+                let a = 1.0 - (-TAU * (20.0 * 20f32.powf(p[2] / 10000.0)) / sr).exp();
+                let d = 1.0 + 3.0 * p[4] / 10000.0;
+                let low = db((p[6] / 5000.0 - 1.0) * 12.0);
+                // the slope keeps more or less of the upper overtones
+                let a2 = 1.0 - (-TAU * (20.0 * 20f32.powf(p[2] / 10000.0) * (2.0 + 6.0 * p[7] / 10000.0)) / sr).exp();
+                for f in io.iter_mut() {
+                    for c in 0..2 {
+                        let k = c * 4;
+                        z[k] += a * (f[c] - z[k]);
+                        z[k + 1] += a * (z[k] - z[k + 1]);
+                        let lo = z[k + 1];
+                        let hi = f[c] - lo;
+                        let bent = (lo * d).tanh() / d;
+                        z[k + 2] += a2 * (bent - z[k + 2]);
+                        let wet = z[k + 2] * low + hi * high;
+                        f[c] = f[c] * (1.0 - mix) + wet * mix;
+                    }
+                }
+            }
             Kind::Bank => {
                 if let Some(st) = &mut self.bank {
                     crate::fxbank::process(p, st, io, cx);
@@ -3539,7 +3636,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -3619,6 +3716,16 @@ mod tests {
         ph.p[7] = 512.0;
         let out = run(ph, sine, 44100);
         assert!(out.iter().all(|f| f[0].abs() < 4.0));
+    }
+
+    #[test]
+    fn finisher_holds_the_ceiling() {
+        let mut fx = Fx::new(Kind::Finisher);
+        fx.p[1] = 7500.0;
+        let out = run(fx, sine, 44100);
+        let peak = out.iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        assert!(peak <= 1.0001 && peak > 0.8, "peak {peak}");
+        assert!(rms(&out[22050..]) > 0.5);
     }
 
     #[test]
