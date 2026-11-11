@@ -14,6 +14,7 @@ enum SlotAct {
     Delete(u16),
     Move(u16, u16),
     Set(u16, cereal_engine::fx::Kind, &'static str),
+    Host(u16),
 }
 
 impl App {
@@ -130,6 +131,7 @@ impl App {
                     ui.separator();
                     let mut changed = false;
                     let mut act: Option<SlotAct> = None;
+                    let mut hosted = None;
                     for slot in 0..10u16 {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(side - 8.0, 18.0), Sense::click());
                         ui.painter().rect_filled(rect, 2.0, PANEL_DARK);
@@ -169,6 +171,12 @@ impl App {
                                 ui.separator();
                                 ui.label(RichText::new("Replace with").small().color(TEXT_DIM));
                             }
+                            ui.menu_button("Plug-ins", |ui| {
+                                if let Some(inst) = crate::hostui::menu(ui, false) {
+                                    hosted = Some(inst);
+                                    act = Some(SlotAct::Host(slot));
+                                }
+                            });
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                                 let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
                                 defs.sort_by_key(|d| d.title);
@@ -212,6 +220,14 @@ impl App {
                                     Some((ii, s)) if ii == i && s == b => Some((i, a)),
                                     o => o,
                                 };
+                            }
+                            SlotAct::Host(s) => {
+                                if let Some(inst) = hosted.take() {
+                                    slots.retain(|x| x.index != s);
+                                    slots.push(cereal_engine::song::Slot::hosted(s, inst));
+                                    slots.sort_by_key(|x| x.index);
+                                    self.fx_open = Some((i, s));
+                                }
                             }
                             SlotAct::Set(s, kind, ident) => {
                                 slots.retain(|x| x.index != s);

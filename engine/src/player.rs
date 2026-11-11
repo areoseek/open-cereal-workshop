@@ -376,6 +376,7 @@ impl Handle {
             midi_live: Vec::new(),
             host_wait: Vec::with_capacity(64),
             host_live: Vec::new(),
+            offline: false,
             host_evs: Vec::with_capacity(64),
             host_buf: vec![[0.0; 2]; BLOCK],
             pad_turn: Vec::with_capacity(128),
@@ -833,6 +834,7 @@ pub struct Player {
     /// Hand-held notes of hosted plug-ins: channel and key.
     host_live: Vec<(u16, u8)>,
     host_evs: Vec<crate::host::Ev>,
+    offline: bool,
     host_buf: Vec<[f32; 2]>,
     /// The layer each pad last played, for pads whose layers take turns: channel, key, layer.
     pad_turn: Vec<(u16, u8, usize)>,
@@ -1952,6 +1954,11 @@ struct ChanFx {
 }
 
 impl Player {
+    /// Mark this player as rendering to a file: hosted plug-ins lent to the render answer only to it.
+    pub fn set_offline(&mut self, on: bool) {
+        self.offline = on;
+    }
+
     fn mix(&mut self, song: &Song, out: &mut [f32], channels: usize) {
         let n = out.len() / channels;
         let ni = song.inserts.len().max(1);
@@ -1961,7 +1968,7 @@ impl Player {
             self.fx = (0..ni).map(|_| vec![]).collect();
             self.ring = vec![0; ni];
         }
-        let clock = crate::host::Clock { playing: self.transport.playing(), tempo: self.transport.tempo() as f64, beats: self.pos / song.ppq.max(1) as f64, sig: song.time_sig };
+        let clock = crate::host::Clock { playing: self.transport.playing(), tempo: self.transport.tempo() as f64, beats: self.pos / song.ppq.max(1) as f64, sig: song.time_sig, offline: self.offline };
         let cx = fx::Ctx { sr: self.sr, step: (song.step() as f64 / self.tpf.max(1e-9)) as f32, clock };
         if self.chan_fx.len() != song.channels.len() {
             self.chan_fx.resize_with(song.channels.len(), || None);

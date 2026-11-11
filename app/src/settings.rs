@@ -51,6 +51,7 @@ impl App {
             }
             Err(e) => self.audio = format!("NO AUDIO: {e}"),
         }
+        self.song.activate_hosted(crate::OUT_RATE.load(std::sync::atomic::Ordering::Relaxed).max(1) as f32);
     }
 
     pub(crate) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -277,6 +278,7 @@ impl App {
     /// A folder for the browser and the sound search, remembered for next time.
     pub(crate) fn add_search_folder(&mut self, dir: std::path::PathBuf) {
         let label = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.display().to_string());
+        cereal_engine::host::add_folder(&dir);
         if !self.lib.search_dirs.contains(&dir) {
             self.lib.search_dirs.push(dir.clone());
             self.lib.rescan();

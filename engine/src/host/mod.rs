@@ -55,6 +55,8 @@ pub struct Clock {
     pub tempo: f64,
     pub beats: f64,
     pub sig: (u8, u8),
+    /// The call comes from a render to a file, not from the sound card.
+    pub offline: bool,
 }
 
 struct Loaded {
@@ -472,6 +474,7 @@ pub struct Instance {
     state: *const PluginState,
     gui: *const PluginGui,
     timer: *const PluginTimer,
+    #[cfg_attr(not(unix), allow(dead_code))]
     fd: *const PluginFd,
     proc: Mutex<Proc>,
     /// Settings changed in our window, waiting for the next call.
@@ -479,6 +482,7 @@ pub struct Instance {
     calls: AtomicU64,
     seen_calls: AtomicU64,
     gui_open: AtomicBool,
+    offline: AtomicBool,
     pub has_note_in: bool,
 }
 
@@ -595,6 +599,7 @@ impl Instance {
                 calls: AtomicU64::new(0),
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
                 has_note_in,
             }))
         }
@@ -603,6 +608,16 @@ impl Instance {
     fn shared(&self) -> &Shared {
         // SAFETY: lives as long as the instance.
         unsafe { &*self.shared }
+    }
+
+    /// Hand the plug-in to a render to a file, or back to the sound card.
+    pub fn set_offline(&self, on: bool) {
+        self.offline.store(on, Relaxed);
+    }
+
+    /// The rate the plug-in is running at, when it is.
+    pub fn rate(&self) -> Option<f32> {
+        self.proc.lock().ok().filter(|p| p.active).map(|p| p.rate)
     }
 
     /// Whether the plug-in takes sound in (an effect) or only gives it out.
@@ -659,7 +674,12 @@ impl Instance {
     /// Run the plug-in over `io` (sound in, sound out). Audio thread. False when it could not run, and then
     /// `io` is untouched.
     pub fn process(&self, io: &mut [[f32; 2]], evs: &[Ev], clock: &Clock, rate: f32) -> bool {
-        let Ok(mut guard) = self.proc.try_lock() else { return false };
+        // while a file is being rendered the plug-in belongs to the render; the sound card goes without
+        if self.offline.load(Relaxed) != clock.offline {
+            return false;
+        }
+        let got = if clock.offline { self.proc.lock().ok() } else { self.proc.try_lock().ok() };
+        let Some(mut guard) = got else { return false };
         let p = &mut *guard;
         if !p.active || p.rate != rate {
             return false;
@@ -1069,7 +1089,7 @@ mod tests {
 
         // not active yet: nothing runs and the sound is left alone
         let mut io = vec![[0.25f32; 2]; 512];
-        let clock = Clock { playing: true, tempo: 120.0, beats: 0.0, sig: (4, 4) };
+        let clock = Clock { playing: true, tempo: 120.0, beats: 0.0, sig: (4, 4), offline: false };
         assert!(!inst.process(&mut io, &[], &clock, 48_000.0));
         assert!(inst.activate(48_000.0));
         // sound in comes out as it is at gain 1

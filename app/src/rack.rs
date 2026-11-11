@@ -205,6 +205,13 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    ui.menu_button("Plug-ins", |ui| {
+                        if let Some(inst) = crate::hostui::menu(ui, true) {
+                            self.song.channels.push(Chan::hosted(inst));
+                            self.sel_chan = self.song.channels.len() - 1;
+                            self.dirty = true;
+                        }
+                    });
                     if ui.button("MIDI Sender").on_hover_text("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::midiout::IDENT.into();

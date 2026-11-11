@@ -233,6 +233,7 @@ impl App {
                     ChannelKind::Layer => "Layer".to_string(),
                     ChannelKind::AutomationClip => "Automation clip".to_string(),
                     _ if c.bay().is_some() => format!("Patch Bay ({})", c.gen.as_ref().map_or("", |g| cereal_engine::synth::def(g.kind).title)),
+                    _ if c.ext.is_some() => c.ext.as_ref().map(|h| h.0.found.name.clone()).unwrap_or_default(),
                     _ => cereal_engine::synth::title_for(&c.plugin).map(str::to_string).unwrap_or_else(|| c.plugin.clone()),
                 };
                 ui.label(RichText::new(what).small().color(TEXT_DIM));
@@ -369,6 +370,11 @@ impl App {
                         self.handle.send(cereal_engine::player::Cmd::NoteOn { chan: ci as u16, key: k, vel: 1.0 });
                         self.handle.send(cereal_engine::player::Cmd::NoteOff { chan: ci as u16, key: k });
                     }
+                }
+                _ if c.ext.is_some() => {
+                    let h = c.ext.clone().unwrap();
+                    let title = c.name.clone();
+                    changed |= crate::hostui::panel(ui, &h.0, &title);
                 }
                 _ => {
                     ui.label(format!("Instrument: {}", c.plugin));

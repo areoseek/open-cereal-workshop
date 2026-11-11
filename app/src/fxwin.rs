@@ -136,6 +136,7 @@ impl App {
         };
         self.handle.transport.watch_slot((meter != 0 && meter != 6).then_some((ins, slot)));
         let title = format!("{} - {}", self.song.inserts[ins].slots[si].title(), self.song.insert_name(ins));
+        let shown = title.clone();
         let mut open = true;
         let mut changed = false;
         // several pass-through units share one kind, so the name in the slot decides which presets belong here
@@ -143,6 +144,8 @@ impl App {
             let named = &self.song.inserts[ins].slots[si].plugin;
             fx::DEFS.iter().find(|d| d.kind == f.kind && d.ident.eq_ignore_ascii_case(named)).map(|d| d.ident).unwrap_or(fx::def(f.kind).ident)
         });
+        // a hosted plug-in keeps its own presets
+        let ident = ident.filter(|_| self.song.inserts[ins].slots[si].fx.as_ref().is_some_and(|f| f.ext.is_none()));
         let mut pick = None;
         let mut pick_ir = false;
         let mut cab_changed = false;
@@ -168,6 +171,10 @@ impl App {
                 ui.label(RichText::new(format!("\"{}\" has no built-in unit yet. Its settings are kept as they are\nand saved back untouched; the sound passes through.", s.plugin)).color(TEXT_DIM));
                 return;
             };
+            if let Some(h) = &f.ext {
+                changed |= crate::hostui::panel(ui, &h.0, &shown);
+                return;
+            }
             let d = fx::def(f.kind);
             if meter != 0 {
                 let (frames, count, rate) = self.handle.transport.watched(8192);

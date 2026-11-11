@@ -6,6 +6,7 @@ mod chanset;
 mod curve;
 mod events;
 mod fxwin;
+mod hostui;
 mod midi;
 mod record;
 mod settings;
@@ -382,6 +383,19 @@ impl App {
                         if let (Some(i), Some(sl)) = (it.next(), it.next()) {
                             app.fx_open = Some((i, sl as u16));
                             app.sel_insert = i;
+                        }
+                    }
+                    "hostfx" => {
+                        // put the first installed plug-in on the master track's first slot and open it
+                        let known = cereal_engine::host::known();
+                        if let Some(inst) = known.first().and_then(|f| cereal_engine::host::Instance::open(&f.path, &f.id)) {
+                            if let Some(ins) = app.song.inserts.first_mut() {
+                                ins.slots.retain(|s| s.index != 0);
+                                ins.slots.insert(0, cereal_engine::song::Slot::hosted(0, inst));
+                                app.fx_open = Some((0, 0));
+                                app.sel_insert = 0;
+                                app.dirty = true;
+                            }
                         }
                     }
                     x if x.starts_with("addfx=") => {
@@ -1322,6 +1336,7 @@ impl App {
         let tr = &self.handle.transport;
         tr.set_pattern(tr.pattern().min(self.song.patterns.len().saturating_sub(1)));
         self.unsaved = true;
+        self.song.activate_hosted(OUT_RATE.load(std::sync::atomic::Ordering::Relaxed) as f32);
         self.handle.publish(self.song.clone());
     }
 
@@ -1731,6 +1746,17 @@ impl App {
 impl App {
     /// Project info, the pattern rename box and the about box.
     fn small_windows(&mut self, ctx: &egui::Context) {
+        // hosted plug-ins get their turn on this thread: timers, callbacks, and word of settings changed in their own windows
+        let hosted = self.song.hosted();
+        if !hosted.is_empty() {
+            for h in &hosted {
+                h.idle();
+                if h.take_dirty() {
+                    self.unsaved = true;
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
         self.settings_window(ctx);
         let mut open = self.show_info;
         egui::Window::new("Project info").open(&mut open).collapsible(false).default_width(360.0).show(ctx, |ui| {
@@ -1922,6 +1948,7 @@ impl eframe::App for App {
                 self.hist_pending = true;
             }
             midi::PPQ.store(self.song.ppq.max(1) as usize, std::sync::atomic::Ordering::Relaxed);
+            self.song.activate_hosted(OUT_RATE.load(std::sync::atomic::Ordering::Relaxed) as f32);
             self.handle.publish(self.song.clone());
         }
         // an edit becomes one undo step once the mouse is up and no text box is being typed in

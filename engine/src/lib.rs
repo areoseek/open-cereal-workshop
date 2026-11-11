@@ -68,8 +68,14 @@ pub fn load_flp(path: &Path, lib: &mut Library) -> Result<(Song, flp::Flp), Stri
 /// Render a song offline into interleaved stereo at `sample_rate`. In song mode the whole playlist is rendered;
 /// otherwise `pattern` once. `tail` seconds are added for sounds still ringing. No audio device is touched.
 pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32) -> Vec<f32> {
-    song.activate_hosted(sample_rate);
+    // hosted plug-ins are lent to the render and handed back as they were
+    let hosted: Vec<_> = song.hosted().into_iter().map(|i| (i.rate(), i)).collect();
+    for (_, i) in &hosted {
+        i.set_offline(true);
+        i.activate(sample_rate);
+    }
     let (h, mut p) = new_player(song.clone(), sample_rate);
+    p.set_offline(true);
     h.transport.set_song_mode(song_mode);
     h.transport.set_pattern(pattern);
     h.transport.set_looping(false);
@@ -90,6 +96,12 @@ pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usiz
         out.resize(at + 2 * 1024, 0.0);
         p.render(&mut out[at..], 2);
         extra += 1024;
+    }
+    for (was, i) in &hosted {
+        i.set_offline(false);
+        if let Some(r) = was {
+            i.activate(*r);
+        }
     }
     out
 }
