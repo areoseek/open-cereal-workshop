@@ -522,7 +522,9 @@ impl Slot {
     }
     /// What to call the slot on screen: the user's own name when they gave one, else our name for the unit.
     pub fn title(&self) -> String {
-        match crate::fx::title_for(&self.plugin) {
+        // a wrapped unit has the wrapper's identifier, so its title comes from the unit itself
+        let own = crate::fx::title_for(&self.plugin).or_else(|| self.fx.as_ref().map(|f| crate::fx::def(f.kind).title));
+        match own {
             Some(t) if self.name.is_empty() || self.name == self.plugin => t.to_string(),
             _ if self.name.is_empty() => self.plugin.clone(),
             _ => self.name.clone(),

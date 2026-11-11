@@ -1698,6 +1698,11 @@ impl Fx {
     /// Read the stored block of the effect called `ident`. None when we have no unit for it or the block is
     /// too short to hold its settings.
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
+        if ident.eq_ignore_ascii_case("Fruity Wrapper") {
+            let (d, at) = wrapped(state)?;
+            let p = d.params.iter().enumerate().map(|(i, q)| wrapped_value(q, &state[at + i * 4..])).collect();
+            return Some(Self { kind: d.kind, p, ir: None });
+        }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if d.kind == Kind::Bank {
             return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None });
@@ -1782,6 +1787,20 @@ impl Fx {
     /// Write the settings into a stored block: `base` when the effect came from a file (everything we do not
     /// model is kept), a fresh block otherwise.
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
+        if let Some((d, at)) = base.and_then(wrapped) {
+            if d.kind == self.kind {
+                // settings go back into the wrapper's own block; untouched ones keep their exact bytes
+                let mut out = base.unwrap().to_vec();
+                for (i, q) in d.params.iter().enumerate() {
+                    let o = at + i * 4;
+                    if wrapped_value(q, &out[o..]) != self.p[i] && q.max != q.min {
+                        let x = (self.p[i] - q.min as f32) / (q.max - q.min) as f32;
+                        out[o..o + 4].copy_from_slice(&x.clamp(0.0, 1.0).to_le_bytes());
+                    }
+                }
+                return out;
+            }
+        }
         if self.kind == Kind::Bank {
             return crate::fxbank::encode(&self.p, base);
         }
@@ -1864,6 +1883,42 @@ fn conv_path(v: &mut Vec<u8>, path: &str) {
 
 /// A new pad controller's block: both axes centred, the plain grid.
 const XY_FRESH: [u8; 71] = [1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 4, 70, 108, 97, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 70, 0, 0, 0];
+
+/// A block of the host wrapper that holds one of the old plug-in-format builds of a stock effect: the unit
+/// we have for it, and where its settings (floats from 0 to 1, one per setting) begin.
+fn wrapped(state: &[u8]) -> Option<(&'static Def, usize)> {
+    let mut at = 4;
+    let (mut name, mut body) = (None, None);
+    while at + 12 <= state.len() {
+        let id = u32::from_le_bytes(state[at..at + 4].try_into().ok()?);
+        let size = u64::from_le_bytes(state[at + 4..at + 12].try_into().ok()?) as usize;
+        at += 12;
+        let data = state.get(at..at.checked_add(size)?)?;
+        match id {
+            54 => name = Some(String::from_utf8_lossy(data).trim_end_matches('\0').to_string()),
+            53 => body = Some(at),
+            _ => {}
+        }
+        at += size;
+    }
+    let (name, body) = (name?, body?);
+    let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&name))?;
+    if state.get(body..body + 4)? != [0xf7, 0xff, 0xff, 0xff] {
+        return None;
+    }
+    let long = state.get(body + 5..body + 9)? == [0xfe, 0xff, 0xff, 0xff];
+    let at = body + if long { 21 } else { 13 };
+    let n = u32::from_le_bytes(state.get(at..at + 4)?.try_into().ok()?) as usize;
+    if d.params.is_empty() || n != d.params.len() || state.len() < at + 4 + n * 4 {
+        return None;
+    }
+    Some((d, at + 4))
+}
+
+fn wrapped_value(q: &Param, raw: &[u8]) -> f32 {
+    let x = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    (q.min as f32 + x * (q.max - q.min) as f32).round()
+}
 
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
@@ -4491,6 +4546,31 @@ impl Unit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrapped_stock_effect_round_trips() {
+        let mut b = 8u32.to_le_bytes().to_vec();
+        let mut chunk = |id: u32, data: &[u8]| {
+            b.extend(id.to_le_bytes());
+            b.extend((data.len() as u64).to_le_bytes());
+            b.extend(data);
+        };
+        chunk(54, b"Fruity Balance");
+        let mut body = vec![0xf7, 0xff, 0xff, 0xff, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+        body.extend(2u32.to_le_bytes());
+        body.extend(0.5f32.to_le_bytes());
+        body.extend(0.8f32.to_le_bytes());
+        body.extend(1u32.to_le_bytes());
+        chunk(53, &body);
+        let fx = Fx::decode("Fruity Wrapper", &b).expect("decodes");
+        assert_eq!(fx.p.len(), 2);
+        assert_eq!(fx.encode(Some(&b)), b);
+        let mut g = fx.clone();
+        g.p[0] = DEFS.iter().find(|d| d.kind == g.kind).unwrap().params[0].max as f32;
+        let out = g.encode(Some(&b));
+        assert_eq!(out.len(), b.len());
+        assert_eq!(Fx::decode("Fruity Wrapper", &out).unwrap().p, g.p);
+    }
+
     use super::*;
 
     fn run(fx: Fx, input: impl Fn(usize) -> [f32; 2], n: usize) -> Vec<[f32; 2]> {
