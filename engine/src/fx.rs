@@ -57,6 +57,7 @@ pub enum Kind {
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
     Conv,
+    Rack,
 }
 
 pub struct Param {
@@ -643,6 +644,7 @@ pub static DEFS: &[Def] = &[
         fixed: &[(0, 14), (20, 1)],
         params: &[p("Dry", 4, 0, 1000, 1000), p("Wet", 8, 0, 1000, 500), p("Input separation", 12, -1000, 1000, 0), p("Wet separation", 16, -1000, 1000, 0)],
     },
+    Def { kind: Kind::Rack, ident: "Distructor", title: "Drive Rack", size: 958, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Wave Candy", title: "Scope Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "ZGameEditor Visualizer", title: "Visual Stage", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Fruity NoteBook 2", title: "Note Pages", size: 0, fixed: &[], params: &[] },
@@ -1521,6 +1523,9 @@ fn conv_parts(state: &[u8]) -> Option<(String, Option<std::ops::Range<usize>>, s
 
 /// The sample file a stored effect block names, for units that play one.
 pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
+    if ident.eq_ignore_ascii_case("Distructor") {
+        return crate::fxrack::cabinet_named_in(state);
+    }
     if !ident.eq_ignore_ascii_case("Fruity Convolver") {
         return None;
     }
@@ -1540,6 +1545,9 @@ impl Fx {
         }
         if kind == Kind::MorphEq {
             return Self::decode(def(kind).ident, &meq_fresh()).expect("our own block reads back");
+        }
+        if kind == Kind::Rack {
+            return Self::decode(def(kind).ident, &crate::fxrack::fresh()).expect("our own block reads back");
         }
         if kind == Kind::Bank {
             return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
@@ -1561,6 +1569,9 @@ impl Fx {
         let d = DEFS.iter().find(|d| d.ident == ident)?;
         if d.kind == Kind::Bank {
             return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None });
+        }
+        if d.kind == Kind::Rack {
+            return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None });
         }
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
         // the oldest reverb blocks (found in presets) have no version number in front
@@ -1635,6 +1646,9 @@ impl Fx {
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
         if self.kind == Kind::Bank {
             return crate::fxbank::encode(&self.p, base);
+        }
+        if self.kind == Kind::Rack {
+            return crate::fxrack::encode(&self.p, base);
         }
         let d = def(self.kind);
         let mut out = match base {
@@ -1807,6 +1821,7 @@ pub struct Unit {
     pub out: [f32; 3],
     bank: Option<Box<crate::fxbank::State>>,
     conv: Option<Box<crate::conv::State>>,
+    rack: Option<Box<crate::fxrack::State>>,
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -1825,7 +1840,7 @@ fn knob_hz(x: f32) -> f32 {
 
 /// State variable filter step: returns (low, band, high).
 #[inline]
-fn svf(z: &mut [f32], x: f32, g: f32, k: f32) -> (f32, f32, f32) {
+pub(crate) fn svf(z: &mut [f32], x: f32, g: f32, k: f32) -> (f32, f32, f32) {
     let hp = (x - (k + g) * z[0] - z[1]) / (1.0 + g * (g + k));
     let v1 = g * hp;
     let bp = v1 + z[0];
@@ -1836,7 +1851,7 @@ fn svf(z: &mut [f32], x: f32, g: f32, k: f32) -> (f32, f32, f32) {
     (lp, bp, hp)
 }
 
-fn svf_g(hz: f32, sr: f32) -> f32 {
+pub(crate) fn svf_g(hz: f32, sr: f32) -> f32 {
     (PI * (hz / sr).clamp(0.0002, 0.49)).tan()
 }
 
@@ -1970,7 +1985,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None };
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
@@ -1986,6 +2001,14 @@ impl Unit {
             // two bars at 40 beats a minute and up
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
+            Kind::Rack => {
+                let mut st = crate::fxrack::State::default();
+                if let Some(ir) = &u.fx.ir {
+                    let k = crate::conv::Kernel::new(&ir.smp, sr, 256, true);
+                    st.conv = Some(Box::new(crate::conv::State::new(std::sync::Arc::new(k))));
+                }
+                u.rack = Some(Box::new(st));
+            }
             Kind::Conv => {
                 if let Some(ir) = &u.fx.ir {
                     let k = crate::conv::Kernel::new(&ir.smp, sr, 512, true);
@@ -2041,11 +2064,14 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
             return c.kernel.frames;
+        }
+        if let Some(r) = &self.rack {
+            return r.conv.as_ref().map_or(0, |c| c.kernel.frames) + (cx.sr * 0.25) as usize;
         }
         match self.fx.kind {
             Kind::Delay => {
@@ -3095,6 +3121,11 @@ impl Unit {
                     crate::fxbank::process(p, st, io, cx);
                 }
             }
+            Kind::Rack => {
+                if let Some(st) = &mut self.rack {
+                    crate::fxrack::process(p, st, io, cx);
+                }
+            }
             Kind::Warp => {
                 // everything heard goes into a two-bar ring; the time line says how far back to read at each
                 // moment of the bar (top = now, bottom = two bars ago) and the volume line gates the result
@@ -3901,7 +3932,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -3914,7 +3945,7 @@ mod tests {
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
-            if d.kind == Kind::Bank {
+            if matches!(d.kind, Kind::Bank | Kind::Rack) {
                 continue;
             }
             let mut fx = Fx::new(d.kind);

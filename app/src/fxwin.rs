@@ -122,6 +122,7 @@ impl App {
         let ident = self.song.inserts[ins].slots[si].fx.as_ref().map(|f| fx::def(f.kind).ident);
         let mut pick = None;
         let mut pick_ir = false;
+        let mut cab_changed = false;
         egui::Window::new(title).id(egui::Id::new("fxwin")).open(&mut open).frame(frame).resizable(false).default_pos([420.0, 160.0]).show(ctx, |ui| {
             if let Some(ident) = ident {
                 pick = self.preset_bar(ui, ident, false);
@@ -156,6 +157,104 @@ impl App {
                         pick_ir = true;
                     }
                 });
+            }
+            if f.kind == Kind::Rack {
+                use cereal_engine::fxrack as rk;
+                let mut soft = f.p[0] >= 0.5;
+                let mut n = rk::count(&f.p);
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut soft, RichText::new("Soft clip output").small()).changed() {
+                        f.p[0] = soft as u8 as f32;
+                        changed = true;
+                    }
+                    if n < rk::SLOTS && ui.button(RichText::new("+ Module").small()).clicked() {
+                        rk::blank(&mut f.p[rk::HEAD + n * rk::PER..rk::HEAD + (n + 1) * rk::PER], 0);
+                        n += 1;
+                        f.p[1] = n as f32;
+                        changed = true;
+                    }
+                    if n > 0 && ui.button(RichText::new("- Module").small()).clicked() {
+                        n -= 1;
+                        f.p[1] = n as f32;
+                        changed = true;
+                        cab_changed = true;
+                    }
+                });
+                for slot in 0..n {
+                    let m = &mut f.p[rk::HEAD + slot * rk::PER..rk::HEAD + (slot + 1) * rk::PER];
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut on = m[1] >= 0.5;
+                        if ui.checkbox(&mut on, "").changed() {
+                            m[1] = on as u8 as f32;
+                            changed = true;
+                        }
+                        let kind = (m[0] as usize).min(3);
+                        egui::ComboBox::from_id_salt(("racktype", ins, slot)).width(86.0).selected_text(RichText::new(rk::TYPES[kind]).small()).show_ui(ui, |ui| {
+                            for (i, name) in rk::TYPES.iter().enumerate() {
+                                if ui.selectable_label(kind == i, *name).clicked() && kind != i {
+                                    m[0] = i as f32;
+                                    if i == 0 {
+                                        m[2] = 3.0;
+                                    } else {
+                                        m[2] = 0.0;
+                                    }
+                                    changed = true;
+                                    cab_changed = true;
+                                }
+                            }
+                        });
+                        let kind = (m[0] as usize).min(3);
+                        let (at, names): (usize, Vec<String>) = match kind {
+                            0 => (2, rk::DRIVES.iter().map(|s| s.to_string()).collect()),
+                            1 => (3, rk::FILTERS.iter().map(|s| s.to_string()).collect()),
+                            2 => (2, rk::CHORUSES.iter().map(|s| s.to_string()).collect()),
+                            _ => (4, (0..rk::CABINETS).map(|i| rk::cabinet_file(i).unwrap_or_default().trim_start_matches("IMP ").trim_end_matches(".wv").to_string()).collect()),
+                        };
+                        let cur = (m[at].max(0.0) as usize).min(names.len() - 1);
+                        egui::ComboBox::from_id_salt(("rackmodel", ins, slot)).width(120.0).selected_text(RichText::new(&names[cur]).small()).show_ui(ui, |ui| {
+                            for (i, name) in names.iter().enumerate() {
+                                if ui.selectable_label(cur == i, name).clicked() && cur != i {
+                                    m[at] = i as f32;
+                                    changed = true;
+                                    cab_changed |= kind == 3;
+                                }
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        let kind = m[0] as i32;
+                        let model = m[2] as i32;
+                        let common: [(&str, usize, i32, i32); 3] = [("In", rk::IN, 0, 10000), ("Mix", rk::MIX, 0, 10000), ("Out", rk::OUT, 0, 10000)];
+                        for &(name, i, lo, hi) in common.iter().chain(rk::shown(kind, model)) {
+                            let v = &mut m[rk::LEAD + i];
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.set_width(58.0);
+                                ui.vertical_centered(|ui| {
+                                    let before = *v;
+                                    let mid = if i == rk::IN || i == rk::OUT { 5000.0 } else { before };
+                                    let r = knob(ui, v, lo as f32, hi as f32, mid, 26.0);
+                                    *v = v.round();
+                                    if r.changed() && *v != before {
+                                        changed = true;
+                                    }
+                                    r.on_hover_text(format!("{name}: {}", *v as i32));
+                                    ui.label(RichText::new(name).small().color(TEXT_DIM));
+                                });
+                            });
+                        }
+                    });
+                }
+                if n > 0 && rk::cabinet_of(&f.p).is_some() && f.ir.is_none() {
+                    // a rack made here has not looked for its cabinet yet: try once
+                    let id = egui::Id::new(("racktried", ins, slot));
+                    if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+                        ui.data_mut(|d| d.insert_temp(id, true));
+                        cab_changed = true;
+                    }
+                    ui.label(RichText::new("The cabinet sounds come with your own content; none was found, so the cabinet passes the sound on.").small().color(TEXT_DIM));
+                }
             }
             let per_row = if f.kind == Kind::Eq { 7 } else { 6 };
             // units made of several like sections show one section at a time: (settings in front, settings per
@@ -208,6 +307,13 @@ impl App {
                 });
             }
         });
+        if cab_changed {
+            let want = self.song.inserts[ins].slots[si].fx.as_ref().and_then(|f| cereal_engine::fxrack::cabinet_of(&f.p)).and_then(cereal_engine::fxrack::cabinet_file);
+            let ir = want.and_then(|name| self.lib.load_stored(&name, None).map(|smp| fx::Ir { smp, path: name }));
+            if let Some(f) = self.song.inserts[ins].slots[si].fx.as_mut() {
+                f.ir = ir;
+            }
+        }
         if pick_ir {
             let mut dlg = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]);
             if let Some(dir) = self.lib.factory_roots.iter().map(|r| r.join("Data/Patches/Impulses")).find(|d| d.is_dir()) {
