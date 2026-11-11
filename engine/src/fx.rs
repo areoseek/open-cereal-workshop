@@ -1708,7 +1708,7 @@ const PAD_MS: [f32; 6] = [29.7, 37.1, 41.1, 43.7, 5.0, 1.7];
 /// First two formants of the vowels A E I O U, in Hz.
 const VOWELS: [[f32; 2]; 5] = [[800.0, 1150.0], [400.0, 2000.0], [300.0, 2500.0], [450.0, 800.0], [325.0, 700.0]];
 
-fn db(x: f32) -> f32 {
+pub(crate) fn db(x: f32) -> f32 {
     10f32.powf(x / 20.0)
 }
 

@@ -7,21 +7,21 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Autogun
 - [ ] BassDrum
 - [ ] BeepMap
-- [ ] BooBass
+- [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
 - [ ] Dashboard
 - [ ] DirectWave
 - [ ] Drumaxx
 - [ ] Drumpad
 - [ ] FLEX
-- [ ] FL Keys
+- [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
 - [ ] FL Slayer
 - [ ] FL Studio Mobile
 - [ ] FL Studio Mobile Rack
 - [ ] FPC
-- [ ] Fruit Kick
+- [~] Fruit Kick: all six knobs read; the end pitch is exact (taken from the step the block stores), the start pitch base, sweep and decay times, click and distortion scales are estimates.
 - [ ] Fruity Dance
 - [ ] Fruity DrumSynth Live
-- [ ] Fruity DX10
+- [~] Fruity DX10: follows the public two-operator design it descends from; the second modulator's settings are read in an assumed order and share the first one's touch setting.
 - [ ] Fruity Envelope Controller
 - [ ] Fruity Granulizer
 - [ ] Fruity Keyboard Controller

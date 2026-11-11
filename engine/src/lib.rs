@@ -9,6 +9,8 @@ pub mod law;
 pub mod player;
 pub mod additive;
 pub mod fm;
+pub mod minis;
+pub mod keys;
 pub mod preset;
 pub mod sample;
 pub mod save;

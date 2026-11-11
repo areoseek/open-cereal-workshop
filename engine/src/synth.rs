@@ -13,6 +13,21 @@ pub enum Kind {
     Additive,
     /// Six operators through a modulation matrix and three filters (`fm.rs`).
     Fm,
+    /// A swept sine drum (`minis.rs`).
+    Kick,
+    /// A carrier and two modulators (`minis.rs`).
+    Fm2,
+    /// A plucked bass string (`minis.rs`).
+    Bass,
+    /// Sampled keys read from set files (`keys.rs`).
+    Keys,
+}
+
+impl Kind {
+    /// The small instruments that share the voice code of `minis.rs`.
+    pub fn mini(self) -> bool {
+        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm)
+    }
 }
 
 pub struct Param {
@@ -204,7 +219,91 @@ pub static DEFS: &[Def] = &[Def {
     fixed: &[],
     tail: &[],
     params: &[],
-}];
+},
+    Def {
+        kind: Kind::Kick,
+        ident: "Fruit Kick",
+        title: "Sweep Kick",
+        size: 32,
+        fixed: &[(28, 4504291)],
+        tail: &[],
+        params: &[
+            p("Start", 4, -2400, 3600, 0),
+            p("End", 8, -2400, 0, -600),
+            p("Sweep", 12, 0, 256, 64),
+            p("Decay", 16, 0, 256, 128),
+            p("Click", 20, 0, 64, 32),
+            p("Drive", 24, 0, 128, 0),
+        ],
+    },
+    Def {
+        kind: Kind::Fm2,
+        ident: "Fruity DX10",
+        title: "Duo FM",
+        size: 92,
+        fixed: &[(0, 1)],
+        tail: &[],
+        params: &[
+            p("Attack", 4, 0, 65535, 0),
+            p("Decay", 8, 0, 65535, 42598),
+            p("Release", 12, 0, 65535, 28901),
+            p("Mod 1 coarse", 16, 0, 65535, 55181),
+            p("Mod 1 fine", 20, 0, 65535, 21561),
+            p("Mod 1 start", 24, 0, 65535, 15073),
+            p("Mod 1 time", 28, 0, 65535, 52429),
+            p("Mod 1 hold", 32, 0, 65535, 3277),
+            p("Mod 1 release", 36, 0, 65535, 52429),
+            p("Mod touch", 40, 0, 65535, 58982),
+            p("Vibrato", 44, 0, 65535, 0),
+            p("Fine tune", 48, 0, 65535, 29295),
+            p("Brightness", 52, 0, 65535, 0),
+            p("Mod 1 through", 56, 0, 65535, 27132),
+            p("Vibrato rate", 60, 0, 65535, 0),
+            p("Mod 2 coarse", 64, 0, 65535, 0),
+            p("Mod 2 fine", 68, 0, 65535, 0),
+            p("Mod 2 start", 72, 0, 65535, 0),
+            p("Mod 2 time", 76, 0, 65535, 0),
+            p("Mod 2 hold", 80, 0, 65535, 0),
+            p("Mod 2 release", 84, 0, 65535, 0),
+            p("Octave", 88, -3, 3, 0),
+        ],
+    },
+    Def {
+        kind: Kind::Bass,
+        ident: "BooBass",
+        title: "String Bass",
+        size: 16,
+        fixed: &[(0, 1)],
+        tail: &[],
+        params: &[p("Bass", 4, 0, 65535, 32767), p("Mid", 8, 0, 65535, 32767), p("Treble", 12, 0, 65535, 32767)],
+    },
+    Def {
+        kind: Kind::Keys,
+        ident: "FL Keys",
+        title: "Sample Keys",
+        // the block starts with the set's name, so the settings sit at a distance that depends on it
+        size: 0,
+        fixed: &[],
+        tail: &[1, 0, 0, 0, 9, b'm', b'd', b'a', b' ', b'P', b'i', b'a', b'n', b'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        params: &[
+            p("Decay", 0, -1000, 1000, 0),
+            p("Release", 4, -1000, 1000, 0),
+            p("Hardness", 8, -1000, 1000, 0),
+            p("Touch to hardness", 12, -1000, 1000, -1000),
+            p("Muffle", 16, 0, 1000, 784),
+            p("Touch to muffle", 20, 0, 2000, 502),
+            p("Touch", 24, -1000, 1000, -248),
+            p("Stereo", 28, 0, 2000, 1000),
+            p("Tune", 32, -1000, 1000, 0),
+            p("Detune", 36, 0, 500, 123),
+            p("Stretch", 40, -500, 500, 0),
+            p("Treble", 44, -1000, 1000, 0),
+            p("Pan / tremolo", 48, -1000, 1000, 0),
+            p("Wobble rate", 52, 0, 65535, 0),
+            p("Drive", 56, 0, 1000, 0),
+        ],
+    },
+];
 
 pub fn def(kind: Kind) -> &'static Def {
     DEFS.iter().find(|d| d.kind == kind).expect("every kind has a table entry")
@@ -267,18 +366,33 @@ impl Gen {
         } else {
             state
         };
-        if state.len() < d.size {
+        let shift = Self::shift(d.kind, state);
+        if state.len() < d.size || (d.kind == Kind::Keys && state.len() < shift + 60) {
             return None;
+        }
+        if d.kind == Kind::Keys {
+            // read the set now, away from the sound thread
+            crate::keys::set(&crate::keys::name_in(state));
         }
         let p = d
             .params
             .iter()
             .map(|p| {
-                let v = if p.width == 1 { state[p.off] as i32 } else { i32::from_le_bytes(state[p.off..p.off + 4].try_into().unwrap()) };
+                let off = p.off + shift;
+                let v = if p.width == 1 { state[off] as i32 } else { i32::from_le_bytes(state[off..off + 4].try_into().unwrap()) };
                 v.clamp(p.min, p.max) as f32
             })
             .collect();
         Some(Self { kind: d.kind, p, raw: state.to_vec(), fm: None })
+    }
+
+    /// Where the settings start in a block that opens with a name.
+    fn shift(kind: Kind, state: &[u8]) -> usize {
+        if kind == Kind::Keys {
+            5 + state.get(4).copied().unwrap_or(0) as usize
+        } else {
+            0
+        }
     }
 
     /// The first layout of the three-oscillator block: shape, coarse and fine of oscillator 1, then mix level,
@@ -314,7 +428,7 @@ impl Gen {
             return if self.raw.is_empty() { base.map(|b| b.to_vec()).unwrap_or_default() } else { self.raw.clone() };
         }
         let mut out = match base {
-            _ if self.raw.len() >= d.size => self.raw.clone(),
+            _ if !self.raw.is_empty() && self.raw.len() >= d.size => self.raw.clone(),
             Some(b) if b.len() >= d.size => b.to_vec(),
             _ => {
                 let mut v = vec![0u8; d.size];
@@ -325,16 +439,23 @@ impl Gen {
                 v
             }
         };
+        let shift = Self::shift(self.kind, &out);
         for (p, &v) in d.params.iter().zip(&self.p) {
             let v = (v.round() as i32).clamp(p.min, p.max);
+            let off = p.off + shift;
             if p.width == 1 {
-                if (out[p.off] as i32).clamp(p.min, p.max) != v {
-                    out[p.off] = v as u8;
+                if (out[off] as i32).clamp(p.min, p.max) != v {
+                    out[off] = v as u8;
                 }
             } else {
-                let was = i32::from_le_bytes(out[p.off..p.off + 4].try_into().unwrap());
+                let was = i32::from_le_bytes(out[off..off + 4].try_into().unwrap());
                 if was.clamp(p.min, p.max) != v {
-                    out[p.off..p.off + 4].copy_from_slice(&v.to_le_bytes());
+                    out[off..off + 4].copy_from_slice(&v.to_le_bytes());
+                    if self.kind == Kind::Kick && p.off == 8 {
+                        // the block also carries the end pitch as a step per frame
+                        let step = (6370028.0 * 2f64.powf(v as f64 / 1200.0)).round() as i32;
+                        out[28..32].copy_from_slice(&step.to_le_bytes());
+                    }
                 }
             }
         }
@@ -366,6 +487,12 @@ impl Gen {
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
+            Kind::Keys => {
+                let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
+                let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set })), ..Default::default() }
+            }
+            k => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: k, p: self.p.clone(), set: None })), ..Default::default() },
         }
     }
 }
@@ -394,6 +521,8 @@ pub struct Tone {
     pub add: Option<std::sync::Arc<crate::additive::Patch>>,
     /// Set for the six-operator instrument.
     pub fm: Option<std::sync::Arc<crate::fm::Patch>>,
+    /// Set for the small instruments.
+    pub mini: Option<std::sync::Arc<crate::minis::Patch>>,
 }
 
 /// Running state of one sounding note.
@@ -404,6 +533,7 @@ pub struct ToneState {
     hold: [f32; 3],
     add: Option<Box<crate::additive::Voice>>,
     fm: Option<Box<crate::fm::Voice>>,
+    mini: Option<crate::minis::Voice>,
 }
 
 #[inline]
@@ -447,7 +577,7 @@ fn wave(shape: u8, t: f32, dt: f32) -> f32 {
 impl ToneState {
     pub fn start(tone: &Tone, seed: u32) -> Self {
         let mut s = Self { seed: seed | 1, ..Default::default() };
-        if tone.add.is_some() || tone.fm.is_some() {
+        if tone.add.is_some() || tone.fm.is_some() || tone.mini.is_some() {
             return s;
         }
         for k in 0..3 {
@@ -474,10 +604,16 @@ impl ToneState {
         if let Some(p) = &tone.fm {
             self.fm = Some(Box::new(crate::fm::Voice::start(p, sr, key, vel, dphase, self.seed)));
         }
+        if let Some(p) = &tone.mini {
+            self.mini = Some(crate::minis::Voice::start(p, sr, key, vel, dphase, self.seed));
+        }
     }
 
     /// The key was let go. Returns the seconds the instrument's own envelopes still need.
     pub fn release(&mut self, tone: &Tone) -> f32 {
+        if let (Some(p), Some(v)) = (&tone.mini, &mut self.mini) {
+            return v.release(p);
+        }
         match (&tone.fm, &mut self.fm) {
             (Some(p), Some(v)) => {
                 v.release();
@@ -494,6 +630,9 @@ impl ToneState {
             return v.frame(p, dphase);
         }
         if let (Some(p), Some(v)) = (&tone.fm, &mut self.fm) {
+            return v.frame(p, dphase);
+        }
+        if let (Some(p), Some(v)) = (&tone.mini, &mut self.mini) {
             return v.frame(p, dphase);
         }
         let mut o = [[0.0f32; 2]; 3];

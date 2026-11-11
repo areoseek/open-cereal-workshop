@@ -578,6 +578,25 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.add_space(6.0);
             ui.label(format!("Volume {:.0} %    Pitch {:+.0} st    Unison {}", p.volume * 100.0, p.pitch, p.uni));
         }
+        _ => {
+            // the small instruments: one knob per stored setting
+            let d = def(g.kind);
+            for row in (0..d.params.len()).collect::<Vec<_>>().chunks(8) {
+                ui.horizontal(|ui| {
+                    for &idx in row {
+                        let p = &d.params[idx];
+                        let mut v = g.p[idx];
+                        let span = (p.max - p.min) as f32;
+                        let label = p.name.to_uppercase();
+                        if cap_knob(ui, &label, &mut v, p.min as f32, p.max as f32, p.def as f32, |v| if span > 1000.0 { format!("{:.0} %", (v - p.min as f32) / span * 100.0) } else { format!("{v:.0}") }) {
+                            g.p[idx] = v.round();
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        }
     }
     changed
 }

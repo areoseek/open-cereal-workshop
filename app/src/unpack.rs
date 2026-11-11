@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Folders under the install's `Data` folder that hold content rather than program parts.
 const WANTED: [&str; 4] = ["patches", "demo projects", "projects", "templates"];
+/// What is taken from the folders of the built-in instruments: their sample sets, never program parts.
+const SOUND_EXT: [&str; 6] = ["wav", "wti", "dat", "ogg", "flac", "fst"];
 const SKIP_EXT: [&str; 6] = ["exe", "dll", "sys", "ocx", "bat", "cmd"];
 const OP_SET_DIR: i32 = 11;
 const OP_EXTRACT: i32 = 20;
@@ -128,14 +130,14 @@ fn index(f: &mut BufReader<File>, file_len: u64) -> Result<Index, String> {
         match int(e, 0) {
             OP_SET_DIR if int(e, 2) != 0 => {
                 // keep only folders under <install>\Data\<a content folder>
-                dir = string_at(&h, strings, int(e, 1)).and_then(|s| safe_parts(&s)).filter(|p| p.len() >= 2 && p[0].eq_ignore_ascii_case("data") && WANTED.contains(&p[1].to_lowercase().as_str()));
+                dir = string_at(&h, strings, int(e, 1)).and_then(|s| safe_parts(&s)).filter(|p| p.len() >= 2 && ((p[0].eq_ignore_ascii_case("data") && WANTED.contains(&p[1].to_lowercase().as_str())) || (p.len() >= 4 && p[0].eq_ignore_ascii_case("plugins") && p[1].eq_ignore_ascii_case("fruity"))));
             }
             OP_EXTRACT => {
                 let (Some(d), Some(name)) = (&dir, string_at(&h, strings, int(e, 2))) else { continue };
                 let Some(mut parts) = safe_parts(&name) else { continue };
                 let Some(file) = parts.pop() else { continue };
                 let ext = file.rsplit('.').next().unwrap_or("").to_lowercase();
-                if SKIP_EXT.contains(&ext.as_str()) {
+                if SKIP_EXT.contains(&ext.as_str()) || (d[0].eq_ignore_ascii_case("plugins") && !SOUND_EXT.contains(&ext.as_str())) {
                     continue;
                 }
                 let high = if size >= 36 { int(e, 4) as u32 as u64 } else { 0 };

@@ -162,6 +162,7 @@ impl App {
         if !self.lib.factory_roots.iter().any(|r| r == root) {
             self.lib.factory_roots.push(root.to_path_buf());
         }
+        cereal_engine::keys::add_root(root);
         self.preset_lists.clear();
         for (label, sub) in [("Packs", "Data/Patches/Packs"), ("Presets", "Data/Patches"), ("Demo projects", "Data/Demo projects"), ("Templates", "Data/Templates")] {
             self.browser.add_root(label, root.join(sub));
