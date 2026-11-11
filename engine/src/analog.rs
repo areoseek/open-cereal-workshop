@@ -469,6 +469,86 @@ pub fn buzz(p: &[f32]) -> Set {
 /// The small touch-screen synth's stored values as a voice set. The places of the values were worked out from
 /// how they move between presets: wave choice, modifier and noise at 4 to 6, the filter and its envelope at 7 to
 /// 14, fine tune at 19, the level envelope at 20 to 23. The rest (play mode, slow oscillator, effects) is not read.
+/// Settings of the three-oscillator analogue from its stored values (seventy numbers 0 to 1, then the switch
+/// word). Per oscillator, seven numbers: pulse width, coarse, fine, level, slow-wave bend, envelope bend, wave
+/// (tenths: sine, saw, pulse, triangle, noise). Then: 21 slow-wave delay, 22 its rate, 24 its wave, 26 cutoff,
+/// 27 emphasis, 28 envelope to cutoff, 29 slow wave to cutoff, 30 key follow, 32 high-pass share, 33 band-pass
+/// share, 35-38 level envelope, 39 volume, 41-44 filter envelope. The wave order and the envelopes were read off
+/// the preset names; 23, 31, 34 and 40 are not placed, and of the switches only the ensemble (guess: bit 2).
+pub fn trio(p: &[f32]) -> Set {
+    const PLAIN: [f32; 7] = [0.5, 0.5, 0.5, 0.6, 0.5, 0.5, 0.1];
+    let full = p.len() >= 71;
+    let v = |i: usize| -> f32 {
+        if full {
+            return p[i];
+        }
+        match i {
+            0..=20 => PLAIN[i % 7],
+            26 | 28 | 29 | 39 => 0.5,
+            37 => 1.0,
+            _ => 0.0,
+        }
+    };
+    let mut width = 0.0;
+    let mut osc = [Osc::default(); 3];
+    let mut bend = 0.0f32;
+    for (i, o) in osc.iter_mut().enumerate() {
+        let b = i * 7;
+        let shape = match (v(b + 6) * 10.0).round() as u8 {
+            1 => Shape::Saw,
+            2 => Shape::Pulse,
+            3 => Shape::Triangle,
+            4 => Shape::Noise,
+            _ => Shape::Sine,
+        };
+        if shape == Shape::Pulse && width == 0.0 {
+            width = (2.0 * v(b) - 1.0).abs().min(0.95);
+        }
+        *o = Osc { shape, semis: ((v(b + 1) - 0.5) * 24.0).round() + (v(b + 2) - 0.5) * 2.0, level: v(b + 3).min(2.5) };
+        let x = (v(b + 4) - 0.5) * 2.0;
+        if x.abs() > bend.abs() {
+            bend = x;
+        }
+    }
+    let time = |i: usize| 0.002 + v(i) * v(i) * 6.0;
+    let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2).min(1.0), r: time(i + 3) };
+    let hz = 0.1 * 2f32.powf(v(22) * 8.0);
+    let delay = v(21) * v(21) * 4.0;
+    let shape = match (v(24) * 10.0).round() as u8 {
+        0 => Shape::Sine,
+        1 => Shape::Triangle,
+        2 => Shape::Saw,
+        3 => Shape::Square,
+        _ => Shape::Noise,
+    };
+    let slow = |dest: Dest, amount: f32| Lfo { shape, dest: if amount > 0.004 { dest } else { Dest::None }, amount, hz, reset: false, delay };
+    let to_cut = (v(29) - 0.5).abs() * 2.0;
+    let filter = if v(33) > 0.5 {
+        Filter::Band
+    } else if v(32) > 0.75 {
+        Filter::High
+    } else if v(32) > 0.25 {
+        Filter::LowNotch
+    } else {
+        Filter::Low12
+    };
+    Set {
+        osc,
+        width,
+        amp: env(35),
+        fenv: env(41),
+        filter,
+        cutoff_hz: 25.0 * 2f32.powf(v(26) * 9.7),
+        res: v(27).min(1.0) * 0.95,
+        env_oct: (v(28) - 0.5) * 2.0 * 9.0,
+        track: v(30).min(1.0),
+        lfo: [slow(Dest::Pitch, bend.abs()), slow(Dest::Cutoff, to_cut), Lfo::default()],
+        chorus: if full && (p[70] as u32) & 4 != 0 { 1 } else { 0 },
+        gain: 0.1 + v(39).min(1.0) * 0.5,
+        ..Default::default()
+    }
+}
+
 pub fn pocket(p: &[f32]) -> Set {
     const PLAIN: [f32; 24] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.68, 0.0, 0.0, 0.37, 0.5, 0.0, 1.0, 1.0, 0.0];
     let v = |i: usize| if p.len() >= 24 { p[i] } else { PLAIN[i] };

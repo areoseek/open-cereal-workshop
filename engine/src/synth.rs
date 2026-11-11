@@ -51,6 +51,8 @@ pub enum Kind {
     Poly2,
     /// The small touch-screen synth: its stored values, 0 to 1, in file order (`analog::pocket`).
     Pocket,
+    /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
+    Trio,
     /// The electric guitar (`guitar.rs`).
     Guitar,
     /// A plucked string made from a wearing loop of noise (`minis.rs`).
@@ -94,7 +96,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -484,7 +486,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Pocket, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Trio, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Image, ident: "BeepMap", title: "Picture Synth", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -528,6 +530,16 @@ fn poly_values(state: &[u8], at: usize) -> Vec<f32> {
 
 /// The values of the small touch-screen synth: a tagged file whose data part holds a short head and then one
 /// number from 0 to 1 per control.
+/// The analogue trio's block: seventy eight-byte numbers and a word of switches. Empty when it is not that.
+fn trio_values(state: &[u8]) -> Vec<f32> {
+    if state.len() < 564 {
+        return Vec::new();
+    }
+    let mut p: Vec<f32> = state[..560].chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap()) as f32).collect();
+    p.push(u32::from_le_bytes([state[560], state[561], state[562], state[563]]) as f32);
+    p
+}
+
 fn pocket_values(state: &[u8]) -> Vec<f32> {
     let Some(at) = state.windows(4).position(|w| w == b"DATA") else { return Vec::new() };
     let Some(n) = state.get(at + 4..at + 8).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else { return Vec::new() };
@@ -698,6 +710,9 @@ impl Gen {
         }
         if d.kind == Kind::Poly {
             return Some(Self { kind: d.kind, p: poly_values(state, 12), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::Trio {
+            return Some(Self { kind: d.kind, p: trio_values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Pocket {
             return Some(Self { kind: d.kind, p: pocket_values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -1225,6 +1240,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_analog_trio_reads_its_values_and_sounds_in_every_wave() {
+        for wave in 0..5 {
+            let mut v = [0.0f64; 70];
+            for o in 0..3 {
+                v[o * 7..o * 7 + 7].copy_from_slice(&[0.5, 0.5, 0.5, 0.8, 0.5, 0.5, wave as f64 / 10.0]);
+            }
+            v[26] = 0.6; // cutoff
+            v[28] = 0.5;
+            v[29] = 0.5;
+            v[36] = 0.3;
+            v[37] = 1.0;
+            v[39] = 0.5;
+            let mut b: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            b.extend_from_slice(&4u32.to_le_bytes());
+            let g = Gen::decode("SimSynth", &b).unwrap();
+            assert_eq!(g.p.len(), 71);
+            assert_eq!(g.encode(None), b);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 220.0 / 44100.0;
+            let mut voice = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, dp, 3);
+            let peak = (0..8000).map(|_| voice.frame(patch, dp)[0].abs()).fold(0.0, f32::max);
+            assert!(peak > 0.03 && peak < 1.5, "wave {wave}: {peak}");
+        }
+        let tone = Gen::decode("SimSynth", &[]).unwrap().tone();
+        let patch = tone.mini.as_ref().unwrap();
+        let mut voice = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
+        assert!((0..4000).map(|_| voice.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
     }
 
     #[test]
