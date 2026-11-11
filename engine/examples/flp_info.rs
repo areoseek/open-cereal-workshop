@@ -1,29 +1,40 @@
-//! Dump what our .flp reader understands from a file: cargo run -p cereal-engine --example flp_info -- file.flp
-use cereal_engine::flp;
-use std::collections::BTreeMap;
+//! Print what the reader understands of a .flp file.  cargo run --example flp_info -- song.flp [-v]
+use cereal_engine::flp::{self, ClipSource};
 
 fn main() {
-    for path in std::env::args().skip(1) {
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let verbose = args.iter().any(|a| a == "-v");
+    for path in args.iter().filter(|a| *a != "-v") {
+        let bytes = std::fs::read(path).expect("read file");
+        let f = match flp::parse(&bytes) {
+            Ok(f) => f,
             Err(e) => {
-                eprintln!("{path}: {e}");
+                println!("{path}: {e}");
                 continue;
             }
         };
-        match flp::parse(&bytes) {
-            Ok(f) => {
-                let mut by_id: BTreeMap<u8, usize> = BTreeMap::new();
-                for e in &f.events {
-                    *by_id.entry(e.id).or_default() += 1;
-                }
-                let named: Vec<_> = f.channel_names.iter().filter(|s| !s.is_empty()).take(8).cloned().collect();
-                println!(
-                    "{}\n  version={:?} title={:?} tempo={} chans={} ppq={} events={} notes={}\n  names={:?}\n  distinct event ids={}",
-                    path, f.version, f.title, f.tempo, f.header.channels, f.header.ppq, f.events.len(), f.notes.len(), named, by_id.len()
-                );
+        let notes: usize = f.patterns.iter().map(|p| p.notes.len()).sum();
+        println!("{path}\n  version {}  title {:?}  tempo {}  ppq {}  sig {}/{}", f.version, f.title, f.tempo, f.header.ppq, f.time_sig.0, f.time_sig.1);
+        println!("  {} channels, {} patterns ({} notes), {} arrangements, {} inserts", f.channels.len(), f.patterns.len(), notes, f.arrangements.len(), f.inserts.len());
+        for a in &f.arrangements {
+            let pat = a.items.iter().filter(|i| matches!(i.source, ClipSource::Pattern(_))).count();
+            let named = a.tracks.iter().filter(|t| !t.name.is_empty()).count();
+            let end = a.items.iter().map(|i| i.position + i.length).max().unwrap_or(0);
+            let top = a.items.iter().map(|i| i.track).max().unwrap_or(0);
+            println!("  arrangement {:?}: {} clips ({} pattern), {} tracks ({} named), lowest track used {}, ends at tick {}, {} markers", a.name, a.items.len(), pat, a.tracks.len(), named, top + 1, end, a.markers.len());
+        }
+        if verbose {
+            for c in &f.channels {
+                println!("  ch {:3} {:?} {:?} plugin {:?} vol {} pan {} insert {} root {} sample {:?}", c.index, c.kind, c.name, c.plugin, c.volume, c.pan, c.insert, c.root_key, c.sample_path);
             }
-            Err(e) => println!("{path}\n  PARSE ERROR: {e}"),
+            for p in &f.patterns {
+                println!("  pat {:3} {:?} {} notes", p.index, p.name, p.notes.len());
+            }
+            for i in f.inserts.iter().filter(|i| !i.name.is_empty() || !i.slots.is_empty() || i.volume != 12800) {
+                let slots: Vec<String> = i.slots.iter().map(|s| format!("{}:{}", s.index, s.plugin)).collect();
+                let routes: Vec<usize> = i.routes.iter().enumerate().filter(|(_, r)| **r).map(|(k, _)| k).collect();
+                println!("  insert {:3} {:?} vol {} pan {} -> {:?} slots {:?}", i.index, i.name, i.volume, i.pan, routes, slots);
+            }
         }
     }
 }

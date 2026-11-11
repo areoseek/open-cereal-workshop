@@ -1,0 +1,1132 @@
+//! Writing a project back to a .flp.
+//!
+//! A project that was opened from a file is saved by patching that file's own event list: only what was edited
+//! is rewritten, and everything this program does not understand yet (plugin state, automation, settings) is
+//! carried over untouched. A project that was not edited at all saves byte for byte identical.
+//!
+//! A project started here has no file to patch, so a plain skeleton is built first and patched the same way.
+//!
+//! Known gap: when a channel is deleted the channels after it are renumbered in the channel list, in every
+//! note and in every playlist clip. Other places that refer to channels by number (layer children, automation
+//! targets) are not understood yet and are left alone.
+
+use std::collections::HashMap;
+
+use crate::flp::{self, id, latin1, u16at, u32at, version_tuple, ChannelKind, Event, Flp, FlpFile, Header, Value, NOTE_SIZE};
+use crate::song::{ClipSrc, Note, Song};
+
+const ITEM_BASE: u16 = 0x5000;
+const MIXER_BASE: usize = 448;
+
+/// Ids that can never belong to a channel's own run of events.
+fn ends_channel(e: u8) -> bool {
+    matches!(e, 64 | 65 | 99 | 233 | 236 | 238 | 27 | 29 | 31 | 42 | 95 | 100 | 133 | 149 | 204 | 225)
+}
+
+fn text_event(eid: u8, s: &str, unicode: bool) -> Event {
+    if unicode {
+        Event::text(eid, s)
+    } else {
+        let mut b: Vec<u8> = s.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect();
+        b.push(0);
+        Event::data(eid, b)
+    }
+}
+
+fn put_u32(d: &mut [u8], o: usize, v: u32) {
+    if let Some(s) = d.get_mut(o..o + 4) {
+        s.copy_from_slice(&v.to_le_bytes());
+    }
+}
+fn put_u16(d: &mut [u8], o: usize, v: u16) {
+    if let Some(s) = d.get_mut(o..o + 2) {
+        s.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn color_bits(c: [u8; 3], keep_top: u32) -> u32 {
+    c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16 | (keep_top & 0xff00_0000)
+}
+
+fn item_size(d: &[u8]) -> Option<usize> {
+    [32usize, 60, 80, 88, 96, 104, 112, 120, 128].into_iter().find(|&s| !d.is_empty() && d.len() % s == 0 && d.chunks_exact(s).all(|it| u16at(it, 4) == ITEM_BASE))
+}
+
+fn item_size_for(ver: (u32, u32, u32, u32)) -> usize {
+    if ver >= (24, 2, 99, 0) {
+        80
+    } else if ver >= (20, 99, 0, 0) {
+        60
+    } else {
+        32
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// File units, so "did this change" is judged on what would be written
+// ---------------------------------------------------------------------------------------------------------------
+
+fn vol_u(v: f32) -> u32 {
+    (v * 12800.0).round().clamp(0.0, 12800.0) as u32
+}
+fn pan_u(v: f32) -> u32 {
+    (v * 6400.0 + 6400.0).round().clamp(0.0, 12800.0) as u32
+}
+fn ins_vol(v: f32) -> i32 {
+    (v * 12800.0).round().clamp(0.0, 16000.0) as i32
+}
+fn ins_pan(v: f32) -> i32 {
+    (v * 6400.0).round().clamp(-6400.0, 6400.0) as i32
+}
+fn vel_u(v: f32) -> u8 {
+    (v * 100.0).round().clamp(0.0, 128.0) as u8
+}
+fn npan_u(v: f32) -> u8 {
+    (v * 64.0 + 64.0).round().clamp(0.0, 128.0) as u8
+}
+fn fine_u(v: f32) -> u8 {
+    (v / 10.0 + 120.0).round().clamp(0.0, 240.0) as u8
+}
+
+type NoteKey = (u32, u32, u16, u8, u8, u8, u8, bool);
+fn note_key(n: &Note) -> NoteKey {
+    (n.pos, n.len, n.chan, n.key, vel_u(n.vel), npan_u(n.pan), fine_u(n.fine_cents), n.muted)
+}
+fn notes_key(notes: &[Note]) -> Vec<NoteKey> {
+    let mut v: Vec<NoteKey> = notes.iter().map(note_key).collect();
+    v.sort();
+    v
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// A plain project to patch when there is no original
+// ---------------------------------------------------------------------------------------------------------------
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
+}
+
+/// The events of one empty sampler channel with every setting at its default.
+fn blank_channel(index: u16, unicode: bool, word_insert: bool) -> Vec<Event> {
+    let mut ev = vec![
+        Event::word(id::NEW_CHANNEL, index),
+        Event::byte(id::CHAN_TYPE, 0),
+        text_event(id::PLUGIN_INTERNAL_NAME, "", unicode),
+        text_event(id::PLUGIN_NAME, "Sampler", unicode),
+        Event::int(id::COLOR, 0x006a_655c),
+        Event::byte(id::CHAN_ENABLED, 1),
+        if word_insert { Event::word(id::CHAN_TARGET_INSERT_WORD, 0) } else { Event::byte(id::CHAN_TARGET_INSERT, 0) },
+        Event::data(id::CHAN_LEVELS, hex("001900001027000000000000000100000000000000000000")),
+        Event::data(
+            id::CHAN_PARAMS,
+            hex("ffffffff0000000001000001ffffffff3c0000000000803f0000803f0000803f0000803f0000803f0000000001000000ffffffff000400003000000000000100a7050000000000000001000000000000000000000000000000000000010000000000000000000000000000000000000002000000feffffffffffffff000000000000000000000000000000000000f03f0000000000000000ffffffff01"),
+        ),
+    ];
+    for i in 0..5 {
+        let mut d = hex("000000000000000064000000204e0000204e00003075000032000000204e00000000000064000000204e000000000000b680000000000000000000000000000000000000");
+        if i == 1 {
+            d[0] = 4;
+        }
+        ev.push(Event::data(id::CHAN_ENVELOPE, d));
+    }
+    ev.push(Event::int(id::SAMPLE_FLAGS, 3));
+    ev.push(Event::byte(id::CHAN_ZIPPED, 0));
+    ev
+}
+
+/// A project with `channels` empty samplers, one empty playlist and a default mixer, in the layout version 20
+/// wrote: 32-byte playlist items, 500 tracks, 127 inserts.
+fn skeleton(song: &Song) -> Flp {
+    let mut ev = vec![
+        Event::data(id::VERSION, b"20.8.4.2576\0".to_vec()),
+        Event::int(id::BUILD, 2576),
+        Event::int(id::TEMPO, 140_000),
+        Event::word(id::CURRENT_PATTERN, 1),
+        Event::byte(id::LOOP_ACTIVE, 0),
+        Event::byte(id::SHUFFLE, 0),
+        Event::word(id::MAIN_PITCH, 0),
+        Event::byte(id::TIMESIG_NUM, 4),
+        Event::byte(id::TIMESIG_BEAT, 4),
+        Event::byte(id::PAN_LAW, 0),
+        Event::text(id::TITLE, ""),
+        Event::text(id::GENRE, ""),
+        Event::text(id::ARTIST, ""),
+        Event::text(id::COMMENT, ""),
+    ];
+    for i in 0..song.channels.len() {
+        ev.extend(blank_channel(i as u16, true, false));
+    }
+    ev.push(Event::word(id::NEW_ARRANGEMENT, 0));
+    ev.push(Event::text(id::ARRANGEMENT_NAME, "Arrangement"));
+    ev.push(Event::data(id::PLAYLIST, vec![]));
+    let n_tracks = song.tracks.len().max(1);
+    for t in 0..n_tracks {
+        let mut d = (t as u32 + 1).to_le_bytes().to_vec();
+        d.extend(hex("4851560000000000010000803fffffffff0000000000000000000500000000000000010000000000000000000000000000ffffffffffffffff0100000000"));
+        ev.push(Event::data(id::TRACK, d));
+    }
+    ev.push(Event::word(id::CURRENT_ARRANGEMENT, 0));
+    let n_ins = song.inserts.len().max(1);
+    for i in 0..n_ins {
+        let flags: u32 = if i == 0 { 0x0c } else { 0x4c };
+        let mut d = vec![0u8; 12];
+        put_u32(&mut d, 4, flags);
+        ev.push(Event::data(id::INSERT_FLAGS, d));
+        for s in 0..10 {
+            ev.push(Event::word(id::SLOT_INDEX, s));
+        }
+        let mut routes = vec![0u8; n_ins];
+        if i != 0 {
+            routes[0] = 1;
+        }
+        ev.push(Event::data(id::INSERT_ROUTING, routes));
+        ev.push(Event::int(id::INSERT_INPUT, u32::MAX));
+        ev.push(Event::int(id::INSERT_OUTPUT, if i == 0 { 0 } else { u32::MAX }));
+    }
+    Flp::from_file(FlpFile { header: Header { format: 0, channels: song.channels.len() as u16, ppq: song.ppq.clamp(24, 960) as u16 }, events: ev, trailer: vec![] })
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Channels added, removed, cloned or reordered
+// ---------------------------------------------------------------------------------------------------------------
+
+fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bool) {
+    let n_orig = orig.channels.len();
+    let srcs: Vec<Option<usize>> = song.channels.iter().map(|c| c.src.map(|s| s as usize).filter(|&s| s < n_orig)).collect();
+    if srcs.len() == n_orig && srcs.iter().enumerate().all(|(i, s)| *s == Some(i)) {
+        return;
+    }
+
+    // cut the stream into channel runs and everything else
+    enum Part {
+        Other(Event),
+        Slot(usize),
+    }
+    let mut parts: Vec<Part> = Vec::with_capacity(file.events.len());
+    let mut blocks: Vec<Vec<Event>> = vec![];
+    let mut open = false;
+    let mut word_insert = false;
+    for e in file.events.drain(..) {
+        if e.id == id::NEW_CHANNEL {
+            parts.push(Part::Slot(blocks.len()));
+            blocks.push(vec![e]);
+            open = true;
+        } else if open && !ends_channel(e.id) {
+            word_insert |= e.id == id::CHAN_TARGET_INSERT_WORD;
+            blocks.last_mut().unwrap().push(e);
+        } else {
+            open = false;
+            parts.push(Part::Other(e));
+        }
+    }
+
+    // a model for brand new channels: an existing sampler stripped of its sample, else the plain default
+    let model: Vec<Event> = orig
+        .channels
+        .iter()
+        .position(|c| c.kind == ChannelKind::Sampler)
+        .and_then(|i| blocks.get(i))
+        .map(|b| {
+            b.iter()
+                .filter(|e| e.id != id::SAMPLE_PATH && e.id != id::CHAN_AUTOMATION)
+                .cloned()
+                .map(|mut e| {
+                    match e.id {
+                        id::PLUGIN_NAME => e = text_event(id::PLUGIN_NAME, "Sampler", unicode),
+                        id::CHAN_LEVELS => {
+                            if let Value::Data(d) = &mut e.value {
+                                put_u32(d, 0, 6400);
+                                put_u32(d, 4, 10000);
+                                put_u32(d, 8, 0);
+                            }
+                        }
+                        id::CHAN_ENABLED => e.value = Value::Byte(1),
+                        _ => {}
+                    }
+                    e
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| blank_channel(0, unicode, word_insert));
+
+    let mut new_blocks: Vec<Vec<Event>> = srcs
+        .iter()
+        .enumerate()
+        .map(|(pos, s)| {
+            let mut b = match s {
+                Some(k) => blocks[*k].clone(),
+                None => model.clone(),
+            };
+            if let Some(first) = b.first_mut() {
+                first.value = Value::Word(pos as u16);
+            }
+            b
+        })
+        .collect();
+
+    // old number -> new number (the first place a kept channel sits)
+    let mut remap: HashMap<u16, u16> = HashMap::new();
+    for (pos, s) in srcs.iter().enumerate() {
+        if let Some(k) = s {
+            remap.entry(*k as u16).or_insert(pos as u16);
+        }
+    }
+
+    let n_slots = blocks.len();
+    let mut out: Vec<Event> = Vec::with_capacity(parts.len() + 64);
+    let mut it = new_blocks.drain(..);
+    for p in parts {
+        match p {
+            Part::Other(e) => out.push(e),
+            Part::Slot(k) => {
+                if let Some(b) = it.next() {
+                    out.extend(b);
+                }
+                if k + 1 == n_slots {
+                    for b in it.by_ref() {
+                        out.extend(b);
+                    }
+                }
+            }
+        }
+    }
+    let rest: Vec<Vec<Event>> = it.collect();
+    if !rest.is_empty() {
+        // the file had no channels at all: put them ahead of the playlist and mixer
+        let at = out.iter().position(|e| matches!(e.id, 99 | 233 | 236 | 238 | 42 | 149 | 204)).unwrap_or(out.len());
+        let tail = out.split_off(at);
+        out.extend(rest.into_iter().flatten());
+        out.extend(tail);
+    }
+
+    // renumber what points at channels
+    for e in &mut out {
+        match (e.id, &mut e.value) {
+            (id::PATTERN_NOTES, Value::Data(d)) => {
+                let mut nd = Vec::with_capacity(d.len());
+                for n in d.chunks_exact(NOTE_SIZE) {
+                    if let Some(&to) = remap.get(&u16at(n, 6)) {
+                        let mut n = n.to_vec();
+                        put_u16(&mut n, 6, to);
+                        nd.extend(n);
+                    }
+                }
+                *d = nd;
+            }
+            (id::PLAYLIST, Value::Data(d)) => {
+                if let Some(size) = item_size(d) {
+                    let mut nd = Vec::with_capacity(d.len());
+                    for item in d.chunks_exact(size) {
+                        let ix = u16at(item, 6);
+                        if ix > ITEM_BASE {
+                            nd.extend_from_slice(item);
+                        } else if let Some(&to) = remap.get(&ix) {
+                            let mut item = item.to_vec();
+                            put_u16(&mut item, 6, to);
+                            nd.extend(item);
+                        }
+                    }
+                    *d = nd;
+                }
+            }
+            _ => {}
+        }
+    }
+    file.events = out;
+    file.header.channels = song.channels.len() as u16;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The patch
+// ---------------------------------------------------------------------------------------------------------------
+
+fn set_or_insert(ev: &mut Vec<Event>, range: std::ops::Range<usize>, e: Event, fallback_at: usize) {
+    match (range.start..range.end.min(ev.len())).find(|&i| ev[i].id == e.id) {
+        Some(i) => ev[i] = e,
+        None => ev.insert(fallback_at.min(ev.len()), e),
+    }
+}
+
+fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
+    let head_end = ev.iter().position(|e| matches!(e.id, 64 | 65 | 99 | 233 | 236)).unwrap_or(ev.len());
+    let after_version = ev.iter().position(|e| e.id == id::VERSION).map(|i| i + 1).unwrap_or(0).min(head_end);
+    let milli = |t: f32| (t as f64 * 1000.0).round() as u32;
+    if milli(song.tempo) != milli(base.tempo) {
+        if let Some(e) = ev.iter_mut().find(|e| e.id == id::TEMPO) {
+            e.value = Value::Int(milli(song.tempo));
+        } else if let Some(e) = ev.iter_mut().find(|e| e.id == id::TEMPO_WORD) {
+            e.value = Value::Word(song.tempo.round() as u16);
+        } else {
+            ev.insert(after_version, Event::int(id::TEMPO, milli(song.tempo)));
+        }
+    }
+    if song.time_sig != base.time_sig {
+        set_or_insert(ev, 0..head_end, Event::byte(id::TIMESIG_NUM, song.time_sig.0), after_version);
+        let head_end = ev.iter().position(|e| matches!(e.id, 64 | 65 | 99 | 233 | 236)).unwrap_or(ev.len());
+        set_or_insert(ev, 0..head_end, Event::byte(id::TIMESIG_BEAT, song.time_sig.1), after_version);
+    }
+    for (eid, now, was) in [(id::TITLE, &song.title, &base.title), (id::GENRE, &song.genre, &base.genre), (id::ARTIST, &song.artist, &base.artist), (id::COMMENT, &song.comment, &base.comment)] {
+        if now != was {
+            let e = text_event(eid, now, unicode);
+            match ev.iter().position(|x| x.id == eid) {
+                Some(i) => ev[i] = e,
+                None => {
+                    let at = ev.iter().position(|e| matches!(e.id, 64 | 65 | 99 | 233 | 236)).unwrap_or(ev.len());
+                    ev.insert(at, e);
+                }
+            }
+        }
+    }
+}
+
+fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, word_insert: bool) {
+    // channel runs, last first so earlier indices stay good while events are added or removed
+    let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::NEW_CHANNEL).map(|(i, _)| i).collect();
+    for (ci, &start) in starts.iter().enumerate().rev() {
+        let (Some(now), Some(was)) = (song.channels.get(ci), base.channels.get(ci)) else { continue };
+        let mut end = start + 1;
+        while end < ev.len() && !ends_channel(ev[end].id) {
+            end += 1;
+        }
+        let find = |ev: &Vec<Event>, end: usize, eid: u8| (start..end).find(|&i| ev[i].id == eid);
+
+        // a sample path sits at the very end of the run; do it first so `end` stays right for the rest
+        if now.sample_path != was.sample_path {
+            match (find(ev, end, id::SAMPLE_PATH), now.sample_path.is_empty()) {
+                (Some(i), true) => {
+                    ev.remove(i);
+                    end -= 1;
+                }
+                (Some(i), false) => ev[i] = text_event(id::SAMPLE_PATH, &now.sample_path, unicode),
+                (None, true) => {}
+                (None, false) => {
+                    let at = find(ev, end, id::CHAN_ZIPPED).map(|i| i + 1).unwrap_or(end);
+                    ev.insert(at, text_event(id::SAMPLE_PATH, &now.sample_path, unicode));
+                    end += 1;
+                }
+            }
+        }
+        if now.enabled != was.enabled {
+            match find(ev, end, id::CHAN_ENABLED) {
+                Some(i) => ev[i].value = Value::Byte(now.enabled as u8),
+                None => {
+                    ev.insert(start + 1, Event::byte(id::CHAN_ENABLED, now.enabled as u8));
+                    end += 1;
+                }
+            }
+        }
+        if now.name != was.name {
+            // the display name is the first name event of the run (effect slots come much later in the file)
+            match find(ev, end, id::PLUGIN_NAME) {
+                Some(i) => ev[i] = text_event(id::PLUGIN_NAME, &now.name, unicode),
+                None => {
+                    let at = find(ev, end, id::NEW_PLUGIN).or(find(ev, end, id::PLUGIN_INTERNAL_NAME)).or(find(ev, end, id::CHAN_TYPE)).map(|i| i + 1).unwrap_or(start + 1);
+                    ev.insert(at, text_event(id::PLUGIN_NAME, &now.name, unicode));
+                    end += 1;
+                }
+            }
+        }
+        if now.color != was.color {
+            match find(ev, end, id::COLOR) {
+                Some(i) => {
+                    let top = ev[i].as_u32().unwrap_or(0);
+                    ev[i].value = Value::Int(color_bits(now.color, top));
+                }
+                None => {
+                    ev.insert(start + 1, Event::int(id::COLOR, color_bits(now.color, 0)));
+                    end += 1;
+                }
+            }
+        }
+        if now.insert != was.insert {
+            if let Some(i) = find(ev, end, id::CHAN_TARGET_INSERT_WORD) {
+                ev[i].value = Value::Word(now.insert as u16);
+            } else if let Some(i) = find(ev, end, id::CHAN_TARGET_INSERT) {
+                ev[i].value = Value::Byte(now.insert.min(127) as u8);
+            } else {
+                let at = find(ev, end, id::CHAN_LEVELS).unwrap_or(end);
+                ev.insert(at, if word_insert { Event::word(id::CHAN_TARGET_INSERT_WORD, now.insert as u16) } else { Event::byte(id::CHAN_TARGET_INSERT, now.insert.min(127) as u8) });
+                end += 1;
+            }
+        }
+        let levels = (pan_u(now.pan), vol_u(now.volume), now.pitch_cents.round() as i32);
+        if levels != (pan_u(was.pan), vol_u(was.volume), was.pitch_cents.round() as i32) {
+            match find(ev, end, id::CHAN_LEVELS) {
+                Some(i) => {
+                    if let Value::Data(d) = &mut ev[i].value {
+                        if d.len() < 12 {
+                            d.resize(12, 0);
+                        }
+                        if pan_u(now.pan) != pan_u(was.pan) {
+                            put_u32(d, 0, levels.0);
+                        }
+                        if vol_u(now.volume) != vol_u(was.volume) {
+                            put_u32(d, 4, levels.1);
+                        }
+                        put_u32(d, 8, levels.2 as u32);
+                    }
+                }
+                None => {
+                    let mut d = hex("001900001027000000000000000100000000000000000000");
+                    put_u32(&mut d, 0, levels.0);
+                    put_u32(&mut d, 4, levels.1);
+                    put_u32(&mut d, 8, levels.2 as u32);
+                    ev.insert(end, Event::data(id::CHAN_LEVELS, d));
+                    end += 1;
+                }
+            }
+        }
+        if now.root_key != was.root_key {
+            if let Some(i) = find(ev, end, id::CHAN_PARAMS) {
+                if let Value::Data(d) = &mut ev[i].value {
+                    put_u32(d, 16, now.root_key as u32);
+                }
+            }
+        }
+        if now.env_on != was.env_on {
+            if let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(1) {
+                if let Value::Data(d) = &mut ev[i].value {
+                    put_u32(d, 4, now.env_on as u32);
+                }
+            }
+        }
+    }
+}
+
+fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unicode: bool) {
+    let n = song.patterns.len().max(base.patterns.len());
+    for p in 0..n {
+        let number = p as u16 + 1;
+        let empty = crate::song::Pattern::default();
+        let now = song.patterns.get(p).unwrap_or(&empty);
+        let was = base.patterns.get(p).unwrap_or(&empty);
+
+        if notes_key(&now.notes) != notes_key(&was.notes) {
+            // what the file held for each note, so fields this program does not edit survive
+            let mut old: HashMap<(u32, u16, u16), Vec<flp::Note>> = HashMap::new();
+            if let Some(fp) = flp.patterns.iter().find(|fp| fp.index == number) {
+                for note in fp.notes.iter().rev() {
+                    old.entry((note.position, note.rack_channel, note.key)).or_default().push(note.clone());
+                }
+            }
+            let mut sorted: Vec<&Note> = now.notes.iter().collect();
+            sorted.sort_by_key(|n| (n.pos, n.chan, n.key));
+            let mut data = Vec::with_capacity(sorted.len() * NOTE_SIZE);
+            for note in sorted {
+                let mut f = old.get_mut(&(note.pos, note.chan, note.key as u16)).and_then(|v| v.pop()).unwrap_or(flp::Note {
+                    position: 0,
+                    flags: 0x4000,
+                    rack_channel: 0,
+                    length: 0,
+                    key: 60,
+                    group: 0,
+                    fine_pitch: 120,
+                    release: 64,
+                    midi_channel: 0,
+                    pan: 64,
+                    velocity: 100,
+                    mod_x: 128,
+                    mod_y: 128,
+                });
+                f.position = note.pos;
+                f.rack_channel = note.chan;
+                f.length = note.len;
+                f.key = note.key as u16;
+                f.velocity = vel_u(note.vel);
+                f.pan = npan_u(note.pan);
+                f.fine_pitch = fine_u(note.fine_cents);
+                f.flags = if note.muted { f.flags | 0x2000 } else { f.flags & !0x2000 };
+                f.write(&mut data);
+            }
+
+            // the note events this pattern already has
+            let mut cur = 0u16;
+            let mut mine: Vec<usize> = vec![];
+            for (i, e) in ev.iter().enumerate() {
+                match (e.id, &e.value) {
+                    (id::NEW_PATTERN, Value::Word(v)) => cur = *v,
+                    (id::PATTERN_NOTES, _) if cur == number => mine.push(i),
+                    _ => {}
+                }
+            }
+            match mine.split_first() {
+                Some((&first, rest)) => {
+                    for &i in rest.iter().rev() {
+                        ev.remove(i);
+                    }
+                    if data.is_empty() {
+                        ev.remove(first);
+                        // drop the selector too when nothing else hangs off it
+                        if first > 0 && ev[first - 1].id == id::NEW_PATTERN && ev.get(first).map(|e| matches!(e.id, 64 | 65)).unwrap_or(true) {
+                            ev.remove(first - 1);
+                        }
+                    } else {
+                        ev[first].value = Value::Data(data);
+                    }
+                }
+                None if !data.is_empty() => {
+                    let at = ev.iter().position(|e| matches!(e.id, 64 | 99 | 233 | 236)).unwrap_or(ev.len());
+                    ev.insert(at, Event::data(id::PATTERN_NOTES, data));
+                    ev.insert(at, Event::word(id::NEW_PATTERN, number));
+                }
+                None => {}
+            }
+        }
+
+        if now.name != was.name || now.color != was.color {
+            // name and colour live in a second pattern list after the first channel
+            let first_chan = ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(0);
+            let mut cur = 0u16;
+            let (mut sel, mut name_at, mut color_at, mut last_meta) = (None, None, None, None);
+            for i in first_chan..ev.len() {
+                match (ev[i].id, &ev[i].value) {
+                    (id::NEW_PATTERN, Value::Word(v)) => {
+                        cur = *v;
+                        if cur == number {
+                            sel = Some(i);
+                        }
+                    }
+                    (id::PATTERN_NAME, _) => {
+                        last_meta = Some(i);
+                        if cur == number {
+                            name_at = Some(i);
+                        }
+                    }
+                    (id::PATTERN_COLOR, _) => {
+                        last_meta = Some(i);
+                        if cur == number {
+                            color_at = Some(i);
+                        }
+                    }
+                    (id::NEW_ARRANGEMENT | id::INSERT_FLAGS | id::PLAYLIST, _) => break,
+                    _ => {}
+                }
+            }
+            let color = now.color.map(|c| color_bits(c, 0)).unwrap_or(0x0056_5148);
+            match (sel, name_at, color_at) {
+                (_, Some(ni), ci) => {
+                    ev[ni] = text_event(id::PATTERN_NAME, &now.name, unicode);
+                    match ci {
+                        Some(ci) => {
+                            if now.color != was.color {
+                                ev[ci].value = Value::Int(color);
+                            }
+                        }
+                        None => ev.insert(ni + 1, Event::int(id::PATTERN_COLOR, color)),
+                    }
+                }
+                (Some(si), None, Some(ci)) => {
+                    if now.color != was.color {
+                        ev[ci].value = Value::Int(color);
+                    }
+                    ev.insert(si + 1, text_event(id::PATTERN_NAME, &now.name, unicode));
+                }
+                _ => {
+                    // after the last pattern that has a name, else at the end of the first channel's run
+                    let at = match last_meta {
+                        Some(i) => {
+                            let mut j = i + 1;
+                            while j < ev.len() && !matches!(ev[j].id, 64 | 65 | 99 | 233 | 236) {
+                                j += 1;
+                            }
+                            j
+                        }
+                        None => {
+                            let mut j = (first_chan + 1).min(ev.len());
+                            while j < ev.len() && !ends_channel(ev[j].id) {
+                                j += 1;
+                            }
+                            j
+                        }
+                    };
+                    ev.insert(at, Event::int(id::PATTERN_COLOR, color));
+                    ev.insert(at, text_event(id::PATTERN_NAME, &now.name, unicode));
+                    ev.insert(at, Event::word(id::NEW_PATTERN, number));
+                }
+            }
+        }
+    }
+}
+
+fn track_count(flp: &Flp) -> u16 {
+    match flp.arrangements.first() {
+        Some(a) if !a.tracks.is_empty() => a.tracks.len() as u16,
+        _ if flp.version_tuple() >= (12, 9, 0, 0) => 500,
+        _ => 199,
+    }
+}
+
+fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
+    let sorted = |s: &Song| {
+        let mut c = s.clips.clone();
+        c.sort_by_key(|c| (c.pos, c.track, c.len));
+        c
+    };
+    let (now, was) = (sorted(song), sorted(base));
+    if now == was {
+        return;
+    }
+    let tracks = track_count(flp);
+    let at = ev.iter().position(|e| e.id == id::PLAYLIST);
+    let old: Vec<u8> = at.and_then(|i| ev[i].bytes().map(|b| b.to_vec())).unwrap_or_default();
+    let size = item_size(&old).unwrap_or_else(|| item_size_for(flp.version_tuple()));
+    let ppq = song.ppq.max(1) as f32;
+
+    let mut pool: HashMap<(u32, u32, u16, u16), Vec<&[u8]>> = HashMap::new();
+    let mut next_uid = 0u32;
+    if item_size(&old).is_some() {
+        for it in old.chunks_exact(size).rev() {
+            pool.entry((u32at(it, 0), u32at(it, 8), u16at(it, 12), u16at(it, 6))).or_default().push(it);
+            if size >= 60 {
+                next_uid = next_uid.max(u32at(it, 32));
+            }
+        }
+    }
+    // how each kept clip looked before, to tell an edited offset or mute from an untouched one
+    let was_by: HashMap<(u32, u32, u16, ClipSrc), &crate::song::Clip> = was.iter().map(|c| ((c.pos, c.len, c.track, c.src), c)).collect();
+
+    let mut data = Vec::with_capacity(now.len() * size);
+    for c in &now {
+        let (index, audio) = match c.src {
+            ClipSrc::Pattern(p) => (ITEM_BASE + p as u16 + 1, false),
+            ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => (ch as u16, true),
+        };
+        let track = (tracks - 1).saturating_sub(c.track);
+        let reused = pool.get_mut(&(c.pos, c.len, track, index)).and_then(|v| v.pop());
+        let before = was_by.get(&(c.pos, c.len, c.track, c.src));
+        let mut it = match reused {
+            Some(raw) => raw.to_vec(),
+            None => {
+                let mut it = vec![0u8; size];
+                put_u32(&mut it, 0, c.pos);
+                put_u16(&mut it, 4, ITEM_BASE);
+                put_u16(&mut it, 6, index);
+                put_u32(&mut it, 8, c.len);
+                put_u16(&mut it, 12, track);
+                put_u16(&mut it, 16, 0x78);
+                put_u16(&mut it, 18, 0x40);
+                it[20..24].copy_from_slice(&[0x40, 0x64, 0x80, 0x80]);
+                if size >= 60 {
+                    next_uid += 1;
+                    put_u32(&mut it, 32, next_uid);
+                    put_u32(&mut it, 52, 1.0f32.to_bits());
+                }
+                if size >= 80 {
+                    it[64..72].copy_from_slice(&1.0f64.to_le_bytes());
+                }
+                it
+            }
+        };
+        let fresh = reused.is_none();
+        if fresh || before.map(|b| b.muted != c.muted).unwrap_or(true) {
+            let f = u16at(&it, 18);
+            put_u16(&mut it, 18, if c.muted { f | 0x2000 } else { f & !0x2000 });
+        }
+        if fresh || before.map(|b| b.offset != c.offset).unwrap_or(true) {
+            let (a, b) = match (audio, c.offset) {
+                (false, 0) => (u32::MAX, u32::MAX),
+                (false, o) => (o, o + c.len),
+                (true, 0) => ((-1.0f32).to_bits(), (-1.0f32).to_bits()),
+                (true, o) => ((o as f32 / ppq).to_bits(), ((o + c.len) as f32 / ppq).to_bits()),
+            };
+            put_u32(&mut it, 24, a);
+            put_u32(&mut it, 28, b);
+        }
+        data.extend(it);
+    }
+    match at {
+        Some(i) => ev[i].value = Value::Data(data),
+        None => {
+            let at = ev.iter().position(|e| matches!(e.id, 236 | 238 | 42 | 149 | 204)).unwrap_or(ev.len());
+            ev.insert(at, Event::data(id::PLAYLIST, data));
+        }
+    }
+}
+
+fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
+    // only the first arrangement is shown, so only its tracks are edited
+    let mut arrangements = 0;
+    let mut at: Vec<usize> = vec![];
+    for (i, e) in ev.iter().enumerate() {
+        match e.id {
+            id::NEW_ARRANGEMENT => {
+                arrangements += 1;
+                if arrangements > 1 {
+                    break;
+                }
+            }
+            id::TRACK => at.push(i),
+            _ => {}
+        }
+    }
+    for (t, &i) in at.iter().enumerate().rev() {
+        let (Some(now), Some(was)) = (song.tracks.get(t), base.tracks.get(t)) else { continue };
+        if now.name != was.name {
+            let has = ev.get(i + 1).map(|e| e.id == id::TRACK_NAME).unwrap_or(false);
+            match (has, now.name.is_empty()) {
+                (true, true) => {
+                    ev.remove(i + 1);
+                }
+                (true, false) => ev[i + 1] = text_event(id::TRACK_NAME, &now.name, unicode),
+                (false, false) => ev.insert(i + 1, text_event(id::TRACK_NAME, &now.name, unicode)),
+                (false, true) => {}
+            }
+        }
+        if let Value::Data(d) = &mut ev[i].value {
+            if now.color != was.color && d.len() >= 8 {
+                let top = u32at(d, 4);
+                put_u32(d, 4, color_bits(now.color, top));
+            }
+            if now.enabled != was.enabled && d.len() > 12 {
+                d[12] = now.enabled as u8;
+            }
+        }
+    }
+}
+
+fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
+    let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
+    let mut records: Vec<(u8, u16, i32)> = vec![];
+
+    for (k, &open) in opens.iter().enumerate().rev() {
+        let (Some(now), Some(was)) = (song.inserts.get(k), base.inserts.get(k)) else { continue };
+        let mut close = open;
+        while close + 1 < ev.len() && ev[close].id != id::INSERT_OUTPUT && ev[close + 1].id != id::INSERT_FLAGS {
+            close += 1;
+        }
+        let cd = ((k + MIXER_BASE) as u16) << 6;
+        if ins_vol(now.volume) != ins_vol(was.volume) {
+            records.push((192, cd, ins_vol(now.volume)));
+        }
+        if ins_pan(now.pan) != ins_pan(was.pan) {
+            records.push((193, cd, ins_pan(now.pan)));
+        }
+        for s in &now.slots {
+            if was.slots.iter().find(|w| w.index == s.index).map(|w| w.enabled != s.enabled).unwrap_or(false) {
+                records.push((0, cd | (s.index & 63), s.enabled as i32));
+            }
+        }
+
+        // sends, inside the run
+        if now.sends != was.sends && k != 0 {
+            let i = (open..=close).find(|&i| ev[i].id == id::INSERT_ROUTING);
+            let old_len = i.and_then(|i| ev[i].bytes().map(|b| b.len())).unwrap_or(0);
+            let need = now.sends.iter().max().map(|m| m + 1).unwrap_or(1);
+            let mut r = vec![0u8; old_len.max(need)];
+            for &d in &now.sends {
+                r[d] = 1;
+            }
+            match i {
+                Some(i) => ev[i].value = Value::Data(r),
+                None => {
+                    let at = (open..=close).rev().find(|&i| ev[i].id == id::SLOT_INDEX).map(|i| i + 1).unwrap_or(open + 1);
+                    ev.insert(at, Event::data(id::INSERT_ROUTING, r));
+                }
+            }
+        }
+        if now.enabled != was.enabled {
+            if let Value::Data(d) = &mut ev[open].value {
+                let f = u32at(d, 4);
+                put_u32(d, 4, if now.enabled { f | flp::INSERT_FLAG_ENABLED } else { f & !flp::INSERT_FLAG_ENABLED });
+            }
+        }
+
+        // name and colour sit in the few events just ahead of the one that opens the insert
+        let mut pre = open;
+        while pre > 0 && matches!(ev[pre - 1].id, 42 | 95 | 149 | 204) {
+            pre -= 1;
+        }
+        if now.name != was.name {
+            match ((pre..open).find(|&i| ev[i].id == id::INSERT_NAME), now.name.is_empty()) {
+                (Some(i), true) => {
+                    ev.remove(i);
+                }
+                (Some(i), false) => ev[i] = text_event(id::INSERT_NAME, &now.name, unicode),
+                (None, false) => ev.insert(open, text_event(id::INSERT_NAME, &now.name, unicode)),
+                (None, true) => {}
+            }
+        }
+        if now.color != was.color {
+            let open = (pre..ev.len()).find(|&i| ev[i].id == id::INSERT_FLAGS).unwrap_or(open);
+            match ((pre..open).find(|&i| ev[i].id == id::INSERT_COLOR), now.color) {
+                (Some(i), None) => {
+                    ev.remove(i);
+                }
+                (Some(i), Some(c)) => ev[i].value = Value::Int(color_bits(c, 0)),
+                (None, Some(c)) => {
+                    let at = (pre..open).find(|&i| matches!(ev[i].id, 95 | 204)).unwrap_or(open);
+                    ev.insert(at, Event::int(id::INSERT_COLOR, color_bits(c, 0)));
+                }
+                (None, None) => {}
+            }
+        }
+    }
+
+    if records.is_empty() {
+        return;
+    }
+    let at = match ev.iter().position(|e| e.id == id::MIXER_PARAMS) {
+        Some(i) => i,
+        None => {
+            let at = ev.iter().rposition(|e| e.id == id::INSERT_OUTPUT).map(|i| i + 1).unwrap_or(ev.len());
+            ev.insert(at, Event::data(id::MIXER_PARAMS, vec![]));
+            at
+        }
+    };
+    if let Value::Data(d) = &mut ev[at].value {
+        for (pid, cd, value) in records {
+            let hit = (0..d.len() / 12).find(|r| d[r * 12 + 4] == pid && u16at(d, r * 12 + 6) == cd);
+            match hit {
+                Some(r) => put_u32(d, r * 12 + 8, value as u32),
+                None => {
+                    d.extend_from_slice(&0u32.to_le_bytes());
+                    d.push(pid);
+                    d.push(0x1f);
+                    d.extend_from_slice(&cd.to_le_bytes());
+                    d.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+/// The project as .flp bytes. `orig` is the file it was opened from, if any.
+pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
+    if song.channels.len() > 4000 {
+        return Err("too many channels".into());
+    }
+    let (made, song_owned);
+    let (song, orig) = match orig {
+        Some(o) => (song, o),
+        None => {
+            made = skeleton(song);
+            let mut s = song.clone();
+            for (i, c) in s.channels.iter_mut().enumerate() {
+                c.src = Some(i as u16);
+            }
+            song_owned = s;
+            (&song_owned, &made)
+        }
+    };
+
+    let ver = version_tuple(&orig.version);
+    let unicode = ver >= (11, 5, 0, 0);
+    let mut file = orig.file.clone();
+    restructure_channels(&mut file, orig, song, unicode);
+
+    // from here the file and the song agree on which channel is which; compare and patch the rest
+    let flp = Flp::from_file(file);
+    let base = Song::from_flp_with(&flp, None, None);
+    let mut ev = flp.file.events.clone();
+    let word_insert = ev.iter().any(|e| e.id == id::CHAN_TARGET_INSERT_WORD);
+
+    patch_mixer(&mut ev, song, &base, unicode);
+    patch_tracks(&mut ev, song, &base, unicode);
+    patch_playlist(&mut ev, song, &base, &flp);
+    patch_patterns(&mut ev, song, &base, &flp, unicode);
+    patch_channels(&mut ev, song, &base, unicode, word_insert);
+    patch_head(&mut ev, song, &base, unicode);
+
+    let _ = latin1;
+    Ok(FlpFile { header: flp.file.header.clone(), events: ev, trailer: flp.file.trailer.clone() }.to_bytes())
+}
+
+/// Save, then make the saved file the new original: returns the bytes to write and the parsed result, and
+/// marks every channel of `song` as coming from it.
+pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), String> {
+    let bytes = to_bytes(song, orig)?;
+    let flp = flp::parse(&bytes)?;
+    for (i, c) in song.channels.iter_mut().enumerate() {
+        c.src = Some(i as u16);
+    }
+    Ok((bytes, flp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::song::{Clip, Note};
+
+    fn reload(bytes: &[u8]) -> (Song, Flp) {
+        let f = flp::parse(bytes).expect("our own file parses");
+        (Song::from_flp_with(&f, None, None), f)
+    }
+
+    #[test]
+    fn a_new_project_round_trips() {
+        let mut s = Song::new();
+        s.title = "Test".into();
+        s.tempo = 128.5;
+        s.channels[0].name = "Boom".into();
+        s.channels[0].sample_path = "/tmp/boom.wav".into();
+        s.channels[1].volume = 0.5;
+        s.channels[1].pan = -0.25;
+        s.channels[2].insert = 3;
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].toggle_step(0, 96);
+        s.patterns[0].notes.push(Note { pos: 48, len: 24, chan: 2, key: 64, vel: 0.5, pan: 0.5, fine_cents: 0.0, muted: false });
+        s.patterns[0].sort();
+        s.ensure_pattern(2);
+        s.patterns[2].name = "Fill".into();
+        s.patterns[2].toggle_step(3, 24);
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 384, len: 192, track: 2, src: ClipSrc::Pattern(2), offset: 96, muted: true });
+        s.inserts[3].name = "Drums".into();
+        s.inserts[3].volume = 0.8;
+        s.inserts[3].pan = 0.5;
+        s.inserts[4].sends = vec![3];
+        s.inserts[5].enabled = false;
+        s.tracks[2].name = "Fills".into();
+        s.prepare();
+
+        let bytes = to_bytes(&s, None).unwrap();
+        let (r, _) = reload(&bytes);
+        assert_eq!(r.title, "Test");
+        assert!((r.tempo - 128.5).abs() < 1e-3);
+        assert_eq!(r.channels.len(), 4);
+        assert_eq!(r.channels[0].name, "Boom");
+        assert_eq!(r.channels[0].sample_path, "/tmp/boom.wav");
+        assert!((r.channels[1].volume - 0.5).abs() < 1e-3);
+        assert!((r.channels[1].pan + 0.25).abs() < 1e-3);
+        assert_eq!(r.channels[2].insert, 3);
+        assert_eq!(notes_key(&r.patterns[0].notes), notes_key(&s.patterns[0].notes));
+        assert_eq!(r.patterns[2].name, "Fill");
+        assert_eq!(r.patterns[2].notes.len(), 1);
+        assert_eq!(r.clips, s.clips);
+        assert_eq!(r.inserts[3].name, "Drums");
+        assert!((r.inserts[3].volume - 0.8).abs() < 1e-3);
+        assert!((r.inserts[3].pan - 0.5).abs() < 1e-3);
+        assert_eq!(r.inserts[4].sends, vec![3]);
+        assert!(!r.inserts[5].enabled);
+        assert!(r.inserts[6].enabled);
+        assert_eq!(r.tracks[2].name, "Fills");
+
+        // saving what was loaded changes nothing
+        let (mut r2, f2) = reload(&bytes);
+        r2.prepare();
+        assert_eq!(to_bytes(&r2, Some(&f2)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn channels_can_be_removed_added_and_cloned() {
+        let mut s = Song::new();
+        for (i, c) in s.channels.iter_mut().enumerate() {
+            c.name = format!("C{i}");
+        }
+        s.patterns[0].toggle_step(1, 0);
+        s.patterns[0].toggle_step(3, 24);
+        let bytes = to_bytes(&s, None).unwrap();
+        let (mut r, f) = reload(&bytes);
+
+        // remove channel 1 the way the rack does, add a new one, clone the old channel 3
+        r.channels.remove(1);
+        for p in &mut r.patterns {
+            p.notes.retain(|n| n.chan != 1);
+            for n in &mut p.notes {
+                if n.chan > 1 {
+                    n.chan -= 1;
+                }
+            }
+        }
+        r.channels.push(crate::song::Chan { name: "New".into(), ..Default::default() });
+        let mut twin = r.channels[2].clone();
+        twin.name = "C3 #2".into();
+        r.channels.push(twin);
+        r.patterns[0].toggle_step(3, 48);
+        r.prepare();
+
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        assert_eq!(f2.header.channels, 5);
+        let (r2, _) = reload(&bytes2);
+        let names: Vec<&str> = r2.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["C0", "C2", "C3", "New", "C3 #2"]);
+        let mut got: Vec<(u16, u32)> = r2.patterns[0].notes.iter().map(|n| (n.chan, n.pos)).collect();
+        got.sort();
+        assert_eq!(got, [(2, 24), (3, 48)]);
+        // and it is stable from there
+        assert_eq!(to_bytes(&r, Some(&f2)).unwrap(), bytes2);
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every real project saves byte-identical when untouched, and an edit to each
+    /// survives a reload without disturbing anything else.
+    #[test]
+    fn corpus_saves_exactly_and_edits_survive() {
+        let Ok(dir) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().map(|x| x.eq_ignore_ascii_case("flp")).unwrap_or(false) {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = vec![];
+        walk(std::path::Path::new(&dir), &mut files);
+        assert!(!files.is_empty());
+        for p in files {
+            let bytes = std::fs::read(&p).unwrap();
+            let (song, f) = reload(&bytes);
+            assert_eq!(to_bytes(&song, Some(&f)).unwrap(), bytes, "untouched save differs: {}", p.display());
+
+            let mut s = song.clone();
+            s.tempo = 133.25;
+            s.title = "Edited".into();
+            s.ensure_pattern(0);
+            s.patterns[0].notes.push(Note { pos: 7, len: 11, chan: 0, key: 61, vel: 0.9, pan: 0.0, fine_cents: 0.0, muted: false });
+            let extra = s.patterns.len();
+            s.ensure_pattern(extra);
+            s.patterns[extra].name = "Brand new".into();
+            s.patterns[extra].notes.push(Note::step(0, 0));
+            s.clips.push(Clip { pos: 96 * 4 * 300, len: 96, track: 1, src: ClipSrc::Pattern(extra), offset: 0, muted: false });
+            if s.inserts.len() > 2 {
+                s.inserts[1].name = "Renamed".into();
+                s.inserts[1].volume = 0.5;
+                s.inserts[2].color = Some([1, 2, 3]);
+            }
+            if let Some(c) = s.channels.first_mut() {
+                c.name = "First".into();
+                c.volume = 0.25;
+                c.enabled = !c.enabled;
+            }
+            s.prepare();
+            let out = to_bytes(&s, Some(&f)).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            let (r, _) = reload(&out);
+            let name = p.display();
+            assert!((r.tempo - 133.25).abs() < 0.6, "{name}: tempo {}", r.tempo);
+            assert_eq!(r.title, "Edited", "{name}");
+            assert_eq!(r.channels.len(), song.channels.len(), "{name}");
+            assert_eq!(notes_key(&r.patterns[0].notes), notes_key(&s.patterns[0].notes), "{name}: pattern 1");
+            assert_eq!(r.patterns[extra].name, "Brand new", "{name}");
+            assert_eq!(r.patterns[extra].notes.len(), 1, "{name}");
+            for i in 1..extra {
+                assert_eq!(notes_key(&r.patterns[i].notes), notes_key(&song.patterns[i].notes), "{name}: pattern {}", i + 1);
+                assert_eq!(r.patterns[i].name, song.patterns[i].name, "{name}");
+            }
+            let mut want = s.clips.clone();
+            want.sort_by_key(|c| (c.pos, c.track, c.len));
+            let mut got = r.clips.clone();
+            got.sort_by_key(|c| (c.pos, c.track, c.len));
+            assert_eq!(got.len(), want.len(), "{name}: clip count");
+            if s.inserts.len() > 2 {
+                assert_eq!(r.inserts[1].name, "Renamed", "{name}");
+                assert!((r.inserts[1].volume - 0.5).abs() < 1e-3, "{name}");
+                assert_eq!(r.inserts[2].color, Some([1, 2, 3]), "{name}");
+                assert_eq!(r.inserts.len(), song.inserts.len(), "{name}");
+                for i in 3..song.inserts.len() {
+                    assert_eq!(r.inserts[i].name, song.inserts[i].name, "{name}: insert {i}");
+                    assert_eq!(r.inserts[i].sends, song.inserts[i].sends, "{name}: insert {i}");
+                }
+            }
+            if let (Some(c), Some(o)) = (r.channels.first(), song.channels.first()) {
+                assert_eq!(c.name, "First", "{name}");
+                assert!((c.volume - 0.25).abs() < 1e-3, "{name}");
+                assert_eq!(c.enabled, !o.enabled, "{name}");
+            }
+            for (c, o) in r.channels.iter().zip(&song.channels).skip(1) {
+                assert_eq!((c.name.as_str(), c.sample_path.as_str(), c.insert), (o.name.as_str(), o.sample_path.as_str(), o.insert), "{name}");
+            }
+        }
+    }
+}

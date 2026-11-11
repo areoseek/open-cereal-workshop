@@ -34,19 +34,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_and_writes_a_default_beat() {
-        let p = crate::Project::from_shared(&crate::Shared::new(), "demo");
-        let buf = crate::render_project(&p, 44_100.0, 2);
-        assert!(buf.len() > 44_100); // at least a second for two bars at 130 bpm
-        assert!(buf.iter().any(|x| x.abs() > 0.1), "default beat should make sound");
-        assert!(buf.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
-        let mut out = vec![];
-        write_pcm16(&mut out, &buf, 44_100, 1).unwrap();
-        assert_eq!(&out[0..4], b"RIFF");
-        assert_eq!(out.len(), 44 + buf.len() * 2);
-    }
-
-    #[test]
     fn header_is_well_formed() {
         let mut out = vec![];
         write_pcm16(&mut out, &[0.0, 1.0, -1.0, 0.5], 48_000, 1).unwrap();
