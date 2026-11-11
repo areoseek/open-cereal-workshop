@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(encode(&p, Some(&b)), b);
         let mut st = State::new(&p, 44100.0);
         let mut io = vec![[0.25, -0.5]; 2000];
-        process(&p, &mut st, &mut io, &Ctx { sr: 44100.0, step: 5512.5 });
+        process(&p, &mut st, &mut io, &Ctx { sr: 44100.0, step: 5512.5, clock: Default::default() });
         assert!(io.iter().all(|s| *s == [0.25, -0.5]));
     }
 

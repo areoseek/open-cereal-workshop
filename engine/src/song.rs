@@ -50,6 +50,8 @@ pub struct Chan {
     pub slices: Option<Arc<crate::slicer::Slices>>,
     /// The sample map of a pad machine or multi-sample player.
     pub zones: Option<Arc<crate::zones::Map>>,
+    /// The live plug-in of a channel that plays one from another maker.
+    pub ext: Option<crate::host::Hosted>,
 }
 
 /// One envelope of a sampler channel. Times are seconds.
@@ -353,6 +355,11 @@ impl Chan {
         Self { name: d.title.into(), kind: ChannelKind::Plugin, plugin: d.ident.into(), gen: Some(crate::synth::Gen::new(kind)), bay: None, ..Default::default() }
     }
 
+    /// A channel playing a plug-in from another maker.
+    pub fn hosted(inst: Arc<crate::host::Instance>) -> Self {
+        Self { name: inst.found.name.clone(), kind: ChannelKind::Plugin, plugin: WRAPPER.into(), ext: Some(crate::host::Hosted(inst)), ..Default::default() }
+    }
+
     pub fn set_sample(&mut self, raw: Option<Arc<Sample>>) {
         self.raw = raw;
         self.bake();
@@ -512,7 +519,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
     }
 }
 
@@ -666,10 +673,19 @@ pub struct Bay {
     pub layers: crate::fxpatch::Layers,
 }
 
+/// The stored identifier of the unit that holds a plug-in from another maker.
+pub const WRAPPER: &str = "Fruity Wrapper";
+
 /// The stored identifier of the patch bay.
 pub const BAY: &str = "Patcher";
 
 impl Slot {
+    /// A slot running a plug-in from another maker.
+    pub fn hosted(index: u16, inst: Arc<crate::host::Instance>) -> Self {
+        let name = inst.found.name.clone();
+        let fx = crate::fx::Fx { ext: Some(crate::host::Hosted(inst)), ..crate::fx::Fx::new(crate::fx::Kind::Hosted) };
+        Self { index, plugin: WRAPPER.to_string(), name, enabled: true, mix: 1.0, fx: Some(fx), src: None }
+    }
     /// A new slot holding one of our units at its default settings.
     pub fn with_fx(index: u16, kind: crate::fx::Kind) -> Self {
         let d = crate::fx::def(kind);
@@ -678,6 +694,9 @@ impl Slot {
     /// What to call the slot on screen: the user's own name when they gave one, else our name for the unit.
     pub fn title(&self) -> String {
         // a wrapped unit has the wrapper's identifier, so its title comes from the unit itself
+        if let Some(h) = self.fx.as_ref().and_then(|f| f.ext.as_ref()) {
+            return if self.name.is_empty() || self.name == self.plugin { h.0.found.name.clone() } else { self.name.clone() };
+        }
         let own = crate::fx::title_for(&self.plugin).or_else(|| self.fx.as_ref().map(|f| crate::fx::def(f.kind).title));
         match own {
             Some(t) if self.name.is_empty() || self.name == self.plugin => t.to_string(),
@@ -822,6 +841,19 @@ fn color(v: u32) -> Color {
 }
 
 impl Song {
+    /// Every hosted plug-in the song holds, on channels and in effect slots.
+    pub fn hosted(&self) -> Vec<Arc<crate::host::Instance>> {
+        let chans = self.channels.iter().filter_map(|c| c.ext.as_ref());
+        let slots = self.inserts.iter().flat_map(|i| i.slots.iter()).filter_map(|s| s.fx.as_ref().and_then(|f| f.ext.as_ref()));
+        chans.chain(slots).map(|h| h.0.clone()).collect()
+    }
+
+    /// Get every hosted plug-in ready to run at this rate. Call from the window thread before the song is played.
+    pub fn activate_hosted(&self, rate: f32) {
+        for h in self.hosted() {
+            h.activate(rate);
+        }
+    }
     /// A new, empty project: four empty sampler channels, one pattern, the default mixer.
     pub fn new() -> Self {
         let names = ["Kick", "Clap", "Hat", "Snare"];
@@ -1164,11 +1196,15 @@ impl Song {
                     bay: None,
                     slices,
                     zones: bank.or(zones),
+                    ext: None,
                 };
+                if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(WRAPPER) {
+                    ch.ext = crate::host::from_block(&c.state).map(crate::host::Hosted);
+                }
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
                     if let Some((p, lead, g, layers)) = crate::fxpatch::decode_gen(&c.state) {
                         ch.gen = Some(g);
-                        ch.bay = Some(Bay { fx: crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)), raw: None }, lead, layers });
+                        ch.bay = Some(Bay { fx: crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)), raw: None, ext: None }, lead, layers });
                     }
                 }
                 if let Some(g) = ch.gen.as_mut().filter(|g| matches!(g.kind, crate::synth::Kind::Grain | crate::synth::Kind::Travel)) {

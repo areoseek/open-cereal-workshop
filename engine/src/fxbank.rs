@@ -393,7 +393,7 @@ mod tests {
         let again = decode(&encode(&q, Some(&block))).unwrap();
         assert_eq!(again[..LISTED], q[..LISTED]);
         // the default low-pass lets a low tone through and holds a high one back
-        let cx = Ctx { sr: 48000.0, step: 6000.0 };
+        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
         let level = |hz: f32| {
             let mut st = State::default();
             let mut io: Vec<[f32; 2]> = (0..9600).map(|i| [(i as f32 * hz / 48000.0 * 2.0 * PI).sin() * 0.5; 2]).collect();

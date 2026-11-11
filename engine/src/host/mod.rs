@@ -160,7 +160,107 @@ pub fn folders() -> Vec<PathBuf> {
         v.push("/usr/local/lib/clap".into());
         v.push("/usr/lib64/clap".into());
     }
+    if let Ok(more) = EXTRA.lock() {
+        v.extend(more.iter().cloned());
+    }
     v
+}
+
+static EXTRA: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static KNOWN: Mutex<Option<Arc<Vec<Found>>>> = Mutex::new(None);
+
+/// Look in this folder too (a search folder the user added).
+pub fn add_folder(dir: &Path) {
+    if let Ok(mut more) = EXTRA.lock() {
+        if !more.iter().any(|d| d == dir) {
+            more.push(dir.to_path_buf());
+            forget();
+        }
+    }
+}
+
+/// Drop the list of installed plug-ins, so the next look scans the folders again.
+pub fn forget() {
+    if let Ok(mut k) = KNOWN.lock() {
+        *k = None;
+    }
+}
+
+/// Every installed plug-in. The folders are scanned the first time this is asked.
+pub fn known() -> Arc<Vec<Found>> {
+    if let Some(k) = KNOWN.lock().ok().and_then(|k| k.clone()) {
+        return k;
+    }
+    let list = Arc::new(files().iter().flat_map(|f| inside(f)).collect::<Vec<_>>());
+    if let Ok(mut k) = KNOWN.lock() {
+        *k = Some(list.clone());
+    }
+    list
+}
+
+/// The parts of a wrapper block: a number, then pieces of (id, length, bytes).
+fn pieces(state: &[u8]) -> Option<Vec<(u32, &[u8])>> {
+    let mut at = 4;
+    let mut out = Vec::new();
+    while at + 12 <= state.len() {
+        let id = u32::from_le_bytes(state[at..at + 4].try_into().ok()?);
+        let size = u64::from_le_bytes(state[at + 4..at + 12].try_into().ok()?) as usize;
+        at += 12;
+        out.push((id, state.get(at..at.checked_add(size)?)?));
+        at += size;
+    }
+    (at == state.len() && !out.is_empty()).then_some(out)
+}
+
+const P_ID: u32 = 52;
+const P_STATE: u32 = 53;
+const P_NAME: u32 = 54;
+const P_PATH: u32 = 55;
+const P_VENDOR: u32 = 56;
+
+/// The wrapper block of a plug-in, for a project file: its name, where it was found, who made it, its
+/// identifier and what it saved of itself. Given the block it was read from, only the saved part changes.
+pub fn block(inst: &Instance, base: Option<&[u8]>) -> Vec<u8> {
+    let state = inst.save().unwrap_or_default();
+    let path = inst.found.path.to_string_lossy().into_owned();
+    let mut parts: Vec<(u32, Vec<u8>)> = match base.and_then(pieces) {
+        Some(p) if from_parts(&p).is_some_and(|(_, id)| id == inst.found.id) => p.into_iter().map(|(i, d)| (i, d.to_vec())).collect(),
+        _ => vec![(P_ID, inst.found.id.clone().into_bytes()), (P_NAME, inst.found.name.clone().into_bytes()), (P_PATH, path.into_bytes()), (P_VENDOR, inst.found.vendor.clone().into_bytes())],
+    };
+    parts.retain(|p| p.0 != P_STATE);
+    parts.push((P_STATE, state));
+    let mut out = base.filter(|b| b.len() >= 4 && pieces(b).is_some()).map(|b| b[..4].to_vec()).unwrap_or_else(|| 10u32.to_le_bytes().to_vec());
+    for (id, data) in parts {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&data);
+    }
+    out
+}
+
+/// The file and identifier a wrapper block names, when it is a plug-in of the kind we host.
+fn from_parts(parts: &[(u32, &[u8])]) -> Option<(PathBuf, String)> {
+    let text = |want: u32| parts.iter().find(|p| p.0 == want).map(|p| String::from_utf8_lossy(p.1).trim_end_matches('\0').to_string());
+    let path = PathBuf::from(text(P_PATH)?);
+    if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) {
+        return None;
+    }
+    Some((path, text(P_ID).unwrap_or_default()))
+}
+
+/// Open the plug-in a wrapper block names and hand it what it saved. Only installed plug-ins are opened:
+/// the one with the block's identifier, wherever it lives on this machine.
+pub fn from_block(state: &[u8]) -> Option<Arc<Instance>> {
+    let parts = pieces(state)?;
+    let (path, id) = from_parts(&parts)?;
+    let known = known();
+    let name = path.file_name();
+    let hit = known.iter().find(|f| f.id == id && f.path == path).or_else(|| known.iter().find(|f| !id.is_empty() && f.id == id)).or_else(|| known.iter().find(|f| id.is_empty() && f.path.file_name() == name))?;
+    let inst = Instance::open(&hit.path, &hit.id)?;
+    if let Some((_, saved)) = parts.iter().find(|p| p.0 == P_STATE).filter(|p| !p.1.is_empty()) {
+        inst.restore(saved);
+    }
+    Some(inst)
 }
 
 /// Every plug-in file under the install folders.

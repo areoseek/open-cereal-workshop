@@ -57,6 +57,8 @@ pub enum Kind {
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
+    /// A plug-in from another maker, run through the host.
+    Hosted,
     /// Pages of notes or a web address; makes no sound.
     Notes,
     Conv,
@@ -666,6 +668,7 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Patch, ident: "Patcher", title: "Patch Bay", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Rack, ident: "Distructor", title: "Drive Rack", size: 958, fixed: &[], params: &[] },
     Def { kind: Kind::Multi, ident: "Multiband Delay", title: "Band Delay", size: 1781, fixed: &[], params: &[] },
+    Def { kind: Kind::Hosted, ident: "Hosted Plug-in", title: "Plug-in", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Fruity X-Y-Z Controller", title: "Three Axis Pad", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Newtime", title: "Time Editor", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Newtone", title: "Pitch Editor", size: 0, fixed: &[], params: &[] },
@@ -1623,6 +1626,8 @@ pub struct Fx {
     pub sub: Option<std::sync::Arc<crate::fxpatch::Patch>>,
     /// The whole block of a unit with drawn lines, as read or as last edited; the lines live here, their tables in `p`.
     pub raw: Option<std::sync::Arc<Vec<u8>>>,
+    /// The live plug-in of a hosted unit. Copies of the song share it.
+    pub ext: Option<crate::host::Hosted>,
 }
 
 /// An impulse and the stored path it came from (empty when the block carried the sound itself).
@@ -1713,7 +1718,7 @@ impl Fx {
         if kind == Kind::Bank {
             return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
         }
-        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), ir: None, sub: None, raw: None }
+        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), ir: None, sub: None, raw: None, ext: None }
     }
 
     /// Put setting `k` at `v` (0..=1) of its travel, as a controller does. Settings past the unit's listed
@@ -1728,34 +1733,39 @@ impl Fx {
     /// too short to hold its settings.
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
         if ident.eq_ignore_ascii_case("Fruity Wrapper") {
+            if wrapped(state).is_none() {
+                // not one of the old stock units: a plug-in from another maker, when it is installed here
+                let inst = crate::host::from_block(state)?;
+                return Some(Self { ext: Some(crate::host::Hosted(inst)), ..Self::new(Kind::Hosted) });
+            }
             let (d, at) = wrapped(state)?;
             let p = d.params.iter().enumerate().map(|(i, q)| wrapped_value(q, &state[at + i * 4..])).collect();
-            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if d.kind == Kind::Notes {
-            return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Formula {
-            return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Bank {
-            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Patch {
-            return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None });
+            return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None, ext: None });
         }
         if d.kind == Kind::Rack {
-            return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Multi {
-            return crate::fxmulti::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::fxmulti::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Voc {
-            return crate::fxvoc::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::fxvoc::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::OldVoc {
-            return crate::fxvoc::classic::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
+            return crate::fxvoc::classic::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
         // the oldest reverb blocks (found in presets) have no version number in front
@@ -1790,7 +1800,7 @@ impl Fx {
             for _ in 0..4 {
                 at = drawn_table(state, at, &mut p)?;
             }
-            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())) });
+            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())), ext: None });
         }
         let mut p: Vec<f32> = d
             .params
@@ -1823,12 +1833,15 @@ impl Fx {
             }
         }
         let raw = matches!(d.kind, Kind::Curve | Kind::Warp).then(|| std::sync::Arc::new(state.to_vec()));
-        Some(Self { kind: d.kind, p, ir, sub: None, raw })
+        Some(Self { kind: d.kind, p, ir, sub: None, raw, ext: None })
     }
 
     /// Write the settings into a stored block: `base` when the effect came from a file (everything we do not
     /// model is kept), a fresh block otherwise.
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
+        if let Some(h) = &self.ext {
+            return crate::host::block(&h.0, base);
+        }
         if let Some((d, at)) = base.and_then(wrapped) {
             if d.kind == self.kind {
                 // settings go back into the wrapper's own block; untouched ones keep their exact bytes
@@ -2087,6 +2100,8 @@ pub struct Ctx {
     pub sr: f32,
     /// Frames in one step (a sixteenth) at the current tempo.
     pub step: f32,
+    /// Where the song is, for hosted plug-ins that follow it.
+    pub clock: crate::host::Clock,
 }
 
 /// The classic units run on the processor of their successor. This gives the successor's kind for one of them.
@@ -2539,6 +2554,10 @@ impl Unit {
             u.process(io, cx);
             return;
         }
+        if let Some(h) = &self.fx.ext {
+            h.0.process(io, &[], &cx.clock, cx.sr);
+            return;
+        }
         let sr = cx.sr;
         let p = &self.fx.p;
         let z = &mut self.z;
@@ -2806,7 +2825,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru | Kind::Notes => {}
+            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru | Kind::Hosted | Kind::Notes => {}
             Kind::Conv => {
                 if let Some(st) = &mut self.conv {
                     let (dry, wet) = (p[0] / 1000.0, p[1] / 1000.0);
@@ -4794,7 +4813,7 @@ mod tests {
     use super::*;
 
     fn run(fx: Fx, input: impl Fn(usize) -> [f32; 2], n: usize) -> Vec<[f32; 2]> {
-        let cx = Ctx { sr: 44100.0, step: 44100.0 * 60.0 / 130.0 / 4.0 };
+        let cx = Ctx { sr: 44100.0, step: 44100.0 * 60.0 / 130.0 / 4.0, clock: Default::default() };
         let mut u = Unit::new(fx, cx.sr);
         let mut io: Vec<[f32; 2]> = (0..n).map(input).collect();
         for c in io.chunks_mut(256) {
@@ -4974,7 +4993,7 @@ mod tests {
         }
         fx.p[4] = 0.0;
         fx.p[5] = 0.0;
-        let cx = Ctx { sr: 48000.0, step: 6000.0 };
+        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
         let mut u = Unit::new(fx, cx.sr);
         let src = |i: usize| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5;
         let mut io: Vec<[f32; 2]> = (0..96000).map(|i| [src(i); 2]).collect();

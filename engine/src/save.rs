@@ -565,9 +565,17 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                     }
                 }
             }
-        } else if let Some(g) = now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind) {
-            // a built-in instrument: the channel becomes (or stays) a generator channel carrying its settings
-            let ident = crate::synth::def(g.kind).ident;
+        } else if let Some(g) = now.ext.as_ref().map(Ok).or_else(|| now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind).map(Err)) {
+            // a built-in instrument, or a hosted one (whose settings live in the plug-in, so it is always
+            // written): the channel becomes (or stays) a generator channel carrying its settings
+            let ident = match g {
+                Ok(_) => crate::song::WRAPPER,
+                Err(g) => crate::synth::def(g.kind).ident,
+            };
+            let encode = |base: Option<&[u8]>| match g {
+                Ok(h) => crate::host::block(&h.0, base),
+                Err(g) => g.encode(base),
+            };
             if let Some(i) = find(ev, end, id::CHAN_TYPE) {
                 ev[i].value = Value::Byte(2);
             }
@@ -598,12 +606,12 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 Some(i) => {
                     let keep = was.plugin == now.plugin;
                     if let Value::Data(d) = &mut ev[i].value {
-                        *d = g.encode(keep.then_some(d.as_slice()));
+                        *d = encode(keep.then_some(d.as_slice()));
                     }
                 }
                 None => {
                     let at = find(ev, end, id::COLOR).or(find(ev, end, id::PLUGIN_NAME)).map(|i| i + 1).unwrap_or(at + 2);
-                    ev.insert(at, Event::data(id::PLUGIN_PARAMS, g.encode(None)));
+                    ev.insert(at, Event::data(id::PLUGIN_PARAMS, encode(None)));
                     end += 1;
                 }
             }
@@ -1565,7 +1573,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 if q(w.mix, 12800.0) != q(s.mix, 12800.0) {
                     records.push((1, cd | (s.index & 63), q(s.mix, 12800.0)));
                 }
-                if let (true, Some(f)) = (w.fx != s.fx, &s.fx) {
+                if let (true, Some(f)) = (w.fx != s.fx || s.fx.as_ref().is_some_and(|f| f.ext.is_some()), &s.fx) {
                     let Some(end) = (open..=close).find(|&i| ev[i].id == id::SLOT_INDEX && ev[i].value == Value::Word(s.index)) else { continue };
                     let begin = (open..end).rev().find(|&i| ev[i].id == id::SLOT_INDEX).unwrap_or(open);
                     if let Some(i) = (begin..end).find(|&i| ev[i].id == id::PLUGIN_PARAMS) {
@@ -1748,6 +1756,50 @@ mod tests {
         song.channels[n].gen.as_mut().unwrap().p[9] = 7.0;
         let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
         assert_eq!(reload(&bytes).0.channels[n].gen, song.channels[n].gen);
+    }
+
+    #[test]
+    fn hosted_plugins_round_trip() {
+        use crate::host::{self, Instance};
+        use crate::song::{Chan, Slot};
+        let Some(built) = host::test_plugin() else {
+            eprintln!("test plug-in not built; skipped");
+            return;
+        };
+        // installed the way a user would have it: a file of the right kind in a folder we search
+        let dir = std::env::temp_dir().join(format!("cereal-host-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test-tone.clap");
+        std::fs::copy(&built, &path).unwrap();
+        host::add_folder(&dir);
+        let mut song = Song::new();
+        let n = song.channels.len();
+        let a = Instance::open(&path, "").unwrap();
+        let b = Instance::open(&path, "").unwrap();
+        let gain = a.params()[0].id;
+        a.activate(48_000.0);
+        b.activate(48_000.0);
+        a.set(gain, 1.5);
+        b.set(gain, 0.25);
+        a.idle();
+        b.idle();
+        song.channels.push(Chan::hosted(a));
+        song.inserts[0].slots = vec![Slot::hosted(3, b)];
+        let (bytes, flp) = save(&mut song, None).unwrap();
+        let (back, _) = reload(&bytes);
+        let chan = back.channels[n].ext.as_ref().expect("the channel's plug-in is opened again");
+        assert_eq!(back.channels[n].plugin, crate::song::WRAPPER);
+        assert_eq!(chan.0.value(gain), Some(1.5));
+        let slot = &back.inserts[0].slots[0];
+        assert_eq!((slot.index, slot.title().as_str()), (3, "Test Tone"));
+        assert_eq!(slot.fx.as_ref().unwrap().ext.as_ref().unwrap().0.value(gain), Some(0.25));
+        // nothing changed: the file comes out the same; a change in the plug-in is written
+        assert_eq!(to_bytes(&song, Some(&flp)).unwrap(), bytes);
+        song.channels[n].ext.as_ref().unwrap().0.set(gain, 0.75);
+        song.channels[n].ext.as_ref().unwrap().0.idle();
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        assert_eq!(reload(&bytes).0.channels[n].ext.as_ref().unwrap().0.value(gain), Some(0.75));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

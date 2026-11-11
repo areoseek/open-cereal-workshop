@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn the_modulator_shapes_the_carrier() {
-        let cx = Ctx { sr: 44_100.0, step: 5512.0 };
+        let cx = Ctx { sr: 44_100.0, step: 5512.0, clock: Default::default() };
         let mut p = decode(&fresh()).unwrap();
         p[MOD_THRU] = 0.0;
         p[FINISH] = 0.0;
@@ -1014,7 +1014,7 @@ mod tests {
         let p = classic::decode(&b).unwrap();
         assert_eq!(classic::encode(&p), b);
         assert_eq!(b.len(), 129);
-        let cx = Ctx { sr: 44_100.0, step: 5512.0 };
+        let cx = Ctx { sr: 44_100.0, step: 5512.0, clock: Default::default() };
         let mut st = classic::State::default();
         let mut seed = 7u32;
         let mut level = |on: bool, st: &mut classic::State| {

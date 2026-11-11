@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn no_scale_passes_the_sound_and_scale_delays_the_top() {
-        let cx = Ctx { sr: 44100.0, step: 5000.0 };
+        let cx = Ctx { sr: 44100.0, step: 5000.0, clock: Default::default() };
         let mut p = decode(&fresh()).unwrap();
         p[SCALE] = 0.0;
         p[FEEDBACK] = 0.0;

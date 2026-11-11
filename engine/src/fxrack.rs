@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn every_model_keeps_the_sound_finite_and_bounded() {
-        let cx = Ctx { sr: 44_100.0, step: 5512.0 };
+        let cx = Ctx { sr: 44_100.0, step: 5512.0, clock: Default::default() };
         for kind in 0..3 {
             let models = [DRIVES.len(), FILTERS.len(), CHORUSES.len()][kind];
             for model in 0..models {

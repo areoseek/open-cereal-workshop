@@ -374,6 +374,10 @@ impl Handle {
             arps: Vec::new(),
             midi_wait: Vec::with_capacity(64),
             midi_live: Vec::new(),
+            host_wait: Vec::with_capacity(64),
+            host_live: Vec::new(),
+            host_evs: Vec::with_capacity(64),
+            host_buf: vec![[0.0; 2]; BLOCK],
             pad_turn: Vec::with_capacity(128),
             midi_seen: Vec::new(),
             midi_ran: false,
@@ -824,6 +828,12 @@ pub struct Player {
     midi_wait: Vec<(u64, crate::midiout::Msg)>,
     /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
     midi_live: Vec<(u16, u8, crate::midiout::Msg)>,
+    /// Notes on their way to hosted plug-ins: frames still to wait, channel, and the note.
+    host_wait: Vec<(u64, u16, crate::host::Ev)>,
+    /// Hand-held notes of hosted plug-ins: channel and key.
+    host_live: Vec<(u16, u8)>,
+    host_evs: Vec<crate::host::Ev>,
+    host_buf: Vec<[f32; 2]>,
     /// The layer each pad last played, for pads whose layers take turns: channel, key, layer.
     pad_turn: Vec<(u16, u8, usize)>,
     /// What each sender channel last put on the wire, so only changes are sent.
@@ -1148,6 +1158,20 @@ impl Player {
             }
             return;
         }
+        if ch.ext.is_some() {
+            // a hosted plug-in is handed the note and its end; the sound is made when the block is mixed
+            use crate::host::Ev;
+            let key = n.key.min(127);
+            let vel = (n.vel * 100.0 / 127.0).clamp(1.0 / 127.0, 1.0);
+            let off = Ev::NoteOff { at: 0, key, chan: 0 };
+            self.host_wait.push((delay as u64, n.chan, Ev::NoteOn { at: 0, key, chan: 0, vel }));
+            match len_frames {
+                Some(f) => self.host_wait.push((delay as u64 + f.max(1), n.chan, off)),
+                None if live => self.host_live.push((n.chan, n.key.min(127))),
+                None => self.host_wait.push((delay as u64 + (self.sr * 0.25) as u64, n.chan, off)),
+            }
+            return;
+        }
         if ch.plugin.eq_ignore_ascii_case(crate::midiout::IDENT) {
             // the MIDI sender makes no sound: the note goes out as a message, and its end follows when it is due
             let h = crate::midiout::Head::read(ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]));
@@ -1456,6 +1480,10 @@ impl Player {
                 return;
             }
         }
+        while let Some(i) = self.host_live.iter().position(|m| m.0 == chan && m.1 == key.min(127)) {
+            self.host_live.swap_remove(i);
+            self.host_wait.push((0, chan, crate::host::Ev::NoteOff { at: 0, key: key.min(127), chan: 0 }));
+        }
         while let Some(i) = self.midi_live.iter().position(|m| m.0 == chan && m.1 == key) {
             let m = self.midi_live.swap_remove(i);
             self.midi_wait.push((0, m.2));
@@ -1473,6 +1501,13 @@ impl Player {
         });
         for (_, _, off) in self.midi_live.drain(..) {
             self.midi_wait.push((0, off));
+        }
+        self.host_wait.retain_mut(|(left, _, e)| {
+            *left = 0;
+            matches!(e, crate::host::Ev::NoteOff { .. })
+        });
+        for (chan, key) in self.host_live.drain(..) {
+            self.host_wait.push((0, chan, crate::host::Ev::NoteOff { at: 0, key, chan: 0 }));
         }
     }
 
@@ -1926,7 +1961,8 @@ impl Player {
             self.fx = (0..ni).map(|_| vec![]).collect();
             self.ring = vec![0; ni];
         }
-        let cx = fx::Ctx { sr: self.sr, step: (song.step() as f64 / self.tpf.max(1e-9)) as f32 };
+        let clock = crate::host::Clock { playing: self.transport.playing(), tempo: self.transport.tempo() as f64, beats: self.pos / song.ppq.max(1) as f64, sig: song.time_sig };
+        let cx = fx::Ctx { sr: self.sr, step: (song.step() as f64 / self.tpf.max(1e-9)) as f32, clock };
         if self.chan_fx.len() != song.channels.len() {
             self.chan_fx.resize_with(song.channels.len(), || None);
         }
@@ -2003,6 +2039,47 @@ impl Player {
             cf.dirty = false;
         }
         self.transport.voices.store(live, Relaxed);
+
+        // hosted instruments: each is handed the notes due in this block and gives its sound to its track
+        for (c, ch) in song.channels.iter().enumerate() {
+            let Some(h) = &ch.ext else { continue };
+            self.host_evs.clear();
+            for (left, chan, e) in &self.host_wait {
+                if *chan as usize == c && *left < n as u64 {
+                    let at = *left as u32;
+                    self.host_evs.push(match *e {
+                        crate::host::Ev::NoteOn { key, chan, vel, .. } => crate::host::Ev::NoteOn { at, key, chan, vel },
+                        crate::host::Ev::NoteOff { key, chan, .. } => crate::host::Ev::NoteOff { at, key, chan },
+                        crate::host::Ev::Midi { data, .. } => crate::host::Ev::Midi { at, data },
+                    });
+                }
+            }
+            self.host_evs.sort_by_key(|e| match e {
+                crate::host::Ev::NoteOn { at, .. } | crate::host::Ev::NoteOff { at, .. } | crate::host::Ev::Midi { at, .. } => *at,
+            });
+            let buf = &mut self.host_buf[..n];
+            buf.fill([0.0; 2]);
+            if !h.0.process(buf, &self.host_evs, &cx.clock, self.sr) || !ch.enabled {
+                continue;
+            }
+            let g = law::channel_gain(self.ov.chan_volume(song, c));
+            let (pl, pr) = law::pan(self.ov.chan_pan(song, c).clamp(-1.0, 1.0));
+            let i = if (ch.insert as usize) < ni { ch.insert as usize } else { 0 };
+            for (o, f) in self.buses[i][..n].iter_mut().zip(buf.iter()) {
+                o[0] += f[0] * g * pl;
+                o[1] += f[1] * g * pr;
+            }
+            self.dirty[i] = true;
+        }
+        let n64 = n as u64;
+        self.host_wait.retain_mut(|(left, _, _)| {
+            if *left < n64 {
+                false
+            } else {
+                *left -= n64;
+                true
+            }
+        });
 
         // envelope senders: move every running note on and hand its outputs to what is linked
         if !self.env_runs.is_empty() {
@@ -3008,6 +3085,44 @@ mod tests {
         s.channels[0].smp.arp_steps = 1.0;
         let arp = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&arp, 0.2, 0.9) > 0.1, "the child repeats the note while the layer's note is held");
+    }
+
+    #[test]
+    fn a_hosted_plugin_plays_a_channel_and_treats_a_track() {
+        let Some(path) = crate::host::test_plugin() else {
+            eprintln!("test plug-in not built; skipped");
+            return;
+        };
+        // as an instrument: the pattern's note is heard for as long as it lasts
+        let mut s = tone_song(2.0);
+        s.channels[0].set_sample(None);
+        s.channels[0].kind = ChannelKind::Plugin;
+        s.channels[0].plugin = crate::song::WRAPPER.to_string();
+        s.channels[0].ext = Some(crate::host::Hosted(crate::host::Instance::open(&path, "").expect("opens")));
+        let quarter = s.ppq as u32;
+        s.patterns[0].toggle_step(0, quarter);
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 0.45) < 1e-4, "silent before the note");
+        assert!(loud(&buf, 0.52, 0.6) > 0.05, "the note sounds");
+        assert!(loud(&buf, 1.0, 1.5) < 1e-3, "and ends");
+        // turned down on the channel, it is quieter
+        let full = loud(&buf, 0.52, 0.6);
+        s.channels[0].volume *= 0.25;
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.52, 0.6) < full * 0.5);
+
+        // as an effect: its gain setting scales what the track carries
+        let mut s = tone_song(2.0);
+        s.patterns[0].toggle_step(0, 0);
+        let plain = loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.1, 0.4);
+        let inst = crate::host::Instance::open(&path, "").expect("opens");
+        let gain = inst.params()[0].id;
+        s.inserts[0].slots.push(crate::song::Slot::hosted(0, inst.clone()));
+        inst.set(gain, 2.0);
+        let twice = loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.1, 0.4);
+        assert!((twice / plain - 2.0).abs() < 0.1, "{twice} against {plain}");
+        inst.set(gain, 0.0);
+        assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.1, 0.4) < 1e-4);
     }
 
     #[test]
