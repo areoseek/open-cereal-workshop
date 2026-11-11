@@ -111,7 +111,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Squeeze
 - [~] Fruity Stereo Enhancer (built, approximate)
 - [~] Fruity Stereo Shaper (built, approximate)
-- [ ] Fruity Vocoder
+- [~] Fruity Vocoder (Classic Vocoder: left gates right, per-band levels; solo and swap switches not read)
 - [~] Fruity WaveShaper (built as Curve Shaper; drawn line read, no editor for it yet)
 - [ ] Fruity Wrapper
 - [~] Fruity X-Y Controller (built as Pad Controller; outputs its stored position, no pad window yet)

@@ -377,6 +377,57 @@ impl App {
                     pt.line_segment([egui::pos2(x, rect.bottom()), egui::pos2(x, rect.bottom() - g * rect.height())], egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 190, 230)));
                 }
             }
+            if f.kind == Kind::OldVoc {
+                use cereal_engine::fxvoc::classic as cv;
+                ui.label(RichText::new("The left channel is the modulator, the right channel the carrier.").small().color(TEXT_DIM));
+                ui.horizontal(|ui| {
+                    for (name, i, lo, hi) in [("Formant", cv::FORMANT, -1200.0, 1200.0), ("Min", cv::MIN, 0.0, 65536.0), ("Max", cv::MAX, 0.0, 65536.0), ("Scale", cv::SCALE, 0.0, 128.0), ("Width", cv::WIDTH, 5.0, 300.0), ("Attack", cv::ATTACK, 0.0, 500.0), ("Decay", cv::DECAY, 0.0, 1000.0), ("Modulator", cv::MOD, 0.0, 256.0), ("Vocoded", cv::CAR, 0.0, 256.0), ("Bands", cv::BANDS, 4.0, 128.0), ("Order", cv::ORDER, 1.0, 4.0)] {
+                        let v = &mut f.p[i];
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.set_width(52.0);
+                            ui.vertical_centered(|ui| {
+                                let before = *v;
+                                let r = knob(ui, v, lo, hi, before, 26.0);
+                                *v = v.round();
+                                if r.changed() && *v != before {
+                                    changed = true;
+                                }
+                                r.on_hover_text(format!("{name}: {}", *v as i32));
+                                ui.label(RichText::new(name).small().color(TEXT_DIM));
+                            });
+                        });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for (label, at) in [("Invert", cv::INVERT), ("Hold", cv::HOLD)] {
+                        let mut on = f.p[at] >= 0.5;
+                        if ui.checkbox(&mut on, RichText::new(label).small()).changed() {
+                            f.p[at] = on as u8 as f32;
+                            changed = true;
+                        }
+                    }
+                });
+                // a level per band: drag up and down
+                let n = (f.p[cv::BANDS] as usize).clamp(1, cv::MOST);
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(560.0), 64.0), egui::Sense::click_and_drag());
+                let pt = ui.painter_at(rect);
+                pt.rect_filled(rect, 2.0, egui::Color32::from_gray(24));
+                let w = rect.width() / n as f32;
+                if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                    let b = (((pos.x - rect.left()) / w) as usize).min(n - 1);
+                    let v = ((rect.bottom() - pos.y) / rect.height() * 2.0).clamp(0.0, 2.0);
+                    if f.p[cv::GAINS + b] != v {
+                        f.p[cv::GAINS + b] = v;
+                        changed = true;
+                    }
+                }
+                for b in 0..n {
+                    let h = (f.p[cv::GAINS + b] / 2.0).clamp(0.0, 1.0) * rect.height();
+                    let x = rect.left() + b as f32 * w;
+                    pt.rect_filled(egui::Rect::from_min_max(egui::pos2(x + 0.5, rect.bottom() - h), egui::pos2(x + w - 0.5, rect.bottom())), 0.0, egui::Color32::from_rgb(120, 190, 230));
+                }
+            }
             let per_row = if f.kind == Kind::Eq { 7 } else { 6 };
             // units made of several like sections show one section at a time: (settings in front, settings per
             // section, section names)

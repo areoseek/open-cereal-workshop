@@ -713,6 +713,181 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     }
 }
 
+/// The older vocoder (format identifier "Fruity Vocoder"): the left channel opens and closes bands of the right.
+/// Settings: band count, filter order, one number we do not read, hold, twelve whole numbers, then a level per
+/// band (room for 128).
+pub mod classic {
+    use super::{coefs, step};
+    use crate::fx::Ctx;
+
+    pub const BANDS: usize = 0;
+    pub const ORDER: usize = 1;
+    pub const HOLD: usize = 3;
+    pub const INTS: usize = 4;
+    pub const MIN: usize = INTS;
+    pub const MAX: usize = INTS + 1;
+    pub const SCALE: usize = INTS + 2;
+    pub const INVERT: usize = INTS + 3;
+    pub const FORMANT: usize = INTS + 4;
+    pub const WIDTH: usize = INTS + 5;
+    pub const ATTACK: usize = INTS + 6;
+    pub const DECAY: usize = INTS + 7;
+    pub const MOD: usize = INTS + 10;
+    pub const CAR: usize = INTS + 11;
+    pub const GAINS: usize = 16;
+    pub const MOST: usize = 128;
+    const DEF: [i32; 12] = [0, 65536, 64, 0, 0, 50, 20, 100, 0, 0, 0, 128];
+
+    pub fn decode(s: &[u8]) -> Option<Vec<f32>> {
+        let int = |o: usize| s.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+        let n = int(4)? as usize;
+        if int(0)? != 2 || !(1..=MOST).contains(&n) || s.len() != 65 + n * 4 {
+            return None;
+        }
+        let mut p = vec![1f32; GAINS + MOST];
+        p[BANDS] = n as f32;
+        p[ORDER] = int(8)? as f32;
+        p[2] = int(12)? as f32;
+        p[HOLD] = s[16] as f32;
+        for b in 0..n {
+            p[GAINS + b] = f32::from_le_bytes(s[17 + b * 4..21 + b * 4].try_into().unwrap());
+        }
+        for i in 0..12 {
+            p[INTS + i] = int(17 + n * 4 + i * 4)? as f32;
+        }
+        Some(p)
+    }
+
+    pub fn encode(p: &[f32]) -> Vec<u8> {
+        let n = (p[BANDS] as usize).clamp(1, MOST);
+        let mut out = Vec::with_capacity(65 + n * 4);
+        for v in [2, n as i32, p[ORDER] as i32, p[2] as i32] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.push(p[HOLD] as u8);
+        for b in 0..n {
+            out.extend_from_slice(&p[GAINS + b].to_le_bytes());
+        }
+        for i in 0..12 {
+            out.extend_from_slice(&(p[INTS + i].round() as i32).to_le_bytes());
+        }
+        out
+    }
+
+    pub fn fresh() -> Vec<u8> {
+        let mut p = vec![1f32; GAINS + MOST];
+        p[BANDS] = 16.0;
+        p[ORDER] = 2.0;
+        p[2] = 2.0;
+        p[HOLD] = 0.0;
+        for (i, v) in DEF.iter().enumerate() {
+            p[INTS + i] = *v as f32;
+        }
+        encode(&p)
+    }
+
+    #[derive(Default, Clone)]
+    struct Band {
+        an: [f32; 3],
+        ak: f32,
+        az: [f32; 8],
+        sy: [f32; 3],
+        sk: f32,
+        sz: [f32; 4],
+        env: f32,
+    }
+
+    #[derive(Default)]
+    pub struct State {
+        seen: Vec<f32>,
+        sr: f32,
+        bands: Vec<Band>,
+        out: Vec<f32>,
+    }
+
+    fn place(p: &[f32], t: f32) -> f32 {
+        let lo = 20.0 * 1000f32.powf((p[MIN] / 65536.0).clamp(0.0, 1.0));
+        let hi = (20.0 * 1000f32.powf((p[MAX] / 65536.0).clamp(0.0, 1.0))).max(lo * 1.1);
+        let log = lo * (hi / lo).powf(t);
+        let lin = lo + (hi - lo) * t;
+        let k = (p[SCALE] / 128.0).clamp(0.0, 1.0);
+        // the middle of the knob sits near the logarithmic end, where voices spread best
+        lin + (log - lin) * (k * 2.0).min(1.0) * (1.0 - (k - 0.5).max(0.0) * 0.5)
+    }
+
+    fn build(p: &[f32], st: &mut State, sr: f32) {
+        let n = (p[BANDS] as usize).clamp(1, MOST);
+        let old = std::mem::take(&mut st.bands);
+        let keep = old.len() == n;
+        let width = (p[WIDTH] / 50.0).clamp(0.1, 6.0);
+        let shift = 2f32.powf(p[FORMANT].clamp(-2400.0, 2400.0) / 1200.0);
+        let hz: Vec<f32> = (0..n).map(|b| place(p, (b as f32 + 0.5) / n as f32).clamp(20.0, sr * 0.45)).collect();
+        st.bands = (0..n)
+            .map(|b| {
+                let mut band = if keep { old[b].clone() } else { Band::default() };
+                let lo = place(p, b as f32 / n as f32);
+                let hi = place(p, (b + 1) as f32 / n as f32);
+                let oct = ((hi / lo).max(1.0001).log2() * width).clamp(0.01, 4.0);
+                let q = 1.0 / (2f32.powf(oct * 0.5) - 2f32.powf(-oct * 0.5));
+                let from = if p[INVERT] >= 0.5 { hz[n - 1 - b] } else { hz[b] };
+                (band.an, band.ak) = coefs((from / shift).clamp(20.0, sr * 0.45), q, sr);
+                (band.sy, band.sk) = coefs(hz[b], q, sr);
+                band
+            })
+            .collect();
+        st.sr = sr;
+    }
+
+    pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
+        if p.len() < GAINS + MOST {
+            return;
+        }
+        let sr = cx.sr;
+        if st.seen != p || st.sr != sr {
+            build(p, st, sr);
+            st.seen.clear();
+            st.seen.extend_from_slice(p);
+        }
+        let n = io.len();
+        st.out.clear();
+        st.out.resize(n, 0.0);
+        let order = (p[ORDER] as usize).clamp(1, 4);
+        let stages = if order > 2 { 2 } else { 1 };
+        let att = 1.0 - (-1.0 / ((p[ATTACK].max(0.0) * 0.0001 + 0.0002) * sr)).exp();
+        let dec = 1.0 - (-1.0 / ((p[DECAY].max(0.0) * 0.001 + 0.001) * sr)).exp();
+        let hold = p[HOLD] >= 0.5;
+        let makeup = 0.85 * (st.bands.len() as f32).sqrt() * [0.66, 1.0, 4.7, 5.4][order - 1];
+        for (b, band) in st.bands.iter_mut().enumerate() {
+            let g = p[GAINS + b].clamp(0.0, 4.0) * makeup;
+            for (s, f) in io.iter().enumerate() {
+                if !hold {
+                    let mut x = f[0];
+                    for o in 0..order {
+                        x = step(&band.an, band.ak, &mut band.az[o * 2..o * 2 + 2], x).1 * band.ak;
+                    }
+                    let r = x.abs();
+                    band.env += (r - band.env) * if r > band.env { att } else { dec };
+                }
+                let mut y = f[1];
+                for o in 0..stages {
+                    y = step(&band.sy, band.sk, &mut band.sz[o * 2..o * 2 + 2], y).1 * band.sk;
+                }
+                st.out[s] += y * band.env * g;
+            }
+            for v in band.az.iter_mut().chain(band.sz.iter_mut()).chain([&mut band.env]) {
+                if !v.is_finite() || v.abs() < 1e-20 {
+                    *v = 0.0;
+                }
+            }
+        }
+        let (m, c) = (p[MOD] / 128.0, p[CAR] / 128.0);
+        for (f, o) in io.iter_mut().zip(&st.out) {
+            let y = f[0] * m + o * c;
+            *f = [y, y];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,5 +1001,42 @@ mod tests {
         let mut st4 = State::default();
         let (lo4, hi4) = run(&mut st4, &p, 300.0, 40);
         assert!(lo4 + hi4 > 0.01, "{lo4} {hi4}");
+    }
+    #[test]
+    fn the_classic_unit_reads_back_and_gates_the_right_channel() {
+        if let Ok(dir) = std::env::var("CEREAL_STATE_DIR_CLASSIC") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let b = std::fs::read(e.path()).unwrap();
+                assert!(classic::encode(&classic::decode(&b).unwrap()) == b, "{:?} differs", e.path());
+            }
+        }
+        let b = classic::fresh();
+        let p = classic::decode(&b).unwrap();
+        assert_eq!(classic::encode(&p), b);
+        assert_eq!(b.len(), 129);
+        let cx = Ctx { sr: 44_100.0, step: 5512.0 };
+        let mut st = classic::State::default();
+        let mut seed = 7u32;
+        let mut level = |on: bool, st: &mut classic::State| {
+            let mut e = 0f32;
+            for _ in 0..40 {
+                let mut io: Vec<[f32; 2]> = (0..512)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let a = (seed >> 8) as f32 / 8388608.0 - 1.0;
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let c = (seed >> 8) as f32 / 8388608.0 - 1.0;
+                        [if on { a * 0.4 } else { 0.0 }, c * 0.3]
+                    })
+                    .collect();
+                classic::process(&p, st, &mut io, &cx);
+                e = io.iter().map(|f| f[0] * f[0]).sum::<f32>().sqrt();
+                assert!(io.iter().all(|f| f[0].is_finite() && f[0] == f[1]));
+            }
+            e
+        };
+        let open = level(true, &mut st);
+        let shut = level(false, &mut st);
+        assert!(open > 0.5 && shut < open * 0.05, "{open} {shut}");
     }
 }
