@@ -41,7 +41,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Morphine (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Ogun (plays as Metal Stack: seeds, fullness, morph, decay, release, pitch and level are read at estimated scales and give our own seeded spread of harmonics; richness, drawn maps, envelopes, unison, filter, effects and editing are not done)
 - [~] Patcher (as an instrument: the held instruments the notes reach play through the bay's effects; note shapers and setting cables are not built)
-- [ ] Plucked!
+- [~] Plucked! (opens as Pluck String: decay, colour, even decay, gate and widen all play; per-note offsets of decay and colour from the piano roll are not done)
 - [~] PoiZone (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] ReWired
 - [~] Sakura (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)

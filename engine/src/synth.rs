@@ -43,6 +43,8 @@ pub enum Kind {
     Travel,
     /// The small three-oscillator analog-style synth and its wider sibling (`analog.rs`).
     Buzz,
+    /// A plucked string made from a wearing loop of noise (`minis.rs`).
+    String,
     BuzzXt,
     /// Units that make no sound of their own: they send control values or notes elsewhere.
     Quiet,
@@ -422,6 +424,15 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Buzz, ident: "Wasp", title: "Hornet", size: 169, fixed: &[(0, 1)], tail: &[], params: BUZZ },
     Def { kind: Kind::BuzzXt, ident: "Wasp XT", title: "Hornet XT", size: 213, fixed: &[(0, 11)], tail: &[], params: BUZZ },
+    Def {
+        kind: Kind::String,
+        ident: "Plucked!",
+        title: "Pluck String",
+        size: 20,
+        fixed: &[],
+        tail: &[],
+        params: &[p("Decay", 0, 0, 128, 128), p("Colour", 4, 0, 128, 64), p("Even decay", 8, 0, 1, 1), p("Gate", 12, 0, 1, 0), p("Widen", 16, 0, 1, 1)],
+    },
     Def { kind: Kind::Sub, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -1092,6 +1103,23 @@ mod tests {
             let peak = (0..6000).map(|_| v.frame(patch, 261.63 / 44100.0)[0].abs()).fold(0.0, f32::max);
             assert!(peak > 0.05 && peak < 1.2, "{ident} {peak}");
         }
+    }
+
+    #[test]
+    fn the_plucked_string_rings_at_pitch_and_wears_down() {
+        let g = Gen::decode("Plucked!", &[]).unwrap();
+        assert_eq!(g.raw.len(), 20);
+        let tone = g.tone();
+        let patch = tone.mini.as_ref().unwrap();
+        let dp = 220.0 / 44100.0;
+        let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, dp, 9);
+        let out: Vec<f32> = (0..44100).map(|_| v.frame(patch, dp)[0]).collect();
+        let peak = |r: std::ops::Range<usize>| out[r].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak(0..4000) > 0.1 && peak(0..4000) < 1.2);
+        assert!(peak(40000..44100) < peak(0..4000) * 0.9);
+        // one period is about 200 samples: the sound matches itself there and not half a period on
+        let corr = |lag: usize| (20000..30000).map(|i| out[i] * out[i + lag]).sum::<f32>();
+        assert!(corr(200) > 0.8 * corr(0) && corr(100) < 0.5 * corr(0), "{} {} {}", corr(0), corr(200), corr(100));
     }
 
     #[test]

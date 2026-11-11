@@ -29,6 +29,7 @@ pub enum Voice {
     Bank(Box<crate::drumbank::Voice>),
     Image(Box<crate::beep::Voice>),
     Grain(Box<crate::grain::Voice>),
+    String(Box<Ks>),
     Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
     Quiet,
 }
@@ -71,11 +72,30 @@ pub struct Pluck {
     held: bool,
 }
 
+/// The simple string: one loop of noise per side, averaged as it goes round.
+#[derive(Debug, Clone, Default)]
+pub struct Ks {
+    line: [Vec<f32>; 2],
+    pos: usize,
+    /// How far between two samples the loop's true length falls.
+    frac: f32,
+    last: [f32; 2],
+    keep: f32,
+    fade: f32,
+    fade_by: f32,
+    wide: bool,
+    vel: f32,
+}
+
 fn rnd(seed: &mut u32) -> f32 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 17;
     *seed ^= *seed << 5;
     (*seed as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+fn s_gate(p: &Patch) -> bool {
+    p.kind == Kind::String && p.p.get(3).is_some_and(|&g| g != 0.0)
 }
 
 impl Voice {
@@ -94,6 +114,35 @@ impl Voice {
         }
         match p.kind {
             Kind::Image | Kind::Quiet | Kind::Grain => Voice::Quiet,
+            Kind::String => {
+                let hz = (dphase * sr).clamp(20.0, sr * 0.4);
+                // the averaging step adds half a sample to the loop
+                let len = sr / hz - 0.5;
+                let n = (len.floor() as usize).max(2);
+                let mut seed = seed | 1;
+                let colour = (s[1] / 128.0).clamp(0.0, 1.0);
+                let c = 0.03 + colour * colour * 0.97;
+                let mut fill = || {
+                    let mut z = 0.0;
+                    let mut v: Vec<f32> = (0..n + 1).map(|_| {
+                        z += (rnd(&mut seed) - z) * c;
+                        z
+                    }).collect();
+                    let top = v.iter().fold(1e-6f32, |m, x| m.max(x.abs()));
+                    let mean = v.iter().sum::<f32>() / v.len() as f32;
+                    v.iter_mut().for_each(|x| *x = (*x - mean) / top);
+                    v
+                };
+                let wide = s[4] != 0.0;
+                let a = fill();
+                let b = if wide { fill() } else { Vec::new() };
+                // seconds to fall sixty decibels
+                let t60 = 0.15 + (s[0] / 128.0).powi(2) * 6.0;
+                // evened out, every key takes the same time; otherwise the loss is per trip, so high keys die sooner
+                let trips = if s[2] != 0.0 { t60 * hz } else { t60 * C5 };
+                let keep = 0.001f32.powf(1.0 / trips.max(1.0));
+                Voice::String(Box::new(Ks { line: [a, b], pos: 0, frac: len - len.floor(), last: [0.0; 2], keep, fade: 1.0, fade_by: 1.0, wide, vel }))
+            }
             Kind::Buzz | Kind::BuzzXt => {
                 let set = crate::analog::buzz(s);
                 Voice::Analog(Box::new((crate::analog::Voice::start(&set, sr, key, vel, seed), set)))
@@ -209,6 +258,16 @@ impl Voice {
             Voice::Bank(v) => v.left(),
             Voice::Image(v) => v.release(),
             Voice::Grain(v) => v.release(),
+            Voice::String(v) => {
+                if s_gate(p) {
+                    v.fade_by = 0.99;
+                    0.03
+                } else {
+                    // the string rings on: the time left is the loop's own decay
+                    let per_sec = v.keep.ln() * (44100.0 / v.line[0].len() as f32);
+                    (0.001f32.ln() / per_sec.min(-1e-6)).min(8.0)
+                }
+            }
             Voice::Analog(v) => {
                 let (v, set) = &mut **v;
                 v.release(set)
@@ -224,6 +283,31 @@ impl Voice {
             Voice::Bank(v) => v.frame(),
             Voice::Image(v) => v.frame(),
             Voice::Grain(v) => v.frame(),
+            Voice::String(v) => {
+                let n = v.line[0].len();
+                let (at, next) = (v.pos, (v.pos + 1) % n);
+                let mut out = [0.0f32; 2];
+                for side in 0..if v.wide { 2 } else { 1 } {
+                    let line = &mut v.line[side];
+                    // read between two samples so the pitch lands between whole loop lengths
+                    let x = line[at] + (line[next] - line[at]) * v.frac;
+                    let y = (x + v.last[side]) * 0.5 * v.keep;
+                    v.last[side] = x;
+                    line[at] = y;
+                    out[side] = x;
+                }
+                if !v.wide {
+                    out[1] = out[0];
+                } else {
+                    // keep the middle solid: the sides differ only in part
+                    let mid = (out[0] + out[1]) * 0.5;
+                    out = [mid + (out[0] - mid) * 0.7, mid + (out[1] - mid) * 0.7];
+                }
+                v.pos = next;
+                v.fade *= v.fade_by;
+                let g = v.fade * v.vel * 0.7;
+                [out[0] * g, out[1] * g]
+            }
             Voice::Analog(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set, dphase)
