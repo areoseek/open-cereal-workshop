@@ -39,6 +39,7 @@ pub enum Voice {
     Pluck(Box<Pluck>),
     Keys(Box<crate::keys::Voice>),
     Bank(Box<crate::drumbank::Voice>),
+    Kit(Box<crate::drumkit::Voice>),
     Image(Box<crate::beep::Voice>),
     Grain(Box<crate::grain::Voice>),
     String(Box<Ks>),
@@ -204,6 +205,7 @@ impl Voice {
                 let set = crate::strmodel::set(s);
                 Voice::Str(Box::new((crate::strmodel::Voice::start(&set, sr, key, vel, seed), set)))
             }
+            Kind::Kit => Voice::Kit(Box::new(crate::drumkit::Voice::start(s, sr, key, vel, seed))),
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
             Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel },
             Kind::Fm2 => {
@@ -313,6 +315,7 @@ impl Voice {
             }
             Voice::Keys(v) => v.release(),
             Voice::Bank(v) => v.left(),
+            Voice::Kit(v) => v.release(),
             Voice::Image(v) => v.release(),
             Voice::Grain(v) => v.release(),
             Voice::Guitar(v) => v.release(),
@@ -367,6 +370,7 @@ impl Voice {
         match self {
             Voice::Keys(v) => v.frame(dphase),
             Voice::Bank(v) => v.frame(),
+            Voice::Kit(v) => v.frame(&p.p),
             Voice::Image(v) => v.frame(),
             Voice::Grain(v) => v.frame(),
             Voice::Guitar(v) => v.frame(),

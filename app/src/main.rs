@@ -353,6 +353,17 @@ impl App {
                             }
                         }
                     }
+                    x if x.starts_with("gen=") => {
+                        // put an instrument on the first channel and open its settings
+                        if let Some(d) = cereal_engine::synth::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&x[4..])) {
+                            if let Some(c) = app.song.channels.first_mut() {
+                                *c = cereal_engine::song::Chan::instrument(d.kind);
+                                app.sel_chan = 0;
+                                app.show_chanset = true;
+                                app.handle.publish(app.song.clone());
+                            }
+                        }
+                    }
                     "noplaylist" => app.show_playlist = false,
                     "norack" => app.show_rack = false,
                     w => {

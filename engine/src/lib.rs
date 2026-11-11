@@ -22,6 +22,7 @@ pub mod tailfx;
 pub mod strmodel;
 pub mod hybrid;
 pub mod morph;
+pub mod drumkit;
 pub mod kickd;
 pub mod membrane;
 pub mod triple;

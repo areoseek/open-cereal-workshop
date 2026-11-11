@@ -31,8 +31,8 @@ pub enum Kind {
     MetalBank,
     /// Synths we cannot read in full yet: a voice of our own shaped by the few settings we can place (`SUBS`).
     Sub,
-    /// Drum synths we cannot read in full yet: played by the swept sine drum.
-    Thump,
+    /// Sixteen modelled drums on pads with a step runner (`drumkit.rs`).
+    Kit,
     /// One drum patch per key (`drumbank.rs`).
     DrumBank,
     /// A picture swept from left to right, each row a sine wave (`beep.rs`).
@@ -109,7 +109,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -510,7 +510,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Grain, ident: "Fruity Granulizer", title: "Grain Player", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Travel, ident: "Wave Traveller", title: "Path Scratcher", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::DrumBank, ident: "Fruity DrumSynth Live", title: "Drum Bank", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Thump, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Kit, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
 ];
 
@@ -595,12 +595,6 @@ fn sub_patch(ident: &str, state: &[u8]) -> crate::additive::Patch {
         patch.p[ix::CUTOFF] = 2600.0 + c * 5592.0;
     }
     patch
-}
-
-/// Settings for the swept sine drum from a drum synth's block.
-fn thump(_ident: &str, _state: &[u8]) -> Vec<f32> {
-    // a struck skin: a short fall onto the played key
-    vec![700.0, 0.0, 40.0, 140.0, 16.0, 0.0]
 }
 
 /// A voice of our own for a pack preset we cannot read, picked from the words in its name.
@@ -749,6 +743,10 @@ impl Gen {
             g.p = crate::hybrid::defaults();
             g.raw = crate::hybrid::fresh();
         }
+        if kind == Kind::Kit {
+            g.p = crate::drumkit::defaults();
+            g.raw = crate::drumkit::fresh();
+        }
         if kind == Kind::Skin {
             g.p = crate::membrane::defaults();
             g.raw = crate::membrane::fresh();
@@ -829,8 +827,8 @@ impl Gen {
         if d.kind == Kind::DrumBank {
             return Some(Self { kind: d.kind, p: crate::drumbank::parse(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
-        if d.kind == Kind::Thump {
-            return Some(Self { kind: d.kind, p: thump(ident, state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        if d.kind == Kind::Kit {
+            return Some(Self { kind: d.kind, p: crate::drumkit::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if matches!(d.kind, Kind::Metal | Kind::MetalBank) {
             let patch = crate::metal::patch(state)?;
@@ -985,7 +983,7 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin | Kind::Kit) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
@@ -993,6 +991,7 @@ impl Gen {
                 Kind::Morph => crate::morph::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::KickD => crate::kickd::FIRST,
                 Kind::Skin => crate::membrane::FIRST,
+                Kind::Kit => crate::drumkit::FIRST,
                 _ => 12,
             };
             for (i, &v) in self.p.iter().enumerate() {
@@ -1082,9 +1081,10 @@ impl Gen {
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
             Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub => Tone { add: self.pre.clone().or_else(|| Some(std::sync::Arc::new(stand_in("")))), ..Default::default() },
-            Kind::Thump => {
-                let p = if self.p.len() == 6 { self.p.clone() } else { thump("", &[]) };
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Kick, p, set: None, img: None, smp: None })), ..Default::default() }
+            Kind::Kit => {
+                // the cut groups and the step patterns ride along after the list
+                let p = if self.p.len() >= crate::drumkit::COUNT { crate::drumkit::voice_list(&self.p, &self.raw) } else { crate::drumkit::voice_list(&crate::drumkit::defaults(), &crate::drumkit::fresh()) };
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
             }
             Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone(), smp: None })), ..Default::default() },
             Kind::Grain => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, crate::grain::Set::parse(&self.raw))) })), ..Default::default() },
@@ -1671,6 +1671,57 @@ mod tests {
             eprintln!("membrane drums: {seen}, loudest {}, ninth tenth {}, middle {}, tenth {}, softest {}, out of range {}: {:?}", peaks[seen - 1], peaks[seen * 9 / 10], peaks[seen / 2], peaks[seen / 10], peaks[0], odd.len(), &odd[..odd.len().min(12)]);
             assert!(peaks[seen - 1] < 4.0);
             assert!(odd.len() * 10 < seen, "{} of {seen} are out of range", odd.len());
+        }
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every stored drum kit there reads, writes back the same, and its pads and
+    /// patterns play.
+    #[test]
+    fn every_stored_drum_kit_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Generators/Drumaxx")];
+        let (mut kits, mut pads, mut runs, mut peaks) = (0, 0, 0, Vec::new());
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    continue;
+                }
+                let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+                assert_eq!(g.kind, Kind::Kit);
+                assert_eq!(g.p.len(), crate::drumkit::COUNT, "{path:?}");
+                assert_eq!(g.encode(None), g.raw);
+                let tone = g.tone();
+                let patch = tone.mini.as_ref().unwrap();
+                let dp = 261.63 / 44100.0;
+                let mut keys: Vec<u8> = (0..crate::drumkit::PADS).map(|k| g.p[k * crate::drumkit::REC + 4] as u8).filter(|&k| k > 0).collect();
+                keys.dedup();
+                for key in keys {
+                    let mut v = crate::minis::Voice::start(patch, 44100.0, key, 0.8, dp, 3);
+                    let peak = (0..22050).map(|_| v.frame(patch, dp)).fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+                    assert!(peak.is_finite() && peak < 6.0, "{path:?} key {key}: {peak}");
+                    peaks.push(peak);
+                    pads += 1;
+                }
+                for pat in 0..crate::drumkit::PATTERNS {
+                    let (Some(key), Some(_)) = (crate::drumkit::pat_key(&g.raw, pat), crate::drumkit::pat_len(&g.raw, pat)) else { continue };
+                    let mut v = crate::minis::Voice::start(patch, 44100.0, key, 0.8, dp, 3);
+                    let peak = (0..44100).map(|_| v.frame(patch, dp)).fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+                    assert!(peak.is_finite() && peak < 12.0, "{path:?} pattern {pat}: {peak}");
+                    runs += 1;
+                }
+                kits += 1;
+            }
+        }
+        if kits > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            let n = peaks.len();
+            eprintln!("drum kits: {kits}, pads {pads}, patterns {runs}; pad peaks: loudest {}, ninth tenth {}, middle {}, tenth {}, softest {}", peaks[n - 1], peaks[n * 9 / 10], peaks[n / 2], peaks[n / 10], peaks[0]);
+            assert!(peaks[n / 2] > 0.05 && peaks[n / 2] < 1.5);
         }
     }
 

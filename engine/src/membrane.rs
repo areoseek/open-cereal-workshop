@@ -81,7 +81,7 @@ fn placed() -> Vec<(usize, &'static str, Ctl, u8)> {
         (24, "Level move", Ctl::Knob, 4),
         (26, "Resonance", Ctl::Knob, 4),
         (25, "Decay", Ctl::Knob, 4),
-        (1, "Repeat the hit", Ctl::Switch, 4),
+        (1, "Repeat the hit", Ctl::Choice(&["Off", "Once", "Twice", "Three times"]), 4),
         (15, "Frequency", Ctl::Knob, 5),
         (16, "Level", Ctl::Knob, 5),
         (17, "Resonance", Ctl::Knob, 5),
@@ -143,6 +143,36 @@ pub fn values(raw: &[u8]) -> Vec<f32> {
     }
 }
 
+/// The name and the forty numbers of one drum saved by itself: the pad files of the kit instrument in their
+/// three ages (35, 36 and 39 numbers after a tag and a name), or a whole one-drum block.
+pub fn read_patch(b: &[u8]) -> Option<(String, Vec<f32>)> {
+    let text = |b: &[u8]| String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]).into_owned();
+    if fits(b) {
+        return Some((text(&b[12..FIRST]), values_at(b, FIRST)));
+    }
+    if b.len() < 132 + 35 * 4 || &b[1..4] != b"PMD" {
+        return None;
+    }
+    let mut v: Vec<f32> = b[132..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    if v.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    match v.len() {
+        35 => {
+            // the first age had no shape and no high shelf
+            v.insert(12, 1.0);
+            v.splice(15..15, [0.5, 0.5, 0.0]);
+        }
+        36 => {
+            v.splice(15..15, [0.5, 0.5, 0.0]);
+        }
+        39 | 40 => {}
+        _ => return None,
+    }
+    v.resize(COUNT, 0.0);
+    Some((text(&b[4..132]), v))
+}
+
 /// A block of our own for a new instrument.
 pub fn fresh() -> Vec<u8> {
     let mut out = Vec::with_capacity(SIZE);
@@ -175,7 +205,14 @@ pub fn set(p: &[f32]) -> Set {
     let mut out = [0.0; COUNT];
     for (i, o) in out.iter_mut().enumerate() {
         let v = p.get(i).copied().filter(|v| v.is_finite()).unwrap_or(DEFS[i]);
-        *o = if (30..34).contains(&i) { v.clamp(0.0, 64.0) } else { v.clamp(0.0, 1.0) };
+        *o = if (30..34).contains(&i) {
+            v.clamp(0.0, 64.0)
+        } else if i == 1 {
+            // the count of repeats, 0 to 3; one later version of the kit block keeps it as a share of three
+            if v > 0.0 && v < 1.0 { (v * 3.0).round() } else { v.clamp(0.0, 3.0).round() }
+        } else {
+            v.clamp(0.0, 1.0)
+        };
     }
     Set { p: out }
 }
@@ -206,7 +243,7 @@ impl Set {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     b: [f32; 3],
     a: [f32; 2],
     z: [f32; 2],
@@ -214,7 +251,7 @@ struct Biquad {
 
 impl Biquad {
     #[inline]
-    fn run(&mut self, x: f32) -> f32 {
+    pub(crate) fn run(&mut self, x: f32) -> f32 {
         let y = self.b[0] * x + self.z[0];
         self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
         self.z[1] = self.b[2] * x - self.a[1] * y;
@@ -233,7 +270,7 @@ impl Biquad {
         self.norm([(1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0], [1.0 + al, -2.0 * c, 1.0 - al]);
     }
 
-    fn peak(&mut self, sr: f32, hz: f32, q: f32, db: f32) {
+    pub(crate) fn peak(&mut self, sr: f32, hz: f32, q: f32, db: f32) {
         let w = std::f32::consts::TAU * (hz / sr).min(0.45);
         let (s, c) = w.sin_cos();
         let a = 10f32.powf(db / 40.0);
@@ -350,7 +387,7 @@ impl Voice {
             noise: p[4],
             last: 0.0,
             thin: 2.0 / (1.0 + strike * sr * 0.5).sqrt(),
-            again: if p[1] >= 0.5 { 3 } else { 0 },
+            again: p[1] as u8,
             modes,
             live,
             cut: 1.0 - (-std::f32::consts::TAU * (200.0 * 2f32.powf(p[9] * 6.6) * tune.sqrt()).min(sr * 0.45) / sr).exp(),
@@ -383,7 +420,7 @@ impl Voice {
     }
 
     pub fn frame(&mut self, _set: &Set) -> [f32; 2] {
-        // the repeated hit of a clap: three more strikes close behind the first
+        // the repeated hit of a clap: up to three more strikes close behind the first
         if self.again > 0 && self.n > 0 && self.n % ((self.sr * 0.011) as u32).max(1) == 0 {
             self.again -= 1;
             self.env = 1.0;

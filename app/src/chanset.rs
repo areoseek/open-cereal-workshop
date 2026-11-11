@@ -32,33 +32,38 @@ pub fn key_name(key: u8) -> String {
 
 /// The controls of an instrument stored as a list of numbers, group by group. True when one was moved.
 fn float_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen, groups: &[&str], params: &[cereal_engine::duo::Info]) -> bool {
+    float_panel_at(ui, ci, g, groups, params, 0)
+}
+
+/// The same for a run of settings that starts `base` numbers into the list.
+fn float_panel_at(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen, groups: &[&str], params: &[cereal_engine::duo::Info], base: usize) -> bool {
     use cereal_engine::duo::Ctl;
     let mut changed = false;
     for (gi, title) in groups.iter().enumerate() {
         ui.label(RichText::new(*title).small().color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
             for (i, info) in params.iter().enumerate().filter(|(_, p)| p.group as usize == gi) {
-                let mut v = g.p[i];
+                let mut v = g.p[base + i];
                 match info.ctl {
                     Ctl::Knob => {
                         if cap_knob(ui, &info.name.to_uppercase(), &mut v, 0.0, 1.0, info.def, |v| format!("{:.0} %", v * 100.0)) {
-                            g.p[i] = v;
+                            g.p[base + i] = v;
                             changed = true;
                         }
                     }
                     Ctl::Switch => {
                         let mut on = v >= 0.5;
                         if ui.toggle_value(&mut on, info.name).changed() {
-                            g.p[i] = if on { 1.0 } else { 0.0 };
+                            g.p[base + i] = if on { 1.0 } else { 0.0 };
                             changed = true;
                         }
                     }
                     Ctl::Pick(names) => {
                         let now = cereal_engine::duo::pick(v, names.len());
-                        egui::ComboBox::from_id_salt(("floats", ci, i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt(("floats", ci, base + i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
                             for (k, name) in names.iter().enumerate() {
                                 if ui.selectable_label(k == now, *name).clicked() && k != now {
-                                    g.p[i] = k as f32 / (names.len() - 1) as f32;
+                                    g.p[base + i] = k as f32 / (names.len() - 1) as f32;
                                     changed = true;
                                 }
                             }
@@ -67,16 +72,16 @@ fn float_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen, groups
                     Ctl::Whole(top) => {
                         let mut n = v.round().clamp(0.0, top as f32) as u32 + 1;
                         if ui.add(egui::DragValue::new(&mut n).range(1..=top + 1).prefix(format!("{} ", info.name))).changed() {
-                            g.p[i] = (n - 1) as f32;
+                            g.p[base + i] = (n - 1) as f32;
                             changed = true;
                         }
                     }
                     Ctl::Choice(names) => {
                         let now = (v.round().max(0.0) as usize).min(names.len() - 1);
-                        egui::ComboBox::from_id_salt(("floats", ci, i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt(("floats", ci, base + i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
                             for (k, name) in names.iter().enumerate() {
                                 if ui.selectable_label(k == now, *name).clicked() && k != now {
-                                    g.p[i] = k as f32;
+                                    g.p[base + i] = k as f32;
                                     changed = true;
                                 }
                             }
@@ -981,6 +986,192 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS[..8], params());
             ui.label(RichText::new("The drum rings out by itself whatever the length of the note. How hard a hit lands only matters through the four links.").small().color(TEXT_DIM));
         }
+        Kind::Kit => {
+            use cereal_engine::drumkit as kit;
+            if g.p.len() < kit::COUNT || !kit::fits(&g.raw) {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and a default kit plays.").color(TEXT_DIM));
+                return false;
+            }
+            let pick_id = egui::Id::new(("kit_pad", ci));
+            let pat_id = egui::Id::new(("kit_pat", ci));
+            let mut pad: usize = ui.data(|d| d.get_temp(pick_id)).unwrap_or(0).min(kit::PADS - 1);
+            let mut pat: usize = ui.data(|d| d.get_temp(pat_id)).unwrap_or(0).min(kit::PATTERNS - 1);
+            ui.label(RichText::new("Kit").small().color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                for (i, name) in kit::KIT_NAMES {
+                    if i == 14 {
+                        continue;
+                    }
+                    let mut v = g.p[kit::KIT + i];
+                    if cap_knob(ui, &name.to_uppercase(), &mut v, 0.0, 1.0, if i == 1 { 0.36 } else { 0.0 }, |v| format!("{:.0} %", v * 100.0)) {
+                        g.p[kit::KIT + i] = v;
+                        changed = true;
+                    }
+                }
+                let mut on = g.p[kit::KIT + 3] >= 0.5;
+                if ui.toggle_value(&mut on, "Tone bands").changed() {
+                    g.p[kit::KIT + 3] = if on { 1.0 } else { 0.0 };
+                    changed = true;
+                }
+                for (b, hz) in kit::BANDS.iter().enumerate() {
+                    let mut v = (g.p[kit::KIT + 4 + b] - 0.5) * 200.0;
+                    let label = if *hz >= 1000.0 { format!("{:.1} kHz: ", hz / 1000.0) } else { format!("{hz:.0} Hz: ") };
+                    if ui.add(egui::DragValue::new(&mut v).range(-100.0..=100.0).speed(1.0).prefix(label).suffix(" %")).changed() {
+                        g.p[kit::KIT + 4 + b] = v / 200.0 + 0.5;
+                        changed = true;
+                    }
+                }
+                let mut on = g.p[kit::KIT + 12] >= 0.5;
+                if ui.toggle_value(&mut on, "Ceiling").on_hover_text("Holds the output of the kit under full level").changed() {
+                    g.p[kit::KIT + 12] = if on { 1.0 } else { 0.0 };
+                    changed = true;
+                }
+                for (i, name) in [(13usize, "DRIVE"), (14, "LET GO")] {
+                    let mut v = g.p[kit::KIT + i];
+                    if cap_knob(ui, name, &mut v, 0.0, 1.0, if i == 14 { 0.5 } else { 0.0 }, |v| format!("{:.0} %", v * 100.0)) {
+                        g.p[kit::KIT + i] = v;
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(3.0);
+            ui.label(RichText::new("Pads").small().color(TEXT_DIM));
+            egui::Grid::new(("kit_pads", ci)).num_columns(9).spacing([6.0, 2.0]).show(ui, |ui| {
+                for k in 0..kit::PADS {
+                    let at = k * kit::REC;
+                    let name = kit::name(&g.raw, k);
+                    if ui.selectable_label(k == pad, format!("{:>2}  {}", k + 1, if name.is_empty() { "..." } else { &name })).clicked() {
+                        pad = k;
+                    }
+                    let mut key = g.p[at + 4].round().clamp(0.0, 127.0) as u8;
+                    if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v < 1.0 { "no key".into() } else { key_name(v as u8) })).on_hover_text("The key that strikes this pad").changed() {
+                        g.p[at + 4] = key as f32;
+                        changed = true;
+                    }
+                    for (i, label) in [(0usize, "vol "), (1, "pan ")] {
+                        let mut v = g.p[at + i] * 100.0;
+                        if ui.add(egui::DragValue::new(&mut v).range(0.0..=100.0).speed(0.5).prefix(label).max_decimals(0)).changed() {
+                            g.p[at + i] = v / 100.0;
+                            changed = true;
+                        }
+                    }
+                    for (i, label, tip) in [(2usize, "M", "Mute"), (3, "S", "Solo")] {
+                        let mut on = g.p[at + i] >= 0.5;
+                        if ui.toggle_value(&mut on, label).on_hover_text(tip).changed() {
+                            g.p[at + i] = if on { 1.0 } else { 0.0 };
+                            changed = true;
+                        }
+                    }
+                    let mut cut = kit::cut(&g.raw, k);
+                    if ui.add(egui::DragValue::new(&mut cut).range(0..=16).prefix("cut ")).on_hover_text("Pads of one cut group stop each other. 0 is none.").changed() {
+                        kit::set_cut(&mut g.raw, k, cut);
+                        changed = true;
+                    }
+                    let mut off = kit::out_offset(&g.raw, k);
+                    if ui.add(egui::DragValue::new(&mut off).range(-98..=98).prefix("track ")).on_hover_text("Mixer track offset. Kept in the file; pads are not sent to their own tracks yet.").changed() {
+                        kit::set_out_offset(&mut g.raw, k, off);
+                        changed = true;
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Pad {}", pad + 1)).strong());
+                let mut name = kit::name(&g.raw, pad);
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(160.0)).changed() {
+                    kit::set_name(&mut g.raw, pad, &name);
+                    changed = true;
+                }
+                if ui.button("Load drum...").on_hover_text("Put a saved drum of your own on this pad").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Saved drum", &["dmpatch", "fst"]).pick_file() {
+                        let bytes = if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                            match cereal_engine::preset::read(&p).ok().and_then(|f| f.unit()) {
+                                Some(cereal_engine::preset::Unit::Gen(d)) => d.raw,
+                                _ => Vec::new(),
+                            }
+                        } else {
+                            std::fs::read(&p).unwrap_or_default()
+                        };
+                        let mut raw = std::mem::take(&mut g.raw);
+                        changed |= kit::load_pad(&mut g.p, &mut raw, pad, &bytes);
+                        g.raw = raw;
+                    }
+                }
+            });
+            let drum = &cereal_engine::membrane::params()[..38];
+            changed |= float_panel_at(ui, ci, g, &cereal_engine::membrane::GROUPS[..8], drum, pad * kit::REC + kit::DRUM);
+            ui.add_space(3.0);
+            ui.label(RichText::new("Step patterns").small().color(TEXT_DIM));
+            ui.horizontal(|ui| {
+                let mut n = pat + 1;
+                if ui.add(egui::DragValue::new(&mut n).range(1..=kit::PATTERNS).prefix("Pattern ")).changed() {
+                    pat = n - 1;
+                }
+                let used = kit::pat_len(&g.raw, pat);
+                let mut len = used.unwrap_or(16);
+                if ui.add(egui::DragValue::new(&mut len).range(1..=kit::STEPS).prefix("Steps ")).changed() || (used.is_none() && ui.button("Use").clicked()) {
+                    if used.is_none() {
+                        kit::reset_pattern(&mut g.raw, pat);
+                    }
+                    kit::set_pat_len(&mut g.raw, pat, len);
+                    changed = true;
+                }
+                let mut key = kit::pat_key(&g.raw, pat).unwrap_or(127);
+                if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v >= 127.0 { "no key".into() } else { key_name(v as u8) })).on_hover_text("Hold this key to run the pattern").changed() {
+                    kit::set_pat_key(&mut g.raw, pat, (key < 127).then_some(key));
+                    changed = true;
+                }
+                if ui.button("Clear").clicked() {
+                    kit::reset_pattern(&mut g.raw, pat);
+                    changed = true;
+                }
+                if ui.button("Load pattern...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Saved pattern", &["dmptrn"]).pick_file() {
+                        changed |= kit::import_pattern(&mut g.raw, pat, &std::fs::read(&p).unwrap_or_default());
+                    }
+                }
+            });
+            if let Some(len) = kit::pat_len(&g.raw, pat) {
+                egui::ScrollArea::horizontal().id_salt(("kit_steps", ci)).show(ui, |ui| {
+                    for k in 0..kit::PADS {
+                        if g.p[k * kit::REC + 4] < 1.0 && (0..len).all(|i| !kit::step(&g.raw, pat, k, i).0) {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.add_sized([86.0, 16.0], egui::Label::new(RichText::new(kit::name(&g.raw, k)).small()).truncate());
+                            for i in 0..len {
+                                if i > 0 && i % 4 == 0 {
+                                    ui.add_space(4.0);
+                                }
+                                let (on, hard) = kit::step(&g.raw, pat, k, i);
+                                let r = ui.add_sized([15.0, 16.0], egui::SelectableLabel::new(on, "")).on_hover_text(format!("Step {}: strength {hard}. Scroll over it to change the strength.", i + 1));
+                                if r.clicked() {
+                                    kit::set_step(&mut g.raw, pat, k, i, !on, hard);
+                                    changed = true;
+                                }
+                                if r.hovered() {
+                                    let turn = ui.input(|inp| inp.raw_scroll_delta.y);
+                                    if turn != 0.0 {
+                                        let h = (hard as f32 + turn.signum() * 4.0).clamp(1.0, 127.0) as u8;
+                                        kit::set_step(&mut g.raw, pat, k, i, on, h);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            } else {
+                ui.label(RichText::new("This pattern is not in use.").small().color(TEXT_DIM));
+            }
+            ui.data_mut(|d| {
+                d.insert_temp(pick_id, pad);
+                d.insert_temp(pat_id, pat);
+            });
+            ui.label(RichText::new("A pad sounds when its key is played; holding the key of a pattern runs its steps in time with the song. The tone bands and the ceiling work on each held key by itself, not on the whole kit together.").small().color(TEXT_DIM));
+        }
         Kind::KickD => {
             use cereal_engine::kickd::{params, sample_list, sample_name, sample_path, set_sample_path, COUNT, GROUPS};
             if g.p.len() < COUNT {
@@ -1062,7 +1253,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, params());
             ui.label(RichText::new("The wheels and key pressure are not worked yet, so links from them rest. A few stored settings are not placed yet: they are kept in the file as they are.").small().color(TEXT_DIM));
         }
-        Kind::Sub | Kind::Thump => {
+        Kind::Sub => {
             ui.label(RichText::new("Plays a stand-in voice of our own, shaped by the few stored settings we can read so far. Its block is kept untouched.").color(TEXT_DIM));
         }
         Kind::Metal | Kind::MetalBank => {
