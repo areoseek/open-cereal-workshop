@@ -7,6 +7,7 @@ use std::f32::consts::TAU;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
+pub mod flp;
 pub mod project;
 pub mod wav;
 
