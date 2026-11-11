@@ -551,6 +551,10 @@ pub struct FlpInsert {
     /// -6400..=6400.
     pub pan: i32,
     pub stereo_separation: i32,
+    /// The built-in equaliser: low, mid and high band, each gain (1/100 dB), frequency and width (0..=65536).
+    pub eq: [[i32; 3]; 3],
+    /// Send level per destination insert, 12800 = 100 %. Destinations not listed are at 100 %.
+    pub route_levels: Vec<(usize, i32)>,
     /// routes[i] is true when this insert sends to insert i.
     pub routes: Vec<bool>,
     pub slots: Vec<FlpSlot>,
@@ -560,10 +564,13 @@ pub struct FlpInsert {
 
 impl Default for FlpInsert {
     fn default() -> Self {
-        Self { index: 0, name: String::new(), color: None, flags: 0, volume: 12800, pan: 0, stereo_separation: 0, routes: vec![], slots: vec![], input: -1, output: -1 }
+        Self { index: 0, name: String::new(), color: None, flags: 0, volume: 12800, pan: 0, stereo_separation: 0, eq: EQ_DEFAULT, route_levels: vec![], routes: vec![], slots: vec![], input: -1, output: -1 }
     }
 }
 
+pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
+pub const INSERT_FLAG_INVERT: u32 = 1 << 0;
+pub const INSERT_FLAG_SWAP: u32 = 1 << 1;
 pub const INSERT_FLAG_ENABLED: u32 = 1 << 3;
 pub const INSERT_FLAG_SOLO: u32 = 1 << 12;
 
@@ -1008,6 +1015,16 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
             192 => ins.volume = value,
             193 => ins.pan = value,
             194 => ins.stereo_separation = value,
+            208..=210 => ins.eq[pid as usize - 208][0] = value,
+            216..=218 => ins.eq[pid as usize - 216][1] = value,
+            224..=226 => ins.eq[pid as usize - 224][2] = value,
+            64..=191 => {
+                let dest = pid as usize - 64;
+                match ins.route_levels.iter_mut().find(|r| r.0 == dest) {
+                    Some(r) => r.1 = value,
+                    None => ins.route_levels.push((dest, value)),
+                }
+            }
             _ => {}
         }
     }

@@ -499,11 +499,56 @@ pub struct Insert {
     /// Inserts this one feeds. Empty on the master.
     pub sends: Vec<usize>,
     pub slots: Vec<Slot>,
+    /// Stereo separation, -1 (wider) ..= 1 (mono).
+    pub sep: f32,
+    /// The built-in equaliser: low shelf, mid peak, high shelf.
+    pub eq: [Band; 3],
+    /// Send level per destination insert (index = destination), 1.0 = 100 %. Missing entries are 1.0.
+    pub levels: Vec<f32>,
+    pub invert: bool,
+    pub swap: bool,
+}
+
+/// One band of an insert's equaliser.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Band {
+    pub gain_db: f32,
+    /// 0..=1 of the frequency knob.
+    pub freq: f32,
+    /// 0..=1 of the width knob.
+    pub q: f32,
+}
+
+impl Band {
+    pub fn hz(&self) -> f32 {
+        20.0 * 1000f32.powf(self.freq.clamp(0.0, 1.0))
+    }
+    pub fn width(&self) -> f32 {
+        0.25 * (self.q.clamp(0.0, 1.0) * 4.0).exp2()
+    }
+}
+
+pub const EQ_DEFAULT: [Band; 3] = [
+    Band { gain_db: 0.0, freq: 5777.0 / 65536.0, q: 17500.0 / 65536.0 },
+    Band { gain_db: 0.0, freq: 33145.0 / 65536.0, q: 17500.0 / 65536.0 },
+    Band { gain_db: 0.0, freq: 55825.0 / 65536.0, q: 17500.0 / 65536.0 },
+];
+
+impl Insert {
+    pub fn send_level(&self, dest: usize) -> f32 {
+        self.levels.get(dest).copied().unwrap_or(1.0)
+    }
+    pub fn set_send_level(&mut self, dest: usize, v: f32) {
+        if self.levels.len() <= dest {
+            self.levels.resize(dest + 1, 1.0);
+        }
+        self.levels[dest] = v;
+    }
 }
 
 impl Default for Insert {
     fn default() -> Self {
-        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![] }
+        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false }
     }
 }
 
@@ -918,6 +963,22 @@ impl Song {
                         enabled: ins.flags & flp::INSERT_FLAG_ENABLED != 0 || ins.flags == 0,
                         sends,
                         slots: ins.slots.iter().map(|s| Slot { index: s.index, plugin: s.plugin.clone(), name: s.name.clone(), enabled: s.enabled }).collect(),
+                        sep: (ins.stereo_separation as f32 / 64.0).clamp(-1.0, 1.0),
+                        eq: ins.eq.map(|b| Band { gain_db: b[0] as f32 / 100.0, freq: b[1] as f32 / 65536.0, q: b[2] as f32 / 65536.0 }),
+                        levels: {
+                            let mut l = vec![];
+                            for &(d, v) in &ins.route_levels {
+                                if ins.routes.get(d).copied().unwrap_or(false) && v != 12800 {
+                                    if l.len() <= d {
+                                        l.resize(d + 1, 1.0);
+                                    }
+                                    l[d] = v as f32 / 12800.0;
+                                }
+                            }
+                            l
+                        },
+                        invert: ins.flags & flp::INSERT_FLAG_INVERT != 0,
+                        swap: ins.flags & flp::INSERT_FLAG_SWAP != 0,
                     }
                 })
                 .collect()

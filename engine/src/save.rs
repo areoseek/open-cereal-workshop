@@ -988,6 +988,33 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         if ins_pan(now.pan) != ins_pan(was.pan) {
             records.push((193, cd, ins_pan(now.pan)));
         }
+        let q = |v: f32, scale: f32| (v * scale).round() as i32;
+        if q(now.sep, 64.0) != q(was.sep, 64.0) {
+            records.push((194, cd, q(now.sep, 64.0)));
+        }
+        for b in 0..3u8 {
+            let (x, y) = (&now.eq[b as usize], &was.eq[b as usize]);
+            if q(x.gain_db, 100.0) != q(y.gain_db, 100.0) {
+                records.push((208 + b, cd, q(x.gain_db, 100.0)));
+            }
+            if q(x.freq, 65536.0) != q(y.freq, 65536.0) {
+                records.push((216 + b, cd, q(x.freq, 65536.0)));
+            }
+            if q(x.q, 65536.0) != q(y.q, 65536.0) {
+                records.push((224 + b, cd, q(x.q, 65536.0)));
+            }
+        }
+        for d in 0..now.levels.len().max(was.levels.len()).min(128) {
+            if q(now.send_level(d), 12800.0) != q(was.send_level(d), 12800.0) {
+                records.push((64 + d as u8, cd, q(now.send_level(d), 12800.0)));
+            }
+        }
+        if (now.invert, now.swap) != (was.invert, was.swap) {
+            if let Value::Data(d) = &mut ev[open].value {
+                let f = u32at(d, 4) & !(flp::INSERT_FLAG_INVERT | flp::INSERT_FLAG_SWAP);
+                put_u32(d, 4, f | if now.invert { flp::INSERT_FLAG_INVERT } else { 0 } | if now.swap { flp::INSERT_FLAG_SWAP } else { 0 });
+            }
+        }
         for s in &now.slots {
             if was.slots.iter().find(|w| w.index == s.index).map(|w| w.enabled != s.enabled).unwrap_or(false) {
                 records.push((0, cd | (s.index & 63), s.enabled as i32));
@@ -1163,6 +1190,12 @@ mod tests {
         s.inserts[3].pan = 0.5;
         s.inserts[4].sends = vec![3];
         s.inserts[5].enabled = false;
+        s.inserts[3].sep = -0.5;
+        s.inserts[3].eq[0].gain_db = 6.0;
+        s.inserts[3].eq[1].freq = 0.25;
+        s.inserts[3].eq[2].q = 0.75;
+        s.inserts[4].set_send_level(3, 0.5);
+        s.inserts[4].swap = true;
         s.tracks[2].name = "Fills".into();
         s.prepare();
 
@@ -1186,6 +1219,13 @@ mod tests {
         assert_eq!(r.inserts[4].sends, vec![3]);
         assert!(!r.inserts[5].enabled);
         assert!(r.inserts[6].enabled);
+        assert!((r.inserts[3].sep + 0.5).abs() < 1e-3);
+        assert!((r.inserts[3].eq[0].gain_db - 6.0).abs() < 1e-3);
+        assert!((r.inserts[3].eq[1].freq - 0.25).abs() < 1e-3);
+        assert!((r.inserts[3].eq[2].q - 0.75).abs() < 1e-3);
+        assert_eq!(r.inserts[2].eq, crate::song::EQ_DEFAULT);
+        assert!((r.inserts[4].send_level(3) - 0.5).abs() < 1e-3);
+        assert!(r.inserts[4].swap && !r.inserts[4].invert && !r.inserts[3].swap);
         assert_eq!(r.tracks[2].name, "Fills");
 
         // saving what was loaded changes nothing

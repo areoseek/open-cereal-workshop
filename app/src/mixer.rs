@@ -28,6 +28,7 @@ impl App {
             u
         };
         let font = FontId::proportional(10.5);
+        let mut route: Option<(usize, usize, bool)> = None;
         ui.horizontal_top(|ui| {
             let side = 190.0;
             let strips_w = (ui.available_width() - side - 8.0).max(120.0);
@@ -60,7 +61,7 @@ impl App {
                                     if knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).on_hover_text("Panning").changed() {
                                         self.dirty = true;
                                     }
-                                    let h = (ui.available_height() - 22.0).clamp(60.0, 220.0);
+                                    let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
                                     let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), self.peaks[i]);
                                     if r.changed() {
                                         self.dirty = true;
@@ -70,6 +71,25 @@ impl App {
                                     let dot = if used[i] > 0 { GREEN } else { PANEL_DARK };
                                     let (rect, _) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 8.0), Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 3.0, dot);
+                                    // routing from the selected insert into this one
+                                    let src = self.sel_insert;
+                                    if src != i && src != 0 && src < n {
+                                        let routed = self.song.inserts[src].sends.contains(&i);
+                                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 12.0), Sense::click());
+                                        let c = rect.center();
+                                        let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
+                                        ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
+                                        if resp.on_hover_text(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
+                                            route = Some((src, i, !routed));
+                                        }
+                                        if routed {
+                                            let mut lv = self.song.inserts[src].send_level(i);
+                                            if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).on_hover_text(format!("Send level {:.0} %", lv * 100.0)).changed() {
+                                                self.song.inserts[src].set_send_level(i, lv);
+                                                self.dirty = true;
+                                            }
+                                        }
+                                    }
                                 });
                             });
                             if selected {
@@ -86,15 +106,19 @@ impl App {
                     let i = self.sel_insert.min(n.saturating_sub(1));
                     ui.label(RichText::new(self.song.insert_name(i)).strong().color(TEXT));
                     ui.separator();
-                    let ins = &self.song.inserts[i];
+                    let mut changed = false;
                     for slot in 0..10u16 {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(side - 8.0, 18.0), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(side - 8.0, 18.0), Sense::click());
                         ui.painter().rect_filled(rect, 2.0, PANEL_DARK);
-                        match ins.slots.iter().find(|s| s.index == slot) {
+                        match self.song.inserts[i].slots.iter_mut().find(|s| s.index == slot) {
                             Some(s) => {
                                 let label = if s.name.is_empty() { s.plugin.clone() } else { s.name.clone() };
                                 ui.painter().text(rect.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, fit(ui, &label, rect.width() - 22.0, &font), font.clone(), if s.enabled { TEXT } else { TEXT_DIM });
                                 ui.painter().circle_filled(rect.right_center() - Vec2::new(8.0, 0.0), 3.0, if s.enabled { GREEN } else { PANEL });
+                                if resp.on_hover_text("Click to switch this effect on or off").clicked() {
+                                    s.enabled = !s.enabled;
+                                    changed = true;
+                                }
                             }
                             None => {
                                 ui.painter().text(rect.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, format!("Slot {}", slot + 1), font.clone(), TEXT_DIM.gamma_multiply(0.6));
@@ -102,6 +126,33 @@ impl App {
                         }
                     }
                     ui.add_space(4.0);
+                    // the track's own equaliser: gain on top, frequency and width under it
+                    {
+                        let ins = &mut self.song.inserts[i];
+                        let def = cereal_engine::song::EQ_DEFAULT;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            for b in 0..3 {
+                                ui.vertical(|ui| {
+                                    let band = &mut ins.eq[b];
+                                    let hz = band.hz();
+                                    changed |= knob(ui, &mut band.gain_db, -18.0, 18.0, 0.0, 22.0).on_hover_text(format!("{} gain {:+.1} dB", ["Low", "Mid", "High"][b], band.gain_db)).changed();
+                                    changed |= knob(ui, &mut band.freq, 0.0, 1.0, def[b].freq, 16.0).on_hover_text(format!("Frequency {hz:.0} Hz")).changed();
+                                    changed |= knob(ui, &mut band.q, 0.0, 1.0, def[b].q, 16.0).on_hover_text("Width").changed();
+                                });
+                            }
+                            ui.vertical(|ui| {
+                                changed |= knob(ui, &mut ins.sep, -1.0, 1.0, 0.0, 22.0).on_hover_text(format!("Stereo separation {:+.0} %", -ins.sep * 100.0)).changed();
+                                changed |= ui.selectable_label(ins.invert, RichText::new("INV").small()).on_hover_text("Reverse polarity").clicked().then(|| ins.invert = !ins.invert).is_some();
+                                changed |= ui.selectable_label(ins.swap, RichText::new("SWAP").small()).on_hover_text("Swap left and right").clicked().then(|| ins.swap = !ins.swap).is_some();
+                            });
+                        });
+                    }
+                    if changed {
+                        self.dirty = true;
+                    }
+                    ui.add_space(4.0);
+                    let ins = &self.song.inserts[i];
                     if i != 0 {
                         let to: Vec<String> = ins.sends.iter().map(|&d| self.song.insert_name(d)).collect();
                         ui.label(RichText::new(format!("Out: {}", if to.is_empty() { "(none)".into() } else { to.join(", ") })).small().color(TEXT_DIM));
@@ -114,5 +165,29 @@ impl App {
                 });
             });
         });
+        if let Some((src, dst, on)) = route {
+            // never let a track feed itself through others
+            let mut reach = vec![dst];
+            let mut k = 0;
+            while k < reach.len() {
+                for &d in &self.song.inserts[reach[k]].sends {
+                    if !reach.contains(&d) {
+                        reach.push(d);
+                    }
+                }
+                k += 1;
+            }
+            let ins = &mut self.song.inserts[src];
+            if !on {
+                ins.sends.retain(|&d| d != dst);
+                self.dirty = true;
+            } else if !reach.contains(&src) {
+                ins.sends.push(dst);
+                ins.sends.sort_unstable();
+                self.dirty = true;
+            } else {
+                self.status = "That routing would feed the track back into itself".into();
+            }
+        }
     }
 }

@@ -165,6 +165,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         sr: sample_rate,
         voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
         buses: vec![],
+        eq: vec![],
         dirty: vec![],
         pos: 0.0,
         was_playing: false,
@@ -502,6 +503,8 @@ pub struct Player {
     sr: f32,
     voices: Vec<Voice>,
     buses: Vec<Vec<[f32; 2]>>,
+    /// Equaliser memory per insert and band: two values per side.
+    eq: Vec<[[f32; 4]; 3]>,
     dirty: Vec<bool>,
     pos: f64,
     was_playing: bool,
@@ -888,6 +891,47 @@ impl Player {
         n
     }
 
+}
+
+/// Biquad coefficients (b0, b1, b2, a1, a2) for band 0 (low shelf), 1 (peak) or 2 (high shelf).
+fn eq_coeffs(band: usize, b: &crate::song::Band, rate: f32) -> [f32; 5] {
+    let a = 10f32.powf(b.gain_db / 40.0);
+    let w = 2.0 * std::f32::consts::PI * (b.hz() / rate).min(0.49);
+    let (sn, cs) = w.sin_cos();
+    let alpha = sn / (2.0 * b.width());
+    let (b0, b1, b2, a0, a1, a2);
+    match band {
+        1 => {
+            b0 = 1.0 + alpha * a;
+            b1 = -2.0 * cs;
+            b2 = 1.0 - alpha * a;
+            a0 = 1.0 + alpha / a;
+            a1 = -2.0 * cs;
+            a2 = 1.0 - alpha / a;
+        }
+        0 => {
+            let k = 2.0 * a.sqrt() * alpha;
+            b0 = a * ((a + 1.0) - (a - 1.0) * cs + k);
+            b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cs);
+            b2 = a * ((a + 1.0) - (a - 1.0) * cs - k);
+            a0 = (a + 1.0) + (a - 1.0) * cs + k;
+            a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cs);
+            a2 = (a + 1.0) + (a - 1.0) * cs - k;
+        }
+        _ => {
+            let k = 2.0 * a.sqrt() * alpha;
+            b0 = a * ((a + 1.0) + (a - 1.0) * cs + k);
+            b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cs);
+            b2 = a * ((a + 1.0) + (a - 1.0) * cs - k);
+            a0 = (a + 1.0) - (a - 1.0) * cs + k;
+            a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cs);
+            a2 = (a + 1.0) - (a - 1.0) * cs - k;
+        }
+    }
+    [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+}
+
+impl Player {
     fn mix(&mut self, song: &Song, out: &mut [f32], channels: usize) {
         let n = out.len() / channels;
         let ni = song.inserts.len().max(1);
@@ -931,6 +975,45 @@ impl Player {
                 let (pl, pr) = law::pan(op.unwrap_or(ins.pan));
                 let (gl, gr) = (g * pl, g * pr);
                 let mut peak = [0f32; 2];
+                // the insert's own equaliser, then separation, polarity and swap, then the fader
+                if self.eq.len() != ni {
+                    self.eq = vec![[[0.0; 4]; 3]; ni];
+                }
+                for (b, band) in ins.eq.iter().enumerate() {
+                    if band.gain_db.abs() < 0.005 {
+                        continue;
+                    }
+                    let c = eq_coeffs(b, band, self.sr);
+                    let st = &mut self.eq[i][b];
+                    for f in bus[..n].iter_mut() {
+                        for ch in 0..2 {
+                            let x = f[ch];
+                            let y = c[0] * x + st[ch * 2];
+                            st[ch * 2] = c[1] * x - c[3] * y + st[ch * 2 + 1];
+                            st[ch * 2 + 1] = c[2] * x - c[4] * y;
+                            f[ch] = y;
+                        }
+                    }
+                    for v in st.iter_mut() {
+                        if !v.is_finite() || v.abs() < 1e-20 {
+                            *v = 0.0;
+                        }
+                    }
+                }
+                if ins.sep != 0.0 {
+                    let side = 1.0 - ins.sep;
+                    for f in bus[..n].iter_mut() {
+                        let m = (f[0] + f[1]) * 0.5;
+                        let s = (f[0] - f[1]) * 0.5 * side;
+                        *f = [m + s, m - s];
+                    }
+                }
+                if ins.swap {
+                    for f in bus[..n].iter_mut() {
+                        f.swap(0, 1);
+                    }
+                }
+                let (gl, gr) = if ins.invert { (-gl, -gr) } else { (gl, gr) };
                 for f in bus[..n].iter_mut() {
                     f[0] *= gl;
                     f[1] *= gr;
@@ -961,9 +1044,10 @@ impl Player {
                 } else {
                     for &d in &ins.sends {
                         if d < ni {
+                            let lv = law::fader_gain(ins.send_level(d));
                             for (o, f) in self.buses[d][..n].iter_mut().zip(&bus[..n]) {
-                                o[0] += f[0];
-                                o[1] += f[1];
+                                o[0] += f[0] * lv;
+                                o[1] += f[1] * lv;
                             }
                             self.dirty[d] = true;
                         }

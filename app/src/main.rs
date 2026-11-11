@@ -808,21 +808,32 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |_| {});
 
         let frame = egui::Frame::window(&ctx.style()).fill(PANEL);
+        // where windows first appear: playlist on top, rack and mixer side by side under it, channel settings
+        // down the right edge, so nothing starts out covered
+        let screen = ctx.screen_rect();
+        let left = if self.show_browser { 246.0 } else { 8.0 };
+        let top = 92.0;
+        let right_col = 440.0;
+        let wide = (screen.width() - left - right_col - 16.0).max(480.0);
+        let upper = ((screen.height() - top) * 0.46).max(220.0);
+        let low_y = top + upper + 48.0;
+        let low_h = (screen.height() - low_y - 56.0).max(160.0);
+        let rack_w = 640.0f32.min(wide * 0.5);
         let mut open = self.show_playlist;
-        egui::Window::new("Playlist").open(&mut open).frame(frame).default_pos([260.0, 90.0]).default_size([980.0, 420.0]).show(ctx, |ui| self.playlist_ui(ui));
+        egui::Window::new("Playlist").open(&mut open).frame(frame).default_pos([left, top]).default_size([wide, upper]).show(ctx, |ui| self.playlist_ui(ui));
         self.show_playlist = open;
         let mut open = self.show_rack;
-        egui::Window::new("Channel rack").open(&mut open).frame(frame).default_pos([280.0, 540.0]).default_size([640.0, 260.0]).show(ctx, |ui| self.rack_ui(ui));
+        egui::Window::new("Channel rack").open(&mut open).frame(frame).default_pos([left, low_y]).default_size([rack_w, low_h]).show(ctx, |ui| self.rack_ui(ui));
         self.show_rack = open;
         let mut open = self.show_piano;
-        egui::Window::new("Piano roll").open(&mut open).frame(frame).default_pos([340.0, 140.0]).default_size([900.0, 460.0]).show(ctx, |ui| self.piano_ui(ui));
+        egui::Window::new("Piano roll").open(&mut open).frame(frame).default_pos([left + 24.0, top + 24.0]).default_size([wide - 24.0, upper + 60.0]).show(ctx, |ui| self.piano_ui(ui));
         self.show_piano = open;
         let mut open = self.show_mixer;
-        egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([300.0, 420.0]).default_size([980.0, 360.0]).show(ctx, |ui| self.mixer_ui(ui));
+        egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([left + rack_w + 28.0, low_y]).default_size([(screen.width() - left - rack_w - 44.0).max(400.0), low_h]).show(ctx, |ui| self.mixer_ui(ui));
         self.show_mixer = open;
         let mut open = self.show_chanset;
         let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
-        egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([940.0, 520.0]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
+        egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
         self.show_chanset = open;
 
         self.small_windows(ctx);
