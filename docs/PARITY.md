@@ -64,11 +64,11 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Emphasizer
 - [ ] EQUO
 - [ ] FL Studio Mobile Rack FX
-- [ ] Frequency Shifter
+- [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
 - [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
 - [ ] Fruity 7 Band EQ
 - [~] Fruity Balance (built, approximate)
-- [ ] Fruity Bass Boost
+- [~] Fruity Bass Boost (built as Bass Lift; frequency and amount scales estimated)
 - [ ] Fruity Big Clock
 - [~] Fruity Blood Overdrive (built, approximate)
 - [ ] Fruity Center
@@ -86,7 +86,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Flanger (built as Flanger (classic), settings carried onto the newer unit)
 - [~] Fruity Flangus (built, approximate)
 - [ ] Fruity Formula Controller
-- [ ] Fruity Free Filter
+- [~] Fruity Free Filter (built as Open Filter: seven shapes; frequency law fitted to three known points, Q and gain scales estimated)
 - [ ] Fruity HTML NoteBook
 - [~] Fruity Limiter (built, approximate)
 - [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Not yet: slow oscillators, patterns 2 to 10 and key switching, line editors, the note text. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
@@ -100,7 +100,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Parametric EQ 2 (built, approximate)
 - [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas not run)
 - [ ] Fruity Phase Inverter
-- [ ] Fruity Phaser
+- [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
 - [~] Fruity Reeverb 2 (built, approximate)
 - [ ] Fruity Scratcher

@@ -16,6 +16,10 @@ pub enum Kind {
     Loud,
     Warp,
     Bank,
+    FreeFilter,
+    BassBoost,
+    Phaser,
+    FreqShift,
     FastLp,
     Overdrive,
     Filter,
@@ -687,6 +691,52 @@ pub static DEFS: &[Def] = &[
             p("Attack", 20, 0, 8192, 1765),
             p("Release", 24, 0, 8192, 5000),
             p("Tension", 28, 0, 256, 0),
+        ],
+    },
+    Def {
+        kind: Kind::FreeFilter,
+        ident: "Fruity Free Filter",
+        title: "Open Filter",
+        size: 21,
+        fixed: &[(0, 2), (17, 0x0100_0000)],
+        params: &[p("Type", 4, 0, 700, 100), p("Frequency", 8, 0, 1024, 1024), p("Q", 12, 0, 1024, 0), p("Gain", 16, 0, 1024, 676)],
+    },
+    Def { kind: Kind::BassBoost, ident: "Fruity Bass Boost", title: "Bass Lift", size: 12, fixed: &[(0, 1)], params: &[p("Frequency", 4, 0, 1024, 512), p("Amount", 8, 0, 1024, 768)] },
+    Def {
+        kind: Kind::Phaser,
+        ident: "Fruity Phaser",
+        title: "Phaser",
+        size: 40,
+        fixed: &[(0, 1)],
+        params: &[
+            p("Sweep rate", 4, 0, 5000, 1500),
+            p("Depth low", 8, 0, 1000, 0),
+            p("Depth high", 12, 0, 1000, 900),
+            p("Rate range", 16, 0, 1024, 0),
+            p("Stereo", 20, 0, 1024, 512),
+            p("Stages", 24, 1, 23, 11),
+            p("Feedback", 28, 0, 1000, 693),
+            p("Dry", 32, 0, 1024, 0),
+            p("Gain", 36, 0, 5000, 2500),
+        ],
+    },
+    Def {
+        kind: Kind::FreqShift,
+        ident: "Frequency Shifter",
+        title: "Hertz Shifter",
+        size: 52,
+        fixed: &[(0, 4)],
+        params: &[
+            p("Mix", 4, 0, 10000, 10000),
+            p("Mode", 8, 0, 3, 0),
+            p("Frequency", 12, -100000, 100000, 70000),
+            p("Right phase", 16, 0, 10000, 0),
+            p("Sideband left", 20, 0, 10000, 10000),
+            p("Sideband right", 24, 0, 10000, 10000),
+            p("Feedback", 28, 0, 10000, 5000),
+            p("Width", 32, 0, 10000, 10000),
+            p("Range", 36, 0, 2, 1),
+            p("Start phase", 40, 0, 10000, 5000),
         ],
     },
     // the offsets here only number the settings: the block is packed and read by its own module
@@ -1731,6 +1781,7 @@ impl Unit {
             // two bars at 40 beats a minute and up
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
+            Kind::FreqShift => u.buf = vec![[0.0; 2]; 36],
             Kind::Tuner => {
                 u.buf = vec![[0.0; 2]; (sr * 0.2) as usize + 8];
                 u.lines.push(vec![0.0; 2048]);
@@ -1816,7 +1867,8 @@ impl Unit {
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Peak => (cx.sr * 3.0) as usize,
             Kind::Warp => (cx.step * 32.0) as usize + 64,
-            Kind::Bank => (cx.sr * 0.25) as usize,
+            Kind::Bank | Kind::FreeFilter | Kind::BassBoost | Kind::FreqShift => (cx.sr * 0.25) as usize,
+            Kind::Phaser => (cx.sr * 1.5) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2526,6 +2578,156 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::FreeFilter => {
+                // seven shapes on one two-pole stage: low, band, high pass, notch, low shelf, bell, high shelf
+                let kind = ((p[0] / 100.0) as i32).clamp(1, 7);
+                let hz = (3.966 + 0.00683 * p[1] - 1.22e-6 * p[1] * p[1]).exp();
+                let q = 0.707 * 20f32.powf(p[2] / 1024.0);
+                let a = 10f32.powf((p[3] / 676.0 - 1.0) * 36.0 / 40.0);
+                let w = TAU * (hz / sr).clamp(0.0002, 0.49);
+                let (sn, c) = w.sin_cos();
+                let al = sn / (2.0 * q);
+                let k = 2.0 * a.sqrt() * al;
+                let (b0, b1, b2, a0, a1, a2) = match kind {
+                    1 => ((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0, 1.0 + al, -2.0 * c, 1.0 - al),
+                    2 => (al, 0.0, -al, 1.0 + al, -2.0 * c, 1.0 - al),
+                    3 => ((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0, 1.0 + al, -2.0 * c, 1.0 - al),
+                    4 => (1.0, -2.0 * c, 1.0, 1.0 + al, -2.0 * c, 1.0 - al),
+                    5 => (
+                        a * ((a + 1.0) - (a - 1.0) * c + k),
+                        2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+                        a * ((a + 1.0) - (a - 1.0) * c - k),
+                        (a + 1.0) + (a - 1.0) * c + k,
+                        -2.0 * ((a - 1.0) + (a + 1.0) * c),
+                        (a + 1.0) + (a - 1.0) * c - k,
+                    ),
+                    6 => (1.0 + al * a, -2.0 * c, 1.0 - al * a, 1.0 + al / a, -2.0 * c, 1.0 - al / a),
+                    _ => (
+                        a * ((a + 1.0) + (a - 1.0) * c + k),
+                        -2.0 * a * ((a - 1.0) + (a + 1.0) * c),
+                        a * ((a + 1.0) + (a - 1.0) * c - k),
+                        (a + 1.0) - (a - 1.0) * c + k,
+                        2.0 * ((a - 1.0) - (a + 1.0) * c),
+                        (a + 1.0) - (a - 1.0) * c - k,
+                    ),
+                };
+                let co = [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+                for f in io.iter_mut() {
+                    f[0] = biquad(&co, &mut z[0..2], f[0]);
+                    f[1] = biquad(&co, &mut z[2..4], f[1]);
+                }
+            }
+            Kind::BassBoost => {
+                // a slow one-pole follower of the input is added back on top of it
+                let sel = 140.0 - 130.0 * p[0] / 1024.0;
+                let a = 1.0 - (-TAU * (44100.0 / (TAU * (sel + 1.0))) / sr).exp();
+                let ratio = p[1] / 1024.0 * 4.0;
+                for f in io.iter_mut() {
+                    for c in 0..2 {
+                        z[c] += a * (f[c] - z[c]);
+                        f[c] += z[c] * ratio;
+                    }
+                }
+            }
+            Kind::Phaser => {
+                let top = 2.0 + 8.0 * p[3] / 1024.0;
+                let inc = p[0] / 5000.0 * top / sr;
+                let (lo, hi) = (p[1] / 1000.0, p[2] / 1000.0);
+                let spread = p[4] / 1024.0;
+                let stages = (p[5] as usize).clamp(1, 23);
+                let fb = (p[6] / 1000.0).clamp(0.0, 0.98);
+                let dry = (p[7] / 1024.0).clamp(0.0, 1.0);
+                let gain = p[8] / 2500.0;
+                // odd stage counts turn the loop's sign over, so the fed back part keeps ringing the same way
+                let sign = if stages % 2 == 0 { 1.0 } else { -1.0 };
+                let mut co = [0.0f32; 2];
+                for (i, f) in io.iter_mut().enumerate() {
+                    if i % 16 == 0 {
+                        self.ph += inc * 16.0;
+                        if self.ph >= 1.0 {
+                            self.ph -= 1.0;
+                        }
+                        for c in 0..2 {
+                            let l = 0.5 - 0.5 * ((self.ph + spread * c as f32) * TAU).cos();
+                            let t = (PI * knob_hz(0.15 + 0.8 * (lo + (hi - lo) * l)) / sr).min(1.5).tan();
+                            co[c] = (t - 1.0) / (t + 1.0);
+                        }
+                    }
+                    for c in 0..2 {
+                        let mut x = f[c] + sign * fb * z[60 + c];
+                        for s in 0..stages {
+                            let k = c * 24 + s;
+                            let y = co[c] * x + z[k];
+                            z[k] = x - co[c] * y;
+                            x = y;
+                        }
+                        if !x.is_finite() {
+                            x = 0.0;
+                        }
+                        z[60 + c] = x.clamp(-8.0, 8.0);
+                        f[c] = (f[c] * dry + x * (1.0 - dry)) * gain;
+                    }
+                }
+            }
+            Kind::FreqShift => {
+                // a pair of all-pass chains gives two copies of the input a quarter turn apart; turning them
+                // against a sine and cosine moves every frequency by the same number of hertz
+                const A: [f32; 4] = [0.6923878, 0.9360654322959, 0.9882295226860, 0.9987488452737];
+                const B: [f32; 4] = [0.4021921162426, 0.8561710882420, 0.9722909545651, 0.9952884791278];
+                let mix = (p[0] / 10000.0).clamp(0.0, 1.0);
+                let mode = p[1] as i32;
+                let x = (p[2].abs() / 100000.0).clamp(0.0, 1.0).powf(4.85) * p[2].signum();
+                let hz = match p[8] as i32 {
+                    0 => 20000.0 * x,
+                    1 => 200.0 * x,
+                    // tempo: so many turns to four bars
+                    _ => p[2] / 10000.0 * sr / (cx.step * 64.0),
+                };
+                let inc = hz / sr;
+                let side = [p[4] / 5000.0 - 1.0, p[5] / 5000.0 - 1.0];
+                let fb = (p[6] / 5000.0 - 1.0).clamp(-0.98, 0.98);
+                let width = (p[7] / 10000.0).clamp(0.0, 1.0);
+                let offs = [p[9] / 10000.0 - 0.5, p[9] / 10000.0 - 0.5 + p[3] / 10000.0];
+                let b = &mut self.buf;
+                for f in io.iter_mut() {
+                    self.ph = (self.ph + inc).rem_euclid(1.0);
+                    let mut wet = [0.0f32; 2];
+                    for c in 0..2 {
+                        let (sn, cs) = ((self.ph + offs[c]) * TAU).sin_cos();
+                        let x = f[c] + fb * b[33][c];
+                        let y = if mode >= 2 {
+                            x * sn
+                        } else {
+                            let (mut i, mut q) = (x, x);
+                            for s in 0..4 {
+                                let k = s * 4;
+                                let y = A[s] * (i + b[k + 3][c]) - b[k + 1][c];
+                                b[k + 1][c] = b[k][c];
+                                b[k][c] = i;
+                                b[k + 3][c] = b[k + 2][c];
+                                b[k + 2][c] = y;
+                                i = y;
+                                let k = 16 + s * 4;
+                                let y = B[s] * (q + b[k + 3][c]) - b[k + 1][c];
+                                b[k + 1][c] = b[k][c];
+                                b[k][c] = q;
+                                b[k + 3][c] = b[k + 2][c];
+                                b[k + 2][c] = y;
+                                q = y;
+                            }
+                            let held = b[32][c];
+                            b[32][c] = i;
+                            held * cs + side[c] * q * sn
+                        };
+                        let y = if y.is_finite() { y.clamp(-8.0, 8.0) } else { 0.0 };
+                        b[33][c] = y;
+                        wet[c] = y;
+                    }
+                    let (m, s) = ((wet[0] + wet[1]) * 0.5, (wet[0] - wet[1]) * 0.5 * width);
+                    f[0] = f[0] * (1.0 - mix) + (m + s) * mix;
+                    f[1] = f[1] * (1.0 - mix) + (m - s) * mix;
+                }
+            }
             Kind::Bank => {
                 if let Some(st) = &mut self.bank {
                     crate::fxbank::process(p, st, io, cx);
@@ -3337,7 +3539,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -3390,6 +3592,33 @@ mod tests {
             let out = run(Fx::new(kind), sine, 8000);
             assert!(rms(&out[4000..]) > 0.05, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn hertz_shifter_moves_a_tone_up() {
+        // 440 Hz moved by the stored value that reads 800 Hz lands on 1240 Hz
+        let mut fx = Fx::new(Kind::FreqShift);
+        fx.p[2] = 51542.0;
+        fx.p[8] = 0.0;
+        let out = run(fx, sine, 44100 * 2);
+        let tail = &out[44100..];
+        let crossings = tail.windows(2).filter(|w| w[0][0] <= 0.0 && w[1][0] > 0.0).count();
+        assert!((crossings as i32 - 1240).abs() <= 8, "{crossings} cycles in a second");
+        assert!((rms(tail) - 0.3535).abs() < 0.03, "level {}", rms(tail));
+    }
+
+    #[test]
+    fn open_filter_shapes() {
+        // low pass far below the tone removes it; a high pass there leaves it alone
+        let mut fx = Fx::new(Kind::FreeFilter);
+        fx.p[1] = 80.0;
+        assert!(rms(&run(fx.clone(), sine, 16384)[8192..]) < 0.03);
+        fx.p[0] = 300.0;
+        assert!((rms(&run(fx, sine, 16384)[8192..]) - 0.3535).abs() < 0.02);
+        let mut ph = Fx::new(Kind::Phaser);
+        ph.p[7] = 512.0;
+        let out = run(ph, sine, 44100);
+        assert!(out.iter().all(|f| f[0].abs() < 4.0));
     }
 
     #[test]
