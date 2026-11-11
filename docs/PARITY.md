@@ -57,9 +57,9 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Wave Traveller (opens as Path Scratcher, block kept; its sample is found and played straight through; the per-key travel paths, regions, speed, volume paths and editing are not done)
 
 ## Effects and tools (90)
-- [ ] Control Surface
+- [~] Control Surface (opens as Control Panel, block kept, sound passes through; its controls are not shown or sent yet)
 - [ ] Distructor
-- [ ] Edison
+- [~] Edison (opens as Wave Recorder, block kept, sound passes through; recording and editing are not done)
 - [~] Effector (built as Pad Effects; all twelve effects are our own takes, tuned by ear from the manual text)
 - [~] Emphasis (built as Finisher: gain rider plus shaper, four modes, hardness, linking, ceiling; a plain stand-in for the adaptive stages, switches and meters missing)
 - [ ] Emphasizer
@@ -86,16 +86,16 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Filter (built, approximate)
 - [~] Fruity Flanger (built as Flanger (classic), settings carried onto the newer unit)
 - [~] Fruity Flangus (built, approximate)
-- [ ] Fruity Formula Controller
+- [~] Fruity Formula Controller (opens as Formula Sender, block kept; formulas are not worked out or sent yet)
 - [~] Fruity Free Filter (built as Open Filter: seven shapes; frequency law fitted to three known points, Q and gain scales estimated)
-- [ ] Fruity HTML NoteBook
+- [~] Fruity HTML NoteBook (opens as Web Notes, block kept, sound passes through; the page is not shown)
 - [~] Fruity Limiter (built, approximate)
 - [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Not yet: slow oscillators, patterns 2 to 10 and key switching, line editors, the note text. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
 - [ ] Fruity LSD
 - [~] Fruity Multiband Compressor (built as Three Band Compressor, approximate)
 - [ ] Fruity Mute 2
-- [ ] Fruity NoteBook
-- [ ] Fruity NoteBook 2
+- [~] Fruity NoteBook (opens as Note Pad, block kept, sound passes through; the notes are not shown)
+- [~] Fruity NoteBook 2 (opens as Note Pages, block kept, sound passes through; the notes are not shown)
 - [~] Fruity PanOMatic (built, approximate)
 - [~] Fruity Parametric EQ (built as Seven Band EQ (classic), settings carried onto the newer unit)
 - [~] Fruity Parametric EQ 2 (built, approximate)
@@ -146,8 +146,8 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [ ] Vintage Phaser
 - [ ] Vocodex
-- [ ] Wave Candy
-- [ ] ZGameEditor Visualizer
+- [~] Wave Candy (opens as Scope Meter, block kept, sound passes through; the displays are not drawn)
+- [~] ZGameEditor Visualizer (opens as Visual Stage, block kept, sound passes through; no visuals)
 
 ## Core windows
 - [~] Channel rack (steps, channel strip, layers, add sampler or instrument)

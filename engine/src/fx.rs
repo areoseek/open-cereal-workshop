@@ -54,6 +54,8 @@ pub enum Kind {
     Peak,
     Xy,
     Curve,
+    /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
+    Thru,
 }
 
 pub struct Param {
@@ -632,6 +634,14 @@ pub static DEFS: &[Def] = &[
             p("Output", 312, 0, 10000, 5000),
         ],
     },
+    Def { kind: Kind::Thru, ident: "Wave Candy", title: "Scope Meter", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "ZGameEditor Visualizer", title: "Visual Stage", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity NoteBook 2", title: "Note Pages", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity NoteBook", title: "Note Pad", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity HTML NoteBook", title: "Web Notes", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Control Surface", title: "Control Panel", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Edison", title: "Wave Recorder", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Thru, ident: "Fruity Formula Controller", title: "Formula Sender", size: 0, fixed: &[], params: &[] },
     Def {
         kind: Kind::Tuner,
         ident: "Pitcher",
@@ -2253,7 +2263,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush => {}
+            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru => {}
             Kind::Curve => {
                 if p.len() < 4 + CURVE_N {
                     return;

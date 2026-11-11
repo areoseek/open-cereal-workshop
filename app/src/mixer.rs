@@ -157,7 +157,7 @@ impl App {
                                 ui.label(RichText::new("Replace with").small().color(TEXT_DIM));
                             }
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().collect();
+                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru).collect();
                                 defs.sort_by_key(|d| d.title);
                                 for d in defs {
                                     if ui.button(d.title).clicked() {
