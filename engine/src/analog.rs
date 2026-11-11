@@ -561,6 +561,41 @@ pub fn poly(p: &[f32]) -> Set {
     }
 }
 
+/// The larger vintage poly. Only the first oscillator's section could be placed with any confidence (values 5 to
+/// 11: pulse width, its source, the three wave switches, sub level and phase); the second oscillator, cross
+/// modulation, filters, envelopes, slow oscillators, modulation table and effects are kept in the block but not
+/// read, so the sound has this instrument's wave mix and a plain open shape.
+pub fn poly2(p: &[f32]) -> Set {
+    let v = |i: usize| p.get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.0, 1.0, 0.5][i.min(11)]);
+    let on = |i: usize| v(i) >= 0.5;
+    let source = (v(6) * 2.0).round() as u8;
+    let mut osc = [
+        Osc { shape: Shape::Pulse, semis: 0.0, level: if on(7) { 1.0 } else { 0.0 } },
+        Osc { shape: Shape::Saw, semis: 0.0, level: if on(8) { 1.0 } else { 0.0 } },
+        Osc { shape: Shape::Square, semis: -12.0, level: if on(9) { v(10) } else { 0.0 } },
+    ];
+    if osc.iter().all(|o| o.level == 0.0) {
+        // the second oscillator must be carrying the sound
+        osc[1].level = 1.0;
+    }
+    Set {
+        osc,
+        width: if source == 1 { v(5) } else { 0.0 },
+        dual: true,
+        amp: Adsr { a: 0.004, d: 1.2, s: 0.7, r: 0.25 },
+        fenv: Adsr { a: 0.004, d: 0.9, s: 0.4, r: 0.25 },
+        filter: Filter::Low24,
+        cutoff_hz: 900.0,
+        res: 0.15,
+        env_oct: 3.0,
+        track: 0.5,
+        lfo: [Lfo { shape: Shape::Triangle, dest: if source == 0 && v(5) > 0.0 { Dest::Width } else { Dest::None }, amount: v(5), hz: 0.8, reset: false, delay: 0.0 }, Lfo::default(), Lfo::default()],
+        chorus: 1,
+        gain: 0.4,
+        ..Default::default()
+    }
+}
+
 const PI_F: f32 = std::f32::consts::PI;
 
 #[cfg(test)]

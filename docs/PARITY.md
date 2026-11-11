@@ -34,7 +34,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Harmless (built as Harmonic Stack, approximate; its built-in chorus, delay, reverb and compressor, harmonic detune, grit, slides and velocity links are not run yet)
 - [~] Harmor (built as Harmonic Forge on the additive engine: timbre mix, unison, the lower filter, pluck, phaser and harmonizer of the first layer are read at estimated scales; the second layer, picture resynthesis, drawn envelopes, filter types, built-in effects and a fresh block for new instances are not done, so it arrives with projects and presets only)
 - [~] Kepler (opens as Vintage Poly and keeps its block; pulse, saw, sub and noise, pulse width from the slider, slow oscillator or envelope, low cut, four-pole filter with envelope, slow oscillator and key follow, gate or envelope level, octave and the three ensemble modes play; the arpeggiator, hold, tempo sync and the menu options are not done and there is no editing yet)
-- [ ] Kepler Exo
+- [~] Kepler Exo (opens as Vintage Poly II and keeps its block; only the first oscillator's wave mix and pulse width are read, the rest of the 151 settings could not be placed without a running copy, so it plays a plain version of the sound; no editing)
 - [~] MIDI Out (opens as MIDI Sender, block kept, correctly silent; sending notes and controllers to a MIDI port is not done)
 - [ ] Minisynth
 - [~] MiniSynth (opens as Pocket Synth and keeps its block; the ten wave modes, modifier, noise, filter with its envelope, fine tune and level envelope play on our analog voice, placed from how values move between presets; play modes, the slow oscillator and the effects are not read and there is no editing yet)
