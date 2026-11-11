@@ -1,0 +1,5 @@
+[package]
+name = "cereal-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Audio engine for Breakfast Cereal DAW: transport, step sequencer, synthesized drum voices. No UI, no audio device."
