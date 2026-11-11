@@ -1,11 +1,57 @@
 //! The playlist: pattern clips and audio clips on tracks.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use std::collections::BTreeSet;
+
+use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
 use cereal_engine::song::{Clip, ClipSrc};
 
+use crate::pianoroll::SNAPS;
 use crate::widgets::*;
-use crate::App;
+use crate::{App, Win};
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    #[default]
+    Draw,
+    Paint,
+    Delete,
+    Mute,
+    Slip,
+    Slice,
+    Select,
+    Zoom,
+    Playback,
+}
+
+const TOOLS: [(Tool, &str, &str); 9] = [
+    (Tool::Draw, "Draw", "Draw (P)"),
+    (Tool::Paint, "Paint", "Paint (B)"),
+    (Tool::Delete, "Delete", "Delete (D)"),
+    (Tool::Mute, "Mute", "Mute (T)"),
+    (Tool::Slip, "Slip", "Slip: move what is inside a clip (S)"),
+    (Tool::Slice, "Slice", "Slice (C)"),
+    (Tool::Select, "Select", "Select (E)"),
+    (Tool::Zoom, "Zoom", "Zoom to selection (Z)"),
+    (Tool::Playback, "Play", "Playback (Y)"),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Move,
+    Left,
+    Right,
+    Slip,
+}
+
+enum Drag {
+    Clips { mode: Mode, anchor_tick: f32, anchor_track: i32, orig: Vec<(usize, Clip)> },
+    Rect { from: Pos2, add: bool, zoom: bool },
+    Sweep { mute: Option<bool>, right: bool },
+    Paint,
+    Slice { tick: u32 },
+    Seek,
+}
 
 pub struct State {
     scroll_x: f32,
@@ -13,12 +59,21 @@ pub struct State {
     /// Pixels per tick at 96 ppq.
     zoom: f32,
     track_h: f32,
-    drag: Option<(usize, f32)>,
+    drag: Option<Drag>,
+    pub tool: Tool,
+    snap: usize,
+    pub sel: BTreeSet<usize>,
+    clip: Vec<Clip>,
+    /// What the draw and paint tools put down: the last clip touched, else the current pattern.
+    brush: Option<(ClipSrc, u32, u32)>,
+    brush_pat: usize,
+    grid_line: u32,
+    left_tick: u32,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0 }
     }
 }
 
@@ -41,15 +96,20 @@ impl App {
         let ppq = self.song.ppq as f32;
         let bar = self.song.bar();
         let beat = self.song.ppq.max(1);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("Playlist  -  Arrangement  -  {}", self.song.pattern_name(pat))).color(TEXT));
-            ui.label(egui::RichText::new("   left-click: place the selected pattern / move, right-click: delete, Ctrl+wheel: zoom, Alt: no snap").color(TEXT_DIM).small());
-        });
+        if self.playlist.brush_pat != pat {
+            // picking another pattern makes it the thing to draw
+            self.playlist.brush_pat = pat;
+            self.playlist.brush = None;
+        }
+        if self.playlist.sel.iter().any(|&i| i >= self.song.clips.len()) {
+            self.playlist.sel.clear();
+            self.playlist.drag = None;
+        }
+        self.playlist_header(ui, pat);
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(Vec2::new(200.0, 120.0)), Sense::click_and_drag());
         let grid = Rect::from_min_max(rect.min + Vec2::new(HEAD_W, RULER_H), rect.max);
         let heads = Rect::from_min_max(Pos2::new(rect.left(), grid.top()), Pos2::new(grid.left(), rect.bottom()));
         let ruler = Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(rect.right(), grid.top()));
-        let px = self.playlist.zoom * 96.0 / ppq;
         let th = self.playlist.track_h;
         let ntracks = self.song.tracks.len();
 
@@ -59,7 +119,12 @@ impl App {
                 if mods.alt {
                     self.playlist.track_h = (self.playlist.track_h * zoom).clamp(14.0, 120.0);
                 } else {
-                    self.playlist.zoom = (self.playlist.zoom * zoom).clamp(0.005, 4.0);
+                    let old = self.playlist.zoom;
+                    self.playlist.zoom = (old * zoom).clamp(0.005, 4.0);
+                    if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
+                        let off = pp.x - grid.left();
+                        self.playlist.scroll_x = (self.playlist.scroll_x + off) * self.playlist.zoom / old - off;
+                    }
                 }
             } else if mods.shift {
                 self.playlist.scroll_x -= scroll.y + scroll.x;
@@ -67,7 +132,13 @@ impl App {
                 self.playlist.scroll_y -= scroll.y;
                 self.playlist.scroll_x -= scroll.x;
             }
+            let (mid, delta) = ui.input(|i| (i.pointer.middle_down(), i.pointer.delta()));
+            if mid {
+                self.playlist.scroll_x -= delta.x;
+                self.playlist.scroll_y -= delta.y;
+            }
         }
+        let px = self.playlist.zoom * 96.0 / ppq;
         self.playlist.scroll_x = self.playlist.scroll_x.max(0.0);
         self.playlist.scroll_y = self.playlist.scroll_y.clamp(0.0, (ntracks as f32 * th - grid.height()).max(0.0));
         let (sx, sy) = (self.playlist.scroll_x, self.playlist.scroll_y);
@@ -104,7 +175,7 @@ impl App {
 
         // clips
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        let mut hit: Option<usize> = None;
+        let mut hit: Option<(usize, i8)> = None;
         let gp = ui.painter_at(grid);
         let font = FontId::proportional(10.5);
         for (i, c) in self.song.clips.iter().enumerate() {
@@ -122,7 +193,8 @@ impl App {
             gp.rect_filled(r, 2.0, col.gamma_multiply(0.55));
             let title = Rect::from_min_max(r.min, Pos2::new(r.right(), (r.top() + 12.0).min(r.bottom())));
             gp.rect_filled(title, 2.0, col);
-            gp.rect_stroke(r, 2.0, Stroke::new(1.0_f32, LINE), egui::StrokeKind::Inside);
+            let selected = self.playlist.sel.contains(&i);
+            gp.rect_stroke(r, 2.0, Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, if selected { Color32::from_rgb(235, 96, 88) } else { LINE }), egui::StrokeKind::Inside);
             if r.width() > 16.0 {
                 gp.with_clip_rect(r.intersect(grid)).text(title.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &name, font.clone(), Color32::from_gray(245));
             }
@@ -193,7 +265,8 @@ impl App {
             }
             if let Some(pp) = pointer {
                 if r.contains(pp) && grid.contains(pp) {
-                    hit = Some(i);
+                    let edge = if r.width() < 12.0 { 0 } else if pp.x > r.right() - 5.0 { 1 } else if pp.x < r.left() + 4.0 { -1 } else { 0 };
+                    hit = Some((i, edge));
                 }
             }
         }
@@ -243,56 +316,442 @@ impl App {
             self.dirty = true;
         }
 
-        // interaction
-        let (pressed, down, released, sec_down, alt) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released(), i.pointer.secondary_down(), i.modifiers.alt));
-        let unit = if bar_px >= 120.0 { beat } else { bar };
-        let snap = |t: f32| if alt { t.round().max(0.0) as u32 } else { ((t / unit as f32).floor().max(0.0) as u32) * unit };
-        if let Some(pp) = pointer.filter(|_| resp.hovered() || self.playlist.drag.is_some()) {
-            if ruler.contains(pp) && down {
-                if !self.handle.transport.song_mode() {
-                    self.handle.transport.set_song_mode(true);
-                }
-                self.handle.transport.seek(snap(tick_of(pp.x)));
-            } else if grid.contains(pp) || self.playlist.drag.is_some() {
-                let track = track_of(pp.y) as u16;
-                if sec_down {
-                    if let Some(i) = hit {
-                        self.song.clips.remove(i);
-                        self.playlist.drag = None;
-                        self.dirty = true;
+        // ---- interaction
+        let (pressed, down, sec_pressed, sec_down, mods) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.secondary_pressed(), i.pointer.secondary_down(), i.modifiers));
+        if resp.hovered() && (pressed || sec_pressed) {
+            self.focus = Win::Playlist;
+        }
+        self.playlist.grid_line = if bar_px >= 120.0 { beat } else { bar };
+        self.playlist.left_tick = tick_of(grid.left()) as u32;
+        let g = if mods.alt { 1 } else { self.pl_snap() };
+        let snap = |t: f32| ((t.max(0.0) as u32) / g) * g;
+        let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
+        let tool = self.playlist.tool;
+        let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
+        if let Some(pp) = over {
+            if pressed && self.playlist.drag.is_none() {
+                if ruler.contains(pp) {
+                    self.playlist.drag = Some(Drag::Seek);
+                } else if grid.contains(pp) {
+                    let track = track_of(pp.y);
+                    match tool {
+                        Tool::Draw | Tool::Paint | Tool::Slip if mods.command => self.playlist.drag = Some(Drag::Rect { from: pp, add: mods.shift, zoom: false }),
+                        Tool::Draw | Tool::Paint | Tool::Slip => match hit {
+                            Some((i, edge)) => {
+                                let c = self.song.clips[i].clone();
+                                self.playlist.brush = Some((c.src, c.len, c.offset));
+                                if let ClipSrc::Pattern(pi) = c.src {
+                                    self.handle.transport.set_pattern(pi);
+                                    self.playlist.brush_pat = pi;
+                                }
+                                if !self.playlist.sel.contains(&i) {
+                                    self.playlist.sel.clear();
+                                }
+                                let mut targets: Vec<usize> = if self.playlist.sel.is_empty() { vec![i] } else { self.playlist.sel.iter().copied().collect() };
+                                let mode = if tool == Tool::Slip { Mode::Slip } else { match edge { -1 => Mode::Left, 1 => Mode::Right, _ => Mode::Move } };
+                                if mods.shift && mode == Mode::Move {
+                                    // the originals stay; copies travel
+                                    let was_sel = !self.playlist.sel.is_empty();
+                                    let mut copies = vec![];
+                                    for &t in &targets {
+                                        copies.push(self.song.clips.len());
+                                        let c = self.song.clips[t].clone();
+                                        self.song.clips.push(c);
+                                    }
+                                    self.playlist.sel = if was_sel { copies.iter().copied().collect() } else { BTreeSet::new() };
+                                    targets = copies;
+                                    self.dirty = true;
+                                }
+                                let orig = targets.iter().map(|&t| (t, self.song.clips[t].clone())).collect();
+                                self.playlist.drag = Some(Drag::Clips { mode, anchor_tick: tick_of(pp.x), anchor_track: track as i32, orig });
+                            }
+                            None if tool == Tool::Slip => {}
+                            None => {
+                                let (src, len, offset) = self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0));
+                                let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false };
+                                self.song.clips.push(c.clone());
+                                self.playlist.sel.clear();
+                                self.playlist.drag = Some(if tool == Tool::Paint { Drag::Paint } else { Drag::Clips { mode: Mode::Move, anchor_tick: tick_of(pp.x), anchor_track: track as i32, orig: vec![(self.song.clips.len() - 1, c)] } });
+                                self.dirty = true;
+                            }
+                        },
+                        Tool::Delete => self.playlist.drag = Some(Drag::Sweep { mute: None, right: false }),
+                        Tool::Mute => {
+                            let to = hit.map(|(i, _)| !self.song.clips[i].muted).unwrap_or(true);
+                            self.playlist.drag = Some(Drag::Sweep { mute: Some(to), right: false });
+                        }
+                        Tool::Slice => {
+                            let t = tick_of(pp.x);
+                            self.playlist.drag = Some(Drag::Slice { tick: (((t / g as f32).round() as u32) * g).max(1) });
+                        }
+                        Tool::Select => self.playlist.drag = Some(Drag::Rect { from: pp, add: mods.shift, zoom: false }),
+                        Tool::Zoom => self.playlist.drag = Some(Drag::Rect { from: pp, add: false, zoom: true }),
+                        Tool::Playback => self.playlist.drag = Some(Drag::Seek),
                     }
-                } else if pressed && grid.contains(pp) {
-                    match hit {
-                        Some(i) => {
-                            self.playlist.drag = Some((i, tick_of(pp.x) - self.song.clips[i].pos as f32));
-                            if let ClipSrc::Pattern(pi) = self.song.clips[i].src {
-                                self.handle.transport.set_pattern(pi);
+                }
+            } else if sec_pressed && self.playlist.drag.is_none() && grid.contains(pp) {
+                match tool {
+                    Tool::Zoom => {
+                        let off = pp.x - grid.left();
+                        let old = self.playlist.zoom;
+                        self.playlist.zoom = (old * 0.5).max(0.005);
+                        self.playlist.scroll_x = ((self.playlist.scroll_x + off) * self.playlist.zoom / old - off).max(0.0);
+                    }
+                    Tool::Select if hit.is_none() => self.playlist.sel.clear(),
+                    _ => self.playlist.drag = Some(Drag::Sweep { mute: None, right: true }),
+                }
+            }
+            if self.playlist.drag.is_none() && hit.map(|h| h.1 != 0).unwrap_or(false) && matches!(tool, Tool::Draw | Tool::Paint) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+        }
+
+        let mut done = false;
+        if let (Some(pp), Some(drag)) = (pointer, self.playlist.drag.as_ref()) {
+            match drag {
+                Drag::Clips { mode, anchor_tick, anchor_track, orig } => {
+                    if down {
+                        let dt = snap_delta(tick_of(pp.x) - anchor_tick);
+                        let dtr = track_of(pp.y) as i32 - anchor_track;
+                        let dt_move = dt.max(-(orig.iter().map(|(_, c)| c.pos).min().unwrap_or(0) as i64));
+                        let dtr = dtr.clamp(-(orig.iter().map(|(_, c)| c.track as i32).min().unwrap_or(0)), ntracks as i32 - 1 - orig.iter().map(|(_, c)| c.track as i32).max().unwrap_or(0));
+                        for (i, o) in orig {
+                            let c = &mut self.song.clips[*i];
+                            let mut n = o.clone();
+                            match mode {
+                                Mode::Move => {
+                                    n.pos = (o.pos as i64 + dt_move) as u32;
+                                    n.track = (o.track as i32 + dtr) as u16;
+                                }
+                                Mode::Right => n.len = (o.len as i64 + dt).max(g.min(beat) as i64) as u32,
+                                Mode::Left => {
+                                    let d = dt.clamp(-(o.offset.min(o.pos) as i64), o.len as i64 - g.min(beat) as i64);
+                                    n.pos = (o.pos as i64 + d) as u32;
+                                    n.offset = (o.offset as i64 + d) as u32;
+                                    n.len = (o.len as i64 - d) as u32;
+                                }
+                                Mode::Slip => n.offset = (o.offset as i64 - dt).max(0) as u32,
+                            }
+                            if c.pos != n.pos || c.track != n.track || c.len != n.len || c.offset != n.offset {
+                                *c = n.clone();
+                                self.dirty = true;
+                            }
+                            self.playlist.brush = Some((n.src, n.len, n.offset));
+                        }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::Rect { from, add, zoom } => {
+                    let r = Rect::from_two_pos(*from, pp).intersect(grid);
+                    if down {
+                        ui.painter_at(grid).rect(r, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18), Stroke::new(1.0_f32, Color32::WHITE), egui::StrokeKind::Inside);
+                    } else {
+                        let (t0, t1) = (tick_of(r.left()), tick_of(r.right()));
+                        if *zoom {
+                            if r.width() > 6.0 {
+                                let new_px = (grid.width() / (t1 - t0).max(1.0)).min(4.0 * 96.0 / ppq);
+                                self.playlist.zoom = new_px * ppq / 96.0;
+                                self.playlist.scroll_x = t0 * new_px;
+                            }
+                        } else {
+                            if !add {
+                                self.playlist.sel.clear();
+                            }
+                            let (r0, r1) = (track_of(r.top()), track_of(r.bottom()));
+                            for (i, c) in self.song.clips.iter().enumerate() {
+                                if (c.pos as f32) < t1.max(t0 + 1.0) && (c.pos + c.len) as f32 > t0 && (r0..=r1).contains(&(c.track as usize)) {
+                                    self.playlist.sel.insert(i);
+                                }
                             }
                         }
-                        None => {
-                            let pos = snap(tick_of(pp.x));
-                            let len = self.song.pattern_length(pat);
-                            self.song.clips.push(Clip { pos, len, track, src: ClipSrc::Pattern(pat), offset: 0, muted: false });
-                            self.playlist.drag = Some((self.song.clips.len() - 1, tick_of(pp.x) - pos as f32));
-                            self.dirty = true;
+                        done = true;
+                    }
+                }
+                Drag::Sweep { mute, right } => {
+                    let held = if *right { sec_down } else { down };
+                    if !held {
+                        done = true;
+                    } else if let Some((i, _)) = hit {
+                        match mute {
+                            None => {
+                                let gone: BTreeSet<usize> = [i].into();
+                                self.pl_remove(&gone);
+                            }
+                            Some(to) => {
+                                if self.song.clips[i].muted != *to {
+                                    self.song.clips[i].muted = *to;
+                                    self.dirty = true;
+                                }
+                            }
                         }
                     }
-                } else if down {
-                    if let Some((i, dt)) = self.playlist.drag {
-                        if let Some(c) = self.song.clips.get_mut(i) {
-                            let pos = snap(tick_of(pp.x) - dt + if alt { 0.0 } else { unit as f32 * 0.5 });
-                            if c.pos != pos || c.track != track {
-                                c.pos = pos;
-                                c.track = track;
+                }
+                Drag::Slice { tick } => {
+                    if down {
+                        let x = x_of(*tick as f32);
+                        ui.painter_at(grid).line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
+                        if let Some((i, _)) = hit {
+                            let at = *tick;
+                            let c = &mut self.song.clips[i];
+                            if at > c.pos && at < c.pos + c.len {
+                                let mut tail = c.clone();
+                                tail.pos = at;
+                                tail.offset = c.offset + (at - c.pos);
+                                tail.len = c.pos + c.len - at;
+                                c.len = at - c.pos;
+                                self.song.clips.push(tail);
                                 self.dirty = true;
                             }
                         }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::Paint => {
+                    if down && grid.contains(pp) {
+                        let (src, len, offset) = self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0));
+                        let unit = len.max(g).max(1);
+                        let pos = snap(tick_of(pp.x)) / unit * unit;
+                        let track = track_of(pp.y) as u16;
+                        if !self.song.clips.iter().any(|c| c.track == track && c.pos < pos + len && pos < c.pos + c.len) {
+                            self.song.clips.push(Clip { pos, len, track, src, offset, muted: false });
+                            self.dirty = true;
+                        }
+                    } else if !down {
+                        done = true;
+                    }
+                }
+                Drag::Seek => {
+                    if down {
+                        if !self.handle.transport.song_mode() {
+                            self.handle.transport.set_song_mode(true);
+                        }
+                        self.handle.transport.seek(snap(tick_of(pp.x)));
+                    } else {
+                        done = true;
                     }
                 }
             }
+        } else if self.playlist.drag.is_some() && !down && !sec_down {
+            done = true;
         }
-        if released || !down {
+        if done {
             self.playlist.drag = None;
         }
+    }
+
+    fn pl_snap(&self) -> u32 {
+        let (_, unit, div) = SNAPS[self.playlist.snap.min(SNAPS.len() - 1)];
+        let base = match unit {
+            0 => self.playlist.grid_line,
+            1 => 1,
+            2 => self.song.step(),
+            3 => self.song.ppq,
+            _ => self.song.bar(),
+        };
+        (base / div).max(1)
+    }
+
+    fn pl_remove(&mut self, gone: &BTreeSet<usize>) {
+        if gone.is_empty() {
+            return;
+        }
+        let sel = std::mem::take(&mut self.playlist.sel);
+        let old: Vec<Clip> = self.song.clips.drain(..).collect();
+        for (i, c) in old.into_iter().enumerate() {
+            if gone.contains(&i) {
+                continue;
+            }
+            if sel.contains(&i) {
+                self.playlist.sel.insert(self.song.clips.len());
+            }
+            self.song.clips.push(c);
+        }
+        self.dirty = true;
+    }
+
+    fn pl_targets(&self) -> Vec<usize> {
+        if self.playlist.sel.is_empty() {
+            (0..self.song.clips.len()).collect()
+        } else {
+            self.playlist.sel.iter().copied().filter(|&i| i < self.song.clips.len()).collect()
+        }
+    }
+
+    fn pl_delete_selected(&mut self) {
+        let gone = self.playlist.sel.clone();
+        self.pl_remove(&gone);
+        self.playlist.sel.clear();
+    }
+
+    fn pl_nudge(&mut self, ticks: i64, tracks: i32) {
+        let t = self.pl_targets();
+        let n = self.song.tracks.len() as i32;
+        let clips = &mut self.song.clips;
+        if t.is_empty() || t.iter().any(|&i| (clips[i].pos as i64 + ticks) < 0 || !(0..n).contains(&(clips[i].track as i32 + tracks))) {
+            return;
+        }
+        for &i in &t {
+            clips[i].pos = (clips[i].pos as i64 + ticks) as u32;
+            clips[i].track = (clips[i].track as i32 + tracks) as u16;
+        }
+        self.dirty = true;
+    }
+
+    fn pl_duplicate(&mut self) {
+        let t = self.pl_targets();
+        if t.is_empty() {
+            return;
+        }
+        let bar = self.song.bar();
+        let clips = &mut self.song.clips;
+        let start = t.iter().map(|&i| clips[i].pos).min().unwrap_or(0) / bar * bar;
+        let end = t.iter().map(|&i| clips[i].pos + clips[i].len).max().unwrap_or(0);
+        let by = (end - start).div_ceil(bar).max(1) * bar;
+        self.playlist.sel.clear();
+        for &i in &t {
+            let mut c = clips[i].clone();
+            c.pos += by;
+            self.playlist.sel.insert(clips.len());
+            clips.push(c);
+        }
+        self.dirty = true;
+    }
+
+    fn pl_mute(&mut self, muted: bool) {
+        let t = self.pl_targets();
+        for &i in &t {
+            self.song.clips[i].muted = muted;
+        }
+        self.dirty |= !t.is_empty();
+    }
+
+    pub(crate) fn pl_copy(&mut self, ctx: &egui::Context, cut: bool) {
+        if self.playlist.sel.is_empty() {
+            return;
+        }
+        let t = self.pl_targets();
+        self.playlist.clip = t.iter().map(|&i| self.song.clips[i].clone()).collect();
+        ctx.copy_text(format!("{} clips", t.len()));
+        if cut {
+            self.pl_delete_selected();
+        }
+    }
+
+    pub(crate) fn pl_paste(&mut self) {
+        if self.playlist.clip.is_empty() {
+            return;
+        }
+        let bar = self.song.bar();
+        let first = self.playlist.clip.iter().map(|c| c.pos).min().unwrap_or(0) / bar * bar;
+        let to = self.playlist.left_tick.div_ceil(bar) * bar;
+        self.playlist.sel.clear();
+        for c in &self.playlist.clip {
+            // a clip whose pattern or channel has gone since the copy is left out
+            let ok = match c.src {
+                ClipSrc::Pattern(p) => p < self.song.patterns.len(),
+                ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => ch < self.song.channels.len(),
+            };
+            if ok {
+                self.playlist.sel.insert(self.song.clips.len());
+                self.song.clips.push(Clip { pos: c.pos - first + to, ..c.clone() });
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// A key press while the playlist has the focus. True when it was ours.
+    pub(crate) fn playlist_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
+        if m.command && !m.alt {
+            match key {
+                Key::A => self.playlist.sel = (0..self.song.clips.len()).collect(),
+                Key::D => self.playlist.sel.clear(),
+                Key::B => self.pl_duplicate(),
+                _ => return false,
+            }
+            return true;
+        }
+        if m.alt {
+            match key {
+                Key::M => self.pl_mute(!m.shift),
+                _ => return false,
+            }
+            return true;
+        }
+        if m.shift {
+            if self.playlist.sel.is_empty() {
+                return false;
+            }
+            match key {
+                Key::ArrowLeft => self.pl_nudge(-(self.pl_snap() as i64), 0),
+                Key::ArrowRight => self.pl_nudge(self.pl_snap() as i64, 0),
+                Key::ArrowUp => self.pl_nudge(0, -1),
+                Key::ArrowDown => self.pl_nudge(0, 1),
+                _ => return false,
+            }
+            return true;
+        }
+        match key {
+            Key::Delete => self.pl_delete_selected(),
+            _ if self.typing_keys || repeat => return false,
+            Key::P => self.playlist.tool = Tool::Draw,
+            Key::B => self.playlist.tool = Tool::Paint,
+            Key::D => self.playlist.tool = Tool::Delete,
+            Key::T => self.playlist.tool = Tool::Mute,
+            Key::S => self.playlist.tool = Tool::Slip,
+            Key::C => self.playlist.tool = Tool::Slice,
+            Key::E => self.playlist.tool = Tool::Select,
+            Key::Z => self.playlist.tool = Tool::Zoom,
+            Key::Y => self.playlist.tool = Tool::Playback,
+            _ => return false,
+        }
+        true
+    }
+
+    fn playlist_header(&mut self, ui: &mut Ui, pat: usize) {
+        ui.horizontal(|ui| {
+            ui.menu_button("Tools", |ui| {
+                let mut act: Option<fn(&mut App)> = None;
+                let items: [(&str, fn(&mut App)); 7] = [
+                    ("Select all                  Ctrl+A", |a| a.playlist.sel = (0..a.song.clips.len()).collect()),
+                    ("Deselect                    Ctrl+D", |a| a.playlist.sel.clear()),
+                    ("Delete                      Del", |a| a.pl_delete_selected()),
+                    ("Duplicate                   Ctrl+B", |a| a.pl_duplicate()),
+                    ("Paste                       Ctrl+V", |a| a.pl_paste()),
+                    ("Mute                        Alt+M", |a| a.pl_mute(true)),
+                    ("Unmute                      Shift+Alt+M", |a| a.pl_mute(false)),
+                ];
+                for (label, f) in items {
+                    if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
+                        act = Some(f);
+                        ui.close_menu();
+                    }
+                }
+                if let Some(f) = act {
+                    f(self);
+                }
+            });
+            for (t, label, hint) in TOOLS {
+                if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).on_hover_text(hint).clicked() {
+                    self.playlist.tool = t;
+                }
+            }
+            ui.separator();
+            egui::ComboBox::from_id_salt("pl_snap").width(74.0).selected_text(SNAPS[self.playlist.snap].0).show_ui(ui, |ui| {
+                for (i, (label, _, _)) in SNAPS.iter().enumerate() {
+                    ui.selectable_value(&mut self.playlist.snap, i, *label);
+                }
+            })
+            .response
+            .on_hover_text("Snap");
+            ui.separator();
+            let brush = match self.playlist.brush {
+                Some((ClipSrc::Pattern(p), _, _)) => self.song.pattern_name(p),
+                Some((ClipSrc::Audio(c), _, _)) | Some((ClipSrc::Automation(c), _, _)) => self.song.channels.get(c).map(|c| c.name.clone()).unwrap_or_default(),
+                None => self.song.pattern_name(pat),
+            };
+            ui.label(RichText::new(format!("Arrangement  -  {brush}")).color(TEXT));
+        });
     }
 }

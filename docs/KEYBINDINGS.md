@@ -56,3 +56,16 @@ Ctrl+wheel scrolling and zoom.
 | Alt+M / Shift+Alt+M | Mute / unmute |
 | Ctrl+drag, Shift+drag a note, Alt held | Rectangle select, drag a copy, no snap |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, scroll sideways, zoom, pan |
+
+## Playlist (when it was the last window clicked)
+
+| Keys | Action |
+|---|---|
+| P, B, D, T, S, C, E, Z, Y | Draw, Paint, Delete, Mute, Slip, Slice, Select, Zoom, Playback tool (typing keyboard off) |
+| Ctrl+A / Ctrl+D | Select all / deselect |
+| Ctrl+C, Ctrl+X, Ctrl+V | Copy, cut, paste |
+| Ctrl+B | Duplicate to the right |
+| Delete | Delete the selection |
+| Shift+Left / Right, Shift+Up / Down | Nudge by the snap value, move a track up or down |
+| Alt+M / Shift+Alt+M | Mute / unmute |
+| Ctrl+drag, Shift+drag a clip, clip edges, Alt held | Rectangle select, drag a copy, resize, no snap |

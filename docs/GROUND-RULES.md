@@ -28,9 +28,12 @@ An experienced FL Studio user must be able to sit down and work from muscle memo
 
 ## User-supplied content (Devin, 2026-11-10)
 
-The first-run setup (app/src/setup.rs) lets a user point the program at their own installed copy of the
-original, or start their own installer so it installs itself. We read those files in place at runtime.
-- We never unpack the installer ourselves, never get around any check in it, and never copy its content into
-  this repository, a release, or a download.
+The first-run setup (app/src/setup.rs, app/src/unpack.rs) asks the user for the installer file they downloaded
+themselves and reads the content files out of it on their machine. An installed copy can be used in place instead.
+- The installer is read as data in its container format (NSIS, an open source format, large-file variant; one
+  LZMA stream per file). Nothing in it is run and no check in it is got around.
+- Only content folders are taken (Data/Patches, Demo projects, Projects, Templates). No program files.
+- None of it ever goes into this repository, a release or a download, and the installer is never fetched for
+  the user: they bring the file.
 - The wording shown to the user must say plainly that the files are theirs to obtain and that the original
   licence still applies to them. We make no promise about what that licence permits.

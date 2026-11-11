@@ -1,14 +1,17 @@
 //! First-run content setup.
 //!
-//! This program ships none of the reference program's sounds, presets or demo songs. A user who has their own
-//! copy (the free trial download counts) can point us at it, and we then read those files in place from their
-//! disk: nothing is copied into the project, nothing is bundled, nothing is uploaded. Their use of those files
-//! stays under the licence they accepted when they installed that copy.
+//! This program ships none of the reference program's sounds, presets or demo songs. A user who downloaded the
+//! installer themselves (the free trial counts) can point us at that one file; `unpack` reads the content files
+//! out of it into this program's data folder on their own disk. An already installed copy can be used in place
+//! instead. Nothing is bundled or uploaded, and their use of those files stays under the maker's licence.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{mpsc, Arc};
 
 use egui::{Align2, Color32, RichText};
 
+use crate::unpack::{self, Progress};
 use crate::widgets::*;
 use crate::App;
 
@@ -18,6 +21,13 @@ pub struct State {
     msg: String,
     found: Vec<PathBuf>,
     searched: bool,
+    job: Option<Job>,
+}
+
+struct Job {
+    progress: Arc<Progress>,
+    result: mpsc::Receiver<Result<usize, String>>,
+    dest: PathBuf,
 }
 
 #[derive(Default)]
@@ -129,16 +139,21 @@ pub fn detect() -> Vec<PathBuf> {
     out
 }
 
-/// Start the user's own installer so it can unpack itself. We never unpack it ourselves.
-fn run_installer(exe: &Path) -> Result<(), String> {
-    let mut cmd = if cfg!(windows) {
-        std::process::Command::new(exe)
-    } else {
-        let mut c = std::process::Command::new("wine");
-        c.arg(exe);
-        c
-    };
-    cmd.spawn().map(|_| ()).map_err(|e| if cfg!(windows) { format!("Could not start the installer: {e}") } else { format!("Could not start the installer with Wine ({e}). Install Wine, or run the installer on a Windows machine and copy the installed folder over.") })
+/// Where unpacked content lives: this program's own data folder.
+fn content_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME").or_else(|| std::env::var_os("LOCALAPPDATA")).map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))?;
+    Some(base.join("breakfast-cereal").join("content"))
+}
+
+fn start_unpack(installer: PathBuf) -> Result<Job, String> {
+    let dest = content_dir().ok_or("No home folder to put the files in.")?;
+    let progress = Arc::new(Progress::default());
+    let (tx, rx) = mpsc::channel();
+    let (p, d) = (progress.clone(), dest.clone());
+    std::thread::Builder::new().name("unpack".into()).spawn(move || {
+        let _ = tx.send(unpack::unpack(&installer, &d, &p));
+    }).map_err(|e| e.to_string())?;
+    Ok(Job { progress, result: rx, dest })
 }
 
 impl App {
@@ -176,9 +191,23 @@ impl App {
         if !self.setup.searched {
             self.setup.searched = true;
             self.setup.found = detect();
+            // for tests: start on an installer without the file dialog
+            if let Some(exe) = std::env::var_os("CEREAL_SETUP_INSTALLER") {
+                match start_unpack(PathBuf::from(exe)) {
+                    Ok(job) => self.setup.job = Some(job),
+                    Err(e) => self.setup.msg = e,
+                }
+            }
         }
         let mut pick: Option<PathBuf> = None;
         let mut close = false;
+        if let Some(res) = self.setup.job.as_ref().and_then(|j| j.result.try_recv().ok()) {
+            let job = self.setup.job.take().unwrap();
+            match res {
+                Ok(_) => pick = Some(job.dest),
+                Err(e) => self.setup.msg = e,
+            }
+        }
         // dim everything behind
         egui::Area::new(egui::Id::new("setup_dim")).order(egui::Order::Middle).fixed_pos(egui::Pos2::ZERO).show(ctx, |ui| {
             let r = ctx.screen_rect();
@@ -191,42 +220,48 @@ impl App {
             ui.add_space(4.0);
             ui.label("Breakfast Cereal DAW does not include, and cannot include, the sounds, presets and demo songs that come with FL Studio. Projects made there usually point at those files.");
             ui.add_space(4.0);
-            ui.label("If you have your own copy of FL Studio installed (the free trial from the maker's website counts), point this program at it. The files are read where they are on your disk. Nothing is copied into this program, bundled or uploaded, and your use of them stays under the licence you accepted from Image-Line.");
+            ui.label("All this needs is the FL Studio installer file, which you download yourself from Image-Line (the free trial is the same file). Choose it below and the sounds, presets, demo projects and templates are read out of it into this program's data folder on your disk. Nothing is installed or run, nothing is uploaded, and your use of those files stays under Image-Line's licence.");
             ui.add_space(8.0);
-            if !self.setup.found.is_empty() {
-                ui.label(RichText::new("Found on this computer").color(TEXT_DIM));
-                for f in self.setup.found.clone() {
-                    ui.horizontal(|ui| {
-                        if ui.button("Use this").clicked() {
-                            pick = Some(f.clone());
+            if let Some(job) = &self.setup.job {
+                let (done, total) = (job.progress.done.load(Ordering::Relaxed), job.progress.total.load(Ordering::Relaxed));
+                let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                ui.add(egui::ProgressBar::new(frac).text(if total == 0 { "Reading the installer...".to_string() } else { format!("{done} of {total} files") }));
+                if ui.button("Cancel").clicked() {
+                    job.progress.cancel.store(true, Ordering::Relaxed);
+                }
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else {
+                if ui.add(egui::Button::new(RichText::new("Choose the installer file...").size(14.0)).min_size(egui::vec2(220.0, 30.0))).clicked() {
+                    if let Some(exe) = rfd::FileDialog::new().set_title("Choose the installer you downloaded").add_filter("Installer", &["exe"]).pick_file() {
+                        match start_unpack(exe) {
+                            Ok(job) => {
+                                self.setup.job = Some(job);
+                                self.setup.msg.clear();
+                            }
+                            Err(e) => self.setup.msg = e,
                         }
-                        ui.label(RichText::new(f.display().to_string()).monospace().size(11.0));
-                    });
+                    }
                 }
                 ui.add_space(6.0);
-            }
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Choose the installed folder...").on_hover_text("The folder that holds the Data folder, for example Program Files/Image-Line/<version>").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().set_title("Choose your installed copy").pick_folder() {
-                        match install_root(&dir) {
-                            Some(root) => pick = Some(root),
-                            None => self.setup.msg = format!("{} does not look like an installed copy (no Data/Patches folder inside).", dir.display()),
+                ui.collapsing("Already installed on this computer?", |ui| {
+                    for f in self.setup.found.clone() {
+                        ui.horizontal(|ui| {
+                            if ui.button("Use this").clicked() {
+                                pick = Some(f.clone());
+                            }
+                            ui.label(RichText::new(f.display().to_string()).monospace().size(11.0));
+                        });
+                    }
+                    if ui.button("Choose the installed folder...").on_hover_text("The folder that holds the Data folder").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().set_title("Choose your installed copy").pick_folder() {
+                            match install_root(&dir) {
+                                Some(root) => pick = Some(root),
+                                None => self.setup.msg = format!("{} does not look like an installed copy (no Data/Patches folder inside).", dir.display()),
+                            }
                         }
                     }
-                }
-                if ui.button("I only have the installer file...").on_hover_text("Runs your downloaded installer so it can install itself; come back here when it has finished").clicked() {
-                    if let Some(exe) = rfd::FileDialog::new().set_title("Choose the installer you downloaded").add_filter("Installer", &["exe"]).pick_file() {
-                        self.setup.msg = match run_installer(&exe) {
-                            Ok(()) => "The installer is running. Finish it, then press Search again.".into(),
-                            Err(e) => e,
-                        };
-                    }
-                }
-                if ui.button("Search again").clicked() {
-                    self.setup.found = detect();
-                    self.setup.msg = if self.setup.found.is_empty() { "No installed copy found in the usual places. Choose the folder by hand.".into() } else { String::new() };
-                }
-            });
+                });
+            }
             if !self.setup.msg.is_empty() {
                 ui.add_space(4.0);
                 ui.label(RichText::new(&self.setup.msg).color(Color32::from_rgb(240, 170, 70)));
@@ -248,6 +283,9 @@ impl App {
         if let Some(root) = pick {
             self.setup_use(root);
         } else if close {
+            if let Some(job) = self.setup.job.take() {
+                job.progress.cancel.store(true, Ordering::Relaxed);
+            }
             self.setup.open = false;
         }
     }

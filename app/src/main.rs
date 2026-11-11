@@ -5,6 +5,7 @@ mod browser;
 mod chanset;
 mod fxwin;
 mod setup;
+mod unpack;
 
 /// Windows that take their own key commands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -13,7 +14,6 @@ pub(crate) enum Win {
     #[allow(dead_code)]
     Rack,
     Piano,
-    #[allow(dead_code)]
     Playlist,
 }
 mod mixer;
@@ -473,12 +473,16 @@ impl App {
                         self.clone_pattern();
                     } else if self.focus == Win::Piano && self.show_piano {
                         self.pr_copy(ctx, cut);
+                    } else if self.focus == Win::Playlist && self.show_playlist {
+                        self.pl_copy(ctx, cut);
                     }
                     continue;
                 }
                 egui::Event::Paste(_) if !typing_text => {
                     if self.focus == Win::Piano && self.show_piano {
                         self.pr_paste();
+                    } else if self.focus == Win::Playlist && self.show_playlist {
+                        self.pl_paste();
                     }
                     continue;
                 }
@@ -495,6 +499,9 @@ impl App {
                 continue;
             }
             if self.focus == Win::Piano && self.show_piano && self.piano_key(key, modifiers, repeat) {
+                continue;
+            }
+            if self.focus == Win::Playlist && self.show_playlist && self.playlist_key(key, modifiers, repeat) {
                 continue;
             }
             if modifiers.command {
