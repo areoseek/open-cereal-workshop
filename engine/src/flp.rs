@@ -70,6 +70,8 @@ pub mod id {
     pub const CHAN_ENVELOPE: u8 = 218;
     pub const CHAN_LEVELS: u8 = 219;
     pub const PATTERN_NOTES: u8 = 224;
+    /// Recorded control movements of a pattern: 12-byte records of position, control, destination, value.
+    pub const PATTERN_CTRL: u8 = 223;
     pub const MIXER_PARAMS: u8 = 225;
     pub const PLAYLIST: u8 = 233;
     pub const CHAN_AUTOMATION: u8 = 234;
@@ -483,6 +485,8 @@ pub struct FlpPattern {
     pub name: String,
     pub color: Option<u32>,
     pub notes: Vec<Note>,
+    /// Control events: tick, which control (see `param`), destination, raw value.
+    pub ctrl: Vec<(u32, u16, u16, i32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -734,6 +738,10 @@ impl Flp {
                 (id::PATTERN_NOTES, Value::Data(d)) => {
                     let p = patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
                     p.notes.extend(d.chunks_exact(NOTE_SIZE).map(Note::read));
+                }
+                (id::PATTERN_CTRL, Value::Data(d)) => {
+                    let p = patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
+                    p.ctrl.extend(d.chunks_exact(12).map(|r| (u32at(r, 0), u16at(r, 4), u16at(r, 6), u32at(r, 8) as i32)));
                 }
 
                 // ---- channels

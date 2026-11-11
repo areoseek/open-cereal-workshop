@@ -294,7 +294,7 @@ mod tests {
         song.time_sig = (3, 4);
         let mk = |pos, len, chan, key, vel| Note { pos, len, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
         let notes = vec![mk(0, 48, 0, 60, 1.0), mk(48, 48, 0, 60, 0.5), mk(96, 200, 0, 67, 1.2), mk(24, 0, 1, 36, 1.0), mk(500, 10, 1, 40, 0.8)];
-        song.patterns = vec![Pattern { name: "P".into(), color: None, notes: notes.clone() }];
+        song.patterns = vec![Pattern { name: "P".into(), notes: notes.clone(), ..Default::default() }];
         let bytes = export(&song, false, 0);
         assert_eq!(&bytes[..4], b"MThd");
         let back = import(&bytes, 96).unwrap();

@@ -312,6 +312,21 @@ fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bo
                 }
                 *d = nd;
             }
+            (id::PATTERN_CTRL, Value::Data(d)) => {
+                // control events aimed at a channel follow it, and go with it when it is deleted
+                let mut nd = Vec::with_capacity(d.len());
+                for r in d.chunks_exact(12) {
+                    let dest = u16at(r, 6);
+                    if dest >= 0x2000 {
+                        nd.extend_from_slice(r);
+                    } else if let Some(&to) = remap.get(&dest) {
+                        let mut r = r.to_vec();
+                        put_u16(&mut r, 6, to);
+                        nd.extend(r);
+                    }
+                }
+                *d = nd;
+            }
             (id::PLAYLIST, Value::Data(d)) => {
                 if let Some(size) = item_size(d) {
                     let mut nd = Vec::with_capacity(d.len());
@@ -820,6 +835,58 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                     ev.insert(at, Event::data(id::PATTERN_NOTES, data));
                     ev.insert(at, Event::word(id::NEW_PATTERN, number));
                 }
+                None => {}
+            }
+        }
+
+        if now.events != was.events {
+            let mut sorted = now.events.clone();
+            sorted.sort_by_key(|e| e.tick);
+            let mut data = Vec::with_capacity(sorted.len() * 12);
+            for e in &sorted {
+                data.extend_from_slice(&e.tick.to_le_bytes());
+                data.extend_from_slice(&e.param.to_le_bytes());
+                data.extend_from_slice(&e.dest.to_le_bytes());
+                data.extend_from_slice(&e.raw.to_le_bytes());
+            }
+            // the pattern's selector in the first pattern list and the control events it already has
+            let first_chan = ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(ev.len());
+            let mut cur = 0u16;
+            let (mut sel, mut mine): (Option<usize>, Vec<usize>) = (None, vec![]);
+            for (i, e) in ev.iter().enumerate() {
+                match (e.id, &e.value) {
+                    (id::NEW_PATTERN, Value::Word(v)) => {
+                        cur = *v;
+                        if cur == number && i < first_chan && sel.is_none() {
+                            sel = Some(i);
+                        }
+                    }
+                    (id::PATTERN_CTRL, _) if cur == number => mine.push(i),
+                    _ => {}
+                }
+            }
+            match mine.split_first() {
+                Some((&first, rest)) => {
+                    for &i in rest.iter().rev() {
+                        ev.remove(i);
+                    }
+                    if data.is_empty() {
+                        ev.remove(first);
+                        if first > 0 && ev[first - 1].id == id::NEW_PATTERN && ev.get(first).map(|e| matches!(e.id, 64 | 65)).unwrap_or(true) {
+                            ev.remove(first - 1);
+                        }
+                    } else {
+                        ev[first].value = Value::Data(data);
+                    }
+                }
+                None if !data.is_empty() => match sel {
+                    Some(i) => ev.insert(i + 1, Event::data(id::PATTERN_CTRL, data)),
+                    None => {
+                        let at = ev.iter().position(|e| matches!(e.id, 64 | 99 | 233 | 236)).unwrap_or(ev.len());
+                        ev.insert(at, Event::data(id::PATTERN_CTRL, data));
+                        ev.insert(at, Event::word(id::NEW_PATTERN, number));
+                    }
+                },
                 None => {}
             }
         }
@@ -1405,6 +1472,7 @@ mod tests {
         s.channels[3].kind = ChannelKind::AudioClip;
         s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false });
         s.channels[2].insert = 3;
+        s.patterns[0].events = vec![crate::song::PatEvent { tick: 0, param: 0, dest: 1, raw: 12800 }, crate::song::PatEvent { tick: 48, param: 0, dest: 1, raw: 400 }];
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].toggle_step(0, 96);
         s.patterns[0].notes.push(Note { pos: 48, len: 24, chan: 2, key: 64, vel: 0.5, pan: 0.5, fine_cents: 0.0, muted: false, ..Default::default() });
@@ -1441,6 +1509,7 @@ mod tests {
         assert!((r.channels[1].pan + 0.25).abs() < 1e-3);
         assert_eq!(r.channels[2].insert, 3);
         assert_eq!(notes_key(&r.patterns[0].notes), notes_key(&s.patterns[0].notes));
+        assert_eq!(r.patterns[0].events, s.patterns[0].events);
         assert_eq!(r.patterns[2].name, "Fill");
         assert_eq!(r.patterns[2].notes.len(), 1);
         assert_eq!(r.clips, s.clips);

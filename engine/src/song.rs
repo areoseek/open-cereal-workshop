@@ -456,6 +456,18 @@ pub struct Pattern {
     pub color: Option<Color>,
     /// Kept sorted by position.
     pub notes: Vec<Note>,
+    /// Recorded control movements, kept sorted by position.
+    pub events: Vec<PatEvent>,
+}
+
+/// One control movement inside a pattern, as the file holds it: which control of which destination, and
+/// the control's own raw value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatEvent {
+    pub tick: u32,
+    pub param: u16,
+    pub dest: u16,
+    pub raw: i32,
 }
 
 impl Pattern {
@@ -464,7 +476,7 @@ impl Pattern {
     }
     /// Length in ticks: the notes rounded up to whole bars, at least one bar.
     pub fn length(&self, bar: u32) -> u32 {
-        let end = self.notes.iter().map(|n| n.pos + n.len.max(1)).max().unwrap_or(0);
+        let end = self.notes.iter().map(|n| n.pos + n.len.max(1)).max().unwrap_or(0).max(self.events.last().map(|e| e.tick + 1).unwrap_or(0));
         end.div_ceil(bar).max(1) * bar
     }
     pub fn has_step(&self, chan: u16, pos: u32) -> bool {
@@ -654,6 +666,8 @@ pub struct Song {
     /// inserts[0] is the master.
     pub inserts: Vec<Insert>,
     /// Order in which the mixer processes inserts so every sender runs before what it feeds.
+    /// Where mixer inserts are numbered from in control addresses (depends on the version that saved the file).
+    pub mixer_base: usize,
     pub mix_order: Vec<usize>,
     /// Automation clips that drive something, with their playlist positions (built by `prepare`).
     pub auto_plan: Vec<AutoPlan>,
@@ -697,6 +711,7 @@ impl Song {
             tracks: vec![Track::default(); DEFAULT_TRACKS],
             clips: vec![],
             inserts,
+            mixer_base: 448,
             mix_order: vec![],
             auto_plan: vec![],
             ctl_links: vec![],
@@ -1026,6 +1041,8 @@ impl Song {
             let out = &mut patterns[p.index as usize - 1];
             out.name = p.name.clone();
             out.color = p.color.map(color);
+            out.events = p.ctrl.iter().map(|&(tick, param, dest, raw)| PatEvent { tick, param, dest, raw }).collect();
+            out.events.sort_by_key(|e| e.tick);
             out.notes = p
                 .notes
                 .iter()
@@ -1139,6 +1156,7 @@ impl Song {
             inserts,
             mix_order: vec![],
             auto_plan: vec![],
+            mixer_base: base,
             ctl_links: f
                 .links
                 .iter()
@@ -1158,6 +1176,105 @@ impl Song {
 impl Default for Song {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Song {
+    /// What a control number and destination from the file point at.
+    pub fn event_target(&self, param: u16, dest: u16) -> Target {
+        use flp::param::*;
+        let raw = (dest >> 6) as usize;
+        let other = Target::Other { param, dest };
+        if dest < 0x2000 {
+            match param {
+                CHAN_VOLUME => Target::ChanVolume(dest as usize),
+                CHAN_PAN => Target::ChanPan(dest as usize),
+                CHAN_PITCH => Target::ChanPitch(dest as usize),
+                _ => other,
+            }
+        } else if dest == flp::DEST_GLOBAL {
+            if param == GLOBAL_TEMPO {
+                Target::Tempo
+            } else {
+                other
+            }
+        } else if raw >= self.mixer_base && raw - self.mixer_base < self.inserts.len() {
+            let (ins, slot) = (raw - self.mixer_base, dest & 63);
+            match param {
+                INSERT_VOLUME if slot == 0 => Target::InsertVolume(ins),
+                INSERT_PAN if slot == 0 => Target::InsertPan(ins),
+                SLOT_MIX => Target::SlotMix(ins, slot),
+                SLOT_ENABLED => Target::SlotOn(ins, slot),
+                p if p & PLUGIN_FLAG != 0 => Target::SlotParam(ins, slot, p & !PLUGIN_FLAG),
+                _ => other,
+            }
+        } else {
+            other
+        }
+    }
+
+    /// The control number and destination the file uses for a target.
+    pub fn event_address(&self, t: Target) -> (u16, u16) {
+        use flp::param::*;
+        let ins = |i: usize, slot: u16| (((i + self.mixer_base) as u16) << 6) | (slot & 63);
+        match t {
+            Target::ChanVolume(c) => (CHAN_VOLUME, c as u16),
+            Target::ChanPan(c) => (CHAN_PAN, c as u16),
+            Target::ChanPitch(c) => (CHAN_PITCH, c as u16),
+            Target::InsertVolume(i) => (INSERT_VOLUME, ins(i, 0)),
+            Target::InsertPan(i) => (INSERT_PAN, ins(i, 0)),
+            Target::Tempo => (GLOBAL_TEMPO, flp::DEST_GLOBAL),
+            Target::SlotMix(i, s) => (SLOT_MIX, ins(i, s)),
+            Target::SlotOn(i, s) => (SLOT_ENABLED, ins(i, s)),
+            Target::SlotParam(i, s, k) => (k | PLUGIN_FLAG, ins(i, s)),
+            Target::Other { param, dest } => (param, dest),
+        }
+    }
+
+    /// The raw values a target's control runs between; None for one we do not play.
+    pub fn event_range(&self, t: Target) -> Option<(i32, i32)> {
+        Some(match t {
+            Target::ChanVolume(_) | Target::ChanPan(_) => (0, 12800),
+            // the pitch knob in cents, two semitones either way
+            Target::ChanPitch(_) => (-200, 200),
+            Target::InsertVolume(_) => (0, 16000),
+            Target::InsertPan(_) => (-6400, 6400),
+            Target::Tempo => (60_000, 180_000),
+            Target::SlotMix(..) => (0, 12800),
+            Target::SlotOn(..) => (0, 1),
+            Target::SlotParam(i, s, k) => {
+                let fx = self.inserts.get(i)?.slots.iter().find(|x| x.index == s)?.fx.as_ref()?;
+                let q = crate::fx::def(fx.kind).params.get(k as usize)?;
+                (q.min, q.max)
+            }
+            Target::Other { .. } => return None,
+        })
+    }
+
+    /// A short name for a target, for lists and titles.
+    pub fn target_name(&self, t: Target) -> String {
+        let chan = |c: usize| self.channels.get(c).map(|c| c.name.clone()).unwrap_or_else(|| format!("Channel {}", c + 1));
+        let ins = |i: usize| match self.inserts.get(i) {
+            Some(x) if !x.name.is_empty() => x.name.clone(),
+            _ if i == 0 => "Master".into(),
+            _ => format!("Insert {i}"),
+        };
+        let slot = |i: usize, s: u16| self.inserts.get(i).and_then(|x| x.slots.iter().find(|x| x.index == s)).map(|x| if x.name.is_empty() { x.plugin.clone() } else { x.name.clone() }).unwrap_or_else(|| format!("slot {}", s + 1));
+        match t {
+            Target::ChanVolume(c) => format!("{} - Volume", chan(c)),
+            Target::ChanPan(c) => format!("{} - Pan", chan(c)),
+            Target::ChanPitch(c) => format!("{} - Pitch", chan(c)),
+            Target::InsertVolume(i) => format!("{} - Volume", ins(i)),
+            Target::InsertPan(i) => format!("{} - Pan", ins(i)),
+            Target::Tempo => "Tempo".into(),
+            Target::SlotMix(i, s) => format!("{} - {} - Mix", ins(i), slot(i, s)),
+            Target::SlotOn(i, s) => format!("{} - {} - On", ins(i), slot(i, s)),
+            Target::SlotParam(i, s, k) => {
+                let name = self.inserts.get(i).and_then(|x| x.slots.iter().find(|x| x.index == s)).and_then(|x| x.fx.as_ref()).and_then(|f| crate::fx::def(f.kind).params.get(k as usize)).map(|q| q.name.to_string()).unwrap_or_else(|| format!("control {}", k + 1));
+                format!("{} - {} - {}", ins(i), slot(i, s), name)
+            }
+            Target::Other { param, dest } => format!("Control {param:#06x} of {dest:#06x}"),
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 
 mod browser;
 mod chanset;
+mod events;
 mod fxwin;
 mod midi;
 mod record;
@@ -140,6 +141,8 @@ pub(crate) struct App {
     audio_rec: Option<record::AudioRec>,
     save_preset: Option<(String, bool)>,
     show_chanset: bool,
+    show_events: bool,
+    events: events::State,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
     /// Preset files per plugin, found in the user's own content.
@@ -250,6 +253,8 @@ impl App {
             audio_rec: None,
             save_preset: None,
             show_chanset: false,
+            show_events: false,
+            events: events::State::default(),
             fx_open: None,
             preset_lists: Default::default(),
             preset_name: Default::default(),
@@ -279,6 +284,7 @@ impl App {
                     "mixer" => app.show_mixer = true,
                     "piano" => app.show_piano = true,
                     "channel" => app.show_chanset = true,
+                    "events" => app.show_events = true,
                     x if x.starts_with("fx=") => {
                         let mut it = x[3..].split(':').filter_map(|v| v.parse::<usize>().ok());
                         if let (Some(i), Some(sl)) = (it.next(), it.next()) {
@@ -1161,6 +1167,7 @@ impl App {
                     ui.checkbox(&mut self.show_mixer, "Mixer                 F9");
                     ui.checkbox(&mut self.show_browser, "Browser            Alt+F8");
                     ui.checkbox(&mut self.show_info, "Project info       F11");
+                    ui.checkbox(&mut self.show_events, "Event editor");
                     ui.separator();
                     if ui.button("Close all windows     F12").clicked() {
                         self.close_all();
@@ -1428,6 +1435,9 @@ impl eframe::App for App {
         let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
         egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
         self.show_chanset = open;
+        let mut open = self.show_events;
+        egui::Window::new("Event editor").open(&mut open).frame(frame).default_pos([left + 60.0, top + 80.0]).default_size([760.0, 260.0]).show(ctx, |ui| self.events_ui(ui));
+        self.show_events = open;
         self.fx_window(ctx, frame);
 
         self.small_windows(ctx);

@@ -1023,6 +1023,17 @@ impl Player {
     fn fire_pattern(&mut self, song: &Song, pat: usize, a: f64, b: f64, shift: f64, t0: f64, tpf: f64, cut: Option<u32>) {
         let Some(p) = song.patterns.get(pat) else { return };
         let first = a.ceil().max(0.0) as u32;
+        // recorded control movements: each sets its control, which then holds
+        for e in &p.events[p.events.partition_point(|e| e.tick < first)..] {
+            if e.tick as f64 >= b {
+                break;
+            }
+            let t = song.event_target(e.param, e.dest);
+            if let Some((lo, hi)) = song.event_range(t) {
+                self.ov.fit(song);
+                self.ov.set(t, (e.raw - lo) as f32 / (hi - lo).max(1) as f32);
+            }
+        }
         let start = p.notes.partition_point(|n| n.pos < first);
         for n in &p.notes[start..] {
             if n.pos as f64 >= b {
@@ -1616,6 +1627,26 @@ mod tests {
         p.render(&mut buf, 2);
         let up = rises(&buf);
         assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
+    }
+
+    #[test]
+    fn a_pattern_control_event_moves_its_control() {
+        let run = |quiet: bool| {
+            let mut song = Song::new();
+            song.channels = vec![crate::song::Chan::instrument(crate::synth::Kind::Osc3)];
+            song.patterns[0].notes.push(Note { pos: 0, len: song.ppq * 4, ..Default::default() });
+            if quiet {
+                song.patterns[0].events.push(crate::song::PatEvent { tick: 0, param: 0, dest: 0, raw: 0 });
+            }
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.transport.set_playing(true);
+            let mut buf = vec![0.0; 16_000 * 2];
+            p.render(&mut buf, 2);
+            p.render(&mut buf, 2);
+            buf.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+        };
+        let (loud, quiet) = (run(false), run(true));
+        assert!(loud > 0.05 && quiet < loud * 0.01, "{loud} then {quiet}");
     }
 
     #[test]

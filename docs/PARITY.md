@@ -157,7 +157,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Browser (folders, preview, drag to channel)
 - [~] Transport, toolbars, hint bar
 - [~] Automation clips (channel levels and pitch, mixer levels, slot mix and switch, effect settings; instrument settings still to do)
-- [ ] Event editor
+- [x] Event editor
 - [~] Audio recording and audio editor: sound from the input device records to a file and lands on the playlist as an audio clip (REC with MIC on); sounds dragged to the playlist become audio clips. Input choice per mixer track, latency correction and the audio editor to do
 - [ ] Plugin hosting (VST/CLAP)
 - [~] Project files: .flp read/write done; .fst presets and .fsc scores load and save; channel state and mixer state files to do
