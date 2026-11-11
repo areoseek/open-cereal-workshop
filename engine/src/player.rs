@@ -662,12 +662,18 @@ impl Player {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
                     let tone = g.tone();
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(n.key as u32));
+                    v.tstate.note(&tone, sr, n.key, note_gain.min(1.0), hz / sr);
+                    v.attack = ms(1.5);
+                    v.release = ms(12.0);
+                    if let Some(p) = &tone.add {
+                        // this instrument brings its own rise and fall
+                        v.attack = ms(p.attack_s() * 1000.0);
+                        v.release = ms(p.release_s() * 1000.0);
+                    }
                     v.tone = Some(tone);
                     v.step = 1.0;
                     v.step_to = 1.0;
                     v.step_now = 1.0;
-                    v.attack = ms(1.5);
-                    v.release = ms(12.0);
                     v.venv = Env { on: ch.env_on, ..f.vol_env };
                     if ch.env_on {
                         v.level = 1.0;

@@ -31,7 +31,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Voltage Controller
 - [ ] Fruity Wrapper
 - [ ] GMS
-- [ ] Harmless
+- [~] Harmless (built as Harmonic Stack, approximate; its built-in chorus, delay, reverb and compressor, harmonic detune, grit, slides and velocity links are not run yet)
 - [ ] Harmor
 - [ ] Kepler
 - [ ] Kepler Exo
@@ -174,6 +174,8 @@ close, not identical:
   was worked out by comparing many project files, so a few settings may be attached to the wrong knob. The
   least certain: Flanger (eight stored values against twelve knobs), Echo Lab (feedback, diffusion and
   modulation positions), Chorus wave selectors, Limiter time laws, Reverb character, Compressor knee types.
+- Harmonic Stack: which stored field is which control was inferred from value ranges and the public manual; every
+  time, depth and frequency scale, the built-in timbre list and the menu orders are estimates to be measured.
 - Triple Osc: field order inside an oscillator block, the mix law between oscillators, detune width, the
   meaning of the four switches.
 - Instruments and effects not listed as built play a stand-in voice or pass sound through. Their settings are

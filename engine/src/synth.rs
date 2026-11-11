@@ -9,6 +9,8 @@ use std::f32::consts::TAU;
 pub enum Kind {
     /// Three mixed oscillators.
     Osc3,
+    /// Harmonics shaped by a timbre, mask, pluck, filter and phaser (`additive.rs`).
+    Additive,
 }
 
 pub struct Param {
@@ -30,6 +32,8 @@ pub struct Def {
     pub title: &'static str,
     pub size: usize,
     pub fixed: &'static [(usize, i32)],
+    /// Bytes a fresh block carries after the fixed-size part.
+    pub tail: &'static [u8],
     pub params: &'static [Param],
 }
 
@@ -51,6 +55,7 @@ pub static DEFS: &[Def] = &[Def {
     title: "Triple Osc",
     size: 92,
     fixed: &[(0, 12)],
+    tail: &[],
     params: &[
         p("Osc 1 pan", 4, -64, 64, 0),
         p("Osc 1 shape", 8, 0, 6, 3),
@@ -78,6 +83,116 @@ pub static DEFS: &[Def] = &[Def {
         b("Osc 3 invert", 90),
         b("Osc 3 AM", 91),
     ],
+}, Def {
+    kind: Kind::Additive,
+    ident: "Harmless",
+    title: "Harmonic Stack",
+    size: 432,
+    fixed: &[(0, 12), (424, 1)],
+    tail: &[0, 0, 0, 0, 1],
+    // order matters: `additive::ix` indexes this list
+    params: &[
+        p("Phase", 4, -1000, 1000, 1000),
+        p("Low harmonic protection", 8, 0, 1024, 256),
+        p("Sub 1", 12, 0, 2048, 0),
+        p("Sub 2", 16, 0, 2048, 0),
+        p("Sub 3", 20, 0, 2048, 0),
+        p("EQ 1", 24, -1024, 1024, 0),
+        p("EQ 2", 28, -1024, 1024, 0),
+        p("EQ 3", 32, -1024, 1024, 0),
+        p("EQ 4", 36, -1024, 1024, 0),
+        p("EQ 5", 40, -1024, 1024, 0),
+        p("EQ 6", 44, -1024, 1024, 0),
+        p("Mask 1", 48, 0, 1000, 1000),
+        p("Mask 2", 52, 0, 1000, 0),
+        p("Mask 3", 56, 0, 1000, 1000),
+        p("Mask 4", 60, 0, 1000, 0),
+        p("Mask 5", 64, 0, 1000, 1000),
+        p("Mask 6", 68, 0, 1000, 0),
+        p("Mask 7", 72, 0, 1000, 1000),
+        p("Mask 8", 76, 0, 1000, 0),
+        p("Mask 9", 80, 0, 1000, 1000),
+        p("Mask 10", 84, 0, 1000, 0),
+        p("Mask 11", 88, 0, 1000, 1000),
+        p("Mask 12", 92, 0, 1000, 0),
+        p("Mask mix", 96, 0, 1000, 0),
+        p("Mask LFO", 100, -1000, 1000, 0),
+        p("Tremolo", 104, 0, 1000, 0),
+        p("Attack", 108, 0, 1000, 0),
+        p("Decay", 112, 0, 1000, 1000),
+        p("Release", 116, 0, 1000, 250),
+        p("Pluck", 128, 0, 1000, 1000),
+        p("Pluck masked", 132, 0, 1, 0),
+        p("Pluck alternative", 136, 0, 1, 0),
+        p("Pluck on release", 140, 0, 1, 0),
+        p("Volume", 148, 0, 2000, 1000),
+        p("Velocity to volume", 152, 0, 1, 1),
+        p("Pitch", 156, -2400, 2400, 0),
+        p("Harmonic detune", 160, -2400, 2400, 0),
+        p("Grit", 164, -1000, 1000, 0),
+        p("Vibrato", 168, 0, 1000, 0),
+        p("Pitch LFO", 172, -1000, 1000, 0),
+        p("Portamento", 176, 0, 1, 0),
+        p("Legato", 180, 0, 1, 0),
+        p("Slide time", 184, 0, 1000, 400),
+        p("Filter on", 192, 0, 1, 1),
+        p("Filter attack", 196, 0, 1000, 0),
+        p("Filter decay", 200, 0, 1000, 500),
+        p("Attack slope", 204, -1000, 1000, 0),
+        p("Decay slope", 208, -1000, 1000, -300),
+        p("Envelope amount", 212, -1000, 1000, 500),
+        p("Velocity to envelope", 216, 0, 1, 0),
+        p("Cutoff", 220, 0, 8192, 4096),
+        p("Adaptive envelope", 224, 0, 1, 0),
+        p("Filter width", 228, 0, 1000, 500),
+        p("Key tracking", 232, -1000, 1000, 0),
+        p("Cutoff LFO", 236, -1000, 1000, 0),
+        p("Resonance", 240, 0, 1000, 0),
+        p("Resonance in Hz", 244, 0, 1, 0),
+        p("Resonance offset", 248, -2400, 2400, 0),
+        p("Self oscillation", 252, 0, 2048, 0),
+        p("Motion only", 256, 0, 1, 0),
+        p("Adaptive width", 260, 0, 1, 0),
+        p("Unison order", 264, 1, 9, 1),
+        p("Unison pan", 268, 0, 128, 128),
+        p("Unison pitch", 272, 0, 256, 128),
+        p("Unison phase", 276, 0, 128, 64),
+        p("Unison variation", 280, 0, 128, 0),
+        p("Unison type", 284, 0, 2, 2),
+        p("Phaser amount", 288, 0, 1000, 0),
+        p("Phaser scale", 292, 0, 2, 0),
+        p("Phaser width", 296, 0, 10000, 5000),
+        p("Phaser width LFO", 300, -1000, 1000, 0),
+        p("Phaser offset", 304, 0, 1000, 500),
+        p("Phaser offset LFO", 308, -1000, 1000, 0),
+        p("Phaser speed", 312, -8000, 8000, 3000),
+        p("Phaser key tracking", 316, -2000, 2000, 0),
+        p("Harmonizer amount", 320, 0, 1000, 0),
+        p("Harmonizer width", 324, 0, 1000, 500),
+        p("Harmonizer LFO", 328, -1000, 1000, 0),
+        p("Velocity to harmonizer", 332, 0, 1, 0),
+        p("Harmonizer strength", 336, 0, 1024, 256),
+        p("Harmonizer type", 340, 0, 4, 0),
+        p("Harmonizer position", 344, 0, 3, 3),
+        p("LFO shape", 348, 0, 13, 0),
+        p("LFO global", 352, 0, 1, 1),
+        p("LFO attack", 356, 0, 1000, 0),
+        p("LFO speed", 360, -8000, 8000, 3000),
+        p("Chorus type", 364, 0, 9, 0),
+        p("Chorus mix", 368, 0, 1000, 500),
+        p("Delay type", 372, 0, 3, 0),
+        p("Delay volume", 376, 0, 1000, 500),
+        p("Delay feedback", 380, 0, 1000, 300),
+        p("Delay time", 384, 1, 384, 144),
+        p("Reverb type", 388, 0, 6, 0),
+        p("Reverb volume", 392, 0, 1000, 500),
+        p("Compressor mix", 396, 0, 1000, 500),
+        p("Compressor type", 404, 0, 16, 4),
+        p("Phaser type", 408, 0, 8, 0),
+        p("Resonance type", 412, 0, 9, 0),
+        p("Filter type", 416, 0, 4, 0),
+        p("Timbre", 420, 0, 11, 0),
+    ],
 }];
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -89,15 +204,26 @@ pub fn title_for(ident: &str) -> Option<&'static str> {
 }
 
 /// One instrument's settings, in file units, in the order of its table.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Gen {
     pub kind: Kind,
     pub p: Vec<f32>,
+    /// The stored block these settings came from (or a fresh one); bytes we do not understand live on here.
+    pub raw: Vec<u8>,
+}
+
+/// Two sets of settings are the same when they would be stored as the same block.
+impl PartialEq for Gen {
+    fn eq(&self, o: &Self) -> bool {
+        self.kind == o.kind && self.p == o.p && (self.raw == o.raw || self.encode(None) == o.encode(None))
+    }
 }
 
 impl Gen {
     pub fn new(kind: Kind) -> Self {
-        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
+        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new() };
+        g.raw = g.encode(None);
+        g
     }
 
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
@@ -108,6 +234,18 @@ impl Gen {
         if d.kind == Kind::Osc3 && state.len() == 44 {
             return Some(Self::old_osc3(state));
         }
+        let widened;
+        let state = if d.kind == Kind::Additive && state.len() == 428 {
+            // the first layout had no timbre choice and no custom wave
+            let mut v = state[..420].to_vec();
+            v.extend_from_slice(&[0; 4]);
+            v.extend_from_slice(&state[420..]);
+            v.extend_from_slice(&[0; 4]);
+            widened = v;
+            &widened[..]
+        } else {
+            state
+        };
         if state.len() < d.size {
             return None;
         }
@@ -119,7 +257,7 @@ impl Gen {
                 v.clamp(p.min, p.max) as f32
             })
             .collect();
-        Some(Self { kind: d.kind, p })
+        Some(Self { kind: d.kind, p, raw: state.to_vec() })
     }
 
     /// The first layout of the three-oscillator block: shape, coarse and fine of oscillator 1, then mix level,
@@ -152,12 +290,14 @@ impl Gen {
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
         let d = def(self.kind);
         let mut out = match base {
+            _ if self.raw.len() >= d.size => self.raw.clone(),
             Some(b) if b.len() >= d.size => b.to_vec(),
             _ => {
                 let mut v = vec![0u8; d.size];
                 for &(off, val) in d.fixed {
                     v[off..off + 4].copy_from_slice(&val.to_le_bytes());
                 }
+                v.extend_from_slice(d.tail);
                 v
             }
         };
@@ -200,6 +340,7 @@ impl Gen {
                 t.am = self.p[24] != 0.0;
                 t
             }
+            Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
         }
     }
 }
@@ -217,21 +358,24 @@ pub struct Osc {
     pub invert: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Tone {
     pub osc: [Osc; 3],
     pub mix2: f32,
     pub mix3: f32,
     pub random: f32,
     pub am: bool,
+    /// Set for the additive instrument, which has its own voice.
+    pub add: Option<std::sync::Arc<crate::additive::Patch>>,
 }
 
 /// Running state of one sounding note.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ToneState {
     ph: [[f32; 2]; 3],
     seed: u32,
     hold: [f32; 3],
+    add: Option<Box<crate::additive::Voice>>,
 }
 
 #[inline]
@@ -275,6 +419,9 @@ fn wave(shape: u8, t: f32, dt: f32) -> f32 {
 impl ToneState {
     pub fn start(tone: &Tone, seed: u32) -> Self {
         let mut s = Self { seed: seed | 1, ..Default::default() };
+        if tone.add.is_some() {
+            return s;
+        }
         for k in 0..3 {
             let r = if tone.random > 0.0 { s.rand() * 0.5 + 0.5 } else { 0.0 };
             let ph = (tone.osc[k].phase + r * tone.random).fract();
@@ -291,9 +438,19 @@ impl ToneState {
         (self.seed as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
+    /// Tell the voice about its note; the additive instrument needs this before the first frame.
+    pub fn note(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, dphase: f32) {
+        if let Some(p) = &tone.add {
+            self.add = Some(Box::new(crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed)));
+        }
+    }
+
     /// One frame. `dphase` is the note's cycles per frame.
     #[inline]
     pub fn frame(&mut self, tone: &Tone, dphase: f32) -> [f32; 2] {
+        if let (Some(p), Some(v)) = (&tone.add, &mut self.add) {
+            return v.frame(p, dphase);
+        }
         let mut o = [[0.0f32; 2]; 3];
         for k in 0..3 {
             let osc = &tone.osc[k];
@@ -350,15 +507,39 @@ mod tests {
         let fresh = g.encode(None);
         assert_eq!(fresh.len(), 92);
         assert_eq!(Gen::decode("3x Osc", &fresh).unwrap(), g);
+        let mut odd = fresh.clone();
+        odd.extend_from_slice(&[9; 368]);
+        let mut g = Gen::decode("3x Osc", &odd).unwrap();
         g.p[1] = 2.0;
         g.p[6] = 64.0;
         g.p[24] = 1.0;
-        let mut odd = fresh.clone();
-        odd.extend_from_slice(&[9; 368]);
-        let out = g.encode(Some(&odd));
+        let out = g.encode(None);
         assert_eq!(out.len(), 460);
         assert_eq!(&out[92..], &odd[92..]);
         assert_eq!(Gen::decode("3x Osc", &out).unwrap(), g);
+    }
+
+    #[test]
+    fn additive_blocks_of_every_layout_are_read_and_kept() {
+        let g = Gen::new(Kind::Additive);
+        let fresh = g.encode(None);
+        assert_eq!(fresh.len(), 437);
+        assert_eq!(Gen::decode("Harmless", &fresh).unwrap(), g);
+        // the first layout lacks the timbre choice and the custom wave count
+        let mut old = fresh[..420].to_vec();
+        old.extend_from_slice(&fresh[424..432]);
+        assert_eq!(old.len(), 428);
+        let o = Gen::decode("Harmless", &old).unwrap();
+        assert_eq!(o.p, g.p);
+        // a block with a custom wave keeps it through a settings change
+        let mut big = fresh[..432].to_vec();
+        big.extend_from_slice(&2i32.to_le_bytes());
+        big.extend_from_slice(&[7; 16]);
+        let mut c = Gen::decode("Harmless", &big).unwrap();
+        c.p[crate::additive::ix::CUTOFF] = 1000.0;
+        let out = c.encode(None);
+        assert_eq!(&out[432..], &big[432..]);
+        assert_eq!(i32::from_le_bytes(out[220..224].try_into().unwrap()), 1000);
     }
 
     #[test]
