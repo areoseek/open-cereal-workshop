@@ -48,7 +48,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] SimSynth
 - [ ] Slicex
 - [ ] Soundfont Player
-- [ ] Sytrus
+- [~] Sytrus (built as Six Op, approximate: operators, modulation matrix, three filters with shapers, envelopes, LFOs, mappings, unison; state layouts 17 to 25 are read, older ones 5 to 15 are not yet; its effects section and arpeggio breaks are not run, the panel is read-only and it cannot yet be added fresh from the menu)
 - [ ] Toxic Biohazard
 - [ ] Transistor Bass
 - [ ] Wasp
@@ -176,6 +176,9 @@ close, not identical:
   modulation positions), Chorus wave selectors, Limiter time laws, Reverb character, Compressor knee types.
 - Harmonic Stack: which stored field is which control was inferred from value ranges and the public manual; every
   time, depth and frequency scale, the built-in timbre list and the menu orders are estimates to be measured.
+- Six Op: modulation depth, envelope time unit, LFO speed scale, knob laws, filter type order (worked out from
+  statistics over the user's presets), curve tension sense, shaper curve reading, the level against other
+  instruments. The effects send column is treated as plain output until the effects section exists.
 - Triple Osc: field order inside an oscillator block, the mix law between oscillators, detune width, the
   meaning of the four switches.
 - Instruments and effects not listed as built play a stand-in voice or pass sound through. Their settings are

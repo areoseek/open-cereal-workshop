@@ -547,6 +547,7 @@ name = "cereal-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "miniz_oxide 0.8.9",
  "symphonia",
 ]
 

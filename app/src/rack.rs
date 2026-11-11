@@ -181,7 +181,8 @@ impl App {
                     self.dirty = true;
                 }
                 ui.menu_button("Instrument", |ui| {
-                    for d in cereal_engine::synth::DEFS {
+                    // the six-operator instrument has no fresh block of its own yet: it arrives with projects and presets
+                    for d in cereal_engine::synth::DEFS.iter().filter(|d| d.kind != cereal_engine::synth::Kind::Fm) {
                         if ui.button(d.title).clicked() {
                             self.song.channels.push(Chan::instrument(d.kind));
                             self.sel_chan = self.song.channels.len() - 1;

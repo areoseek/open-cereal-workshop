@@ -11,6 +11,8 @@ pub enum Kind {
     Osc3,
     /// Harmonics shaped by a timbre, mask, pluck, filter and phaser (`additive.rs`).
     Additive,
+    /// Six operators through a modulation matrix and three filters (`fm.rs`).
+    Fm,
 }
 
 pub struct Param {
@@ -193,6 +195,15 @@ pub static DEFS: &[Def] = &[Def {
         p("Filter type", 416, 0, 4, 0),
         p("Timbre", 420, 0, 11, 0),
     ],
+}, Def {
+    kind: Kind::Fm,
+    ident: "Sytrus",
+    title: "Six Op",
+    // a packed block of no fixed size; it is read by `fm::Patch` and stored back untouched
+    size: 0,
+    fixed: &[],
+    tail: &[],
+    params: &[],
 }];
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -210,6 +221,8 @@ pub struct Gen {
     pub p: Vec<f32>,
     /// The stored block these settings came from (or a fresh one); bytes we do not understand live on here.
     pub raw: Vec<u8>,
+    /// The read patch of the six-operator instrument, shared by its notes.
+    pub fm: Option<std::sync::Arc<crate::fm::Patch>>,
 }
 
 /// Two sets of settings are the same when they would be stored as the same block.
@@ -221,8 +234,11 @@ impl PartialEq for Gen {
 
 impl Gen {
     pub fn new(kind: Kind) -> Self {
-        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new() };
+        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None };
         g.raw = g.encode(None);
+        if kind == Kind::Fm {
+            g.fm = Some(Default::default());
+        }
         g
     }
 
@@ -230,6 +246,11 @@ impl Gen {
         let d = DEFS.iter().find(|d| d.ident == ident)?;
         if state.is_empty() {
             return Some(Self::new(d.kind));
+        }
+        if d.kind == Kind::Fm {
+            // layouts we cannot read stay with the project as an unknown instrument
+            let patch = crate::fm::Patch::parse(state)?;
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)) });
         }
         if d.kind == Kind::Osc3 && state.len() == 44 {
             return Some(Self::old_osc3(state));
@@ -257,7 +278,7 @@ impl Gen {
                 v.clamp(p.min, p.max) as f32
             })
             .collect();
-        Some(Self { kind: d.kind, p, raw: state.to_vec() })
+        Some(Self { kind: d.kind, p, raw: state.to_vec(), fm: None })
     }
 
     /// The first layout of the three-oscillator block: shape, coarse and fine of oscillator 1, then mix level,
@@ -289,6 +310,9 @@ impl Gen {
     /// as `base` is left exactly as it was.
     pub fn encode(&self, base: Option<&[u8]>) -> Vec<u8> {
         let d = def(self.kind);
+        if self.kind == Kind::Fm {
+            return if self.raw.is_empty() { base.map(|b| b.to_vec()).unwrap_or_default() } else { self.raw.clone() };
+        }
         let mut out = match base {
             _ if self.raw.len() >= d.size => self.raw.clone(),
             Some(b) if b.len() >= d.size => b.to_vec(),
@@ -341,6 +365,7 @@ impl Gen {
                 t
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
+            Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
         }
     }
 }
@@ -367,6 +392,8 @@ pub struct Tone {
     pub am: bool,
     /// Set for the additive instrument, which has its own voice.
     pub add: Option<std::sync::Arc<crate::additive::Patch>>,
+    /// Set for the six-operator instrument.
+    pub fm: Option<std::sync::Arc<crate::fm::Patch>>,
 }
 
 /// Running state of one sounding note.
@@ -376,6 +403,7 @@ pub struct ToneState {
     seed: u32,
     hold: [f32; 3],
     add: Option<Box<crate::additive::Voice>>,
+    fm: Option<Box<crate::fm::Voice>>,
 }
 
 #[inline]
@@ -419,7 +447,7 @@ fn wave(shape: u8, t: f32, dt: f32) -> f32 {
 impl ToneState {
     pub fn start(tone: &Tone, seed: u32) -> Self {
         let mut s = Self { seed: seed | 1, ..Default::default() };
-        if tone.add.is_some() {
+        if tone.add.is_some() || tone.fm.is_some() {
             return s;
         }
         for k in 0..3 {
@@ -443,12 +471,29 @@ impl ToneState {
         if let Some(p) = &tone.add {
             self.add = Some(Box::new(crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed)));
         }
+        if let Some(p) = &tone.fm {
+            self.fm = Some(Box::new(crate::fm::Voice::start(p, sr, key, vel, dphase, self.seed)));
+        }
+    }
+
+    /// The key was let go. Returns the seconds the instrument's own envelopes still need.
+    pub fn release(&mut self, tone: &Tone) -> f32 {
+        match (&tone.fm, &mut self.fm) {
+            (Some(p), Some(v)) => {
+                v.release();
+                p.tail_s(v.seconds())
+            }
+            _ => 0.0,
+        }
     }
 
     /// One frame. `dphase` is the note's cycles per frame.
     #[inline]
     pub fn frame(&mut self, tone: &Tone, dphase: f32) -> [f32; 2] {
         if let (Some(p), Some(v)) = (&tone.add, &mut self.add) {
+            return v.frame(p, dphase);
+        }
+        if let (Some(p), Some(v)) = (&tone.fm, &mut self.fm) {
             return v.frame(p, dphase);
         }
         let mut o = [[0.0f32; 2]; 3];

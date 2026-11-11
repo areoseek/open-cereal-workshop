@@ -513,6 +513,71 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                 });
             }
         }
+        Kind::Fm => {
+            // shown as stored for now: the settings play, the editing pages are still to come
+            use cereal_engine::fm::MODULES;
+            let Some(p) = g.fm.clone() else { return false };
+            let pct = |v: f32| if v == 0.0 { String::new() } else { format!("{:.0}", v * 100.0) };
+            ui.label(RichText::new("Modulation matrix (percent)").strong());
+            egui::Grid::new("fm_matrix").striped(true).min_col_width(34.0).show(ui, |ui| {
+                ui.label("");
+                for k in 0..6 {
+                    ui.label(RichText::new(format!("{}", k + 1)).strong());
+                }
+                ui.label(RichText::new("Pan").strong());
+                ui.label(RichText::new("Out").strong());
+                ui.end_row();
+                for r in 0..9 {
+                    ui.label(RichText::new(MODULES[r]).strong());
+                    for c in 0..6 {
+                        ui.label(pct(if r < 6 { p.fm[r][c] } else { p.feed[r - 6][c] }));
+                    }
+                    ui.label(pct(p.pan[r]));
+                    ui.label(pct(p.out[r]));
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Operators").strong());
+            let used = p.used();
+            egui::Grid::new("fm_ops").striped(true).show(ui, |ui| {
+                for h in ["", "Ratio", "Offset Hz", "Level", "Noise", "Plucked", "Heard"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for (k, o) in p.ops.iter().enumerate() {
+                    ui.label(MODULES[k]);
+                    ui.label(format!("{:.4}", o.ratio));
+                    ui.label(format!("{:.2}", o.offset_hz));
+                    ui.label(format!("{:.0} %", o.vol * 100.0));
+                    ui.label(format!("{:.0} %", o.noise * 100.0));
+                    ui.label(if o.pluck { "yes" } else { "" });
+                    ui.label(if used[k] { "yes" } else { "" });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Filters").strong());
+            egui::Grid::new("fm_filters").striped(true).show(ui, |ui| {
+                for h in ["", "Stages", "Type", "Cutoff", "Resonance", "Envelope", "To next", "Shaper"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for (k, f) in p.filts.iter().enumerate() {
+                    ui.label(MODULES[6 + k]);
+                    ui.label(if f.slope == 0 { "off".to_string() } else { format!("{}", f.slope) });
+                    ui.label(format!("{}", f.kind));
+                    ui.label(format!("{:.0} %", f.cut * 100.0));
+                    ui.label(format!("{:.0} %", f.res * 100.0));
+                    ui.label(format!("{:.0} %", f.env_amt * 100.0));
+                    ui.label(pct(f.next));
+                    ui.label(if f.ws_on { "on" } else { "" });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(format!("Volume {:.0} %    Pitch {:+.0} st    Unison {}", p.volume * 100.0, p.pitch, p.uni));
+        }
     }
     changed
 }

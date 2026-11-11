@@ -277,6 +277,8 @@ struct Voice {
     /// A built-in instrument's settings and running state.
     tone: Option<crate::synth::Tone>,
     tstate: crate::synth::ToneState,
+    /// Frames the instrument's own envelopes still need after the key is let go.
+    tail: u32,
     gl: f32,
     gr: f32,
     insert: usize,
@@ -334,6 +336,9 @@ impl Voice {
             self.rel_from = self.env_now;
             self.rel_t = 0;
             self.ctl = 0;
+            if let Some(tone) = &self.tone {
+                self.tail = (self.tstate.release(tone) * self.sr) as u32;
+            }
         }
         self.remaining = None;
     }
@@ -432,7 +437,9 @@ impl Voice {
                 }
             }
             self.ctl -= 1;
-            if self.releasing && (self.kill || !self.venv.on) {
+            if self.releasing && self.tail > 0 && !self.kill {
+                self.tail -= 1;
+            } else if self.releasing && (self.kill || !self.venv.on) {
                 self.level -= self.release;
                 if self.level <= 0.0 {
                     self.active = false;

@@ -8,3 +8,4 @@ description = "Audio engine for Breakfast Cereal DAW: project model, .flp readin
 [dependencies]
 arc-swap = "1"
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "adpcm", "flac", "ogg", "vorbis", "mp3", "aiff"] }
+miniz_oxide = "0.8"
