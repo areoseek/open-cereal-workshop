@@ -72,12 +72,15 @@ impl App {
             } else {
                 let ext = ext_of(&path);
                 let project = ext == "flp";
+                let preset = ext == "fst";
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
                 let text = RichText::new(&name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
                 let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate());
                 if resp.clicked() {
                     self.browser.selected = Some(path.clone());
-                    if !project {
+                    if preset {
+                        self.actions.push(Action::LoadPreset(path.clone(), crate::PresetTo::Auto));
+                    } else if !project {
                         self.actions.push(Action::Preview(path.clone()));
                     }
                 }
@@ -91,6 +94,11 @@ impl App {
                     if project {
                         if ui.button("Open project").clicked() {
                             self.actions.push(Action::Open(path.clone()));
+                            ui.close_menu();
+                        }
+                    } else if preset {
+                        if ui.button("Load preset").clicked() {
+                            self.actions.push(Action::LoadPreset(path.clone(), crate::PresetTo::Auto));
                             ui.close_menu();
                         }
                     } else {

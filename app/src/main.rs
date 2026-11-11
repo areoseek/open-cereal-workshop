@@ -39,6 +39,17 @@ pub(crate) enum Action {
     Open(PathBuf),
     /// Load a sample into a channel, or into a new one.
     LoadSample(PathBuf, Option<usize>),
+    /// Load a plugin preset onto the matching unit.
+    LoadPreset(PathBuf, PresetTo),
+}
+
+/// Where a preset should land.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PresetTo {
+    /// The open effect or the selected channel when it is the same unit, a new slot or channel otherwise.
+    Auto,
+    Slot(usize, u16),
+    Chan(usize),
 }
 
 fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
@@ -118,6 +129,10 @@ pub(crate) struct App {
     show_chanset: bool,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
+    /// Preset files per plugin, found in the user's own content.
+    preset_lists: std::collections::HashMap<String, std::rc::Rc<Vec<PathBuf>>>,
+    /// The preset last loaded per plugin, for the previous / next buttons.
+    preset_name: std::collections::HashMap<String, PathBuf>,
     chanset: chanset::State,
     rename_pattern: Option<(usize, String)>,
 }
@@ -216,6 +231,8 @@ impl App {
             show_about: false,
             show_chanset: false,
             fx_open: None,
+            preset_lists: Default::default(),
+            preset_name: Default::default(),
             chanset: Default::default(),
             rename_pattern: None,
         };
@@ -228,6 +245,12 @@ impl App {
         app.setup.open = roots.is_empty() && !app.settings.never_ask && std::env::var_os("CEREAL_NO_SETUP").is_none();
         if let Some(p) = open {
             app.open(&p);
+        }
+        // presets to load at start, for screenshots and tests
+        if let Ok(v) = std::env::var("CEREAL_PRESET") {
+            for p in std::env::split_paths(&v) {
+                app.actions.push(Action::LoadPreset(p, PresetTo::Auto));
+            }
         }
         // windows to show at start, for screenshots and tests: CEREAL_SHOW=mixer,piano,channel
         if let Ok(show) = std::env::var("CEREAL_SHOW") {
@@ -373,6 +396,142 @@ impl App {
         }
     }
 
+    /// Load a plugin preset file onto one of our units.
+    fn load_preset(&mut self, path: &Path, to: PresetTo) {
+        use cereal_engine::preset::{self, Unit};
+        let pre = match preset::read(path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        match pre.unit() {
+            None => self.status = format!("\"{}\" is a preset for {}, which has no built-in unit yet", name, pre.ident),
+            Some(Unit::Fx(f)) => {
+                let same = |song: &Song, ins: usize, slot: u16| song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.index == slot)).and_then(|s| s.fx.as_ref()).is_some_and(|x| x.kind == f.kind);
+                let at = match to {
+                    PresetTo::Slot(i, s) => Some((i, s)),
+                    _ => self.fx_open.filter(|&(i, s)| same(&self.song, i, s)),
+                };
+                let ins = at.map(|a| a.0).unwrap_or(self.sel_insert).min(self.song.inserts.len().saturating_sub(1));
+                let Some(insert) = self.song.inserts.get_mut(ins) else { return };
+                let slot = match at {
+                    Some((_, s)) => s,
+                    None => match (0..10u16).find(|k| insert.slots.iter().all(|s| s.index != *k)) {
+                        Some(k) => k,
+                        None => {
+                            self.status = "No free effect slot on this mixer track".into();
+                            return;
+                        }
+                    },
+                };
+                let kind = f.kind;
+                match insert.slots.iter_mut().find(|s| s.index == slot) {
+                    Some(s) if s.fx.as_ref().is_some_and(|x| x.kind == kind) => s.fx = Some(f),
+                    _ => {
+                        insert.slots.retain(|s| s.index != slot);
+                        let mut s = cereal_engine::song::Slot::with_fx(slot, kind);
+                        s.fx = Some(f);
+                        insert.slots.push(s);
+                        insert.slots.sort_by_key(|s| s.index);
+                    }
+                }
+                self.fx_open = Some((ins, slot));
+                self.sel_insert = ins;
+                self.show_mixer = true;
+                self.preset_name.insert(cereal_engine::fx::def(kind).ident.to_string(), path.to_path_buf());
+                self.status = format!("Preset: {name}");
+                self.dirty = true;
+            }
+            Some(Unit::Gen(g)) => {
+                let target = match to {
+                    PresetTo::Chan(c) => Some(c),
+                    _ => Some(self.sel_chan),
+                }
+                .filter(|&c| self.song.channels.get(c).and_then(|c| c.gen.as_ref()).is_some_and(|x| x.kind == g.kind));
+                let kind = g.kind;
+                let ci = match target {
+                    Some(c) => c,
+                    None => {
+                        let mut c = Chan::instrument(kind);
+                        c.name = name.clone();
+                        self.song.channels.push(c);
+                        self.song.channels.len() - 1
+                    }
+                };
+                self.song.channels[ci].gen = Some(g);
+                self.sel_chan = ci;
+                self.preset_name.insert(cereal_engine::synth::def(kind).ident.to_string(), path.to_path_buf());
+                self.status = format!("Preset: {name}");
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// The preset files for the plugin called `ident` in the user's own content, sorted by name.
+    pub(crate) fn presets_for(&mut self, ident: &str, generator: bool) -> std::rc::Rc<Vec<PathBuf>> {
+        if let Some(l) = self.preset_lists.get(ident) {
+            return l.clone();
+        }
+        let mut out = Vec::new();
+        for root in &self.lib.factory_roots {
+            let base = root.join("Data/Patches/Plugin presets").join(if generator { "Generators" } else { "Effects" });
+            // folder names differ from the plugin names in case here and there
+            let dirs = std::fs::read_dir(&base).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(ident)));
+            let mut stack: Vec<PathBuf> = dirs.collect();
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|p| p.to_string_lossy().to_lowercase());
+        let l = std::rc::Rc::new(out);
+        self.preset_lists.insert(ident.to_string(), l.clone());
+        l
+    }
+
+    /// The preset picker shown in an effect or instrument window. Returns the file to load, if one was chosen.
+    pub(crate) fn preset_bar(&mut self, ui: &mut egui::Ui, ident: &str, generator: bool) -> Option<PathBuf> {
+        let list = self.presets_for(ident, generator);
+        let current = self.preset_name.get(ident).cloned();
+        let at = current.as_ref().and_then(|c| list.iter().position(|p| p == c));
+        let label = at.and_then(|i| list[i].file_stem()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Presets".into());
+        let mut pick = None;
+        ui.horizontal(|ui| {
+            if list.is_empty() {
+                ui.label(egui::RichText::new("Presets: none found (Options > Sounds and presets from your own copy)").small().color(widgets::TEXT_DIM));
+                return;
+            }
+            let n = list.len();
+            if ui.small_button("<").on_hover_text("Previous preset").clicked() {
+                pick = Some(list[at.map(|i| (i + n - 1) % n).unwrap_or(n - 1)].clone());
+            }
+            if ui.small_button(">").on_hover_text("Next preset").clicked() {
+                pick = Some(list[at.map(|i| (i + 1) % n).unwrap_or(0)].clone());
+            }
+            ui.menu_button(format!("{label}  v"), |ui| {
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for (i, p) in list.iter().enumerate() {
+                        let name = p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.selectable_label(Some(i) == at, name).clicked() {
+                            pick = Some(p.clone());
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
+        pick
+    }
+
     fn run_actions(&mut self) {
         for a in std::mem::take(&mut self.actions) {
             match a {
@@ -382,6 +541,7 @@ impl App {
                 },
                 Action::Open(p) => self.open(&p),
                 Action::LoadSample(p, into) => self.load_sample(&p, into),
+                Action::LoadPreset(p, to) => self.load_preset(&p, to),
             }
         }
     }

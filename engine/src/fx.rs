@@ -312,9 +312,21 @@ impl Fx {
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
         let d = DEFS.iter().find(|d| d.ident == ident)?;
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
-        // older, shorter blocks are accepted as long as every setting we use is there
-        let short_ok = matches!(d.kind, Kind::Comp);
-        if state.len() < need && !(short_ok && state.len() >= 28) {
+        // the oldest reverb blocks (found in presets) have no version number in front
+        let lead;
+        let state = if d.kind == Kind::Reverb && state.len() == 53 {
+            lead = [&10000i32.to_le_bytes()[..], state].concat();
+            &lead[..]
+        } else {
+            state
+        };
+        // older, shorter blocks are accepted as long as every setting they had is there; the rest read as default
+        let least = match d.kind {
+            Kind::Comp => 28,
+            Kind::Reverb => 56,
+            _ => need,
+        };
+        if state.len() < least {
             return None;
         }
         let p = d

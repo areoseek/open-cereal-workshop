@@ -80,7 +80,11 @@ impl App {
                         self.sel_chan = ci;
                     }
                     if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
-                        self.actions.push(crate::Action::LoadSample((*path).clone(), Some(ci)));
+                        if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                            self.actions.push(crate::Action::LoadPreset((*path).clone(), crate::PresetTo::Chan(ci)));
+                        } else {
+                            self.actions.push(crate::Action::LoadSample((*path).clone(), Some(ci)));
+                        }
                     }
                     let hover = if missing { format!("Missing sample: {}", c.sample_path) } else if !c.sample_path.is_empty() { c.sample_path.clone() } else { c.plugin.clone() };
                     let resp = if hover.is_empty() { resp } else { resp.on_hover_text(hover) };

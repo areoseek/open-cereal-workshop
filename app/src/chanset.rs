@@ -191,6 +191,11 @@ impl App {
 
         match self.chanset.tab {
             Tab::Sample if built_in => {
+                let ident = cereal_engine::synth::def(self.song.channels[ci].gen.as_ref().unwrap().kind).ident;
+                if let Some(p) = self.preset_bar(ui, ident, true) {
+                    self.actions.push(crate::Action::LoadPreset(p, crate::PresetTo::Chan(ci)));
+                }
+                ui.add_space(4.0);
                 changed |= instrument_panel(ui, self.song.channels[ci].gen.as_mut().unwrap());
             }
             Tab::Sample => {

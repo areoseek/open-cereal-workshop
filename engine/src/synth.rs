@@ -105,6 +105,9 @@ impl Gen {
         if state.is_empty() {
             return Some(Self::new(d.kind));
         }
+        if d.kind == Kind::Osc3 && state.len() == 44 {
+            return Some(Self::old_osc3(state));
+        }
         if state.len() < d.size {
             return None;
         }
@@ -117,6 +120,31 @@ impl Gen {
             })
             .collect();
         Some(Self { kind: d.kind, p })
+    }
+
+    /// The first layout of the three-oscillator block: shape, coarse and fine of oscillator 1, then mix level,
+    /// shape, coarse and fine of the other two.
+    fn old_osc3(state: &[u8]) -> Self {
+        let mut g = Self::new(Kind::Osc3);
+        let at = |i: usize| i32::from_le_bytes(state[i * 4..i * 4 + 4].try_into().unwrap());
+        let d = def(Kind::Osc3);
+        let mut set = |name: &str, v: i32| {
+            if let Some(k) = d.params.iter().position(|p| p.name == name) {
+                g.p[k] = v.clamp(d.params[k].min, d.params[k].max) as f32;
+            }
+        };
+        set("Osc 1 shape", at(0));
+        set("Osc 2 level", at(3));
+        set("Osc 2 shape", at(4));
+        set("Osc 3 level", at(7));
+        set("Osc 3 shape", at(8));
+        set("Osc 1 coarse", at(1));
+        set("Osc 1 fine", at(2));
+        set("Osc 2 coarse", at(5));
+        set("Osc 2 fine", at(6));
+        set("Osc 3 coarse", at(9));
+        set("Osc 3 fine", at(10));
+        g
     }
 
     /// The stored block. Bytes we do not understand are kept from `base`, and a value that still reads the same

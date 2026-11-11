@@ -104,7 +104,12 @@ impl App {
         let title = format!("{} - {}", self.song.inserts[ins].slots[si].title(), self.song.insert_name(ins));
         let mut open = true;
         let mut changed = false;
+        let ident = self.song.inserts[ins].slots[si].fx.as_ref().map(|f| fx::def(f.kind).ident);
+        let mut pick = None;
         egui::Window::new(title).id(egui::Id::new("fxwin")).open(&mut open).frame(frame).resizable(false).default_pos([420.0, 160.0]).show(ctx, |ui| {
+            if let Some(ident) = ident {
+                pick = self.preset_bar(ui, ident, false);
+            }
             let s = &mut self.song.inserts[ins].slots[si];
             ui.horizontal(|ui| {
                 if led(ui, s.enabled, 12.0).on_hover_text("Effect on / off").clicked() {
@@ -151,6 +156,9 @@ impl App {
         });
         if changed {
             self.dirty = true;
+        }
+        if let Some(p) = pick {
+            self.actions.push(crate::Action::LoadPreset(p, crate::PresetTo::Slot(ins, slot)));
         }
         if !open {
             self.fx_open = None;

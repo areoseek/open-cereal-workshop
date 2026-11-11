@@ -6,6 +6,7 @@ pub mod fx;
 pub mod synth;
 pub mod law;
 pub mod player;
+pub mod preset;
 pub mod sample;
 pub mod save;
 pub mod song;
