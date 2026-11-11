@@ -17,7 +17,7 @@ use crate::song::{ClipSrc, Note, Sampler, Song};
 const ITEM_BASE: u16 = 0x5000;
 
 /// Ids that can never belong to a channel's own run of events.
-fn ends_channel(e: u8) -> bool {
+pub(crate) fn ends_channel(e: u8) -> bool {
     matches!(e, 64 | 65 | 99 | 233 | 236 | 238 | 27 | 29 | 31 | 42 | 95 | 100 | 133 | 149 | 204 | 225)
 }
 
