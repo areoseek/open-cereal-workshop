@@ -1,4 +1,4 @@
-//! A minimal RIFF/WAVE writer: 16-bit PCM, no dependencies. Enough for project export; more formats later.
+//! A RIFF/WAVE writer: 16 and 24-bit PCM and 32-bit float, no dependencies.
 
 use std::io::{self, Write};
 
@@ -47,4 +47,38 @@ mod tests {
         assert_eq!(i16::from_le_bytes(out[46..48].try_into().unwrap()), 32767);
         assert_eq!(i16::from_le_bytes(out[48..50].try_into().unwrap()), -32767);
     }
+}
+
+/// Write interleaved f32 samples as WAV at 16 or 24-bit PCM, or 32-bit float.
+pub fn write<W: Write>(mut w: W, samples: &[f32], sample_rate: u32, channels: u16, bits: u16) -> io::Result<()> {
+    if bits <= 16 {
+        return write_pcm16(w, samples, sample_rate, channels);
+    }
+    let bits = if bits >= 32 { 32 } else { 24 };
+    let bytes_per = (bits / 8) as usize;
+    let block_align = channels * bits / 8;
+    let data_len = (samples.len() * bytes_per) as u32;
+    w.write_all(b"RIFF")?;
+    w.write_all(&(36 + data_len).to_le_bytes())?;
+    w.write_all(b"WAVE")?;
+    w.write_all(b"fmt ")?;
+    w.write_all(&16u32.to_le_bytes())?;
+    w.write_all(&(if bits == 32 { 3u16 } else { 1 }).to_le_bytes())?;
+    w.write_all(&channels.to_le_bytes())?;
+    w.write_all(&sample_rate.to_le_bytes())?;
+    w.write_all(&(sample_rate * block_align as u32).to_le_bytes())?;
+    w.write_all(&block_align.to_le_bytes())?;
+    w.write_all(&bits.to_le_bytes())?;
+    w.write_all(b"data")?;
+    w.write_all(&data_len.to_le_bytes())?;
+    let mut bytes = Vec::with_capacity(samples.len() * bytes_per);
+    for &s in samples {
+        if bits == 32 {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        } else {
+            let v = (s.clamp(-1.0, 1.0) as f64 * 8_388_607.0).round() as i32;
+            bytes.extend_from_slice(&v.to_le_bytes()[..3]);
+        }
+    }
+    w.write_all(&bytes)
 }

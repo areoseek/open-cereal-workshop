@@ -2,6 +2,7 @@
 //! the mixer. No UI and no audio device live here; the app feeds `Player::render` from its audio callback.
 
 pub mod flp;
+pub mod flac;
 pub mod fx;
 pub mod fxbank;
 pub mod fxpatch;

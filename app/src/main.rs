@@ -129,6 +129,7 @@ pub(crate) struct App {
     hist_pending: bool,
     show_info: bool,
     show_about: bool,
+    render: Option<RenderOpts>,
     show_chanset: bool,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
@@ -234,6 +235,7 @@ impl App {
             hist_pending: false,
             show_info: false,
             show_about: false,
+            render: None,
             show_chanset: false,
             fx_open: None,
             preset_lists: Default::default(),
@@ -365,17 +367,82 @@ impl App {
         }
     }
 
+    /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
-        let default = self.path.as_ref().map(|p| p.with_extension("wav")).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "untitled.wav".into());
-        let Some(path) = rfd::FileDialog::new().add_filter("WAV audio", &["wav"]).set_file_name(default).save_file() else { return };
-        let rate = 44_100.0;
-        let song_mode = self.handle.transport.song_mode();
-        let buf = cereal_engine::render_song(&self.song, rate, song_mode, self.handle.transport.pattern(), 6.0);
-        let r = std::fs::File::create(&path).and_then(|f| wav::write_pcm16(std::io::BufWriter::new(f), &buf, rate as u32, 2));
+        if self.render.is_none() {
+            self.render = Some(RenderOpts { flac: false, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode() });
+        }
+    }
+
+    fn render_to_file(&mut self, o: &RenderOpts) {
+        let (ext, label) = if o.flac { ("flac", "FLAC audio") } else { ("wav", "WAV audio") };
+        let default = self.path.as_ref().map(|p| p.with_extension(ext)).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| format!("untitled.{ext}"));
+        let Some(path) = rfd::FileDialog::new().add_filter(label, &[ext]).set_file_name(default).save_file() else { return };
+        let buf = cereal_engine::render_song(&self.song, o.rate as f32, o.song, self.handle.transport.pattern(), o.tail);
+        let r = std::fs::File::create(&path).and_then(|f| {
+            let w = std::io::BufWriter::new(f);
+            if o.flac {
+                cereal_engine::flac::write(w, &buf, o.rate, 2, o.bits.min(24) as u32)
+            } else {
+                wav::write(w, &buf, o.rate, 2, o.bits)
+            }
+        });
         self.status = match r {
             Ok(()) => format!("Exported {}", path.display()),
             Err(e) => format!("Export failed: {e}"),
         };
+    }
+
+    fn render_window(&mut self, ctx: &egui::Context) {
+        let Some(mut o) = self.render.take() else { return };
+        let mut open = true;
+        let mut go = false;
+        egui::Window::new("Rendering").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("render").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+                ui.label("Mode");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.song, true, "Full song");
+                    ui.selectable_value(&mut o.song, false, "Pattern");
+                });
+                ui.end_row();
+                ui.label("Format");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.flac, false, "WAV");
+                    ui.selectable_value(&mut o.flac, true, "FLAC");
+                });
+                ui.end_row();
+                ui.label("Depth");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.bits, 16, "16 bit");
+                    ui.selectable_value(&mut o.bits, 24, "24 bit");
+                    if !o.flac {
+                        ui.selectable_value(&mut o.bits, 32, "32 bit float");
+                    } else if o.bits > 24 {
+                        o.bits = 24;
+                    }
+                });
+                ui.end_row();
+                ui.label("Sample rate");
+                ui.horizontal(|ui| {
+                    for r in [44_100u32, 48_000, 88_200, 96_000] {
+                        ui.selectable_value(&mut o.rate, r, format!("{r}"));
+                    }
+                });
+                ui.end_row();
+                ui.label("Tail");
+                ui.add(egui::Slider::new(&mut o.tail, 0.0..=20.0).suffix(" s"));
+                ui.end_row();
+            });
+            ui.add_space(6.0);
+            if ui.button("Start").clicked() {
+                go = true;
+            }
+        });
+        if go {
+            self.render_to_file(&o);
+        } else if open {
+            self.render = Some(o);
+        }
     }
 
     fn export_midi(&mut self) {
@@ -822,7 +889,7 @@ impl App {
                         self.save(true);
                     }
                     ui.separator();
-                    if ui.button("Export WAV...     Ctrl+R").clicked() {
+                    if ui.button("Export audio...   Ctrl+R").clicked() {
                         ui.close_menu();
                         self.export();
                     }
@@ -1083,6 +1150,7 @@ impl App {
             }
         }
 
+        self.render_window(ctx);
         let mut open = self.show_about;
         egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.heading("Breakfast Cereal DAW");
@@ -1092,6 +1160,15 @@ impl App {
         });
         self.show_about = open;
     }
+}
+
+/// Choices in the rendering window.
+struct RenderOpts {
+    flac: bool,
+    bits: u16,
+    rate: u32,
+    tail: f32,
+    song: bool,
 }
 
 impl eframe::App for App {

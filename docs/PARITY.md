@@ -163,7 +163,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Project files: .flp read/write done; .fst presets, .fsc scores to do
 - [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)
 - [~] MIDI devices: keyboards and pads play the selected channel (Linux; hold pedal kept). Windows input, bend and wheels, controller linking, recording to do
-- [~] Rendering/export: WAV and MIDI files done (MIDI import too, by menu or drop); MP3, OGG, FLAC to do
+- [~] Rendering/export: WAV (16, 24, 32 float), FLAC and MIDI files done, with a rendering window (MIDI import too, by menu or drop); MP3, OGG to do
 
 ## What "approximate" means
 `[~]` marks a part that works but has not been measured against the reference. Until measured, treat these as
