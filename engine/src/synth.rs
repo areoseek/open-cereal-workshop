@@ -58,6 +58,8 @@ pub enum Kind {
     /// The two-string model with its touch, links, body, echo, chorus and room: its stored values in file order (`strmodel.rs`).
     StrModel,
     Triple,
+    /// Six oscillators that bend each other, with a filter: its stored list of numbers (`hybrid.rs`).
+    Hybrid,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -467,7 +469,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Duo, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::SawSyn, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::StrModel, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Hybrid, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Buzz, ident: "Wasp", title: "Hornet", size: 169, fixed: &[(0, 1)], tail: &[], params: BUZZ },
     Def { kind: Kind::BuzzXt, ident: "Wasp XT", title: "Hornet XT", size: 213, fixed: &[(0, 11)], tail: &[], params: BUZZ },
     Def {
@@ -747,6 +749,10 @@ impl Gen {
             g.p = crate::triple::defaults();
             g.raw = crate::triple::fresh();
         }
+        if kind == Kind::Hybrid {
+            g.p = crate::hybrid::defaults();
+            g.raw = crate::hybrid::fresh();
+        }
         if kind == Kind::Fm {
             // a new one carries a full block of its own, so every page of its window can be edited and saved
             g.raw = crate::fm::Patch::blank_state();
@@ -784,6 +790,9 @@ impl Gen {
         }
         if d.kind == Kind::StrModel {
             return Some(Self { kind: d.kind, p: tagged_values(state, crate::strmodel::COUNT), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::Hybrid {
+            return Some(Self { kind: d.kind, p: crate::hybrid::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Triple {
             return Some(Self { kind: d.kind, p: crate::triple::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -959,9 +968,13 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
-            let first = if self.kind == Kind::Triple { crate::triple::base(&out).unwrap_or(usize::MAX / 8) } else { 12 };
+            let first = match self.kind {
+                Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
+                Kind::Hybrid => crate::hybrid::base(&out).unwrap_or(usize::MAX / 8),
+                _ => 12,
+            };
             for (i, &v) in self.p.iter().enumerate() {
                 let o = first + i * 4;
                 if out.len() >= o + 4 && f32::from_le_bytes(out[o..o + 4].try_into().unwrap()) != v {
@@ -1006,6 +1019,7 @@ impl Gen {
             Kind::Duo => crate::duo::tail(&self.p),
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),
+            Kind::Hybrid => crate::hybrid::tail(&self.p),
             _ => Default::default(),
         }
     }
@@ -1014,6 +1028,7 @@ impl Gen {
     pub fn mono(&self) -> Option<f32> {
         match self.kind {
             Kind::Duo => crate::duo::set(&self.p).mono,
+            Kind::Hybrid => crate::hybrid::set(&self.p).mono,
             Kind::Triple => (self.p.len() >= crate::triple::COUNT && self.p[40] >= 0.5).then(|| if self.p[11] >= 0.5 { 0.005 + self.p[10].clamp(0.0, 1.0).powi(2) * 2.0 } else { 0.0 }),
             _ => None,
         }
@@ -1060,6 +1075,15 @@ impl Gen {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
                 Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None, smp: None })), ..Default::default() }
+            }
+            Kind::Hybrid => {
+                let mut p = self.p.clone();
+                if p.len() >= crate::hybrid::COUNT {
+                    p.truncate(crate::hybrid::COUNT);
+                    let ids = crate::hybrid::wave_ids(&self.raw, &p);
+                    p.extend(ids);
+                }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
             }
             Kind::Triple => {
                 // the three waves ride along as numbers after the list
@@ -1563,6 +1587,64 @@ mod tests {
             peaks.sort_by(|a, b| a.total_cmp(b));
             eprintln!("triple synth sounds: {seen}, loudest {top} ({worst}), middle {}, tenth {}, quiet {}: {:?}", peaks[seen / 2], peaks[seen / 10], quiet.len(), &quiet[..quiet.len().min(12)]);
             assert!(crate::triple::wave_names().len() > 4 || !root.parent().is_some_and(|r| r.join("Plugins").is_dir()));
+            assert!(top < 4.0, "{worst}: {top}");
+            assert!(quiet.len() * 10 < seen, "{} of {seen} stay silent: {quiet:?}", quiet.len());
+        }
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every stored sound of the hybrid synth there reads, plays and stays in range.
+    #[test]
+    fn every_stored_hybrid_synth_sound_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let root = std::path::Path::new(&root);
+        let mut stack = vec![root.join("Patches/Plugin presets/Generators/Toxic Biohazard")];
+        let mut files = Vec::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("tbio")) {
+                    files.push(path);
+                }
+            }
+        }
+        let (mut seen, mut quiet, mut top, mut worst, mut peaks) = (0, Vec::new(), 0.0f32, String::new(), Vec::new());
+        for path in files {
+            let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+            assert_eq!(g.kind, Kind::Hybrid);
+            assert_eq!(g.p.len(), crate::hybrid::COUNT, "{path:?}");
+            assert_eq!(g.encode(None), g.raw);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 261.63 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+            let mut buf: Vec<[f32; 2]> = (0..66150).map(|_| v.frame(patch, dp)).collect();
+            let dry = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            let set = g.tail();
+            if set.any() {
+                crate::tailfx::State::new(44100.0).process(&set, &mut buf, 5512.0, None);
+            }
+            let peak = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            assert!(peak.is_finite(), "{path:?}: {peak}");
+            if peak > top {
+                top = peak;
+                worst = path.file_name().unwrap().to_string_lossy().into_owned();
+            }
+            peaks.push(peak);
+            if std::env::var("CEREAL_HYBRID_DUMP").is_ok() && !(0.03..1.5).contains(&peak) {
+                eprint!("dry {dry:.2} ");
+                let on: Vec<usize> = (0..6).filter(|k| g.p[25 + k] >= 0.5).collect();
+                eprintln!("{peak:.3} {:?} on{on:?} lvl {:?} wave {:?} filt {} cut {} res {} eg {} feg {:?} amp {:?} vol {} drive {} eq {:?}", path.file_name().unwrap(), &g.p[103..109], &g.p[306..312], g.p[300], g.p[15], g.p[16], g.p[23], &g.p[19..23], &g.p[3..7], g.p[0], g.p[8], &g.p[227..236]);
+            }
+            if peak < 0.003 && g.p[0] > 0.05 {
+                quiet.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            seen += 1;
+        }
+        if seen > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            eprintln!("hybrid synth sounds: {seen}, loudest {top} ({worst}), middle {}, tenth {}, quiet {}: {:?}", peaks[seen / 2], peaks[seen / 10], quiet.len(), &quiet[..quiet.len().min(12)]);
             assert!(top < 4.0, "{worst}: {top}");
             assert!(quiet.len() * 10 < seen, "{} of {seen} stay silent: {quiet:?}", quiet.len());
         }

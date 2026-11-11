@@ -972,6 +972,15 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
         }
+        Kind::Hybrid => {
+            use cereal_engine::hybrid::{params, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, &GROUPS, params());
+            ui.label(RichText::new("Only the sine, the saw and the squares are placed in the list of built shapes; the other places play stand-in shapes of our own. The step runner, the two effect units and the links to outside controllers are kept in the file but not worked yet.").small().color(TEXT_DIM));
+        }
         Kind::Triple => {
             use cereal_engine::triple::{params, set_wave_name, wave_name, wave_names, COUNT, GROUPS};
             if g.p.len() < COUNT {

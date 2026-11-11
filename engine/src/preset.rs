@@ -54,11 +54,14 @@ pub fn read(path: &std::path::Path) -> Result<Preset, String> {
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("gmsynth")) {
         return Ok(Preset { ident: "GMS".into(), state: crate::triple::wrap(&bytes) });
     }
+    if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("tbio")) {
+        return Ok(Preset { ident: "Toxic Biohazard".into(), state: crate::hybrid::wrap(&bytes) });
+    }
     parse(&bytes)
 }
 
 /// File endings that hold the settings of one plugin.
-pub const EXTS: [&str; 2] = ["fst", "gmsynth"];
+pub const EXTS: [&str; 3] = ["fst", "gmsynth", "tbio"];
 
 pub fn is_file(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|x| EXTS.iter().any(|e| x.eq_ignore_ascii_case(e)))

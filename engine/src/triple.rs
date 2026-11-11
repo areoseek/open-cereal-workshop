@@ -205,7 +205,7 @@ pub struct Wave {
 
 impl Wave {
     /// From the strength of each overtone as (cosine, sine) parts, the first being the note itself.
-    fn from_parts(parts: &[(f32, f32)]) -> Self {
+    pub(crate) fn from_parts(parts: &[(f32, f32)]) -> Self {
         let mut levels = vec![vec![0.0f32; TABLE + 1]; LEVELS];
         let mut acc = vec![0.0f32; TABLE + 1];
         // the level with the fewest overtones first, adding the next ones for each richer level
@@ -270,7 +270,7 @@ impl Wave {
 
     /// The wave at `ph` (0 to 1) for a note that moves `dp` of a cycle per frame.
     #[inline]
-    fn at(&self, ph: f32, dp: f32) -> f32 {
+    pub(crate) fn at(&self, ph: f32, dp: f32) -> f32 {
         let room = 0.45 / dp.abs().max(1e-6);
         let mut lv = 0;
         while lv < LEVELS - 1 && (512 >> lv) as f32 > room {

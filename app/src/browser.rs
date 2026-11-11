@@ -42,7 +42,7 @@ impl State {
                             let is_dir = p.is_dir();
                             let ext = ext_of(&p);
                             let hidden = e.file_name().to_string_lossy().starts_with('.');
-                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid", "gmsynth"].contains(&ext.as_str()))).then_some((p, is_dir))
+                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid", "gmsynth", "tbio"].contains(&ext.as_str()))).then_some((p, is_dir))
                         })
                         .collect()
                 })
