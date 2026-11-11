@@ -29,6 +29,7 @@ pub enum Voice {
     Bank(Box<crate::drumbank::Voice>),
     Image(Box<crate::beep::Voice>),
     Grain(Box<crate::grain::Voice>),
+    Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
     Quiet,
 }
 
@@ -93,6 +94,10 @@ impl Voice {
         }
         match p.kind {
             Kind::Image | Kind::Quiet | Kind::Grain => Voice::Quiet,
+            Kind::Buzz | Kind::BuzzXt => {
+                let set = crate::analog::buzz(s);
+                Voice::Analog(Box::new((crate::analog::Voice::start(&set, sr, key, vel, seed), set)))
+            }
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
             Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel },
             Kind::Fm2 => {
@@ -204,6 +209,10 @@ impl Voice {
             Voice::Bank(v) => v.left(),
             Voice::Image(v) => v.release(),
             Voice::Grain(v) => v.release(),
+            Voice::Analog(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Quiet => 0.0,
         }
     }
@@ -215,6 +224,10 @@ impl Voice {
             Voice::Bank(v) => v.frame(),
             Voice::Image(v) => v.frame(),
             Voice::Grain(v) => v.frame(),
+            Voice::Analog(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set, dphase)
+            }
             Voice::Quiet => [0.0; 2],
             Voice::Kick { sr, t, ph, scale, vel } => {
                 let sec = *t as f32 / *sr;

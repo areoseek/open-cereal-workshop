@@ -52,8 +52,8 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Sytrus (built as Six Op, approximate: operators, modulation matrix, three filters with shapers, envelopes, LFOs, mappings, unison; state layouts 17 to 25 are read, older ones 5 to 15 are not yet; its effects section and arpeggio breaks are not run, the panel is read-only and it cannot yet be added fresh from the menu)
 - [~] Toxic Biohazard (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] Transistor Bass
-- [ ] Wasp
-- [ ] Wasp XT
+- [~] Wasp (opens as Hornet: our own three-oscillator voice with ring mod, FM, dual voice, six filter types, two envelopes, two slow oscillators and drive; the layout is placed from value ranges, so a few switches may be on the wrong control; tempo sync of the slow oscillators and the envelope link are not done)
+- [~] Wasp XT (opens as Hornet XT on the same voice; the eleven added settings are kept but not played)
 - [~] Wave Traveller (opens as Path Scratcher, block kept; its sample is found and played straight through; the per-key travel paths, regions, speed, volume paths and editing are not done)
 
 ## Effects and tools (90)

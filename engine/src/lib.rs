@@ -11,6 +11,7 @@ pub mod synth;
 pub mod law;
 pub mod player;
 pub mod additive;
+pub mod analog;
 pub mod fm;
 pub mod minis;
 pub mod keys;

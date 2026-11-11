@@ -41,6 +41,9 @@ pub enum Kind {
     Grain,
     /// A sample named in the block, played straight for now (the drawn travel paths are not read).
     Travel,
+    /// The small three-oscillator analog-style synth and its wider sibling (`analog.rs`).
+    Buzz,
+    BuzzXt,
     /// Units that make no sound of their own: they send control values or notes elsewhere.
     Quiet,
 }
@@ -94,6 +97,51 @@ const fn b(name: &'static str, off: usize) -> Param {
 /// Settings per oscillator of the three-oscillator instrument, in table order.
 pub const OSC_FIELDS: usize = 7;
 pub const SHAPES: [&str; 7] = ["Sine", "Triangle", "Square", "Saw", "Round saw", "Noise", "Custom"];
+
+/// The settings both analog-style synths share, in stored order (the wider one keeps eleven more we cannot place).
+const BUZZ: &[Param] = &[
+    p("Osc 1 shape", 4, 0, 3, 0),
+    p("Osc 1 coarse", 8, 0, 128, 64),
+    p("Osc 1 fine", 12, 0, 128, 64),
+    p("Osc 2 shape", 16, 0, 3, 0),
+    p("Osc 2 coarse", 20, 0, 128, 64),
+    p("Osc 2 fine", 24, 0, 128, 64),
+    p("Osc 3 shape", 28, 0, 1, 0),
+    p("Osc 3 amount", 32, 0, 128, 0),
+    p("Osc mix", 36, 0, 128, 64),
+    p("Pulse width", 40, 0, 128, 0),
+    p("FM amount", 44, 0, 128, 0),
+    p("Ring mod", 48, 0, 1, 0),
+    p("Amp attack", 52, 0, 128, 0),
+    p("Amp decay", 56, 0, 128, 64),
+    p("Amp sustain", 60, 0, 128, 128),
+    p("Amp release", 64, 0, 128, 16),
+    p("Filter attack", 68, 0, 128, 0),
+    p("Filter decay", 72, 0, 128, 64),
+    p("Filter sustain", 76, 0, 128, 64),
+    p("Filter release", 80, 0, 128, 16),
+    p("Key tracking", 84, 0, 1, 0),
+    p("Filter type", 88, 0, 5, 0),
+    p("Cutoff", 92, 0, 512, 512),
+    p("Resonance", 96, 0, 128, 0),
+    p("Envelope amount", 100, 0, 128, 0),
+    p("LFO 1 shape", 104, 0, 3, 2),
+    p("LFO 1 target", 108, 0, 2, 1),
+    p("LFO 1 amount", 112, 0, 128, 0),
+    p("LFO 1 speed", 116, 0, 128, 64),
+    p("LFO 1 sync", 120, 0, 1, 0),
+    p("LFO 1 reset", 124, 0, 1, 0),
+    p("LFO 2 shape", 128, 0, 3, 2),
+    p("LFO 2 target", 132, 0, 2, 0),
+    p("LFO 2 amount", 136, 0, 128, 0),
+    p("LFO 2 speed", 140, 0, 128, 64),
+    p("LFO 2 sync", 144, 0, 1, 0),
+    p("LFO 2 reset", 148, 0, 1, 0),
+    p("Drive on", 152, 0, 1, 0),
+    p("Drive", 156, 0, 128, 0),
+    p("Tone", 160, 0, 128, 64),
+    p("Dual voice", 164, 0, 1, 0),
+];
 
 pub static DEFS: &[Def] = &[Def {
     kind: Kind::Osc3,
@@ -372,6 +420,8 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Sub, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Buzz, ident: "Wasp", title: "Hornet", size: 169, fixed: &[(0, 1)], tail: &[], params: BUZZ },
+    Def { kind: Kind::BuzzXt, ident: "Wasp XT", title: "Hornet XT", size: 213, fixed: &[(0, 11)], tail: &[], params: BUZZ },
     Def { kind: Kind::Sub, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -1024,6 +1074,24 @@ mod tests {
         let out = c.encode(None);
         assert_eq!(&out[432..], &big[432..]);
         assert_eq!(i32::from_le_bytes(out[220..224].try_into().unwrap()), 1000);
+    }
+
+    #[test]
+    fn analog_synths_make_fresh_blocks_and_sound() {
+        for (ident, size, version) in [("Wasp", 169, 1), ("Wasp XT", 213, 11)] {
+            let g = Gen::decode(ident, &[]).unwrap();
+            assert_eq!(g.raw.len(), size);
+            assert_eq!(g.raw[0], version);
+            let mut again = Gen::decode(ident, &g.raw).unwrap();
+            assert_eq!(again.encode(None), g.raw);
+            again.p[22] = 300.0;
+            assert_eq!(&again.encode(None)[92..96], &300i32.to_le_bytes());
+            let tone = again.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 1.0, 261.63 / 44100.0, 5);
+            let peak = (0..6000).map(|_| v.frame(patch, 261.63 / 44100.0)[0].abs()).fold(0.0, f32::max);
+            assert!(peak > 0.05 && peak < 1.2, "{ident} {peak}");
+        }
     }
 
     #[test]
