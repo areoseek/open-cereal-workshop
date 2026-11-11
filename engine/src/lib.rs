@@ -4,6 +4,7 @@
 pub mod flp;
 pub mod flac;
 pub mod fx;
+pub mod host;
 pub mod fxbank;
 pub mod fxpatch;
 pub mod fxrack;

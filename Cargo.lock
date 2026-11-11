@@ -548,10 +548,18 @@ name = "cereal-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "libloading",
  "miniz_oxide 0.8.9",
  "rusty_mp3",
  "rusty_vorbis",
  "symphonia",
+]
+
+[[package]]
+name = "cereal-testplug"
+version = "0.1.0"
+dependencies = [
+ "cereal-engine",
 ]
 
 [[package]]

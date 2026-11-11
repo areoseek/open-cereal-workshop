@@ -1,0 +1,13 @@
+[package]
+name = "cereal-testplug"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+edition = "2021"
+description = "A tiny CLAP plug-in the engine's tests load: a gain with a sine voice. Not shipped."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cereal-engine = { path = "../engine" }
