@@ -148,13 +148,14 @@ impl App {
                     ChannelKind::AudioClip => "Audio clip".to_string(),
                     ChannelKind::Layer => "Layer".to_string(),
                     ChannelKind::AutomationClip => "Automation clip".to_string(),
-                    _ => c.plugin.clone(),
+                    _ => cereal_engine::synth::title_for(&c.plugin).map(str::to_string).unwrap_or_else(|| c.plugin.clone()),
                 };
                 ui.label(RichText::new(what).small().color(TEXT_DIM));
             });
         });
         ui.separator();
-        if !matches!(kind, ChannelKind::Sampler | ChannelKind::AudioClip) {
+        let built_in = self.song.channels[ci].gen.is_some();
+        if !built_in && !matches!(kind, ChannelKind::Sampler | ChannelKind::AudioClip) {
             let c = &self.song.channels[ci];
             match kind {
                 ChannelKind::Layer => {
@@ -180,7 +181,7 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            for (t, name) in [(Tab::Sample, "Sample"), (Tab::Envelope, "Envelope / filter"), (Tab::Misc, "Miscellaneous")] {
+            for (t, name) in [(Tab::Sample, if built_in { "Instrument" } else { "Sample" }), (Tab::Envelope, "Envelope / filter"), (Tab::Misc, "Miscellaneous")] {
                 if ui.selectable_label(self.chanset.tab == t, name).clicked() {
                     self.chanset.tab = t;
                 }
@@ -189,6 +190,9 @@ impl App {
         ui.add_space(4.0);
 
         match self.chanset.tab {
+            Tab::Sample if built_in => {
+                changed |= instrument_panel(ui, self.song.channels[ci].gen.as_mut().unwrap());
+            }
             Tab::Sample => {
                 let mut pick = false;
                 {
@@ -363,4 +367,90 @@ impl App {
             self.dirty = true;
         }
     }
+}
+
+/// The knobs of a built-in instrument.
+fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
+    use cereal_engine::synth::{def, Kind, OSC_FIELDS, SHAPES};
+    let mut changed = false;
+    match g.kind {
+        Kind::Osc3 => {
+            let d = def(g.kind);
+            for k in 0..3 {
+                let base = k * OSC_FIELDS;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("OSC {}", k + 1)).strong());
+                    ui.add_space(6.0);
+                    // shape buttons
+                    for (i, name) in SHAPES.iter().enumerate() {
+                        let on = g.p[base + 1] as usize == i;
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 18.0), Sense::click());
+                        let fill = if on { ACCENT } else { Color32::from_rgb(52, 58, 62) };
+                        ui.painter().rect_filled(rect, 2.0, fill);
+                        let ink = if on { Color32::BLACK } else { TEXT_DIM };
+                        let pts: Vec<Pos2> = (0..=16)
+                            .map(|j| {
+                                let t = j as f32 / 16.0;
+                                let y = match i {
+                                    0 => (t * std::f32::consts::TAU).sin(),
+                                    1 => 1.0 - 4.0 * ((t + 0.25).fract() - 0.5).abs(),
+                                    2 => if t < 0.5 { 0.9 } else { -0.9 },
+                                    3 => 2.0 * t - 1.0,
+                                    4 => {
+                                        let x = 2.0 * t - 1.0;
+                                        x * (2.0 - x.abs())
+                                    }
+                                    5 => ((j * 7919 % 13) as f32 / 6.0 - 1.0) * 0.9,
+                                    _ => (t * std::f32::consts::TAU).sin() * (1.0 - t),
+                                };
+                                Pos2::new(rect.left() + 3.0 + t * (rect.width() - 6.0), rect.center().y - y * 6.0)
+                            })
+                            .collect();
+                        ui.painter().add(egui::Shape::line(pts, Stroke::new(1.2_f32, ink)));
+                        if resp.on_hover_text(*name).clicked() && !on {
+                            g.p[base + 1] = i as f32;
+                            changed = true;
+                        }
+                    }
+                    let inv = &mut g.p[21 + k];
+                    if ui.selectable_label(*inv != 0.0, "INV").on_hover_text("Invert this oscillator").clicked() {
+                        *inv = if *inv != 0.0 { 0.0 } else { 1.0 };
+                        changed = true;
+                    }
+                    if k == 2 {
+                        let am = &mut g.p[24];
+                        if ui.selectable_label(*am != 0.0, "AM").on_hover_text("Oscillator 3 shapes the level of the other two").clicked() {
+                            *am = if *am != 0.0 { 0.0 } else { 1.0 };
+                            changed = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut kn = |ui: &mut Ui, label: &str, idx: usize, hint: &dyn Fn(f32) -> String| {
+                        let p = &d.params[idx];
+                        let mut v = g.p[idx];
+                        if cap_knob(ui, label, &mut v, p.min as f32, p.max as f32, p.def as f32, hint) {
+                            g.p[idx] = v.round();
+                            changed = true;
+                        }
+                    };
+                    if k > 0 {
+                        kn(ui, "LEVEL", base - 1, &|v| format!("{:.0} %", v / 128.0 * 100.0));
+                    } else {
+                        ui.add_space(52.0);
+                    }
+                    kn(ui, "PAN", base, &|v| format!("{:+.0} %", v / 64.0 * 100.0));
+                    kn(ui, "COARSE", base + 2, &|v| format!("{v:+.0} semitones"));
+                    kn(ui, "FINE", base + 3, &|v| format!("{v:+.0} cents"));
+                    kn(ui, "PHASE", base + 4, &|v| format!("{:.0} %", v / 64.0 * 100.0));
+                    kn(ui, "DETUNE", base + 5, &|v| format!("{:.0} %", v / 64.0 * 100.0));
+                    if k == 2 {
+                        kn(ui, "RANDOM", 20, &|v| format!("Phase randomness {:.0} %", v / 64.0 * 100.0));
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        }
+    }
+    changed
 }

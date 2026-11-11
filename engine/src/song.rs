@@ -41,6 +41,8 @@ pub struct Chan {
     pub smp: Sampler,
     /// The sample as loaded, when `sample` is a treated copy (reversed, faded, ...).
     pub raw: Option<Arc<Sample>>,
+    /// Settings of a built-in instrument, when the channel's generator is one we can run.
+    pub gen: Option<crate::synth::Gen>,
 }
 
 /// One envelope of a sampler channel. Times are seconds.
@@ -231,6 +233,12 @@ impl Sampler {
 
 impl Chan {
     /// Set the sample this channel plays, applying the treatments that are worked out ahead of time.
+    /// A new channel playing one of the built-in instruments.
+    pub fn instrument(kind: crate::synth::Kind) -> Self {
+        let d = crate::synth::def(kind);
+        Self { name: d.title.into(), kind: ChannelKind::Plugin, plugin: d.ident.into(), gen: Some(crate::synth::Gen::new(kind)), ..Default::default() }
+    }
+
     pub fn set_sample(&mut self, raw: Option<Arc<Sample>>) {
         self.raw = raw;
         self.bake();
@@ -380,7 +388,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None }
     }
 }
 
@@ -897,6 +905,7 @@ impl Song {
                     children: c.children.clone(),
                     smp: Sampler::from_flp(c),
                     raw: None,
+                    gen: if c.kind == ChannelKind::Plugin { crate::synth::Gen::decode(&c.plugin, &c.state) } else { None },
                 };
                 ch.bake();
                 ch

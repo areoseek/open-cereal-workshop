@@ -274,6 +274,9 @@ struct Voice {
     phase: f32,
     dphase: f32,
     lp: f32,
+    /// A built-in instrument's settings and running state.
+    tone: Option<crate::synth::Tone>,
+    tstate: crate::synth::ToneState,
     gl: f32,
     gr: f32,
     insert: usize,
@@ -465,6 +468,10 @@ impl Voice {
                         s
                     }
                 }
+                None if self.tone.is_some() => {
+                    let tone = self.tone.as_ref().unwrap();
+                    self.tstate.frame(tone, self.dphase * self.step_now as f32)
+                }
                 None => {
                     // stand-in voice for generators we cannot run yet: a softened saw
                     self.phase += self.dphase;
@@ -650,7 +657,30 @@ impl Player {
                 let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + n.fine_cents) / 1200.0);
                 let min_len = (sr * 0.12) as u64;
                 let remaining = if live { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
-                self.start(Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() });
+                let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
+                if let Some(g) = &ch.gen {
+                    // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
+                    let tone = g.tone();
+                    v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(n.key as u32));
+                    v.tone = Some(tone);
+                    v.step = 1.0;
+                    v.step_to = 1.0;
+                    v.step_now = 1.0;
+                    v.attack = ms(1.5);
+                    v.release = ms(12.0);
+                    v.venv = Env { on: ch.env_on, ..f.vol_env };
+                    if ch.env_on {
+                        v.level = 1.0;
+                        v.attack = 1.0;
+                    }
+                    v.penv = f.pitch_env;
+                    v.cenv = f.cut_env;
+                    v.ftype = f.filter;
+                    v.fcut = f.cutoff;
+                    v.fres = f.resonance;
+                    v.fon = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
+                }
+                self.start(v);
             }
             ChannelKind::Layer | ChannelKind::AutomationClip => {}
         }

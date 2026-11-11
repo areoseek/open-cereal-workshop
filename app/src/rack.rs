@@ -176,6 +176,18 @@ impl App {
                     self.sel_chan = self.song.channels.len() - 1;
                     self.dirty = true;
                 }
+                ui.menu_button("Instrument", |ui| {
+                    for d in cereal_engine::synth::DEFS {
+                        if ui.button(d.title).clicked() {
+                            self.song.channels.push(Chan::instrument(d.kind));
+                            self.sel_chan = self.song.channels.len() - 1;
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Add a channel playing a built-in instrument");
                 ui.label(RichText::new("Drop a sample from the browser onto a channel name to load it.").color(TEXT_DIM).small());
             });
         });

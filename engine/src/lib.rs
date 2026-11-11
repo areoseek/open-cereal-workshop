@@ -3,6 +3,7 @@
 
 pub mod flp;
 pub mod fx;
+pub mod synth;
 pub mod law;
 pub mod player;
 pub mod sample;

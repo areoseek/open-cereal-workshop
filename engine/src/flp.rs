@@ -375,6 +375,8 @@ pub struct FlpChannel {
     pub kind: ChannelKind,
     /// Internal generator name (empty for the plain sampler).
     pub plugin: String,
+    /// The generator's stored settings.
+    pub state: Vec<u8>,
     pub name: String,
     pub sample_path: String,
     pub color: u32,
@@ -861,6 +863,11 @@ impl Flp {
                     _ => {}
                 },
                 (id::PLUGIN_PARAMS, Value::Data(d)) if scope == Scope::Insert => slot.state = d.clone(),
+                (id::PLUGIN_PARAMS, Value::Data(d)) if scope == Scope::Channel => {
+                    if let Some(c) = flp.channels.last_mut() {
+                        c.state = d.clone();
+                    }
+                }
                 (id::COLOR, Value::Int(v)) if scope == Scope::Channel => {
                     if let Some(c) = flp.channels.last_mut() {
                         c.color = *v;

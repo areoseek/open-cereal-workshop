@@ -455,6 +455,49 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 }
             }
         }
+        if let Some(g) = now.gen.as_ref().filter(|_| now.gen != was.gen || now.plugin != was.plugin || now.kind != was.kind) {
+            // a built-in instrument: the channel becomes (or stays) a generator channel carrying its settings
+            let ident = crate::synth::def(g.kind).ident;
+            if let Some(i) = find(ev, end, id::CHAN_TYPE) {
+                ev[i].value = Value::Byte(2);
+            }
+            let at = match find(ev, end, id::PLUGIN_INTERNAL_NAME) {
+                Some(i) => {
+                    ev[i] = text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode);
+                    i
+                }
+                None => {
+                    let at = find(ev, end, id::CHAN_TYPE).map(|i| i + 1).unwrap_or(start + 1);
+                    ev.insert(at, text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode));
+                    end += 1;
+                    at
+                }
+            };
+            if find(ev, end, id::NEW_PLUGIN).is_none() {
+                let mut h = vec![0u8; 52];
+                put_u32(&mut h, 8, 2);
+                put_u32(&mut h, 16, 0x50);
+                put_u32(&mut h, 36, 128);
+                put_u32(&mut h, 40, 410);
+                put_u32(&mut h, 44, 558);
+                put_u32(&mut h, 48, 389);
+                ev.insert(at + 1, Event::data(id::NEW_PLUGIN, h));
+                end += 1;
+            }
+            match find(ev, end, id::PLUGIN_PARAMS) {
+                Some(i) => {
+                    let keep = was.plugin == now.plugin;
+                    if let Value::Data(d) = &mut ev[i].value {
+                        *d = g.encode(keep.then_some(d.as_slice()));
+                    }
+                }
+                None => {
+                    let at = find(ev, end, id::COLOR).or(find(ev, end, id::PLUGIN_NAME)).map(|i| i + 1).unwrap_or(at + 2);
+                    ev.insert(at, Event::data(id::PLUGIN_PARAMS, g.encode(None)));
+                    end += 1;
+                }
+            }
+        }
         if now.color != was.color {
             match find(ev, end, id::COLOR) {
                 Some(i) => {
@@ -1258,6 +1301,28 @@ pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), Strin
 mod tests {
     use super::*;
     use crate::song::{Clip, Note};
+
+    #[test]
+    fn instruments_round_trip() {
+        use crate::song::Chan;
+        use crate::synth::Kind;
+        let mut song = Song::new();
+        let n = song.channels.len();
+        let mut c = Chan::instrument(Kind::Osc3);
+        c.gen.as_mut().unwrap().p[1] = 2.0;
+        c.gen.as_mut().unwrap().p[6] = 77.0;
+        song.channels.push(c.clone());
+        let (bytes, flp) = save(&mut song, None).unwrap();
+        let (back, _) = reload(&bytes);
+        assert_eq!(back.channels.len(), n + 1);
+        assert_eq!(back.channels[n].kind, ChannelKind::Plugin);
+        assert_eq!(back.channels[n].plugin, "3x Osc");
+        assert_eq!(back.channels[n].gen, c.gen);
+        assert_eq!(to_bytes(&song, Some(&flp)).unwrap(), bytes);
+        song.channels[n].gen.as_mut().unwrap().p[9] = 7.0;
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        assert_eq!(reload(&bytes).0.channels[n].gen, song.channels[n].gen);
+    }
 
     #[test]
     fn effect_slots_round_trip() {
