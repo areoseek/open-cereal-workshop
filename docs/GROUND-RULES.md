@@ -25,3 +25,12 @@ An experienced FL Studio user must be able to sit down and work from muscle memo
 - Reads and writes .flp projects and the related preset/score formats. The format is worked out only from files we save ourselves with the demo and from public format notes; never from the program's code.
 - Our own drawing of the interface: same places and same behaviour, our own artwork, icons and colours.
 - Stock sounds are ours. A project that points at the original's stock samples plays them only from the user's own installed copy.
+
+## User-supplied content (Devin, 2026-11-10)
+
+The first-run setup (app/src/setup.rs) lets a user point the program at their own installed copy of the
+original, or start their own installer so it installs itself. We read those files in place at runtime.
+- We never unpack the installer ourselves, never get around any check in it, and never copy its content into
+  this repository, a release, or a download.
+- The wording shown to the user must say plainly that the files are theirs to obtain and that the original
+  licence still applies to them. We make no promise about what that licence permits.

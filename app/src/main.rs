@@ -4,6 +4,18 @@
 mod browser;
 mod chanset;
 mod fxwin;
+mod setup;
+
+/// Windows that take their own key commands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Win {
+    None,
+    #[allow(dead_code)]
+    Rack,
+    Piano,
+    #[allow(dead_code)]
+    Playlist,
+}
 mod mixer;
 mod pianoroll;
 mod playlist;
@@ -83,6 +95,10 @@ pub(crate) struct App {
     show_mixer: bool,
     show_browser: bool,
     typing_keys: bool,
+    /// The window key commands go to.
+    pub(crate) focus: Win,
+    pub(crate) setup: setup::State,
+    pub(crate) settings: setup::Settings,
     sel_chan: usize,
     sel_insert: usize,
     rack: rack::State,
@@ -154,11 +170,8 @@ impl App {
         };
         let lib = Library::new();
         let mut browser = browser::State::default();
-        for r in &lib.factory_roots {
-            browser.add_root("Packs", r.join("Data/Patches/Packs"));
-            browser.add_root("Demo projects", r.join("Data/Demo projects"));
-            browser.add_root("Templates", r.join("Data/Templates"));
-        }
+        let env_roots = lib.factory_roots.clone();
+        let settings = setup::Settings::load();
         for d in &lib.search_dirs {
             browser.add_root(&d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), d.clone());
         }
@@ -184,6 +197,9 @@ impl App {
             show_mixer: false,
             show_browser: true,
             typing_keys: true,
+            focus: Win::None,
+            setup: Default::default(),
+            settings,
             sel_chan: 0,
             sel_insert: 0,
             rack: Default::default(),
@@ -203,6 +219,13 @@ impl App {
             chanset: Default::default(),
             rename_pattern: None,
         };
+        let mut roots = env_roots;
+        roots.extend(app.settings.content.iter().filter(|c| c.is_dir()).cloned());
+        for r in &roots {
+            app.add_content_root(r);
+        }
+        // first run (and later runs until the user settles it): offer to read sounds from their own copy
+        app.setup.open = roots.is_empty() && !app.settings.never_ask && std::env::var_os("CEREAL_NO_SETUP").is_none();
         if let Some(p) = open {
             app.open(&p);
         }
@@ -442,6 +465,25 @@ impl App {
         let typing_text = ctx.wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
         for e in events {
+            // the copy, cut and paste keys arrive as their own events, never as key presses
+            match &e {
+                egui::Event::Copy | egui::Event::Cut if !typing_text => {
+                    let cut = matches!(e, egui::Event::Cut);
+                    if !cut && ctx.input(|i| i.modifiers.shift) {
+                        self.clone_pattern();
+                    } else if self.focus == Win::Piano && self.show_piano {
+                        self.pr_copy(ctx, cut);
+                    }
+                    continue;
+                }
+                egui::Event::Paste(_) if !typing_text => {
+                    if self.focus == Win::Piano && self.show_piano {
+                        self.pr_paste();
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let egui::Event::Key { key, pressed, repeat, modifiers, .. } = e else { continue };
             if !pressed {
                 if let Some((chan, k)) = self.held.remove(&key) {
@@ -450,6 +492,9 @@ impl App {
                 continue;
             }
             if typing_text {
+                continue;
+            }
+            if self.focus == Win::Piano && self.show_piano && self.piano_key(key, modifiers, repeat) {
                 continue;
             }
             if modifiers.command {
@@ -632,6 +677,12 @@ impl App {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui.button("Sounds and presets from your own copy...").clicked() {
+                        self.setup = Default::default();
+                        self.setup.open = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.label(RichText::new(&self.audio).color(TEXT_DIM));
                 });
                 ui.menu_button("HELP", |ui| {
@@ -802,7 +853,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.keys(ctx);
+        if !self.setup.open {
+            self.keys(ctx);
+        }
+        self.setup_ui(ctx);
         // files dropped on the window
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         for p in dropped {
