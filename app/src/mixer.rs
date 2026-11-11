@@ -62,6 +62,16 @@ impl App {
                                     if resp.clicked() {
                                         self.sel_insert = i;
                                     }
+                                    resp.context_menu(|ui| {
+                                        if ui.button("Open mixer track state...").clicked() {
+                                            self.state_ask = Some(crate::StateAsk::OpenTrack(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Save mixer track state as...").clicked() {
+                                            self.state_ask = Some(crate::StateAsk::SaveTrack(i));
+                                            ui.close_menu();
+                                        }
+                                    });
                                     let ins = &mut self.song.inserts[i];
                                     if led(ui, ins.enabled, 14.0).on_hover_text("Mute").clicked() {
                                         ins.enabled = !ins.enabled;

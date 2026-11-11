@@ -120,6 +120,15 @@ impl App {
                             ui.close_menu();
                         }
                         ui.separator();
+                        if ui.button("Open channel state...").clicked() {
+                            self.state_ask = Some(crate::StateAsk::OpenChan(ci));
+                            ui.close_menu();
+                        }
+                        if ui.button("Save channel state as...").clicked() {
+                            self.state_ask = Some(crate::StateAsk::SaveChan(ci));
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button("Clone").clicked() {
                             clone = Some(ci);
                             ui.close_menu();

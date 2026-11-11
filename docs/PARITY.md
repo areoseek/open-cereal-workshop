@@ -160,7 +160,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [x] Event editor
 - [~] Audio recording and audio editor: sound from the input device records to a file and lands on the playlist as an audio clip (REC with MIC on); sounds dragged to the playlist become audio clips. Input choice per mixer track, latency correction and the audio editor to do
 - [ ] Plugin hosting (VST/CLAP)
-- [~] Project files: .flp read/write done; .fst presets and .fsc scores load and save; channel state and mixer state files to do
+- [x] Project files: .flp read/write; .fst presets, channel states and mixer track states and .fsc scores load and save (state menus on the channel button and the mixer name plate)
 - [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)
 - [~] MIDI devices: keyboards and pads play the selected channel (hold pedal kept). played notes record into the current pattern (REC button, R); the pitch wheel bends; Linux and Windows. Knobs and sliders link to any automatable control from its right-click menu (move the knob to learn), and the links are saved in the project. A one-bar countdown before recording (Ctrl+P) and input quantise to the piano roll grid are in the OPTIONS menu
 - [~] Rendering/export: WAV (16, 24, 32 float), FLAC, MP3, Ogg Vorbis and MIDI files done, with a rendering window (MIDI import too, by menu or drop)

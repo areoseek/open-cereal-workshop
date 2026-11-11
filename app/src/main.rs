@@ -58,6 +58,15 @@ pub(crate) enum PresetTo {
     Chan(usize),
 }
 
+/// A state file to pick in a file window: a whole channel or a whole mixer track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum StateAsk {
+    OpenChan(usize),
+    SaveChan(usize),
+    OpenTrack(usize),
+    SaveTrack(usize),
+}
+
 fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or("no audio output device")?;
@@ -142,6 +151,7 @@ pub(crate) struct App {
     rec_audio: bool,
     audio_rec: Option<record::AudioRec>,
     save_preset: Option<(String, bool)>,
+    pub(crate) state_ask: Option<StateAsk>,
     show_chanset: bool,
     show_events: bool,
     events: events::State,
@@ -257,6 +267,7 @@ impl App {
             rec_audio: false,
             audio_rec: None,
             save_preset: None,
+            state_ask: None,
             show_chanset: false,
             show_events: false,
             events: events::State::default(),
@@ -795,15 +806,79 @@ impl App {
 
     /// Load a plugin preset file onto one of our units.
     fn load_preset(&mut self, path: &Path, to: PresetTo) {
-        use cereal_engine::preset::{self, Unit};
-        let pre = match preset::read(path) {
+        use cereal_engine::preset::{self, Holds, Unit};
+        let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("{}: {e}", path.display());
+                return;
+            }
+        };
+        match preset::holds(&bytes) {
+            Holds::Channel => {
+                match preset::channel(&bytes, Some(&mut self.lib), path.parent()) {
+                    Ok(mut c) => {
+                        if c.name.is_empty() {
+                            c.name = name.clone();
+                        }
+                        let at = match to {
+                            PresetTo::Chan(ci) if ci < self.song.channels.len() => {
+                                // the channel stays on its mixer track and keeps the notes it has
+                                c.insert = self.song.channels[ci].insert;
+                                c.src = None;
+                                self.song.channels[ci] = c;
+                                ci
+                            }
+                            _ => {
+                                c.insert = 0;
+                                self.song.channels.push(c);
+                                self.song.channels.len() - 1
+                            }
+                        };
+                        self.sel_chan = at;
+                        self.status = format!("Channel state: {name}");
+                        self.dirty = true;
+                    }
+                    Err(e) => self.status = e,
+                }
+                return;
+            }
+            Holds::Track => {
+                match preset::track(&bytes, Some(&mut self.lib), path.parent()) {
+                    Ok(mut t) => {
+                        let i = match to {
+                            PresetTo::Slot(i, _) => i,
+                            _ => self.sel_insert,
+                        }
+                        .min(self.song.inserts.len().saturating_sub(1));
+                        let Some(old) = self.song.inserts.get_mut(i) else { return };
+                        // where the track sends its sound belongs to the project
+                        t.sends = std::mem::take(&mut old.sends);
+                        t.levels = std::mem::take(&mut old.levels);
+                        if t.name.is_empty() {
+                            t.name = std::mem::take(&mut old.name);
+                        }
+                        *old = t;
+                        self.fx_open = None;
+                        self.sel_insert = i;
+                        self.show_mixer = true;
+                        self.status = format!("Mixer track state: {name}");
+                        self.dirty = true;
+                    }
+                    Err(e) => self.status = e,
+                }
+                return;
+            }
+            Holds::Plugin => {}
+        }
+        let pre = match preset::parse(&bytes) {
             Ok(p) => p,
             Err(e) => {
                 self.status = e;
                 return;
             }
         };
-        let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match pre.unit() {
             None => self.status = format!("\"{}\" is a preset for {}, which has no built-in unit yet", name, pre.ident),
             Some(Unit::Fx(mut f)) => {
@@ -935,6 +1010,50 @@ impl App {
             });
         });
         pick
+    }
+
+    /// Open or save a whole channel or a whole mixer track as a state file.
+    fn state_file(&mut self, ask: StateAsk) {
+        use cereal_engine::preset;
+        let folder = |lib: &cereal_engine::sample::Library, sub: &str| lib.factory_roots.iter().map(|r| r.join("Data/Patches").join(sub)).find(|p| p.is_dir());
+        let (sub, kind) = match ask {
+            StateAsk::OpenChan(_) | StateAsk::SaveChan(_) => ("Channel presets", "Channel state file"),
+            _ => ("Mixer presets", "Mixer track state file"),
+        };
+        let mut d = rfd::FileDialog::new().add_filter(kind, &["fst"]);
+        if let Some(dir) = folder(&self.lib, sub) {
+            d = d.set_directory(dir);
+        }
+        match ask {
+            StateAsk::OpenChan(ci) => {
+                if let Some(p) = d.pick_file() {
+                    self.load_preset(&p, PresetTo::Chan(ci));
+                }
+            }
+            StateAsk::OpenTrack(i) => {
+                if let Some(p) = d.pick_file() {
+                    self.load_preset(&p, PresetTo::Slot(i, 0));
+                }
+            }
+            StateAsk::SaveChan(ci) => {
+                let Some(c) = self.song.channels.get(ci) else { return };
+                let made = preset::write_channel(c);
+                let Some(path) = d.set_file_name(format!("{}.fst", if c.name.is_empty() { "Channel" } else { c.name.as_str() })).save_file() else { return };
+                self.status = match made.and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                    Ok(()) => format!("Saved channel state {}", path.display()),
+                    Err(e) => format!("Channel state not saved: {e}"),
+                };
+            }
+            StateAsk::SaveTrack(i) => {
+                let Some(t) = self.song.inserts.get(i) else { return };
+                let made = preset::write_track(t);
+                let Some(path) = d.set_file_name(format!("{}.fst", self.song.insert_name(i))).save_file() else { return };
+                self.status = match made.and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                    Ok(()) => format!("Saved mixer track state {}", path.display()),
+                    Err(e) => format!("Mixer track state not saved: {e}"),
+                };
+            }
+        }
     }
 
     /// Write the settings of the open effect or the selected instrument to a preset file.
@@ -1469,6 +1588,9 @@ impl App {
         self.render_window(ctx);
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
+        }
+        if let Some(ask) = self.state_ask.take() {
+            self.state_file(ask);
         }
         let mut open = self.show_about;
         egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
