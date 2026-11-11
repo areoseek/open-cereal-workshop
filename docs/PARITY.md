@@ -54,7 +54,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Transistor Bass
 - [ ] Wasp
 - [ ] Wasp XT
-- [ ] Wave Traveller
+- [~] Wave Traveller (opens as Path Scratcher, block kept; its sample is found and played straight through; the per-key travel paths, regions, speed, volume paths and editing are not done)
 
 ## Effects and tools (90)
 - [ ] Control Surface

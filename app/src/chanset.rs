@@ -654,6 +654,10 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.label(RichText::new(format!("Grains hold {:.0} ms, fade {:.0} ms, grain spacing {:.0} %, wave spacing {:.0} %", s.hold * 1000.0, s.attack * 1000.0, s.grain_spacing * 100.0, s.wave_spacing * 100.0)).strong());
             ui.label(RichText::new("Plays the channel's sample as grains from the stored settings. Pan and depth effects, random start, transients and the knobs are still to come.").color(TEXT_DIM));
         }
+        Kind::Travel => {
+            ui.label(RichText::new(cereal_engine::synth::sample_named_in("Wave Traveller", &g.raw).unwrap_or_else(|| "(no sample)".into())).strong());
+            ui.label(RichText::new("Plays its sample straight through for now. The travel paths drawn per key are kept in the block but are not read yet.").color(TEXT_DIM));
+        }
         Kind::Quiet => {
             ui.label(RichText::new("Makes no sound of its own: it sends control values or notes to other units. Its settings are kept untouched; sending is still to come.").color(TEXT_DIM));
         }

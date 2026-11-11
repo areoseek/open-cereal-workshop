@@ -39,6 +39,8 @@ pub enum Kind {
     Image,
     /// The channel's sample played as short grains (`grain.rs`).
     Grain,
+    /// A sample named in the block, played straight for now (the drawn travel paths are not read).
+    Travel,
     /// Units that make no sound of their own: they send control values or notes elsewhere.
     Quiet,
 }
@@ -77,7 +79,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel)
     }
 }
 
@@ -383,6 +385,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Quiet, ident: "Fruity Voltage Controller", title: "Voltage Sender", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "MIDI Out", title: "MIDI Sender", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Grain, ident: "Fruity Granulizer", title: "Grain Player", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Travel, ident: "Wave Traveller", title: "Path Scratcher", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::DrumBank, ident: "Fruity DrumSynth Live", title: "Drum Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
@@ -523,6 +526,17 @@ impl PartialEq for Gen {
     }
 }
 
+/// The sample a block names for itself, for the units that play one.
+pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
+    if !ident.eq_ignore_ascii_case("Wave Traveller") {
+        return None;
+    }
+    let s = state.get(20..)?;
+    let s = &s[..s.iter().position(|&b| b == 0)?];
+    let name = String::from_utf8_lossy(s).into_owned();
+    (name.len() > 4 && name.contains('.') && s.iter().all(|&b| b >= 0x20)).then_some(name)
+}
+
 impl Gen {
     pub fn new(kind: Kind) -> Self {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
@@ -551,7 +565,7 @@ impl Gen {
             let img = crate::beep::Image::parse(state).map(std::sync::Arc::new);
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img, smp: None });
         }
-        if d.kind == Kind::Quiet || d.kind == Kind::Grain {
+        if matches!(d.kind, Kind::Quiet | Kind::Grain | Kind::Travel) {
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::DrumBank {
@@ -768,6 +782,10 @@ impl Gen {
             }
             Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone(), smp: None })), ..Default::default() },
             Kind::Grain => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, crate::grain::Set::parse(&self.raw))) })), ..Default::default() },
+            Kind::Travel => {
+                let set = crate::grain::Set { hold: 0.05, attack: 0.004, grain_spacing: 1.0, wave_spacing: 1.0 };
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Grain, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, set)) })), ..Default::default() }
+            }
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
