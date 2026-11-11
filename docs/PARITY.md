@@ -86,7 +86,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Filter (built, approximate)
 - [~] Fruity Flanger (built as Flanger (classic), settings carried onto the newer unit)
 - [~] Fruity Flangus (built, approximate)
-- [~] Fruity Formula Controller (opens as Formula Sender, block kept; formulas are not worked out or sent yet)
+- [x] Fruity Formula Controller (Formula Sender: formula worked out live from a, b, c, song time and tempo, drives linked controls, notes kept; link from "Link to controller")
 - [~] Fruity Free Filter (built as Open Filter: seven shapes; frequency law fitted to three known points, Q and gain scales estimated)
 - [~] Fruity HTML NoteBook (opens as Web Notes, block kept, sound passes through; the page is not shown)
 - [~] Fruity Limiter (built, approximate)

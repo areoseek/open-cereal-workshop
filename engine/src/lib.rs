@@ -17,6 +17,7 @@ pub mod player;
 pub mod additive;
 pub mod analog;
 pub mod fm;
+pub mod formula;
 pub mod minis;
 pub mod midifile;
 pub mod keys;

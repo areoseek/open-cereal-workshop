@@ -1385,7 +1385,9 @@ impl Player {
             self.cap_at = vec![0; ni];
         }
         for &i in &song.mix_order {
-            if i >= ni || (!self.dirty[i] && self.ring[i] == 0) {
+            // a sender that needs no sound to work keeps its track running
+            let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy)));
+            if i >= ni || (!self.dirty[i] && self.ring[i] == 0 && !sender) {
                 continue;
             }
             let ins = &song.inserts[i];
@@ -1438,8 +1440,9 @@ impl Player {
                             }
                         }
                     }
-                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy) {
+                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Formula) {
                         // a controller: run it, then hand its outputs to whatever is linked to them
+                        u.1.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                         u.1.process(&mut bus[..n], &cx);
                         let slot = slots_index;
                         for l in song.ctl_links.iter().filter(|l| l.ins == i && l.slot == slot) {
@@ -1853,6 +1856,27 @@ mod tests {
         h.send(Cmd::NoteOn { chan: layer, key: 60, vel: 1.0 });
         p.render(&mut buf[..2048], 2);
         assert!(buf[..2048].iter().any(|x| x.abs() > 0.1));
+    }
+
+    #[test]
+    fn a_formula_sender_drives_a_linked_control() {
+        // on a silent track of its own, the formula still runs and holds the master level down
+        let mut s = click_song();
+        let mut slot = crate::song::Slot::with_fx(0, crate::fx::Kind::Formula);
+        slot.fx.as_mut().unwrap().set_formula("a*0");
+        s.inserts[5].slots.push(slot);
+        s.ctl_links.push(crate::song::CtlLink { ins: 5, slot: 0, out: 0, target: Target::InsertVolume(0) });
+        let (h, mut p) = new_player(s.clone(), 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        let mut buf = vec![0.0f32; 8192];
+        p.render(&mut buf, 2);
+        assert!(buf[4096..].iter().all(|x| x.abs() < 1e-6));
+        // and lets it through when the formula says so
+        s.inserts[5].slots[0].fx.as_mut().unwrap().set_formula("0.5+a");
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert!(buf.iter().any(|x| x.abs() > 0.01));
     }
 
     #[test]

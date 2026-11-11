@@ -147,6 +147,9 @@ impl App {
             if f.kind == Kind::Eq {
                 changed |= eq_curve(ui, f);
             }
+            if f.kind == Kind::Formula {
+                changed |= formula_ui(ui, f);
+            }
             if f.kind == Kind::Conv {
                 ui.horizontal(|ui| {
                     let name = match &f.ir {
@@ -519,6 +522,34 @@ impl App {
             self.fx_open = None;
         }
     }
+}
+
+/// The formula sender's formula box, with what the formula gives right now or what is wrong with it.
+fn formula_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
+    use cereal_engine::formula;
+    let mut text = f.formula();
+    let mut changed = false;
+    ui.label(RichText::new("Formula (a, b and c are the knobs below; the result is cut to 0..1)").small().color(TEXT_DIM));
+    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(430.0).font(egui::TextStyle::Monospace)).changed() {
+        f.set_formula(&text);
+        changed = true;
+    }
+    let knob = |k: usize| (f.p.get(k).copied().unwrap_or(0.0) / 65536.0) as f64;
+    match formula::compile(&text) {
+        Ok(c) => {
+            let v = c.value(&formula::Vars { a: knob(0), b: knob(1), c: knob(2), tempo: 130.0, ..Default::default() });
+            ui.label(RichText::new(format!("Compiled ok. At the song start it gives {v:.3}")).small().color(Color32::from_rgb(120, 200, 120)));
+        }
+        Err(e) => {
+            ui.label(RichText::new(format!("Not understood: {e}")).small().color(Color32::from_rgb(230, 120, 100)));
+        }
+    }
+    ui.collapsing("What a formula can use", |ui| {
+        ui.label(RichText::new("+  -  *  /  ^  =  <>  >  >=  <  <=  %  !  div  mod  fmod  not  and  or  xor  shl  shr\nabs  sin  cos  tan  tg  ctg  sec  cosec  arcsin  arccos  arctg  atan2  sinh  cosh  tanh\nexp  ln  log2  log10  logn  sqrt  sqr  pow  power  intpower  min  max  sum  neg\nint  floor  ceil  round  trunc  frac  fold  warp  map  tension  degtorad  radtodeg\nif  case  ife  ifg  ifge  ifl  ifle  rand  seededrand  pi  songtime  gettempo  time").small().monospace().color(TEXT_DIM));
+        ui.label(RichText::new("To drive a control with the result: right-click the control, Link to controller, and pick this unit.").small().color(TEXT_DIM));
+    });
+    ui.add_space(4.0);
+    changed
 }
 
 /// The equaliser's response picture with a handle per band. Returns true when a handle moved a setting.

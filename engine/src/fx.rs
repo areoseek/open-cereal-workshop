@@ -53,6 +53,7 @@ pub enum Kind {
     Tuner,
     Peak,
     Xy,
+    Formula,
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
@@ -684,7 +685,7 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Thru, ident: "Fruity HTML NoteBook", title: "Web Notes", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Control Surface", title: "Control Panel", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Edison", title: "Wave Recorder", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity Formula Controller", title: "Formula Sender", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Formula, ident: "Fruity Formula Controller", title: "Formula Sender", size: 16, fixed: &[(0, 2)], params: &[p("A", 4, 0, 65536, 0), p("B", 8, 0, 65536, 0), p("C", 12, 0, 65536, 0)] },
     Def {
         kind: Kind::Tuner,
         ident: "Pitcher",
@@ -1728,6 +1729,9 @@ impl Fx {
             return Some(Self { kind: d.kind, p, ir: None, sub: None });
         }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
+        if d.kind == Kind::Formula {
+            return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+        }
         if d.kind == Kind::Bank {
             return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
         }
@@ -1839,6 +1843,9 @@ impl Fx {
         }
         if self.kind == Kind::Rack {
             return crate::fxrack::encode(&self.p, base);
+        }
+        if self.kind == Kind::Formula {
+            return formula_encode(&self.p, base);
         }
         if self.kind == Kind::Multi {
             return crate::fxmulti::encode(&self.p, base);
@@ -1956,6 +1963,58 @@ fn wrapped_value(q: &Param, raw: &[u8]) -> f32 {
     (q.min as f32 + x * (q.max - q.min) as f32).round()
 }
 
+/// The formula sender's block: version, the three knobs (65536 = full), then the formula as counted text and
+/// the notes. We carry the formula's letters after the knobs: their count, then one value per letter.
+fn formula_decode(state: &[u8]) -> Option<Vec<f32>> {
+    let mut p: Vec<f32> = (0..3).map(|k| state.get(4 + k * 4..8 + k * 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)).collect::<Option<_>>()?;
+    let (n, at) = counted(state, 16)?;
+    let text = state.get(at..at + n)?;
+    p.push(n as f32);
+    p.extend(text.iter().map(|&c| c as f32));
+    Some(p)
+}
+
+/// The formula is short text: one byte of length, then that many letters. Gives the count and where it starts.
+fn counted(b: &[u8], at: usize) -> Option<(usize, usize)> {
+    b.get(at).map(|&n| (n as usize, at + 1))
+}
+
+fn formula_encode(p: &[f32], base: Option<&[u8]>) -> Vec<u8> {
+    let mut out = match base {
+        Some(b) if b.len() >= 16 => b[..16].to_vec(),
+        _ => {
+            let mut v = vec![0u8; 16];
+            v[0] = 2;
+            v
+        }
+    };
+    for k in 0..3 {
+        out[4 + k * 4..8 + k * 4].copy_from_slice(&(p.get(k).copied().unwrap_or(0.0).clamp(0.0, 65536.0) as u32).to_le_bytes());
+    }
+    let text: Vec<u8> = p.iter().skip(4).take(255).map(|&c| c as u8).collect();
+    out.push(text.len() as u8);
+    out.extend_from_slice(&text);
+    // the notes that follow the formula stay as they were
+    match base.and_then(|b| counted(b, 16).and_then(|(n, at)| b.get(at + n..))) {
+        Some(rest) => out.extend_from_slice(rest),
+        None => out.extend_from_slice(&[0, 0, 0, 0]),
+    }
+    out
+}
+
+impl Fx {
+    /// The formula a formula sender holds.
+    pub fn formula(&self) -> String {
+        self.p.iter().skip(4).map(|&c| c as u8 as char).collect()
+    }
+    pub fn set_formula(&mut self, text: &str) {
+        self.p.resize(3, 0.0);
+        let letters: Vec<f32> = text.chars().filter(|c| (*c as u32) < 256 && !c.is_control()).take(255).map(|c| c as u32 as f32).collect();
+        self.p.push(letters.len() as f32);
+        self.p.extend(letters);
+    }
+}
+
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
     kind == Kind::Pad || kind == Kind::Amp || kind == Kind::Deck || (kind == Kind::Tuner && off < 144)
@@ -2054,6 +2113,12 @@ pub struct Unit {
     lpos: Vec<usize>,
     /// What a controller unit is putting out, 0..=1 each (level follower: both, peak, sweep).
     pub out: [f32; 3],
+    /// Where the song stands, for a formula sender: quarter notes and tempo. Set by whoever runs the unit.
+    pub song_at: (f64, f32),
+    /// The formula sender's compiled formula and the letters it was made from; its clock; its dice.
+    form: Option<(Vec<f32>, Option<crate::formula::Formula>)>,
+    clock: f64,
+    dice: u64,
     bank: Option<Box<crate::fxbank::State>>,
     conv: Option<Box<crate::conv::State>>,
     rack: Option<Box<crate::fxrack::State>>,
@@ -2232,7 +2297,7 @@ const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
         let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
@@ -2321,7 +2386,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, oldvoc: None, tap: Vec::new(), patch: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -3121,6 +3186,20 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Formula => {
+                let letters = p.get(4..).unwrap_or(&[]);
+                if self.form.as_ref().is_none_or(|f| f.0 != letters) {
+                    let text: String = letters.iter().map(|&c| c as u8 as char).collect();
+                    self.form = Some((letters.to_vec(), crate::formula::compile(&text).ok()));
+                }
+                self.dice ^= self.dice << 13;
+                self.dice ^= self.dice >> 7;
+                self.dice ^= self.dice << 17;
+                let v = crate::formula::Vars { a: (p[0] / 65536.0) as f64, b: (p[1] / 65536.0) as f64, c: (p[2] / 65536.0) as f64, song: self.song_at.0, tempo: self.song_at.1 as f64, ms: self.clock, rand: (self.dice >> 11) as f64 / (1u64 << 53) as f64 };
+                self.clock += io.len() as f64 * 1000.0 / sr as f64;
+                let o = self.form.as_ref().and_then(|f| f.1.as_ref()).map(|f| f.out(&v)).unwrap_or(0.0);
+                self.out = [o; 3];
+            }
             Kind::FreeFilter => {
                 // seven shapes on one two-pole stage: low, band, high pass, notch, low shelf, bell, high shelf
                 let kind = ((p[0] / 100.0) as i32).clamp(1, 7);
@@ -4606,6 +4685,27 @@ impl Unit {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_formula_block_keeps_its_notes_and_takes_a_new_formula() {
+        let mut block = vec![2u8, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 1, 0, 0, 0x40, 0, 0];
+        block.push(5);
+        block.extend_from_slice(b"a+b+c");
+        block.extend_from_slice(&[3, 0, 0, 0, b'h', b'e', b'y']);
+        let mut f = Fx::decode("Fruity Formula Controller", &block).unwrap();
+        assert_eq!(f.kind, Kind::Formula);
+        assert_eq!((f.p[0], f.p[1], f.p[2]), (32768.0, 65536.0, 16384.0));
+        assert_eq!(f.formula(), "a+b+c");
+        assert_eq!(f.encode(Some(&block)), block);
+        f.set_formula("Sin(SongTime)*a");
+        let again = f.encode(Some(&block));
+        assert!(again.ends_with(&[3, 0, 0, 0, b'h', b'e', b'y']));
+        assert_eq!(Fx::decode("Fruity Formula Controller", &again).unwrap(), f);
+        // a new one writes a block that reads back
+        let mut fresh = Fx::new(Kind::Formula);
+        fresh.set_formula("a");
+        assert_eq!(Fx::decode("Fruity Formula Controller", &fresh.encode(None)).unwrap(), fresh);
+    }
+
+    #[test]
     fn wrapped_stock_effect_round_trips() {
         let mut b = 8u32.to_le_bytes().to_vec();
         let mut chunk = |id: u32, data: &[u8]| {
@@ -4668,7 +4768,7 @@ mod tests {
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
-            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch) {
+            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch | Kind::Formula) {
                 continue;
             }
             let mut fx = Fx::new(d.kind);

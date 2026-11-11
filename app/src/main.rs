@@ -532,7 +532,43 @@ impl App {
                     None => "Not linked.".to_string(),
                 });
                 ui.label("Move a knob or slider on your MIDI device to link it.");
+                // sender units in the mixer can drive the control too
+                let mut senders: Vec<(usize, u16, u16, String)> = vec![];
+                for (i, ins) in self.song.inserts.iter().enumerate() {
+                    for s in &ins.slots {
+                        let outs: &[&str] = match s.fx.as_ref().map(|f| f.kind) {
+                            Some(cereal_engine::fx::Kind::Peak) => &["peak + sweep", "peak", "sweep"],
+                            Some(cereal_engine::fx::Kind::Xy) => &["X", "Y"],
+                            Some(cereal_engine::fx::Kind::Formula) => &["result"],
+                            _ => &[],
+                        };
+                        for (k, o) in outs.iter().enumerate() {
+                            senders.push((i, s.index, k as u16, format!("{} ({}, slot {}): {o}", s.title(), self.song.insert_name(i), s.index + 1)));
+                        }
+                    }
+                }
+                let held = self.song.ctl_links.iter().find(|l| l.target == t).copied();
+                if !senders.is_empty() {
+                    ui.separator();
+                    ui.label("Or pick a sender unit:");
+                    for (i, slot, out, name) in &senders {
+                        let on = held.is_some_and(|l| (l.ins, l.slot, l.out) == (*i, *slot, *out));
+                        if ui.selectable_label(on, name).clicked() && !on {
+                            self.song.ctl_links.retain(|l| l.target != t);
+                            self.song.ctl_links.push(cereal_engine::song::CtlLink { ins: *i, slot: *slot, out: *out, target: t });
+                            self.status = format!("{} linked to {name}", self.song.target_name(t));
+                            self.dirty = true;
+                            done = true;
+                        }
+                    }
+                    ui.separator();
+                }
                 ui.horizontal(|ui| {
+                    if held.is_some() && ui.button("Remove sender link").clicked() {
+                        self.song.ctl_links.retain(|l| l.target != t);
+                        self.dirty = true;
+                        done = true;
+                    }
                     if have.is_some() && ui.button("Remove link").clicked() {
                         unlink = true;
                     }

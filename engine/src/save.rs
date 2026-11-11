@@ -733,6 +733,41 @@ fn patch_auto(ev: &mut Vec<Event>, song: &Song, base: &Song) {
 
 /// Hardware controller links: when the list changed, the records are written again where the old ones
 /// stood (ahead of the channels when there were none). A record that still stands keeps its own bytes.
+/// Links from a sender unit in an effect slot to the control it drives: records for links that went are taken
+/// out, new links get a record of their own, and the rest stay as they were.
+fn patch_ctl_links(ev: &mut Vec<Event>, song: &Song, base: &Song, mixer_base: usize) {
+    if song.ctl_links == base.ctl_links {
+        return;
+    }
+    let record = |l: &crate::song::CtlLink| {
+        let (param, dest) = song.event_address(l.target);
+        let mut d = vec![0u8; 12];
+        put_u16(&mut d, 0, 0x8000 | l.out);
+        put_u16(&mut d, 2, (((l.ins + mixer_base) as u16) << 6) | (l.slot & 63));
+        put_u16(&mut d, 8, param);
+        put_u16(&mut d, 10, dest);
+        d
+    };
+    let gone: Vec<Vec<u8>> = base.ctl_links.iter().filter(|l| !song.ctl_links.contains(l)).map(|l| {
+        let (param, dest) = base.event_address(l.target);
+        let mut d = record(l);
+        put_u16(&mut d, 8, param);
+        put_u16(&mut d, 10, dest);
+        d
+    }).collect();
+    ev.retain(|e| match (&e.value, e.id) {
+        (Value::Data(d), id::LINK) if d.len() >= 12 => !gone.iter().any(|g| g[..4] == d[..4] && g[8..12] == d[8..12]),
+        _ => true,
+    });
+    let at = ev.iter().rposition(|e| e.id == id::LINK).map(|i| i + 1).unwrap_or_else(|| ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(ev.len()));
+    let fresh: Vec<Event> = song.ctl_links.iter().filter(|l| !base.ctl_links.contains(l)).map(|l| {
+        let mut d = record(l);
+        d.extend(hex("08000000d5010000"));
+        Event::data(id::LINK, d)
+    }).collect();
+    ev.splice(at..at, fresh);
+}
+
 fn patch_midi_links(ev: &mut Vec<Event>, song: &Song, base: &Song) {
     if song.midi_links == base.midi_links {
         return;
@@ -1515,6 +1550,8 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
         None => {
             made = skeleton(song);
             let mut s = song.clone();
+            // addresses of mixer controls are written the way the made file's version counts them
+            s.mixer_base = flp::mixer_base(version_tuple(&made.version));
             for (i, c) in s.channels.iter_mut().enumerate() {
                 c.src = Some(i as u16);
             }
@@ -1541,6 +1578,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_channels(&mut ev, song, &base, unicode, word_insert);
     patch_auto(&mut ev, song, &base);
     patch_midi_links(&mut ev, song, &base);
+    patch_ctl_links(&mut ev, song, &base, flp::mixer_base(ver));
     patch_head(&mut ev, song, &base, unicode);
 
     let _ = latin1;
@@ -1552,6 +1590,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
 pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), String> {
     let bytes = to_bytes(song, orig)?;
     let flp = flp::parse(&bytes)?;
+    song.mixer_base = flp::mixer_base(version_tuple(&flp.version));
     for (i, c) in song.channels.iter_mut().enumerate() {
         c.src = Some(i as u16);
     }
@@ -1837,6 +1876,26 @@ mod tests {
         let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
         let (r3, _) = reload(&bytes3);
         assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
+    }
+
+    #[test]
+    fn sender_links_are_saved() {
+        use crate::song::{CtlLink, Target};
+        let mut song = Song::new();
+        let mut slot = crate::song::Slot::with_fx(2, crate::fx::Kind::Formula);
+        slot.fx.as_mut().unwrap().set_formula("a*b");
+        song.inserts[4].slots.push(slot);
+        song.ctl_links.push(CtlLink { ins: 4, slot: 2, out: 0, target: Target::InsertVolume(7) });
+        song.ctl_links.push(CtlLink { ins: 4, slot: 2, out: 0, target: Target::InsertPan(3) });
+        let (bytes, flp) = save(&mut song, None).unwrap();
+        let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
+        assert_eq!(back.ctl_links, song.ctl_links);
+        assert_eq!(back.inserts[4].slots[0].fx.as_ref().unwrap().formula(), "a*b");
+        // taking one away leaves the other
+        song.ctl_links.remove(0);
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
+        assert_eq!(back.ctl_links, song.ctl_links);
     }
 
     #[test]
