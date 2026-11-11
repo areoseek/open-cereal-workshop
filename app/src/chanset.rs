@@ -972,6 +972,15 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
         }
+        Kind::Morph => {
+            use cereal_engine::morph::{params, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and nothing plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, &GROUPS, params());
+            ui.label(RichText::new("The overtone snapshots, the keyboard zones and the path between the four generators play as stored and are kept in the file; their drawing pages are not built yet. The noise layer, the four extra envelopes and the table of links are kept but not worked.").small().color(TEXT_DIM));
+        }
         Kind::Hybrid => {
             use cereal_engine::hybrid::{params, COUNT, GROUPS};
             if g.p.len() < COUNT {

@@ -60,6 +60,8 @@ pub enum Kind {
     Triple,
     /// Six oscillators that bend each other, with a filter: its stored list of numbers (`hybrid.rs`).
     Hybrid,
+    /// Four generators of sine overtones blended along a path.
+    Morph,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -494,7 +496,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Quiet, ident: "Fruity Slicer 2", title: "Loop Slicer 2", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Pocket, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Triple, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Morph, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Trio, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -753,6 +755,10 @@ impl Gen {
             g.p = crate::hybrid::defaults();
             g.raw = crate::hybrid::fresh();
         }
+        if kind == Kind::Morph {
+            g.p = crate::morph::defaults();
+            g.raw = crate::morph::fresh();
+        }
         if kind == Kind::Fm {
             // a new one carries a full block of its own, so every page of its window can be edited and saved
             g.raw = crate::fm::Patch::blank_state();
@@ -793,6 +799,9 @@ impl Gen {
         }
         if d.kind == Kind::Hybrid {
             return Some(Self { kind: d.kind, p: crate::hybrid::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::Morph {
+            return Some(Self { kind: d.kind, p: crate::morph::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Triple {
             return Some(Self { kind: d.kind, p: crate::triple::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -968,11 +977,12 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::Hybrid => crate::hybrid::base(&out).unwrap_or(usize::MAX / 8),
+                Kind::Morph => crate::morph::base(&out).unwrap_or(usize::MAX / 8),
                 _ => 12,
             };
             for (i, &v) in self.p.iter().enumerate() {
@@ -1020,6 +1030,7 @@ impl Gen {
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),
             Kind::Hybrid => crate::hybrid::tail(&self.p),
+            Kind::Morph => crate::morph::tail(&self.p),
             _ => Default::default(),
         }
     }
@@ -1029,6 +1040,7 @@ impl Gen {
         match self.kind {
             Kind::Duo => crate::duo::set(&self.p).mono,
             Kind::Hybrid => crate::hybrid::set(&self.p).mono,
+            Kind::Morph => crate::morph::set(&self.p).mono,
             Kind::Triple => (self.p.len() >= crate::triple::COUNT && self.p[40] >= 0.5).then(|| if self.p[11] >= 0.5 { 0.005 + self.p[10].clamp(0.0, 1.0).powi(2) * 2.0 } else { 0.0 }),
             _ => None,
         }
@@ -1075,6 +1087,15 @@ impl Gen {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
                 Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None, smp: None })), ..Default::default() }
+            }
+            Kind::Morph => {
+                // the snapshots ride along as one number after the list
+                let mut p = self.p.clone();
+                if p.len() >= crate::morph::COUNT {
+                    p.truncate(crate::morph::COUNT);
+                    p.push(crate::morph::body_id(&self.raw));
+                }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
             }
             Kind::Hybrid => {
                 let mut p = self.p.clone();
@@ -1594,6 +1615,62 @@ mod tests {
 
     /// With CEREAL_FLP_CORPUS set: every stored sound of the hybrid synth there reads, plays and stays in range.
     #[test]
+    fn every_stored_morph_additive_sound_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let root = std::path::Path::new(&root);
+        let mut stack = vec![root.join("Patches/Plugin presets/Generators/Morphine")];
+        let mut files = Vec::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("mrp")) {
+                    files.push(path);
+                }
+            }
+        }
+        let (mut seen, mut quiet, mut top, mut worst, mut peaks) = (0, Vec::new(), 0.0f32, String::new(), Vec::new());
+        for path in files {
+            let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+            assert_eq!(g.kind, Kind::Morph);
+            assert_eq!(g.p.len(), crate::morph::COUNT, "{path:?}");
+            assert_eq!(g.encode(None), g.raw);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            assert!(patch.p[crate::morph::COUNT] >= 1.0, "{path:?}: the snapshots do not read");
+            let dp = 261.63 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+            let mut buf: Vec<[f32; 2]> = (0..44100).map(|_| v.frame(patch, dp)).collect();
+            let dry = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            let set = g.tail();
+            if set.any() {
+                crate::tailfx::State::new(44100.0).process(&set, &mut buf, 5512.0, None);
+            }
+            let peak = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            assert!(peak.is_finite(), "{path:?}: {peak}");
+            if peak > top {
+                top = peak;
+                worst = path.file_name().unwrap().to_string_lossy().into_owned();
+            }
+            peaks.push(peak);
+            if std::env::var("CEREAL_MORPH_DUMP").is_ok() && !(0.05..1.5).contains(&peak) {
+                eprintln!("{peak:.3} dry {dry:.3} {:?} lvl {} drive {} env {:?}", path.file_name().unwrap(), g.p[0], g.p[1], &g.p[9..13]);
+            }
+            if peak < 0.003 {
+                quiet.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            seen += 1;
+        }
+        if seen > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            eprintln!("morph additive sounds: {seen}, loudest {top} ({worst}), middle {}, tenth {}, quiet {}: {:?}", peaks[seen / 2], peaks[seen / 10], quiet.len(), &quiet[..quiet.len().min(8)]);
+            assert!(top < 4.0, "{worst} peaks at {top}");
+            assert!(quiet.len() * 10 < seen, "{} of {seen} are silent", quiet.len());
+        }
+    }
+
+    #[test]
     fn every_stored_hybrid_synth_sound_plays() {
         let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
         let root = std::path::Path::new(&root);
@@ -1855,9 +1932,10 @@ mod tests {
     }
     #[test]
     fn stand_in_synths_take_their_envelope_and_drums_their_sweep() {
+        // a block that cannot be read is kept as it came
         let b = vec![3u8; 700];
         let g = Gen::decode("Morphine", &b).unwrap();
-        assert!(g.tone().add.is_some());
+        assert!(g.tone().mini.is_some());
         assert_eq!(g.encode(None), b);
         let mut k = vec![0u8; 1384];
         for (i, v) in [(1usize, 0.5f32), (2, 0.5), (3, 1.0), (4, 0.5)] {

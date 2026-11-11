@@ -48,6 +48,7 @@ pub enum Voice {
     Str(Box<(crate::strmodel::Voice, crate::strmodel::Set)>),
     Triple(Box<(crate::triple::Voice, crate::triple::Set)>),
     Hybrid(Box<(crate::hybrid::Voice, crate::hybrid::Set)>),
+    Morph(Box<(crate::morph::Voice, crate::morph::Set)>),
     Quiet,
 }
 
@@ -180,6 +181,10 @@ impl Voice {
             Kind::Hybrid => {
                 let set = crate::hybrid::set(s);
                 Voice::Hybrid(Box::new((crate::hybrid::Voice::start(&set, sr, key, vel, seed), set)))
+            }
+            Kind::Morph => {
+                let set = crate::morph::set(s);
+                Voice::Morph(Box::new((crate::morph::Voice::start(&set, sr, key, vel, seed), set)))
             }
             Kind::Triple => {
                 let set = crate::triple::set(s);
@@ -327,6 +332,10 @@ impl Voice {
                 let (v, set) = &mut **v;
                 v.release(set)
             }
+            Voice::Morph(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Str(v) => {
                 let (v, set) = &mut **v;
                 v.release(set)
@@ -381,6 +390,10 @@ impl Voice {
                 v.frame(set, dphase)
             }
             Voice::Hybrid(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set, dphase)
+            }
+            Voice::Morph(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set, dphase)
             }
