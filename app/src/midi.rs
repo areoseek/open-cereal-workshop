@@ -9,6 +9,86 @@ use std::sync::Arc;
 
 use cereal_engine::CmdSender;
 
+/// What the settings window decides for the two MIDI threads.
+#[derive(Default, Clone)]
+pub struct Prefs {
+    /// Inputs that are switched off, by name.
+    pub off: Vec<String>,
+    /// Outputs that have a port number, by name: what a sender channel on that port plays through.
+    pub out: Vec<(String, u8)>,
+    /// Send the clock and start/stop to those outputs.
+    pub sync: bool,
+}
+
+static PREFS: std::sync::Mutex<(Prefs, u64)> = std::sync::Mutex::new((Prefs { off: Vec::new(), out: Vec::new(), sync: false }, 0));
+/// The devices the threads found, for the settings window's lists.
+static INPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static OUTPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Ticks per quarter note of the open song, for the clock.
+pub static PPQ: AtomicUsize = AtomicUsize::new(96);
+
+pub fn set_prefs(p: Prefs) {
+    if let Ok(mut g) = PREFS.lock() {
+        g.0 = p;
+        g.1 += 1;
+    }
+}
+
+/// The preferences and a number that goes up whenever they change.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn prefs() -> (Prefs, u64) {
+    PREFS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn inputs() -> Vec<String> {
+    INPUTS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn outputs() -> Vec<String> {
+    OUTPUTS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn found(list: &std::sync::Mutex<Vec<String>>, names: Vec<String>) {
+    if let Ok(mut g) = list.lock() {
+        *g = names;
+    }
+}
+
+/// Which clock messages are due: start or stop when the transport changes, and 24 ticks to the quarter note.
+#[derive(Default)]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+struct Clock {
+    running: bool,
+    last: i64,
+}
+
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+impl Clock {
+    /// Status bytes to send now (0xfa start, 0xfc stop, 0xf8 clock).
+    fn due(&mut self, playing: bool, tick: f64, ppq: f64, out: &mut Vec<u8>) {
+        let at = (tick * 24.0 / ppq.max(1.0)).floor() as i64;
+        if playing && !self.running {
+            out.push(0xfa);
+            self.last = at;
+        } else if !playing && self.running {
+            out.push(0xfc);
+        }
+        self.running = playing;
+        if playing {
+            if at < self.last {
+                // jumped back (a loop): carry on from there
+                self.last = at;
+            }
+            // never a burst after a jump forward
+            for _ in 0..(at - self.last).min(4) {
+                out.push(0xf8);
+            }
+            self.last = at;
+        }
+    }
+}
+
 /// What the input thread shares with the window.
 pub struct MidiIn {
     /// The channel played notes go to.
@@ -99,9 +179,13 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     let mut held = Held { down: vec![], pedal: vec![], hold: false };
     let mut input = seq.input();
     let mut since_scan = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut seen_prefs = u64::MAX;
     loop {
-        if since_scan.elapsed().as_secs() >= 2 {
+        if since_scan.elapsed().as_secs() >= 2 || PREFS.lock().map(|g| g.1 != seen_prefs).unwrap_or(false) {
             since_scan = std::time::Instant::now();
+            let (pref, gen) = prefs();
+            seen_prefs = gen;
+            let mut names = Vec::new();
             let mut found = Vec::new();
             for client in ClientIter::new(&seq) {
                 let id = client.get_client();
@@ -113,8 +197,19 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 for p in PortIter::new(&seq, id) {
                     let caps = p.get_capability();
                     if caps.contains(PortCap::READ | PortCap::SUBS_READ) && !caps.contains(PortCap::NO_EXPORT) {
-                        found.push((id, p.get_port()));
+                        let name = port_name(&client, &p);
+                        if !pref.off.contains(&name) {
+                            found.push((id, p.get_port()));
+                        }
+                        names.push(name);
                     }
+                }
+            }
+            self::found(&INPUTS, names);
+            // an input that was switched off is let go
+            for a in &linked {
+                if !found.contains(a) {
+                    let _ = seq.unsubscribe_port(Addr { client: a.0, port: a.1 }, Addr { client: me, port });
                 }
             }
             for a in &found {
@@ -170,6 +265,18 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     }
 }
 
+/// A device's name as the lists show it: the client, and the port when it says more.
+#[cfg(target_os = "linux")]
+fn port_name(client: &alsa::seq::ClientInfo, port: &alsa::seq::PortInfo) -> String {
+    let c = client.get_name().unwrap_or("").to_string();
+    let p = port.get_name().unwrap_or("").to_string();
+    if p.is_empty() || p == c || p.starts_with(&c) {
+        if p.is_empty() { c } else { p }
+    } else {
+        format!("{c}: {p}")
+    }
+}
+
 impl Held {
     /// One raw three-byte message, as the Windows driver hands them over.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -200,7 +307,25 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
         fn midiInStart(handle: isize) -> u32;
         fn midiInStop(handle: isize) -> u32;
         fn midiInClose(handle: isize) -> u32;
+        fn midiInGetDevCapsW(device: usize, caps: *mut InCaps, size: u32) -> u32;
     }
+    #[repr(C)]
+    struct InCaps {
+        mid: u16,
+        pid: u16,
+        version: u32,
+        name: [u16; 32],
+        support: u32,
+    }
+    let name_of = |id: u32| {
+        let mut c = InCaps { mid: 0, pid: 0, version: 0, name: [0; 32], support: 0 };
+        // SAFETY: the system fills the structure we hand it, whose size we state.
+        if unsafe { midiInGetDevCapsW(id as usize, &mut c, std::mem::size_of::<InCaps>() as u32) } != 0 {
+            return format!("Input {}", id + 1);
+        }
+        let _ = (c.mid, c.pid, c.version, c.support);
+        wide_name(&c.name)
+    };
     const CALLBACK_FUNCTION: u32 = 0x0003_0000;
     const MIM_DATA: u32 = 0x3c3;
 
@@ -227,10 +352,15 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     let shared: &'static Shared = Box::leak(Box::new(Shared { held: Mutex::new(Held { down: vec![], pedal: vec![], hold: false }), to, chan, seen }));
     let mut open: Vec<isize> = Vec::new();
     let mut count = u32::MAX;
+    let mut seen_prefs = u64::MAX;
     loop {
         // SAFETY: plain calls into the system's MIDI library with valid pointers.
         let now = unsafe { midiInGetNumDevs() };
-        if now != count {
+        let (pref, gen) = prefs();
+        if now != count || gen != seen_prefs {
+            seen_prefs = gen;
+            let names: Vec<String> = (0..now).map(name_of).collect();
+            found(&INPUTS, names.clone());
             for h in open.drain(..) {
                 unsafe {
                     midiInStop(h);
@@ -238,6 +368,9 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 }
             }
             for id in 0..now {
+                if pref.off.contains(&names[id as usize]) {
+                    continue;
+                }
                 let mut h: isize = 0;
                 let ok = unsafe { midiInOpen(&mut h, id, heard as *const () as usize, shared as *const Shared as usize, CALLBACK_FUNCTION) };
                 if ok == 0 {
@@ -247,8 +380,21 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
             }
             count = now;
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // look again soon, so a change in the settings window is felt
+        for _ in 0..8 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if PREFS.lock().map(|g| g.1 != seen_prefs).unwrap_or(false) {
+                break;
+            }
+        }
     }
+}
+
+/// A device name out of the fixed wide-character field the multimedia system fills.
+#[cfg(windows)]
+fn wide_name(w: &[u16]) -> String {
+    let n = w.iter().position(|&c| c == 0).unwrap_or(w.len());
+    String::from_utf16_lossy(&w[..n])
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -260,6 +406,30 @@ fn run(_to: CmdSender, _chan: Arc<AtomicUsize>, _seen: Arc<AtomicUsize>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clock_starts_ticks_and_stops_with_the_transport() {
+        let mut c = Clock::default();
+        let mut out = Vec::new();
+        c.due(false, 0.0, 96.0, &mut out);
+        assert!(out.is_empty());
+        c.due(true, 0.0, 96.0, &mut out);
+        assert_eq!(out, vec![0xfa]);
+        out.clear();
+        // a quarter note later in three steps: 24 clocks in all
+        for t in [30.0, 61.0, 96.0] {
+            for _ in 0..8 {
+                c.due(true, t, 96.0, &mut out);
+            }
+        }
+        assert!(out.len() <= 24 && out.iter().all(|&b| b == 0xf8));
+        out.clear();
+        c.due(true, 100.0, 96.0, &mut out);
+        assert_eq!(out, vec![0xf8]);
+        out.clear();
+        c.due(false, 100.0, 96.0, &mut out);
+        assert_eq!(out, vec![0xfc]);
+    }
 
     #[test]
     fn the_pedal_keeps_released_keys_until_it_lifts() {
@@ -301,17 +471,93 @@ fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn st
 
     let seq = alsa::Seq::open(None, Some(alsa::Direction::Playback), true)?;
     seq.set_client_name(&CString::new("Breakfast Cereal Out")?)?;
+    use alsa::seq::{Addr, ClientIter, PortIter, PortSubscribe};
+    let me = seq.client_id()?;
     let mut ports: Vec<(u8, i32)> = Vec::new();
+    // our port wired to a device: port number, device address
+    let mut wired: Vec<(u8, i32, i32)> = Vec::new();
     let mut got = Vec::with_capacity(256);
+    let mut since_scan = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut seen_prefs = u64::MAX;
+    let mut pref = Prefs::default();
+    let mut clock = Clock::default();
+    let mut due = Vec::with_capacity(8);
+    let make = |seq: &alsa::Seq, n: u8| seq.create_simple_port(&CString::new(format!("Port {n}")).unwrap_or_default(), PortCap::READ | PortCap::SUBS_READ, PortType::MIDI_GENERIC | PortType::APPLICATION);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(1));
+        if since_scan.elapsed().as_secs() >= 2 || PREFS.lock().map(|g| g.1 != seen_prefs).unwrap_or(false) {
+            since_scan = std::time::Instant::now();
+            (pref, seen_prefs) = prefs();
+            let mut names = Vec::new();
+            let mut want: Vec<(u8, i32, i32)> = Vec::new();
+            for client in ClientIter::new(&seq) {
+                let id = client.get_client();
+                if id == me || id == 0 || client.get_name().map(|n| n.starts_with("Breakfast Cereal")).unwrap_or(false) {
+                    continue;
+                }
+                for p in PortIter::new(&seq, id) {
+                    let caps = p.get_capability();
+                    if caps.contains(PortCap::WRITE | PortCap::SUBS_WRITE) && !caps.contains(PortCap::NO_EXPORT) {
+                        let name = port_name(&client, &p);
+                        if let Some(o) = pref.out.iter().find(|o| o.0 == name) {
+                            want.push((o.1, id, p.get_port()));
+                        }
+                        names.push(name);
+                    }
+                }
+            }
+            found(&OUTPUTS, names);
+            for w in &wired {
+                if !want.contains(w) {
+                    if let Some(p) = ports.iter().find(|p| p.0 == w.0) {
+                        let _ = seq.unsubscribe_port(Addr { client: me, port: p.1 }, Addr { client: w.1, port: w.2 });
+                    }
+                }
+            }
+            for w in &want {
+                if !wired.contains(w) {
+                    let ours = match ports.iter().find(|p| p.0 == w.0) {
+                        Some(p) => p.1,
+                        None => {
+                            let p = make(&seq, w.0)?;
+                            ports.push((w.0, p));
+                            p
+                        }
+                    };
+                    if let Ok(sub) = PortSubscribe::empty() {
+                        sub.set_sender(Addr { client: me, port: ours });
+                        sub.set_dest(Addr { client: w.1, port: w.2 });
+                        let _ = seq.subscribe_port(&sub);
+                    }
+                }
+            }
+            wired = want;
+        }
+        if pref.sync {
+            due.clear();
+            clock.due(from.playing(), from.tick(), PPQ.load(Ordering::Relaxed) as f64, &mut due);
+            for &status in &due {
+                let kind = match status {
+                    0xfa => EventType::Start,
+                    0xfc => EventType::Stop,
+                    _ => EventType::Clock,
+                };
+                for p in &ports {
+                    let mut ev = Event::new(kind, &());
+                    ev.set_source(p.1);
+                    ev.set_subs();
+                    ev.set_direct();
+                    let _ = seq.event_output_direct(&mut ev);
+                }
+            }
+        }
         got.clear();
         from.take_midi(&mut got);
         for m in &got {
             let port = match ports.iter().find(|p| p.0 == m.port) {
                 Some(p) => p.1,
                 None => {
-                    let p = seq.create_simple_port(&CString::new(format!("Port {}", m.port))?, PortCap::READ | PortCap::SUBS_READ, PortType::MIDI_GENERIC | PortType::APPLICATION)?;
+                    let p = make(&seq, m.port)?;
                     ports.push((m.port, p));
                     p
                 }
@@ -345,21 +591,91 @@ fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn st
         fn midiOutGetNumDevs() -> u32;
         fn midiOutOpen(handle: *mut isize, device: u32, callback: usize, instance: usize, flags: u32) -> u32;
         fn midiOutShortMsg(handle: isize, msg: u32) -> u32;
+        fn midiOutClose(handle: isize) -> u32;
+        fn midiOutGetDevCapsW(device: usize, caps: *mut OutCaps, size: u32) -> u32;
     }
+    #[repr(C)]
+    struct OutCaps {
+        mid: u16,
+        pid: u16,
+        version: u32,
+        name: [u16; 32],
+        technology: u16,
+        voices: u16,
+        notes: u16,
+        mask: u16,
+        support: u32,
+    }
+    let name_of = |id: u32| {
+        let mut c = OutCaps { mid: 0, pid: 0, version: 0, name: [0; 32], technology: 0, voices: 0, notes: 0, mask: 0, support: 0 };
+        // SAFETY: the system fills the structure we hand it, whose size we state.
+        if unsafe { midiOutGetDevCapsW(id as usize, &mut c, std::mem::size_of::<OutCaps>() as u32) } != 0 {
+            return format!("Output {}", id + 1);
+        }
+        let _ = (c.mid, c.pid, c.version, c.technology, c.voices, c.notes, c.mask, c.support);
+        wide_name(&c.name)
+    };
     // port number -> open device (0 = could not be opened; not tried again)
     let mut open: Vec<(u8, isize)> = Vec::new();
     let mut got = Vec::with_capacity(256);
+    let mut names: Vec<String> = Vec::new();
+    let mut since_scan = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut seen_prefs = u64::MAX;
+    let mut pref = Prefs::default();
+    let mut clock = Clock::default();
+    let mut due = Vec::with_capacity(8);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(1));
+        let changed = PREFS.lock().map(|g| g.1 != seen_prefs).unwrap_or(false);
+        if since_scan.elapsed().as_secs() >= 2 || changed {
+            since_scan = std::time::Instant::now();
+            // SAFETY: a plain call into the multimedia system.
+            let now: Vec<String> = (0..unsafe { midiOutGetNumDevs() }).map(name_of).collect();
+            if changed || now != names {
+                // the ports are worked out afresh
+                for (_, h) in open.drain(..) {
+                    if h != 0 {
+                        // SAFETY: the handle came from midiOutOpen and is not used again.
+                        unsafe { midiOutClose(h) };
+                    }
+                }
+                (pref, seen_prefs) = prefs();
+                names = now;
+                found(&OUTPUTS, names.clone());
+                for (name, port) in &pref.out {
+                    if let Some(id) = names.iter().position(|n| n == name).filter(|_| !open.iter().any(|p| p.0 == *port)) {
+                        let mut h: isize = 0;
+                        // SAFETY: plain calls into the multimedia system; `h` outlives the call that fills it.
+                        let ok = unsafe { midiOutOpen(&mut h, id as u32, 0, 0, 0) == 0 };
+                        if ok {
+                            open.push((*port, h));
+                        }
+                    }
+                }
+            }
+        }
+        if pref.sync {
+            due.clear();
+            clock.due(from.playing(), from.tick(), PPQ.load(Ordering::Relaxed) as f64, &mut due);
+            for &status in &due {
+                for (_, h) in &open {
+                    if *h != 0 {
+                        // SAFETY: the handle came from midiOutOpen above.
+                        unsafe { midiOutShortMsg(*h, status as u32) };
+                    }
+                }
+            }
+        }
         got.clear();
         from.take_midi(&mut got);
         for m in &got {
             let handle = match open.iter().find(|p| p.0 == m.port) {
                 Some(p) => p.1,
                 None => {
+                    // no device was given this port number: the Nth device, when no port list was made at all
                     let mut h: isize = 0;
                     // SAFETY: plain calls into the multimedia system; `h` outlives the call that fills it.
-                    let ok = unsafe { (m.port as u32) < midiOutGetNumDevs() && midiOutOpen(&mut h, m.port as u32, 0, 0, 0) == 0 };
+                    let ok = pref.out.is_empty() && unsafe { (m.port as u32) < midiOutGetNumDevs() && midiOutOpen(&mut h, m.port as u32, 0, 0, 0) == 0 };
                     let h = if ok { h } else { 0 };
                     open.push((m.port, h));
                     h

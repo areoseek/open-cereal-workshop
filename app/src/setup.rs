@@ -34,6 +34,22 @@ struct Job {
 pub struct Settings {
     pub content: Vec<PathBuf>,
     pub never_ask: bool,
+    /// The sound card to play through and to record from, by name; empty = the system's default.
+    pub audio_out: String,
+    pub audio_in: String,
+    /// Sample rate and buffer length in samples; 0 = whatever the device suggests.
+    pub rate: u32,
+    pub buffer: u32,
+    /// MIDI inputs that are switched off, by name.
+    pub midi_off: Vec<String>,
+    /// MIDI outputs that have a port number, by name.
+    pub midi_out: Vec<(String, u8)>,
+    /// Send the clock and start/stop to the outputs that have a port number.
+    pub midi_sync: bool,
+    /// Size of the whole interface; 0 = as the system says.
+    pub scale: f32,
+    /// Extra folders for the browser and the sound search.
+    pub folders: Vec<PathBuf>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -52,7 +68,23 @@ impl Settings {
         for line in text.lines() {
             match line.split_once('=') {
                 Some(("content", v)) if !v.trim().is_empty() => s.content.push(PathBuf::from(v.trim())),
+                Some(("folder", v)) if !v.trim().is_empty() => s.folders.push(PathBuf::from(v.trim())),
                 Some(("content_prompt", v)) => s.never_ask = v.trim() == "never",
+                Some(("audio_out", v)) => s.audio_out = v.trim().to_string(),
+                Some(("audio_in", v)) => s.audio_in = v.trim().to_string(),
+                Some(("rate", v)) => s.rate = v.trim().parse().unwrap_or(0),
+                Some(("buffer", v)) => s.buffer = v.trim().parse().unwrap_or(0),
+                Some(("midi_off", v)) if !v.trim().is_empty() => s.midi_off.push(v.trim().to_string()),
+                Some(("midi_out", v)) => {
+                    // port number, then the name (which may hold any character)
+                    if let Some((n, name)) = v.trim().split_once(' ') {
+                        if let Ok(n) = n.parse() {
+                            s.midi_out.push((name.to_string(), n));
+                        }
+                    }
+                }
+                Some(("midi_sync", v)) => s.midi_sync = v.trim() == "1",
+                Some(("scale", v)) => s.scale = v.trim().parse().unwrap_or(0.0),
                 _ => {}
             }
         }
@@ -70,6 +102,32 @@ impl Settings {
         }
         if self.never_ask {
             out += "content_prompt=never\n";
+        }
+        for (k, v) in [("audio_out", &self.audio_out), ("audio_in", &self.audio_in)] {
+            if !v.is_empty() {
+                out += &format!("{k}={v}\n");
+            }
+        }
+        for f in &self.folders {
+            out += &format!("folder={}\n", f.display());
+        }
+        if self.rate != 0 {
+            out += &format!("rate={}\n", self.rate);
+        }
+        if self.buffer != 0 {
+            out += &format!("buffer={}\n", self.buffer);
+        }
+        for m in &self.midi_off {
+            out += &format!("midi_off={m}\n");
+        }
+        for (name, n) in &self.midi_out {
+            out += &format!("midi_out={n} {name}\n");
+        }
+        if self.midi_sync {
+            out += "midi_sync=1\n";
+        }
+        if self.scale > 0.0 {
+            out += &format!("scale={}\n", self.scale);
         }
         std::fs::write(p, out)
     }

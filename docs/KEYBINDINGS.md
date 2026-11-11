@@ -22,6 +22,7 @@ manual text. "yes" means wired in this build.
 | F4 | New pattern | yes |
 | F5 / F6 / F7 / F9 | Playlist / channel rack / piano roll / mixer | yes |
 | Alt+F8 | Browser | yes |
+| F10 | Settings (MIDI, audio, general, file) | yes |
 | F11 / F12 | Project info / close all windows | yes |
 | + / - | Next / previous pattern | yes |
 | Z S X D C ... and Q 2 W 3 E ... | Play notes from the typing keyboard (two rows, two octaves) | yes |

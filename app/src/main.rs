@@ -8,6 +8,7 @@ mod events;
 mod fxwin;
 mod midi;
 mod record;
+mod settings;
 mod setup;
 mod unpack;
 mod waveed;
@@ -81,18 +82,37 @@ fn out_lag(info: &cpal::OutputCallbackInfo) {
     }
 }
 
-fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
+/// Open the sound card the settings name (or the system's default) and let the player `make` builds for
+/// its rate run on it.
+fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Result<(cpal::Stream, String), String> {
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or("no audio output device")?;
-    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let named = if prefs.audio_out.is_empty() { None } else { host.output_devices().ok().and_then(|mut l| l.find(|d| d.name().map(|n| n == prefs.audio_out).unwrap_or(false))) };
+    let device = named.or_else(|| host.default_output_device()).ok_or("no audio output device")?;
+    let mut config = device.default_output_config().map_err(|e| e.to_string())?;
+    if prefs.rate != 0 && prefs.rate != config.sample_rate().0 {
+        // the layout nearest the default one that can run at the asked rate
+        let want = cpal::SampleRate(prefs.rate);
+        let fits = device.supported_output_configs().ok().and_then(|l| {
+            l.filter(|c| c.min_sample_rate() <= want && want <= c.max_sample_rate() && matches!(c.sample_format(), cpal::SampleFormat::F32 | cpal::SampleFormat::I16))
+                .min_by_key(|c| (c.channels() != config.channels(), c.sample_format() != config.sample_format()))
+        });
+        if let Some(c) = fits {
+            config = c.with_sample_rate(want);
+        }
+    }
     let channels = config.channels() as usize;
     let rate = config.sample_rate().0 as f32;
+    let format = config.sample_format();
+    let mut config: cpal::StreamConfig = config.into();
+    if prefs.buffer != 0 {
+        config.buffer_size = cpal::BufferSize::Fixed(prefs.buffer);
+    }
     OUT_RATE.store(rate as u32, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{} ({} Hz, {} ch)", device.name().unwrap_or_default(), rate as u32, channels);
-    let (handle, mut player): (Handle, Player) = new_player(Song::new(), rate);
+    let mut player = make(rate);
     let err = |e| eprintln!("audio stream error: {e}");
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_output_stream(&config.into(), move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+    let stream = match format {
+        cpal::SampleFormat::F32 => device.build_output_stream(&config, move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 out_lag(info);
                 player.render(out, channels)
             },
@@ -102,7 +122,7 @@ fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
         cpal::SampleFormat::I16 => {
             let mut scratch = vec![0.0f32; 1 << 16];
             device.build_output_stream(
-                &config.into(),
+                &config,
                 move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     out_lag(info);
                     let n = out.len().min(scratch.len());
@@ -119,7 +139,7 @@ fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, name, rate, handle))
+    Ok((stream, name))
 }
 
 pub(crate) struct App {
@@ -166,6 +186,7 @@ pub(crate) struct App {
     /// An edit is under way (mouse still down); it becomes one history step when it ends.
     hist_pending: bool,
     show_info: bool,
+    pub(crate) prefs_win: settings::State,
     show_about: bool,
     render: Option<RenderOpts>,
     rec_held: Vec<(u16, u8, f64, f32)>,
@@ -232,18 +253,26 @@ const TYPING: [(Key, u8); 30] = [
 
 impl App {
     fn new(open: Option<PathBuf>) -> Self {
-        let (stream, audio, handle) = match start_audio() {
-            Ok((s, name, _rate, h)) => (Some(s), name, h),
-            Err(e) => {
+        let settings = setup::Settings::load();
+        record::set_input(&settings.audio_in);
+        midi::set_prefs(midi::Prefs { off: settings.midi_off.clone(), out: settings.midi_out.clone(), sync: settings.midi_sync });
+        let mut made = None;
+        let started = start_audio(&settings, |rate| {
+            let (h, p) = new_player(Song::new(), rate);
+            made = Some(h);
+            p
+        });
+        let (stream, audio, handle) = match (started, made) {
+            (Ok((s, name)), Some(h)) => (Some(s), name, h),
+            (r, _) => {
                 // no device: keep a player nobody pulls so the rest of the app still works
                 let (h, _p) = new_player(Song::new(), 44_100.0);
-                (None, format!("NO AUDIO: {e}"), h)
+                (None, format!("NO AUDIO: {}", r.err().unwrap_or_default()), h)
             }
         };
         let lib = Library::new();
         let mut browser = browser::State::default();
         let env_roots = lib.factory_roots.clone();
-        let settings = setup::Settings::load();
         for d in &lib.search_dirs {
             browser.add_root(&d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), d.clone());
         }
@@ -289,6 +318,7 @@ impl App {
             hist_at: 0,
             hist_pending: false,
             show_info: false,
+            prefs_win: Default::default(),
             show_about: false,
             render: None,
             rec_held: Vec::new(),
@@ -309,6 +339,11 @@ impl App {
             chanset: Default::default(),
             rename_pattern: None,
         };
+        for f in app.settings.folders.clone() {
+            if f.is_dir() {
+                app.add_search_folder(f);
+            }
+        }
         let mut roots = env_roots;
         roots.extend(app.settings.content.iter().filter(|c| c.is_dir()).cloned());
         for r in &roots {
@@ -330,6 +365,11 @@ impl App {
             for w in show.split(',') {
                 match w.trim() {
                     "mixer" => app.show_mixer = true,
+                    "midiset" => app.prefs_win.open = true,
+                    "audioset" => {
+                        app.prefs_win.open = true;
+                        app.prefs_win.page = settings::Page::Audio;
+                    }
                     "piano" => app.show_piano = true,
                     "channel" => app.show_chanset = true,
                     "misc" => {
@@ -1421,6 +1461,7 @@ impl App {
                 Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
                 Key::F4 if !repeat => self.new_pattern(),
                 Key::F2 if !repeat => self.start_rename_pattern(),
+                Key::F10 if !repeat => self.prefs_win.open = !self.prefs_win.open,
                 Key::F11 if !repeat => self.show_info = !self.show_info,
                 Key::F12 if !repeat => self.close_all(),
                 Key::Plus | Key::Equals => self.step_pattern(1),
@@ -1572,6 +1613,18 @@ impl App {
                         ui.close_menu();
                     }
                     ui.separator();
+                    for (label, page) in [("MIDI settings                          F10", settings::Page::Midi), ("Audio settings", settings::Page::Audio), ("General settings", settings::Page::General), ("File settings", settings::Page::File)] {
+                        if ui.button(label).clicked() {
+                            self.prefs_win.open = true;
+                            self.prefs_win.page = page;
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button("Project general settings         F11").clicked() {
+                        self.show_info = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Sounds and presets from your own copy...").clicked() {
                         self.setup = Default::default();
                         self.setup.open = true;
@@ -1678,6 +1731,7 @@ impl App {
 impl App {
     /// Project info, the pattern rename box and the about box.
     fn small_windows(&mut self, ctx: &egui::Context) {
+        self.settings_window(ctx);
         let mut open = self.show_info;
         egui::Window::new("Project info").open(&mut open).collapsible(false).default_width(360.0).show(ctx, |ui| {
             let mut changed = false;
@@ -1775,6 +1829,9 @@ struct RenderOpts {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if !std::mem::replace(&mut self.prefs_win.scaled, true) && self.settings.scale > 0.0 {
+            self.apply_scale(ctx);
+        }
         if !self.setup.open {
             self.keys(ctx);
         }
@@ -1864,6 +1921,7 @@ impl eframe::App for App {
                 self.unsaved = true;
                 self.hist_pending = true;
             }
+            midi::PPQ.store(self.song.ppq.max(1) as usize, std::sync::atomic::Ordering::Relaxed);
             self.handle.publish(self.song.clone());
         }
         // an edit becomes one undo step once the mouse is up and no text box is being typed in

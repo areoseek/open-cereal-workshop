@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use cereal_engine::Transport;
 
@@ -10,8 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// Open the default input device and hand everything it hears to `sink` as interleaved floats.
 fn open_input(mut sink: impl FnMut(&[f32], &cpal::InputCallbackInfo) + Send + 'static) -> Result<(cpal::Stream, u32, usize), String> {
-    let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("no audio input device")?;
+    let device = input_device().ok_or("no audio input device")?;
     let config = device.default_input_config().map_err(|e| e.to_string())?;
     let channels = config.channels() as usize;
     let rate = config.sample_rate().0;
@@ -46,10 +45,34 @@ fn open_input(mut sink: impl FnMut(&[f32], &cpal::InputCallbackInfo) + Send + 's
     Ok((stream, rate, channels))
 }
 
-/// How many inputs the default input device has; asked once.
+/// The input device chosen in the settings, by name; empty = the system's default.
+static IN_NAME: Mutex<String> = Mutex::new(String::new());
+static IN_CHANNELS: Mutex<Option<usize>> = Mutex::new(None);
+
+pub fn set_input(name: &str) {
+    if let Ok(mut g) = IN_NAME.lock() {
+        *g = name.to_string();
+    }
+    if let Ok(mut g) = IN_CHANNELS.lock() {
+        *g = None;
+    }
+}
+
+fn input_device() -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    let want = IN_NAME.lock().map(|g| g.clone()).unwrap_or_default();
+    if !want.is_empty() {
+        if let Some(d) = host.input_devices().ok().and_then(|mut l| l.find(|d| d.name().map(|n| n == want).unwrap_or(false))) {
+            return Some(d);
+        }
+    }
+    host.default_input_device()
+}
+
+/// How many inputs the input device has; asked once per choice of device.
 pub fn input_channels() -> usize {
-    static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| cpal::default_host().default_input_device().and_then(|d| d.default_input_config().ok()).map(|c| c.channels() as usize).unwrap_or(0))
+    let Ok(mut g) = IN_CHANNELS.lock() else { return 0 };
+    *g.get_or_insert_with(|| input_device().and_then(|d| d.default_input_config().ok()).map(|c| c.channels() as usize).unwrap_or(0))
 }
 
 /// The names in the mixer's input list: stereo pairs first, then every input on its own.

@@ -348,45 +348,54 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
     let song = Arc::new(ArcSwap::from_pointee(song));
     let transport = Transport::new();
     let cmds = Arc::new(Mutex::new(Vec::with_capacity(64)));
-    let handle = Handle { transport: transport.clone(), song: song.clone(), cmds: cmds.clone(), graveyard: vec![] };
-    let player = Player {
-        song,
-        transport,
-        cmds,
-        inbox: Vec::with_capacity(64),
-        sr: sample_rate,
-        voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
-        wheel: Vec::new(),
-        buses: vec![],
-        eq: vec![],
-        fx: vec![],
-        driven: Vec::with_capacity(64),
-        env_runs: Vec::new(),
-        arps: Vec::new(),
-        midi_wait: Vec::with_capacity(64),
-        midi_live: Vec::new(),
-        pad_turn: Vec::with_capacity(128),
-        midi_seen: Vec::new(),
-        midi_ran: false,
-        seed: 0x2545_f491,
-        ring: vec![],
-        chan_fx: vec![],
-        scratch: Vec::with_capacity(BLOCK),
-        cap: Vec::new(),
-        cap_at: Vec::new(),
-        inbuf: Vec::new(),
-        blockno: 0,
-        dirty: vec![],
-        pos: 0.0,
-        was_playing: false,
-        chase: false,
-        count_in: 0.0,
-        born: 0,
-        ov: Overrides::default(),
-        tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
-        clicks: [click(sample_rate, 1760.0), click(sample_rate, 880.0)],
-    };
+    let handle = Handle { transport, song, cmds, graveyard: vec![] };
+    let player = handle.player(sample_rate);
     (handle, player)
+}
+
+impl Handle {
+    /// Another player on the same song, transport and commands: for when the sound card is reopened,
+    /// perhaps at another rate. The one before it must be dropped first.
+    pub fn player(&self, sample_rate: f32) -> Player {
+        let (song, transport, cmds) = (self.song.clone(), self.transport.clone(), self.cmds.clone());
+        Player {
+            song,
+            transport,
+            cmds,
+            inbox: Vec::with_capacity(64),
+            sr: sample_rate,
+            voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
+            wheel: Vec::new(),
+            buses: vec![],
+            eq: vec![],
+            fx: vec![],
+            driven: Vec::with_capacity(64),
+            env_runs: Vec::new(),
+            arps: Vec::new(),
+            midi_wait: Vec::with_capacity(64),
+            midi_live: Vec::new(),
+            pad_turn: Vec::with_capacity(128),
+            midi_seen: Vec::new(),
+            midi_ran: false,
+            seed: 0x2545_f491,
+            ring: vec![],
+            chan_fx: vec![],
+            scratch: Vec::with_capacity(BLOCK),
+            cap: Vec::new(),
+            cap_at: Vec::new(),
+            inbuf: Vec::new(),
+            blockno: 0,
+            dirty: vec![],
+            pos: 0.0,
+            was_playing: false,
+            chase: false,
+            count_in: 0.0,
+            born: 0,
+            ov: Overrides::default(),
+            tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
+            clicks: [click(sample_rate, 1760.0), click(sample_rate, 880.0)],
+        }
+    }
 }
 
 /// Control values set by automation clips; they stand in for the song's own values until playback restarts.
@@ -2999,6 +3008,22 @@ mod tests {
         s.channels[0].smp.arp_steps = 1.0;
         let arp = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&arp, 0.2, 0.9) > 0.1, "the child repeats the note while the layer's note is held");
+    }
+
+    #[test]
+    fn a_second_player_carries_on_with_the_same_song() {
+        let mut s = tone_song(2.0);
+        s.patterns[0].toggle_step(0, 0);
+        let (mut handle, first) = new_player(Song::new(), 44_100.0);
+        handle.publish(s);
+        // the sound card is reopened at another rate: the old player goes, a new one takes over
+        drop(first);
+        let mut p = handle.player(96_000.0);
+        assert_eq!(p.sample_rate(), 96_000.0);
+        handle.transport.set_playing(true);
+        let mut out = vec![0.0f32; 96_000];
+        p.render(&mut out, 2);
+        assert!(out.iter().any(|v| v.abs() > 0.01), "the song published before the change is what plays");
     }
 
     #[test]

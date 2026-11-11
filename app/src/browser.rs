@@ -28,6 +28,10 @@ impl State {
         }
     }
 
+    pub fn remove_root(&mut self, path: &Path) {
+        self.roots.retain(|r| r.1 != path);
+    }
+
     pub fn refresh(&mut self) {
         self.listing.clear();
     }
@@ -130,10 +134,7 @@ impl App {
             }
             if ui.small_button("Add folder").clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    let label = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.display().to_string());
-                    self.lib.search_dirs.push(dir.clone());
-                    self.lib.rescan();
-                    self.browser.add_root(&label, dir);
+                    self.add_search_folder(dir);
                 }
             }
         });
