@@ -201,7 +201,7 @@ pub fn import(data: &[u8], ppq: u32) -> Result<Imported, String> {
         let off = |parts: &mut Vec<Option<Part>>, ch: usize, key: u8, start: u64, vel: u8, end: u64| {
             let p = parts[ch].get_or_insert_with(|| Part { drums: ch == 9, ..Part::default() });
             let pos = scale(start);
-            p.notes.push(Note { pos, len: (scale(end).saturating_sub(pos)).max(1), chan: 0, key, vel: vel as f32 / 100.0, pan: 0.0, fine_cents: 0.0, muted: false });
+            p.notes.push(Note { pos, len: (scale(end).saturating_sub(pos)).max(1), chan: 0, key, vel: vel as f32 / 100.0, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() });
         };
         loop {
             let Some(d) = r.var() else { break };
@@ -292,7 +292,7 @@ mod tests {
         song.ppq = 96;
         song.tempo = 137.0;
         song.time_sig = (3, 4);
-        let mk = |pos, len, chan, key, vel| Note { pos, len, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false };
+        let mk = |pos, len, chan, key, vel| Note { pos, len, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
         let notes = vec![mk(0, 48, 0, 60, 1.0), mk(48, 48, 0, 60, 0.5), mk(96, 200, 0, 67, 1.2), mk(24, 0, 1, 36, 1.0), mk(500, 10, 1, 40, 0.8)];
         song.patterns = vec![Pattern { name: "P".into(), color: None, notes: notes.clone() }];
         let bytes = export(&song, false, 0);

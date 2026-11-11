@@ -86,9 +86,10 @@ fn fine_u(v: f32) -> u8 {
     (v / 10.0 + 120.0).round().clamp(0.0, 240.0) as u8
 }
 
-type NoteKey = (u32, u32, u16, u8, u8, u8, u8, bool);
+type NoteKey = ((u32, u32, u16, u8, u8, u8, u8, bool), (i32, i32, i32, bool, bool, u8));
 fn note_key(n: &Note) -> NoteKey {
-    (n.pos, n.len, n.chan, n.key, vel_u(n.vel), npan_u(n.pan), fine_u(n.fine_cents), n.muted)
+    let q = |v: f32| (v * 128.0).round() as i32;
+    ((n.pos, n.len, n.chan, n.key, vel_u(n.vel), npan_u(n.pan), fine_u(n.fine_cents), n.muted), (q(n.release), q(n.mod_x), q(n.mod_y), n.slide, n.porta, n.color))
 }
 fn notes_key(notes: &[Note]) -> Vec<NoteKey> {
     let mut v: Vec<NoteKey> = notes.iter().map(note_key).collect();
@@ -780,6 +781,12 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                 f.pan = npan_u(note.pan);
                 f.fine_pitch = fine_u(note.fine_cents);
                 f.flags = if note.muted { f.flags | 0x2000 } else { f.flags & !0x2000 };
+                f.flags = if note.slide { f.flags | 0x0008 } else { f.flags & !0x0008 };
+                f.flags = if note.porta { f.flags | 0x0010 } else { f.flags & !0x0010 };
+                f.release = (note.release * 128.0).round().clamp(0.0, 128.0) as u8;
+                f.mod_x = (note.mod_x * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
+                f.mod_y = (note.mod_y * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
+                f.midi_channel = (f.midi_channel & !15) | (note.color & 15);
                 f.write(&mut data);
             }
 
@@ -1400,7 +1407,7 @@ mod tests {
         s.channels[2].insert = 3;
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].toggle_step(0, 96);
-        s.patterns[0].notes.push(Note { pos: 48, len: 24, chan: 2, key: 64, vel: 0.5, pan: 0.5, fine_cents: 0.0, muted: false });
+        s.patterns[0].notes.push(Note { pos: 48, len: 24, chan: 2, key: 64, vel: 0.5, pan: 0.5, fine_cents: 0.0, muted: false, ..Default::default() });
         s.patterns[0].sort();
         s.ensure_pattern(2);
         s.patterns[2].name = "Fill".into();
@@ -1587,7 +1594,7 @@ mod tests {
             s.tempo = 133.25;
             s.title = "Edited".into();
             s.ensure_pattern(0);
-            s.patterns[0].notes.push(Note { pos: 7, len: 11, chan: 0, key: 61, vel: 0.9, pan: 0.0, fine_cents: 0.0, muted: false });
+            s.patterns[0].notes.push(Note { pos: 7, len: 11, chan: 0, key: 61, vel: 0.9, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() });
             let extra = s.patterns.len();
             s.ensure_pattern(extra);
             s.patterns[extra].name = "Brand new".into();

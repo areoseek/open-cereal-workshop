@@ -425,11 +425,28 @@ pub struct Note {
     pub pan: f32,
     pub fine_cents: f32,
     pub muted: bool,
+    /// Release velocity, 0..=1, 0.5 = the default.
+    pub release: f32,
+    /// The two free per-note controls, -1..=1; on a sampler they move the filter's cutoff and resonance.
+    pub mod_x: f32,
+    pub mod_y: f32,
+    /// A slide note makes no sound: it bends the notes of its colour already sounding to its own pitch.
+    pub slide: bool,
+    /// A portamento note glides in from the pitch of the note before it.
+    pub porta: bool,
+    /// Note colour, 0..=15; also the MIDI channel it goes out on.
+    pub color: u8,
+}
+
+impl Default for Note {
+    fn default() -> Self {
+        Self { pos: 0, len: 0, chan: 0, key: 60, vel: 1.0, pan: 0.0, fine_cents: 0.0, muted: false, release: 0.5, mod_x: 0.0, mod_y: 0.0, slide: false, porta: false, color: 0 }
+    }
 }
 
 impl Note {
     pub fn step(pos: u32, chan: u16) -> Self {
-        Self { pos, len: 0, chan, key: 60, vel: 1.0, pan: 0.0, fine_cents: 0.0, muted: false }
+        Self { pos, chan, ..Default::default() }
     }
 }
 
@@ -1021,6 +1038,12 @@ impl Song {
                     pan: (n.pan as f32 - 64.0) / 64.0,
                     fine_cents: (n.fine_pitch as f32 - 120.0) * 10.0,
                     muted: n.flags & 0x2000 != 0,
+                    release: n.release as f32 / 128.0,
+                    mod_x: (n.mod_x as f32 - 128.0) / 128.0,
+                    mod_y: (n.mod_y as f32 - 128.0) / 128.0,
+                    slide: n.flags & 0x0008 != 0,
+                    porta: n.flags & 0x0010 != 0,
+                    color: n.midi_channel & 15,
                 })
                 .collect();
             out.sort();

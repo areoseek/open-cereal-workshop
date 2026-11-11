@@ -399,6 +399,11 @@ struct Voice {
     bend: f32,
     /// Octaves the pitch wheel bends it by.
     hand: f32,
+    /// Octaves slide and portamento notes have bent it by, where that is heading and how fast per frame.
+    slide: f32,
+    slide_to: f32,
+    slide_inc: f32,
+    color: u8,
     sr: f32,
     /// Frames sounded, and frames since the note was let go.
     t: u32,
@@ -476,8 +481,12 @@ impl Voice {
         } else {
             self.step
         };
-        if self.bend != 0.0 || self.hand != 0.0 {
-            self.step_now *= ((self.bend + self.hand) as f64).exp2();
+        if self.slide != self.slide_to {
+            let d = self.slide_inc * CTL as f32;
+            self.slide = if (self.slide_to - self.slide).abs() <= d { self.slide_to } else { self.slide + d * (self.slide_to - self.slide).signum() };
+        }
+        if self.bend != 0.0 || self.hand != 0.0 || self.slide != 0.0 {
+            self.step_now *= ((self.bend + self.hand + self.slide) as f64).exp2();
         }
         if self.fon {
             let mut x = self.fcut;
@@ -683,7 +692,27 @@ impl Player {
 
     /// Start one note. `len_frames` None means "no note-off" (a step, or a live key still held).
     fn note_on(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        let mark = self.born;
+        // the note a portamento glides in from: the newest one still sounding on the channel
+        let from = if n.porta {
+            self.voices.iter().filter(|v| v.active && !v.preview && v.chan == n.chan && v.color == n.color).max_by_key(|v| v.born).map(|v| v.key as f32 / 12.0 + v.slide_to)
+        } else {
+            None
+        };
         self.note_on_depth(song, n, delay, len_frames, live, 0);
+        let glide = 1.0 / (self.sr * 0.12);
+        for v in self.voices.iter_mut().filter(|v| v.active && v.born > mark) {
+            v.color = n.color;
+            if v.fon {
+                v.fcut = (v.fcut + n.mod_x * 0.5).clamp(0.0, 1.0);
+                v.fres = (v.fres + n.mod_y * 0.5).clamp(0.0, 1.0);
+            }
+            if let Some(from) = from {
+                v.slide = from - v.key as f32 / 12.0;
+                v.slide_to = 0.0;
+                v.slide_inc = v.slide.abs() * glide;
+            }
+        }
     }
 
     fn note_on_depth(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool, depth: u8) {
@@ -699,6 +728,15 @@ impl Player {
                         self.note_on_depth(song, &Note { chan: k, ..n.clone() }, delay, len_frames, live, depth + 1);
                     }
                 }
+            }
+            return;
+        }
+        if n.slide {
+            // a slide note bends what is sounding in its colour to its own pitch over its length
+            let frames = len_frames.unwrap_or(1).max(1) as f32;
+            for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && v.chan == n.chan && v.color == n.color) {
+                v.slide_to = (n.key as f32 - v.key as f32) / 12.0 + n.fine_cents / 1200.0;
+                v.slide_inc = (v.slide_to - v.slide).abs() / frames;
             }
             return;
         }
@@ -943,7 +981,7 @@ impl Player {
         for c in inbox.drain(..) {
             match c {
                 Cmd::NoteOn { chan, key, vel } => {
-                    let n = Note { pos: 0, len: 0, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false };
+                    let n = Note { pos: 0, len: 0, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
                     self.note_on(song, &n, 0, None, true);
                 }
                 Cmd::NoteOff { chan, key } => self.note_off(song, chan, key),
@@ -1577,6 +1615,27 @@ mod tests {
         p.render(&mut buf, 2);
         p.render(&mut buf, 2);
         let up = rises(&buf);
+        assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
+    }
+
+    #[test]
+    fn a_slide_note_bends_the_sounding_note_to_its_pitch() {
+        let run = |slide: bool| {
+            let mut song = Song::new();
+            song.channels = vec![crate::song::Chan::instrument(crate::synth::Kind::Osc3)];
+            let q = song.ppq / 4;
+            song.patterns[0].notes.push(Note { pos: 0, len: song.ppq * 4, ..Default::default() });
+            if slide {
+                song.patterns[0].notes.push(Note { pos: q, len: q, key: 72, slide: true, ..Default::default() });
+            }
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.transport.set_playing(true);
+            let mut buf = vec![0.0; 16_000 * 2];
+            p.render(&mut buf, 2);
+            p.render(&mut buf, 2);
+            buf.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32
+        };
+        let (flat, up) = (run(false), run(true));
         assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
     }
 

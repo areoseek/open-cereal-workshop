@@ -365,7 +365,7 @@ impl App {
                     // the loop came round while the key was down
                     len = (plen - start).max(1.0);
                 }
-                let note = cereal_engine::song::Note { pos: pos as u32, len: len.round().max(1.0) as u32, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false };
+                let note = cereal_engine::song::Note { pos: pos as u32, len: len.round().max(1.0) as u32, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
                 self.song.patterns[pat].notes.push(note);
                 self.song.patterns[pat].sort();
                 self.dirty = true;

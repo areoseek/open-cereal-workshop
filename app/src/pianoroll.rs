@@ -54,9 +54,32 @@ enum Lane {
     Vel,
     Pan,
     Fine,
+    Release,
+    ModX,
+    ModY,
 }
 
-const LANES: [(Lane, &str); 3] = [(Lane::Vel, "Velocity"), (Lane::Pan, "Pan"), (Lane::Fine, "Fine pitch")];
+const LANES: [(Lane, &str); 6] = [(Lane::Vel, "Velocity"), (Lane::Pan, "Pan"), (Lane::Fine, "Fine pitch"), (Lane::Release, "Release"), (Lane::ModX, "Mod X"), (Lane::ModY, "Mod Y")];
+
+/// The sixteen note colours; a colour is also the MIDI channel the note goes out on.
+pub const NOTE_COLORS: [Color32; 16] = [
+    Color32::from_rgb(158, 209, 165),
+    Color32::from_rgb(159, 211, 186),
+    Color32::from_rgb(161, 208, 213),
+    Color32::from_rgb(162, 186, 214),
+    Color32::from_rgb(164, 167, 216),
+    Color32::from_rgb(187, 166, 218),
+    Color32::from_rgb(211, 168, 219),
+    Color32::from_rgb(221, 169, 201),
+    Color32::from_rgb(223, 171, 174),
+    Color32::from_rgb(224, 190, 172),
+    Color32::from_rgb(226, 216, 174),
+    Color32::from_rgb(207, 228, 175),
+    Color32::from_rgb(182, 229, 177),
+    Color32::from_rgb(178, 231, 196),
+    Color32::from_rgb(180, 232, 228),
+    Color32::from_rgb(181, 209, 234),
+];
 
 /// Snap choices: name, then the grid as (unit, divisor) where unit 0 = follow the lines, 1 = none, 2 = step,
 /// 3 = beat, 4 = bar.
@@ -108,6 +131,10 @@ pub struct State {
     last_len: u32,
     last_vel: f32,
     last_pan: f32,
+    /// What notes drawn next will be: slide notes, portamento notes, and their colour.
+    slide: bool,
+    porta: bool,
+    color: u8,
     drag: Option<Drag>,
     sounding: Option<(u16, u8)>,
     pub tool: Tool,
@@ -134,6 +161,9 @@ impl Default for State {
             last_len: 0,
             last_vel: 1.0,
             last_pan: 0.0,
+            slide: false,
+            porta: false,
+            color: 0,
             drag: None,
             sounding: None,
             tool: Tool::Draw,
@@ -500,6 +530,8 @@ impl App {
             Key::E => self.piano.tool = Tool::Select,
             Key::Z => self.piano.tool = Tool::Zoom,
             Key::Y => self.piano.tool = Tool::Playback,
+            Key::S => self.piano.slide = !self.piano.slide,
+            Key::O => self.piano.porta = !self.piano.porta,
             _ => return false,
         }
         true
@@ -563,6 +595,29 @@ impl App {
             })
             .response
             .on_hover_text("Snap");
+            if ui.selectable_label(self.piano.slide, RichText::new("Slide").small()).on_hover_text("Slide (S): notes drawn next bend the sounding notes to their pitch").clicked() {
+                self.piano.slide = !self.piano.slide;
+            }
+            if ui.selectable_label(self.piano.porta, RichText::new("Porta").small()).on_hover_text("Portamento (O): notes drawn next glide in from the note before").clicked() {
+                self.piano.porta = !self.piano.porta;
+            }
+            let cur = self.piano.color;
+            egui::ComboBox::from_id_salt("pr_color").width(34.0).selected_text(RichText::new(format!("{}", cur + 1)).small().color(NOTE_COLORS[cur as usize & 15])).show_ui(ui, |ui| {
+                for (i, col) in NOTE_COLORS.iter().enumerate() {
+                    if ui.selectable_label(cur as usize == i, RichText::new(format!("Colour {}", i + 1)).color(*col)).clicked() {
+                        self.piano.color = i as u8;
+                        // the selected notes take the colour too
+                        let pat = self.piano.sel_for.0;
+                        let sel = self.piano.sel.clone();
+                        for k in sel {
+                            if let Some(n) = self.song.patterns.get_mut(pat).and_then(|p| p.notes.get_mut(k)) {
+                                n.color = i as u8;
+                                self.dirty = true;
+                            }
+                        }
+                    }
+                }
+            });
             if ui.selectable_label(self.piano.ghosts, RichText::new("Ghosts").small()).on_hover_text("Show the other channels' notes behind").clicked() {
                 self.piano.ghosts = !self.piano.ghosts;
             }
@@ -708,8 +763,12 @@ impl App {
             Lane::Vel => (n.vel / 1.28).clamp(0.0, 1.0),
             Lane::Pan => (n.pan * 0.5 + 0.5).clamp(0.0, 1.0),
             Lane::Fine => (n.fine_cents / 2400.0 + 0.5).clamp(0.0, 1.0),
+            Lane::Release => n.release.clamp(0.0, 1.0),
+            Lane::ModX => (n.mod_x * 0.5 + 0.5).clamp(0.0, 1.0),
+            Lane::ModY => (n.mod_y * 0.5 + 0.5).clamp(0.0, 1.0),
         };
         let which = self.piano.lane;
+        let from_foot = matches!(which, Lane::Vel | Lane::Release);
         for ghost in [true, false] {
             if ghost && !self.piano.ghosts {
                 continue;
@@ -733,9 +792,19 @@ impl App {
                 } else if selected {
                     SELECTED
                 } else {
-                    NOTE.gamma_multiply(0.55 + 0.45 * n.vel.clamp(0.0, 1.28) / 1.28)
+                    let c = if n.color == 0 { NOTE } else { NOTE_COLORS[n.color as usize & 15] };
+                    c.gamma_multiply(0.55 + 0.45 * n.vel.clamp(0.0, 1.28) / 1.28)
                 };
                 gp.rect_filled(r, 2.0, base);
+                if n.slide {
+                    // the small triangle that marks a slide note
+                    let (a, h) = (r.right_top() + Vec2::new(-1.0, 1.0), r.height() - 2.0);
+                    gp.add(egui::Shape::convex_polygon(vec![a, a + Vec2::new(0.0, h), a + Vec2::new(-h.min(r.width() - 2.0), h)], LINE, Stroke::NONE));
+                }
+                if n.porta {
+                    let c = r.right_center() - Vec2::new(5.0, 0.0);
+                    gp.line_segment([c + Vec2::new(-3.0, 3.0), c + Vec2::new(3.0, -3.0)], Stroke::new(1.5_f32, LINE));
+                }
                 gp.rect_stroke(r, 2.0, Stroke::new(1.0_f32, if selected { Color32::WHITE } else { LINE }), egui::StrokeKind::Inside);
                 if r.width() > 24.0 {
                     gp.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, format!("{}{}", NAMES[n.key as usize % 12], n.key / 12), FontId::proportional(9.5), LINE);
@@ -749,7 +818,7 @@ impl App {
                 let x = x_of(n.pos as f32);
                 let y = lane.bottom() - 3.0 - lane_frac(n, which) * (LANE_H - 8.0);
                 let col = if selected { SELECTED } else { NOTE };
-                let foot = if which == Lane::Vel { lane.bottom() } else { lane.center().y };
+                let foot = if from_foot { lane.bottom() } else { lane.center().y };
                 lp.line_segment([Pos2::new(x, foot), Pos2::new(x, y)], Stroke::new(1.5_f32, col));
                 lp.line_segment([Pos2::new(x, y), Pos2::new((x + len as f32 * px).min(x + 40.0), y)], Stroke::new(1.5_f32, col));
                 lp.circle_filled(Pos2::new(x, y), 2.5, col);
@@ -797,7 +866,7 @@ impl App {
         let lane_name = LANES.iter().find(|l| l.0 == which).map(|l| l.1).unwrap_or("");
         p.text(lane_head.left_top() + Vec2::new(6.0, 6.0), Align2::LEFT_TOP, "Control", FontId::proportional(9.5), TEXT_DIM);
         p.text(lane_head.left_top() + Vec2::new(6.0, 20.0), Align2::LEFT_TOP, lane_name, FontId::proportional(11.0), TEXT);
-        if which != Lane::Vel {
+        if !from_foot {
             lp.line_segment([Pos2::new(lane.left(), lane.center().y), Pos2::new(lane.right(), lane.center().y)], Stroke::new(1.0_f32, LINE));
         }
 
@@ -858,7 +927,7 @@ impl App {
                             }
                             None => {
                                 let pos = snap_floor(tick_of(pp.x));
-                                let n = Note { pos, len: self.piano.last_len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, fine_cents: 0.0, muted: false };
+                                let n = Note { pos, len: self.piano.last_len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, slide: self.piano.slide, porta: self.piano.porta, color: self.piano.color, ..Default::default() };
                                 let notes = &mut self.song.patterns[pat].notes;
                                 notes.push(n.clone());
                                 self.piano.sel.clear();
@@ -899,6 +968,9 @@ impl App {
                             Lane::Vel => n.vel = 1.0,
                             Lane::Pan => n.pan = 0.0,
                             Lane::Fine => n.fine_cents = 0.0,
+                            Lane::Release => n.release = 0.5,
+                            Lane::ModX => n.mod_x = 0.0,
+                            Lane::ModY => n.mod_y = 0.0,
                         }
                         self.dirty = true;
                     }
@@ -1049,7 +1121,7 @@ impl App {
                         let notes = &mut self.song.patterns[pat].notes;
                         let taken = notes.iter().any(|n| n.chan == chan && n.key == key && n.pos < pos + len && pos < n.pos + note_len(n, step));
                         if !taken && grid.contains(pp) {
-                            notes.push(Note { pos, len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, fine_cents: 0.0, muted: false });
+                            notes.push(Note { pos, len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, slide: self.piano.slide, porta: self.piano.porta, color: self.piano.color, ..Default::default() });
                             self.dirty = true;
                             self.pr_sound(Some(key));
                         }
@@ -1073,6 +1145,9 @@ impl App {
                                 Lane::Vel => n.vel = frac * 1.28,
                                 Lane::Pan => n.pan = if (frac - 0.5).abs() < 0.03 { 0.0 } else { frac * 2.0 - 1.0 },
                                 Lane::Fine => n.fine_cents = if (frac - 0.5).abs() < 0.03 { 0.0 } else { ((frac - 0.5) * 2400.0).round() },
+                                Lane::Release => n.release = frac,
+                                Lane::ModX => n.mod_x = if (frac - 0.5).abs() < 0.03 { 0.0 } else { frac * 2.0 - 1.0 },
+                                Lane::ModY => n.mod_y = if (frac - 0.5).abs() < 0.03 { 0.0 } else { frac * 2.0 - 1.0 },
                             }
                             self.dirty = true;
                         }
@@ -1155,6 +1230,35 @@ impl App {
                     n.len = len;
                     changed = true;
                 }
+                ui.end_row();
+                ui.label("Release");
+                let mut v = n.release * 100.0;
+                if ui.add(egui::DragValue::new(&mut v).range(0.0..=100.0).speed(0.5).suffix(" %")).changed() {
+                    n.release = v / 100.0;
+                    changed = true;
+                }
+                ui.end_row();
+                for (name, m) in [("Mod X", &mut n.mod_x), ("Mod Y", &mut n.mod_y)] {
+                    ui.label(name);
+                    let mut v = *m * 100.0;
+                    if ui.add(egui::DragValue::new(&mut v).range(-100.0..=100.0).speed(0.5).suffix(" %")).changed() {
+                        *m = v / 100.0;
+                        changed = true;
+                    }
+                    ui.end_row();
+                }
+                ui.label("Colour");
+                let mut c = n.color as u32 + 1;
+                if ui.add(egui::DragValue::new(&mut c).range(1..=16)).changed() {
+                    n.color = (c - 1) as u8;
+                    changed = true;
+                }
+                ui.end_row();
+                ui.label("Slide");
+                changed |= ui.checkbox(&mut n.slide, "").changed();
+                ui.end_row();
+                ui.label("Portamento");
+                changed |= ui.checkbox(&mut n.porta, "").changed();
                 ui.end_row();
                 ui.label("Muted");
                 changed |= ui.checkbox(&mut n.muted, "").changed();
