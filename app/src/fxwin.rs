@@ -207,6 +207,9 @@ impl App {
             if f.kind == Kind::Notes {
                 changed |= notes_ui(ui, f);
             }
+            if f.line_count() > 0 {
+                changed |= lines_ui(ui, f);
+            }
             if f.kind == Kind::Xy {
                 changed |= xy_pad(ui, f);
             }
@@ -797,6 +800,54 @@ fn xy_pad(ui: &mut Ui, f: &mut fx::Fx) -> bool {
 }
 
 /// The formula sender's formula box, with what the formula gives right now or what is wrong with it.
+/// The drawn lines of a unit, each in the line editor.
+fn lines_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
+    let mut changed = false;
+    // which lines to show, and what to call them
+    let shown: Vec<(usize, String)> = match f.kind {
+        Kind::Warp => {
+            let slot = |k: usize| f.p.get(k).copied().unwrap_or(0.0).round().clamp(0.0, 35.0) as usize;
+            vec![(slot(0), format!("Time line, slot {}", slot(0) + 1)), (36 + slot(1), format!("Volume line, slot {}", slot(1) + 1))]
+        }
+        Kind::Maxi => {
+            let id = ui.id().with("maxiline");
+            let mut k: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Level line of").small().color(TEXT_DIM));
+                for (i, name) in ["Low", "Mid", "High", "Main"].iter().enumerate() {
+                    ui.selectable_value(&mut k, i, *name);
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(id, k));
+            vec![(k, String::new())]
+        }
+        _ => vec![(0, "Shape".to_string())],
+    };
+    for (k, name) in shown {
+        if !name.is_empty() {
+            ui.label(RichText::new(name).small().color(TEXT_DIM));
+        }
+        ui.push_id(("line", k), |ui| match f.line(k) {
+            Some(mut c) => {
+                if crate::curve::curve_editor(ui, &mut c, crate::curve::Line::Mapping, 150.0) {
+                    changed |= f.set_line(k, &c);
+                }
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("This line was drawn in an old version and is played as it is.").small().color(TEXT_DIM));
+                    if ui.button("Draw it afresh").clicked() {
+                        let mut c = cereal_engine::fm::Curve::flat(1.0);
+                        c.pts[0].y = 0.0;
+                        changed |= f.set_line(k, &c);
+                    }
+                });
+            }
+        });
+    }
+    changed
+}
+
 /// The note units: pages of text to read and write, or a web address to keep and open.
 fn notes_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     use cereal_engine::notes::Notes;

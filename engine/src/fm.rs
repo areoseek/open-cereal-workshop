@@ -120,6 +120,46 @@ impl Curve {
         true
     }
 
+    /// Read the line whose record starts at `head` of a block, whatever it is used for there. Only the current
+    /// point layout is read.
+    pub fn read_at(raw: &[u8], head: usize) -> Option<Curve> {
+        if raw.len() < head + 12 || at(raw, head + 4) < 2 {
+            return None;
+        }
+        let mut r = R { d: raw, p: head, lfo_rest: 0 };
+        r.curve(at(raw, head))
+    }
+
+    /// Put this line where the record at `head` is, whatever point layout that record had.
+    pub fn replace_at(raw: &mut Vec<u8>, head: usize, c: &Curve) -> bool {
+        if raw.len() < head + 12 {
+            return false;
+        }
+        let (sub, n) = (at(raw, head + 4), at(raw, head + 8));
+        if !(0..=3).contains(&sub) || !(0..=8192).contains(&n) {
+            return false;
+        }
+        let end = head + 12 + n as usize * [12, 16, 24, 24][sub as usize] + 20;
+        if end > raw.len() {
+            return false;
+        }
+        if sub < 2 {
+            // an old record becomes a current one with the same tail, then takes the points
+            let mut fresh = Vec::with_capacity(32);
+            fresh.extend_from_slice(&raw[head..head + 4]);
+            fresh.extend_from_slice(&3i32.to_le_bytes());
+            fresh.extend_from_slice(&0i32.to_le_bytes());
+            fresh.extend_from_slice(&raw[end - 20..end]);
+            raw.splice(head..end, fresh);
+            let mut c = c.clone();
+            c.span = (head, head + 32);
+            return c.store(raw);
+        }
+        let mut c = c.clone();
+        c.span = (head, end);
+        c.store(raw)
+    }
+
     pub fn on(&self) -> bool {
         self.flags & 1 != 0
     }

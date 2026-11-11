@@ -1065,7 +1065,7 @@ impl Song {
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
                     if let Some((p, lead, g, layers)) = crate::fxpatch::decode_gen(&c.state) {
                         ch.gen = Some(g);
-                        ch.bay = Some(Bay { fx: crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)) }, lead, layers });
+                        ch.bay = Some(Bay { fx: crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)), raw: None }, lead, layers });
                     }
                 }
                 if let Some(g) = ch.gen.as_mut().filter(|g| matches!(g.kind, crate::synth::Kind::Grain | crate::synth::Kind::Travel)) {

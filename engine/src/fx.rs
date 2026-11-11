@@ -1621,6 +1621,8 @@ pub struct Fx {
     pub ir: Option<Ir>,
     /// The units and cables held by a patch bay.
     pub sub: Option<std::sync::Arc<crate::fxpatch::Patch>>,
+    /// The whole block of a unit with drawn lines, as read or as last edited; the lines live here, their tables in `p`.
+    pub raw: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 /// An impulse and the stored path it came from (empty when the block carried the sound itself).
@@ -1711,7 +1713,7 @@ impl Fx {
         if kind == Kind::Bank {
             return Self::decode(def(kind).ident, &crate::fxbank::fresh()).expect("our own block reads back");
         }
-        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), ir: None, sub: None }
+        Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), ir: None, sub: None, raw: None }
     }
 
     /// Put setting `k` at `v` (0..=1) of its travel, as a controller does. Settings past the unit's listed
@@ -1728,32 +1730,32 @@ impl Fx {
         if ident.eq_ignore_ascii_case("Fruity Wrapper") {
             let (d, at) = wrapped(state)?;
             let p = d.params.iter().enumerate().map(|(i, q)| wrapped_value(q, &state[at + i * 4..])).collect();
-            return Some(Self { kind: d.kind, p, ir: None, sub: None });
+            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if d.kind == Kind::Notes {
-            return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::Formula {
-            return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::Bank {
-            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::Patch {
-            return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)) });
+            return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None });
         }
         if d.kind == Kind::Rack {
-            return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::Multi {
-            return crate::fxmulti::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::fxmulti::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::Voc {
-            return crate::fxvoc::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::fxvoc::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         if d.kind == Kind::OldVoc {
-            return crate::fxvoc::classic::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None });
+            return crate::fxvoc::classic::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None });
         }
         let need = d.params.iter().map(|p| p.off + 4).max().unwrap_or(0);
         // the oldest reverb blocks (found in presets) have no version number in front
@@ -1788,7 +1790,7 @@ impl Fx {
             for _ in 0..4 {
                 at = drawn_table(state, at, &mut p)?;
             }
-            return Some(Self { kind: d.kind, p, ir: None, sub: None });
+            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())) });
         }
         let mut p: Vec<f32> = d
             .params
@@ -1820,7 +1822,8 @@ impl Fx {
                 ir = crate::sample::Sample::decode(state[w].to_vec(), "wav").ok().map(|s| Ir { smp: std::sync::Arc::new(s), path: String::new() });
             }
         }
-        Some(Self { kind: d.kind, p, ir, sub: None })
+        let raw = matches!(d.kind, Kind::Curve | Kind::Warp).then(|| std::sync::Arc::new(state.to_vec()));
+        Some(Self { kind: d.kind, p, ir, sub: None, raw })
     }
 
     /// Write the settings into a stored block: `base` when the effect came from a file (everything we do not
@@ -1840,6 +1843,8 @@ impl Fx {
                 return out;
             }
         }
+        // a unit that carries its own block (drawn lines, perhaps edited) builds on that
+        let base = self.raw.as_deref().map(|v| &v[..]).or(base);
         if self.kind == Kind::Bank {
             return crate::fxbank::encode(&self.p, base);
         }
@@ -2011,6 +2016,54 @@ fn formula_encode(p: &[f32], base: Option<&[u8]>) -> Vec<u8> {
 }
 
 impl Fx {
+    /// Where each drawn line of this unit starts in `block`, in the order the unit uses them.
+    fn line_heads(&self, block: &[u8]) -> Vec<usize> {
+        match self.kind {
+            Kind::Curve => vec![22],
+            Kind::Warp => warp_lines(block).unwrap_or_default(),
+            Kind::Maxi => {
+                let int = |o: usize| block.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                let mut heads = vec![];
+                let mut at = maxi_lines(block);
+                while let (Some(a), true) = (at, heads.len() < 4) {
+                    heads.push(a);
+                    at = (|| Some(a + 12 + int(a + 8)? as usize * [12, 16, 24, 24][int(a + 4)?.clamp(0, 3) as usize] + 20))();
+                }
+                heads
+            }
+            _ => vec![],
+        }
+    }
+    /// How many drawn lines this unit has that can be edited.
+    pub fn line_count(&self) -> usize {
+        match self.kind {
+            Kind::Curve => 1,
+            Kind::Maxi => 4,
+            Kind::Warp => 2 * WARP_SLOTS,
+            _ => 0,
+        }
+    }
+    /// Drawn line `k` as points. None for a line stored the old way, which has to be drawn afresh.
+    pub fn line(&self, k: usize) -> Option<crate::fm::Curve> {
+        let block = self.encode(None);
+        crate::fm::Curve::read_at(&block, *self.line_heads(&block).get(k)?)
+    }
+    /// Put an edited (or newly drawn) line in place of line `k`.
+    pub fn set_line(&mut self, k: usize, c: &crate::fm::Curve) -> bool {
+        let mut block = self.encode(None);
+        let Some(&head) = self.line_heads(&block).get(k) else { return false };
+        if !crate::fm::Curve::replace_at(&mut block, head, c) {
+            return false;
+        }
+        match Self::decode(def(self.kind).ident, &block) {
+            Some(new) => {
+                *self = new;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The formula a formula sender holds.
     pub fn formula(&self) -> String {
         self.p.iter().skip(4).map(|&c| c as u8 as char).collect()
@@ -4773,6 +4826,34 @@ mod tests {
     }
 
     #[test]
+    fn drawn_lines_can_be_edited_and_saved() {
+        for kind in [Kind::Curve, Kind::Maxi, Kind::Warp] {
+            let mut f = Fx::new(kind);
+            let ident = def(kind).ident;
+            assert!(f.line_count() > 0);
+            let last = f.line_count() - 1;
+            for k in [0, last] {
+                let mut c = f.line(k).unwrap_or_else(|| panic!("{ident} line {k}"));
+                let before = f.p.clone();
+                // a new point in the middle, pulled off the line
+                let x = c.pts[1].x;
+                c.pts[1].x = x * 0.5;
+                c.pts.insert(1, crate::fm::Pt { x: x * 0.5, y: 0.9, ..Default::default() });
+                assert!(f.set_line(k, &c), "{ident} line {k}");
+                assert_ne!(f.p, before, "{ident} line {k} changes the table");
+                assert_eq!(f.line(k).unwrap().pts.len(), c.pts.len());
+            }
+            // a knob moved afterwards and the lines both reach the saved block, and read back the same
+            f.p[0] += 1.0;
+            let block = f.encode(None);
+            let back = Fx::decode(ident, &block).unwrap();
+            assert_eq!(back.p, f.p, "{ident}");
+            // saving over the file's old block gives the same thing
+            assert_eq!(f.encode(Some(&Fx::new(kind).encode(None))), block, "{ident}");
+        }
+    }
+
+    #[test]
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
@@ -4785,8 +4866,10 @@ mod tests {
             }
             let bytes = fx.encode(None);
             assert_eq!(bytes.len(), d.size);
-            assert_eq!(Fx::decode(d.ident, &bytes).as_ref(), Some(&fx), "{}", d.title);
+            // (a unit that carries its block carries the one it was made from, so only the settings are compared)
+            assert_eq!(Fx::decode(d.ident, &bytes).map(|f| (f.kind, f.p, f.ir)), Some((fx.kind, fx.p.clone(), fx.ir.clone())), "{}", d.title);
             // unknown bytes of an existing block survive
+            fx.raw = None;
             let mut base = vec![0xAAu8; d.size + 9];
             base = fx.encode(Some(&base));
             assert_eq!(base.len(), d.size + 9);
