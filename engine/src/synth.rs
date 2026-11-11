@@ -98,7 +98,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -733,7 +733,9 @@ impl Gen {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
         g.raw = g.encode(None);
         if kind == Kind::Fm {
-            g.fm = Some(Default::default());
+            // a new one carries a full block of its own, so every page of its window can be edited and saved
+            g.raw = crate::fm::Patch::blank_state();
+            g.fm = Some(crate::fm::Patch::parse(&g.raw).map(std::sync::Arc::new).unwrap_or_default());
         }
         g
     }

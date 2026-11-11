@@ -3,6 +3,7 @@
 
 mod browser;
 mod chanset;
+mod curve;
 mod events;
 mod fxwin;
 mod midi;

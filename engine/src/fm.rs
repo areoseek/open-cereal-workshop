@@ -66,15 +66,58 @@ pub struct Curve {
     pub decay: i32,
     pub loop_start: i32,
     pub sustain: i32,
+    /// Where the line sits in the block it was read from (start and end), so an edited line can go back in.
+    pub span: (usize, usize),
     /// Running position of every point, after the length knobs.
     t: Vec<f32>,
 }
 
 impl Curve {
     pub fn flat(y: f32) -> Self {
-        let mut c = Self { pts: vec![Pt { x: 0.0, y, ..Default::default() }, Pt { x: 1.0, y, ..Default::default() }], flags: 0, decay: -1, loop_start: -1, sustain: -1, t: vec![] };
+        let mut c = Self { pts: vec![Pt { x: 0.0, y, ..Default::default() }, Pt { x: 1.0, y, ..Default::default() }], flags: 0, decay: -1, loop_start: -1, sustain: -1, span: (0, 0), t: vec![] };
         c.prepare([1.0; 3]);
         c
+    }
+
+    /// Writes the line back over the place it was read from. The block grows or shrinks with the number of
+    /// points, so everything read from it before must be read again. False when the place no longer fits.
+    pub fn store(&self, raw: &mut Vec<u8>) -> bool {
+        let (a, b) = self.span;
+        if b > raw.len() || b < a + 32 {
+            return false;
+        }
+        let n = at(raw, a + 8);
+        if n < 0 || a + 12 + 24 * n as usize + 20 != b {
+            return false;
+        }
+        let keep = at(raw, b - 16);
+        let mut out = Vec::with_capacity(32 + 24 * self.pts.len());
+        out.extend_from_slice(&raw[a..a + 8]);
+        out.extend_from_slice(&(self.pts.len() as i32).to_le_bytes());
+        for (i, p) in self.pts.iter().enumerate() {
+            // a value that was not moved keeps its stored form, which is finer than what we hold
+            let old = (i < n as usize).then(|| &raw[a + 12 + 24 * i..a + 36 + 24 * i]);
+            let same = |o: usize, v: f32, hi: f32| old.filter(|b| {
+                let w = f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+                w.is_finite() && (w as f32).clamp(0.0, hi) == v
+            });
+            match same(0, p.x, 1e5) {
+                Some(b) => out.extend_from_slice(&b[0..8]),
+                None => out.extend_from_slice(&(p.x as f64).to_le_bytes()),
+            }
+            match same(8, p.y, 1.0) {
+                Some(b) => out.extend_from_slice(&b[8..16]),
+                None => out.extend_from_slice(&(p.y as f64).to_le_bytes()),
+            }
+            out.extend_from_slice(&p.tension.to_le_bytes());
+            out.push(p.mode);
+            out.extend_from_slice(old.map(|b| &b[21..24]).unwrap_or(&[0, 0, 0]));
+        }
+        for v in [self.flags, keep, self.decay, self.loop_start, self.sustain] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        raw.splice(a..b, out);
+        true
     }
 
     pub fn on(&self) -> bool {
@@ -282,6 +325,9 @@ pub struct Patch {
     pub uni_phase: f32,
     pub modx: f32,
     pub mody: f32,
+    /// Where each operator's and filter's own settings start in the unpacked block.
+    pub op_at: [usize; 6],
+    pub filt_at: [usize; 3],
     used: [bool; 6],
     fused: [bool; 3],
     any_moving: bool,
@@ -306,6 +352,7 @@ impl<'a> R<'a> {
         Some(i32::from_le_bytes(self.bytes(4)?.try_into().ok()?))
     }
     fn curve(&mut self, kind: i32) -> Option<Curve> {
+        let from = self.p;
         if self.i()? != kind {
             return None;
         }
@@ -328,7 +375,7 @@ impl<'a> R<'a> {
         let decay = self.i()?;
         let loop_start = self.i()?;
         let sustain = self.i()?;
-        Some(Curve { pts, flags, decay, loop_start, sustain, t: vec![] })
+        Some(Curve { pts, flags, decay, loop_start, sustain, span: (from, self.p), t: vec![] })
     }
     /// One setting's envelope, slow oscillator and six mappings. `g` holds the instrument-wide length knobs.
     fn art(&mut self, bipolar: bool, g: [f32; 3]) -> Option<Art> {
@@ -608,7 +655,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -636,6 +683,98 @@ impl Patch {
         }
         let d = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&state[4..], 1 << 24).ok()?;
         Self::from_plain(&d, ver)
+    }
+
+    /// The stored block unpacked, for editing in place.
+    pub fn unpack(state: &[u8]) -> Option<Vec<u8>> {
+        Self::parse(state)?;
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&state[4..], 1 << 24).ok()
+    }
+
+    /// Changes a stored block: `f` works on the unpacked bytes. Gives the new block and what it now reads as, or
+    /// nothing when the result would no longer read (the old block then stays).
+    pub fn edited(state: &[u8], f: impl FnOnce(&mut Vec<u8>)) -> Option<(Vec<u8>, Self)> {
+        let mut d = Self::unpack(state)?;
+        f(&mut d);
+        let mut out = state[..4].to_vec();
+        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
+        let p = Self::parse(&out)?;
+        Some((out, p))
+    }
+
+    /// A stored block for a new instrument: operator 1 as a plain sine straight out, everything else at rest.
+    pub fn blank_state() -> Vec<u8> {
+        fn line(kind: i32, pts: &[(f64, f64)], tail: [i32; 5], out: &mut Vec<u8>) {
+            for v in [kind, 3, pts.len() as i32] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            for &(x, y) in pts {
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&[0; 8]);
+            }
+            for v in tail {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        fn art(bipolar: bool, out: &mut Vec<u8>) {
+            let y = if bipolar { 0.5 } else { 1.0 };
+            out.extend_from_slice(&[0; 16]);
+            line(1, &[(0.0, 0.0), (0.01, 1.0), (0.3, 0.6), (0.5, 0.0)], [0, 0, 1, -1, 2], out);
+            for v in [128i32, 128, 0, 128] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            line(2, &[(0.0, 0.5), (1.0, 0.5)], [0, 0, -1, -1, -1], out);
+            for v in [40000i32, 0, 0, 0, 0] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            for _ in 0..6 {
+                line(3, &[(0.0, y), (1.0, y)], [0, -1, -1, -1, -1], out);
+            }
+        }
+        let mut d = vec![0u8; 1137];
+        let put = |d: &mut Vec<u8>, o: usize, v: i32| d[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut d, 0, 128);
+        put(&mut d, 4, 128);
+        put(&mut d, 12 + 8 * 4, 256);
+        for o in [660, 664, 672, 676, 680, 688] {
+            put(&mut d, o, 128);
+        }
+        put(&mut d, 692, 1);
+        put(&mut d, 728, 512);
+        put(&mut d, 732, 512);
+        d.extend_from_slice(&0i32.to_le_bytes());
+        for _ in 0..6 {
+            let mut h = vec![0u8; 2128];
+            h[4..8].copy_from_slice(&256i32.to_le_bytes());
+            h[8..12].copy_from_slice(&1200i32.to_le_bytes());
+            h[40..44].copy_from_slice(&20000i32.to_le_bytes());
+            h[52..56].copy_from_slice(&1.0f32.to_le_bytes());
+            h[2116..2120].copy_from_slice(&128i32.to_le_bytes());
+            d.extend_from_slice(&h);
+            for a in 0..6 {
+                art(bipolar_at(a), &mut d);
+            }
+        }
+        for _ in 0..3 {
+            let mut h = vec![0u8; 88];
+            for (o, v) in [(0, 0i32), (4, 128), (8, 256), (16, 128), (28, 128), (32, 128)] {
+                h[o..o + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            d.extend_from_slice(&h);
+            line(3, &[(0.0, 0.0), (1.0, 1.0)], [0, -1, -1, -1, -1], &mut d);
+            d.push(0);
+            for a in 0..8 {
+                art(bipolar_at(36 + a), &mut d);
+            }
+        }
+        d.extend_from_slice(&[0; 40]);
+        art(true, &mut d);
+        art(false, &mut d);
+        d.push(0);
+        let mut out = 22u32.to_le_bytes().to_vec();
+        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
+        out
     }
 
     pub fn from_plain(d: &[u8], ver: u32) -> Option<Self> {
@@ -705,6 +844,7 @@ impl Patch {
         let one = [1.0; 3];
         p.arts.clear();
         for k in 0..6 {
+            p.op_at[k] = r.p;
             p.ops[k] = op_from(r.bytes(2128)?);
             for a in 0..6 {
                 let g = if a == 1 { gv } else { one };
@@ -712,6 +852,7 @@ impl Patch {
             }
         }
         for k in 0..3 {
+            p.filt_at[k] = r.p;
             let h = r.bytes(88)?;
             let i = |o: usize| at(h, o);
             let mut ws = r.curve(3)?;
@@ -1393,8 +1534,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_blank_instrument_reads_and_takes_edits() {
+        let state = Patch::blank_state();
+        let p = Patch::parse(&state).unwrap();
+        assert_eq!(p.out[0], 1.0);
+        assert_eq!(p.ops[0].ratio, 1.0);
+        assert_eq!(p.used(), [true, false, false, false, false, false]);
+        // operator 2 into operator 1 at 25 %, and a point more in operator 1's volume envelope
+        let mut env = p.arts[1].env.clone();
+        env.pts.insert(1, Pt { x: 0.005, y: 0.5, ..Default::default() });
+        let (state2, q) = Patch::edited(&state, |d| {
+            d[12 + 4..12 + 8].copy_from_slice(&64i32.to_le_bytes());
+            assert!(env.store(d));
+        })
+        .unwrap();
+        assert_eq!(q.fm[0][1], 0.25);
+        assert_eq!(q.arts[1].env.pts.len(), 5);
+        assert_eq!(q.arts[61].env.pts.len(), 4);
+        assert_eq!(Patch::unpack(&state2).unwrap().len(), Patch::unpack(&state).unwrap().len() + 24);
+        // an edit that breaks the layout is refused
+        assert!(Patch::edited(&state, |d| d.truncate(5000)).is_none());
+    }
+
+    #[test]
+    fn an_edited_line_goes_back_into_its_block() {
+        let mut raw = Sender::fresh();
+        let before = raw.clone();
+        let s = Sender::parse(&raw).unwrap();
+        // storing an untouched line changes nothing
+        assert!(s.arts[2].art.env.store(&mut raw));
+        assert_eq!(raw, before);
+        // a point more in one output's envelope: the block grows, still reads, and the others are as they were
+        let mut c = s.arts[2].art.env.clone();
+        c.pts.insert(2, Pt { x: 0.1, y: 0.25, tension: 0.5, mode: 2 });
+        c.sustain = 3;
+        assert!(c.store(&mut raw));
+        assert_eq!(raw.len(), before.len() + 24);
+        let t = Sender::parse(&raw).unwrap();
+        assert_eq!(t.arts[2].art.env.pts.len(), 5);
+        assert_eq!(t.arts[2].art.env.pts[2], Pt { x: 0.1, y: 0.25, tension: 0.5, mode: 2 });
+        assert_eq!(t.arts[2].art.env.sustain, 3);
+        assert_eq!(t.arts[1].art.env.pts, s.arts[1].art.env.pts);
+        assert_eq!(t.arts[7].art.maps[4].pts, s.arts[7].art.maps[4].pts);
+        assert_eq!((t.arts[7].lo, t.arts[7].hi), (s.arts[7].lo, s.arts[7].hi));
+        // a line whose place has moved is refused rather than written over something else
+        assert!(!s.arts[5].art.env.store(&mut raw[..100].to_vec()));
+    }
+
+    #[test]
     fn curves_hold_loop_and_let_go() {
-        let mut c = Curve { pts: vec![Pt { x: 0.0, y: 0.0, ..Default::default() }, Pt { x: 1.0, y: 1.0, ..Default::default() }, Pt { x: 1.0, y: 0.5, ..Default::default() }, Pt { x: 2.0, y: 0.0, ..Default::default() }], flags: 1, decay: 1, loop_start: -1, sustain: 2, t: vec![] };
+        let mut c = Curve { pts: vec![Pt { x: 0.0, y: 0.0, ..Default::default() }, Pt { x: 1.0, y: 1.0, ..Default::default() }, Pt { x: 1.0, y: 0.5, ..Default::default() }, Pt { x: 2.0, y: 0.0, ..Default::default() }], flags: 1, decay: 1, loop_start: -1, sustain: 2, span: (0, 0), t: vec![] };
         c.prepare([0.5, 1.0, 2.0]);
         assert!((c.env(0.25, None) - 0.5).abs() < 1e-5);
         assert!((c.env(9.0, None) - 0.5).abs() < 1e-5);

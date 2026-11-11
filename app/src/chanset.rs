@@ -577,7 +577,59 @@ fn env_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
     p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
     let x = rect.left() + held / total * rect.width();
     p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
-    ui.label(RichText::new(format!("The picture shows a note held {held:.1} s and let go at the line. Drawing the envelope, oscillator and mapping lines by hand is still to come; they are played as stored.")).small().color(TEXT_DIM));
+    ui.label(RichText::new(format!("The picture shows a note held {held:.1} s and let go at the line.")).small().color(TEXT_DIM));
+    if changed {
+        // the knobs above already rewrote the block this frame; the lines are read afresh on the next one
+        return true;
+    }
+    ui.separator();
+    let line_id = ui.id().with("envline");
+    let n_maps = a.art.maps.iter().filter(|m| m.span.1 > 0).count();
+    let mut which: usize = ui.data(|d| d.get_temp(line_id)).unwrap_or(0).min(1 + n_maps);
+    ui.horizontal(|ui| {
+        ui.label("Line");
+        ui.selectable_value(&mut which, 0, "Envelope");
+        ui.selectable_value(&mut which, 1, "Oscillator shape");
+        for (k, name) in ["Key", "Velocity", "X", "Y", "Random"].iter().enumerate().take(n_maps) {
+            ui.selectable_value(&mut which, 2 + k, format!("{name} map"));
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(line_id, which));
+    let (env_end, lfo_end) = (a.art.env.span.1, a.art.lfo.span.1);
+    if which == 0 && env_end + 16 <= raw.len() {
+        ui.horizontal(|ui| {
+            for (o, name) in [(0usize, "Attack length"), (4, "Decay length"), (12, "Release length")] {
+                let mut v = i32::from_le_bytes(raw[env_end + o..env_end + o + 4].try_into().unwrap()).clamp(0, 256);
+                if ui.add(egui::DragValue::new(&mut v).range(0..=256).prefix(format!("{name} ")).custom_formatter(|v, _| format!("{:.0} %", (v / 128.0) * (v / 128.0) * 100.0))).changed() {
+                    put(raw, env_end + o, v);
+                    changed = true;
+                }
+            }
+        });
+    }
+    if which == 1 && lfo_end + 4 <= raw.len() {
+        ui.horizontal(|ui| {
+            let mut v = i32::from_le_bytes(raw[lfo_end..lfo_end + 4].try_into().unwrap()).clamp(0, 65536);
+            if ui.add(egui::Slider::new(&mut v, 0..=65536).text("Speed").custom_formatter(|v, _| format!("{:.2} Hz", 0.05 * (v / 65536.0 * 11.0).exp2()))).changed() {
+                put(raw, lfo_end, v);
+                changed = true;
+            }
+        });
+    }
+    if changed {
+        return true;
+    }
+    let (mut c, kind) = match which {
+        0 => (a.art.env.clone(), crate::curve::Line::Envelope),
+        1 => (a.art.lfo.clone(), crate::curve::Line::Envelope),
+        k => (a.art.maps[k - 2].clone(), crate::curve::Line::Mapping),
+    };
+    ui.push_id(("envcurve", sel, which), |ui| {
+        if crate::curve::curve_editor(ui, &mut c, kind, 170.0) && c.store(raw) {
+            changed = true;
+        }
+    });
+    ui.label(RichText::new("Drag a point to move it, drag a ring to bend the stretch before it (double-click straightens it). Right-click empty space for a new point, right-click a point for its menu.").small().color(TEXT_DIM));
     changed
 }
 
@@ -811,69 +863,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             }
         }
         Kind::Fm => {
-            // shown as stored for now: the settings play, the editing pages are still to come
-            use cereal_engine::fm::MODULES;
-            let Some(p) = g.fm.clone() else { return false };
-            let pct = |v: f32| if v == 0.0 { String::new() } else { format!("{:.0}", v * 100.0) };
-            ui.label(RichText::new("Modulation matrix (percent)").strong());
-            egui::Grid::new("fm_matrix").striped(true).min_col_width(34.0).show(ui, |ui| {
-                ui.label("");
-                for k in 0..6 {
-                    ui.label(RichText::new(format!("{}", k + 1)).strong());
-                }
-                ui.label(RichText::new("Pan").strong());
-                ui.label(RichText::new("Out").strong());
-                ui.end_row();
-                for r in 0..9 {
-                    ui.label(RichText::new(MODULES[r]).strong());
-                    for c in 0..6 {
-                        ui.label(pct(if r < 6 { p.fm[r][c] } else { p.feed[r - 6][c] }));
-                    }
-                    ui.label(pct(p.pan[r]));
-                    ui.label(pct(p.out[r]));
-                    ui.end_row();
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new("Operators").strong());
-            let used = p.used();
-            egui::Grid::new("fm_ops").striped(true).show(ui, |ui| {
-                for h in ["", "Ratio", "Offset Hz", "Level", "Noise", "Plucked", "Heard"] {
-                    ui.label(RichText::new(h).strong());
-                }
-                ui.end_row();
-                for (k, o) in p.ops.iter().enumerate() {
-                    ui.label(MODULES[k]);
-                    ui.label(format!("{:.4}", o.ratio));
-                    ui.label(format!("{:.2}", o.offset_hz));
-                    ui.label(format!("{:.0} %", o.vol * 100.0));
-                    ui.label(format!("{:.0} %", o.noise * 100.0));
-                    ui.label(if o.pluck { "yes" } else { "" });
-                    ui.label(if used[k] { "yes" } else { "" });
-                    ui.end_row();
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new("Filters").strong());
-            egui::Grid::new("fm_filters").striped(true).show(ui, |ui| {
-                for h in ["", "Stages", "Type", "Cutoff", "Resonance", "Envelope", "To next", "Shaper"] {
-                    ui.label(RichText::new(h).strong());
-                }
-                ui.end_row();
-                for (k, f) in p.filts.iter().enumerate() {
-                    ui.label(MODULES[6 + k]);
-                    ui.label(if f.slope == 0 { "off".to_string() } else { format!("{}", f.slope) });
-                    ui.label(format!("{}", f.kind));
-                    ui.label(format!("{:.0} %", f.cut * 100.0));
-                    ui.label(format!("{:.0} %", f.res * 100.0));
-                    ui.label(format!("{:.0} %", f.env_amt * 100.0));
-                    ui.label(pct(f.next));
-                    ui.label(if f.ws_on { "on" } else { "" });
-                    ui.end_row();
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(format!("Volume {:.0} %    Pitch {:+.0} st    Unison {}", p.volume * 100.0, p.pitch, p.uni));
+            changed |= fm_panel(ui, g);
         }
         Kind::Packs => {
             let (pack, preset) = g.pack_and_preset();
@@ -939,4 +929,294 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
         }
     }
     changed
+}
+
+/// The six-operator instrument: its matrix, operators, filters and drawn lines, all edited in the stored block.
+fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
+    use cereal_engine::fm::{Patch, FILTER_TARGETS, MODULES, OP_TARGETS};
+    let (Some(p), Some(d)) = (g.fm.clone(), Patch::unpack(&g.raw)) else {
+        ui.label(RichText::new("The stored settings could not be read. They are kept untouched and play as far as they were understood.").color(TEXT_DIM));
+        return false;
+    };
+    let int = |o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+    let mut sets: Vec<(usize, i32)> = Vec::new();
+    let mut bytes: Vec<(usize, u8)> = Vec::new();
+    let mut floats: Vec<(usize, f32)> = Vec::new();
+    let mut line: Option<cereal_engine::fm::Curve> = None;
+    // one number: shown scaled, stored as the whole number the block holds
+    let num = |ui: &mut Ui, sets: &mut Vec<(usize, i32)>, o: usize, lo: i32, hi: i32, scale: f32, dec: usize, label: &str, unit: &str| {
+        let mut v = int(o).clamp(lo, hi) as f32 * scale;
+        let speed = ((hi - lo) as f32 * scale / 200.0).max(scale);
+        if ui.add(egui::DragValue::new(&mut v).range(lo as f32 * scale..=hi as f32 * scale).speed(speed).fixed_decimals(dec).prefix(format!("{label} ")).suffix(unit)).changed() {
+            sets.push((o, (v / scale).round() as i32));
+        }
+    };
+    let page_id = ui.id().with("fmpage");
+    let mut page: usize = ui.data(|d| d.get_temp(page_id)).unwrap_or(0);
+    let used = p.used();
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut page, 0, "Main");
+        for (k, name) in MODULES.iter().enumerate() {
+            let heard = k >= 6 || used[k];
+            ui.selectable_value(&mut page, 1 + k, RichText::new(*name).color(if heard { TEXT } else { TEXT_DIM }));
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(page_id, page));
+    ui.separator();
+    // which drawn lines belong to this page, and what they steer
+    let (first_art, targets): (usize, &[&str]) = match page {
+        0 => (60, &["Pan", "Volume"]),
+        k @ 1..=6 => ((k - 1) * 6, &OP_TARGETS),
+        k => (36 + (k - 7) * 8, &FILTER_TARGETS),
+    };
+    match page {
+        0 => {
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, 0, 0, 256, 100.0 / 128.0, 0, "Volume", " %");
+                num(ui, &mut sets, 8, -48, 48, 1.0, 0, "Pitch", " st");
+                num(ui, &mut sets, 4, -128, 128, 100.0 / 128.0, 0, "Oscillator amount", " %");
+                num(ui, &mut sets, 728, 0, 1024, 100.0 / 1024.0, 0, "X", " %");
+                num(ui, &mut sets, 732, 0, 1024, 100.0 / 1024.0, 0, "Y", " %");
+            });
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, 692, 1, 9, 1.0, 0, "Unison voices", "");
+                num(ui, &mut sets, 696, 0, 128, 100.0 / 128.0, 0, "spread", " %");
+                num(ui, &mut sets, 700, 0, 128, 100.0 / 128.0, 0, "level", " %");
+                num(ui, &mut sets, 704, 0, 256, 100.0 / 256.0, 0, "detune", " %");
+                num(ui, &mut sets, 712, 0, 128, 100.0 / 128.0, 0, "phase", " %");
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Envelope lengths, volume").color(TEXT_DIM));
+                num(ui, &mut sets, 660, 0, 256, 1.0, 0, "A", "");
+                num(ui, &mut sets, 664, 0, 256, 1.0, 0, "D", "");
+                num(ui, &mut sets, 672, 0, 256, 1.0, 0, "R", "");
+                ui.label(RichText::new("filter").color(TEXT_DIM));
+                num(ui, &mut sets, 676, 0, 256, 1.0, 0, "A", "");
+                num(ui, &mut sets, 680, 0, 256, 1.0, 0, "D", "");
+                num(ui, &mut sets, 688, 0, 256, 1.0, 0, "R", "");
+            });
+            ui.add_space(4.0);
+            let ring_id = ui.id().with("fmring");
+            let mut ring: bool = ui.data(|d| d.get_temp(ring_id)).unwrap_or(false);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Matrix (percent): each row takes from the operators in the columns").strong());
+                ui.selectable_value(&mut ring, false, "Frequency");
+                ui.selectable_value(&mut ring, true, "Ring");
+            });
+            ui.data_mut(|d| d.insert_temp(ring_id, ring));
+            egui::Grid::new("fm_matrix").striped(true).min_col_width(38.0).spacing([2.0, 2.0]).show(ui, |ui| {
+                ui.label("");
+                for k in 0..6 {
+                    ui.label(RichText::new(format!("{}", k + 1)).strong());
+                }
+                if !ring {
+                    for h in ["Pan", "Send", "Out"] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                }
+                ui.end_row();
+                let (base, rows, cols) = if ring { (336usize, 6usize, 6usize) } else { (12, 9, 9) };
+                for r in 0..rows {
+                    ui.label(RichText::new(MODULES[r]).strong());
+                    for c in 0..cols {
+                        let o = base + r * 36 + c * 4;
+                        let mut v = (int(o).clamp(-256, 256) as f32 / 2.56).round();
+                        let shown = egui::DragValue::new(&mut v).range(-100.0..=100.0).speed(0.5).custom_formatter(|v, _| if v == 0.0 { "·".to_string() } else { format!("{v:.0}") });
+                        let resp = ui.add(shown);
+                        if resp.changed() {
+                            sets.push((o, (v * 2.56).round() as i32));
+                        }
+                        if resp.secondary_clicked() {
+                            sets.push((o, 0));
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.label(RichText::new("Drag a cell to set it, right-click to clear it. A row's own column is its feedback.").small().color(TEXT_DIM));
+        }
+        k @ 1..=6 => {
+            let at = p.op_at[k - 1];
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, at + 40, 0, 640_000, 1.0 / 20000.0, 4, "Ratio", "");
+                num(ui, &mut sets, at + 44, -2_000_000, 2_000_000, 0.01, 2, "Offset", " Hz");
+                num(ui, &mut sets, at, 0, 256, 100.0 / 256.0, 0, "Phase", " %");
+                num(ui, &mut sets, at + 4, -256, 512, 100.0 / 256.0, 0, "Level", " %");
+            });
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, at + 8, 0, 9600, 1.0, 0, "Pitch range", " cents");
+                num(ui, &mut sets, at + 48, 0, 128, 100.0 / 128.0, 0, "Noise", " %");
+                let mut pluck = d.get(at + 2126).copied().unwrap_or(0) != 0;
+                if ui.checkbox(&mut pluck, "Plucked string").changed() {
+                    bytes.push((at + 2126, pluck as u8));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Wave").color(TEXT_DIM));
+                num(ui, &mut sets, at + 2100, 0, 512, 100.0 / 256.0, 0, "Shape", " %");
+                num(ui, &mut sets, at + 2104, -128, 128, 100.0 / 128.0, 0, "Tension", " %");
+                num(ui, &mut sets, at + 2108, 0, 128, 100.0 / 128.0, 0, "Skew", " %");
+                num(ui, &mut sets, at + 2112, 0, 128, 100.0 / 128.0, 0, "Sine shaper", " %");
+                num(ui, &mut sets, at + 2116, 0, 128, 100.0 / 128.0, 0, "Brightness", " %");
+            });
+            ui.horizontal(|ui| {
+                for (o, name) in [(2120usize, "Half wave"), (2122, "Fold up"), (2123, "Centre")] {
+                    let mut on = d.get(at + o).copied().unwrap_or(0) != 0;
+                    if ui.checkbox(&mut on, name).changed() {
+                        bytes.push((at + o, on as u8));
+                    }
+                }
+            });
+            // the wave itself, then the overtones it is built from
+            let fl = |o: usize| d.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).unwrap_or(0.0);
+            const SHOWN: usize = 64;
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(SHOWN as f32 * 7.0, 70.0), Sense::click_and_drag());
+            let pt = ui.painter_at(rect);
+            pt.rect_filled(rect, 2.0, PANEL_DARK);
+            for h in 0..SHOWN {
+                let m = fl(at + 52 + h * 4).clamp(0.0, 1.0);
+                let x = rect.left() + h as f32 * 7.0;
+                pt.rect_filled(egui::Rect::from_min_max(Pos2::new(x + 1.0, rect.bottom() - m * rect.height()), Pos2::new(x + 6.0, rect.bottom())), 0.0, if h % 2 == 0 { ACCENT } else { ACCENT.gamma_multiply(0.75) });
+            }
+            if resp.dragged() || resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let h = (((pos.x - rect.left()) / 7.0) as usize).min(SHOWN - 1);
+                    let m = if ui.input(|i| i.pointer.secondary_down()) { 0.0 } else { ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0) };
+                    floats.push((at + 52 + h * 4, m));
+                }
+            }
+            ui.label(RichText::new("Overtones 1 to 64: drag to set how strong each is, drag with the right button to silence.").small().color(TEXT_DIM));
+        }
+        k => {
+            let at = p.filt_at[k - 7];
+            const KINDS: [&str; 13] = ["Low / band / high mix", "Low-pass 1", "Low-pass 2", "Low-pass 3", "Band-pass", "Notch", "High-pass", "All-pass", "Low shelf", "Peak", "High shelf", "Driven low-pass", "Phaser"];
+            const SLOPES: [&str; 6] = ["Off", "1 stage", "2 stages", "3 stages", "2 stages, alternative", "3 stages, alternative"];
+            ui.horizontal(|ui| {
+                let mut kind = int(at + 84).clamp(0, 12) as usize;
+                egui::ComboBox::from_id_salt("fmfkind").selected_text(KINDS[kind]).show_ui(ui, |ui| {
+                    for (i, n) in KINDS.iter().enumerate() {
+                        if ui.selectable_value(&mut kind, i, *n).clicked() {
+                            sets.push((at + 84, i as i32));
+                        }
+                    }
+                });
+                let mut slope = int(at).clamp(0, 5) as usize;
+                egui::ComboBox::from_id_salt("fmfslope").selected_text(SLOPES[slope]).show_ui(ui, |ui| {
+                    for (i, n) in SLOPES.iter().enumerate() {
+                        if ui.selectable_value(&mut slope, i, *n).clicked() {
+                            sets.push((at, i as i32));
+                        }
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, at + 8, 0, 256, 100.0 / 256.0, 0, "Cutoff", " %");
+                num(ui, &mut sets, at + 12, 0, 256, 100.0 / 256.0, 0, "Resonance", " %");
+                num(ui, &mut sets, at + 4, 0, 256, 100.0 / 256.0, 0, "Envelope", " %");
+                num(ui, &mut sets, at + 36, -256, 256, 100.0 / 256.0, 0, "To next filter", " %");
+            });
+            ui.horizontal(|ui| {
+                num(ui, &mut sets, at + 16, 0, 128, 100.0 / 128.0, 0, "Low / amount", " %");
+                num(ui, &mut sets, at + 20, 0, 128, 100.0 / 128.0, 0, "Band", " %");
+                num(ui, &mut sets, at + 24, 0, 128, 100.0 / 128.0, 0, "High", " %");
+            });
+            ui.horizontal(|ui| {
+                let mut on = int(at + 80) != 0;
+                if ui.checkbox(&mut on, "Shaper").changed() {
+                    sets.push((at + 80, on as i32));
+                }
+                num(ui, &mut sets, at + 28, 0, 256, 1.0, 0, "drive", "");
+                num(ui, &mut sets, at + 32, 0, 128, 100.0 / 128.0, 0, "mix", " %");
+            });
+        }
+    }
+    ui.separator();
+    // the drawn lines of this page
+    let tgt_id = ui.id().with(("fmtarget", page));
+    let mut tgt: usize = ui.data(|d| d.get_temp(tgt_id)).unwrap_or(1).min(targets.len() - 1);
+    let which_id = ui.id().with("fmline");
+    let mut which: usize = ui.data(|d| d.get_temp(which_id)).unwrap_or(0).min(7);
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Lines for");
+        for (k, name) in targets.iter().enumerate() {
+            let live = p.arts.get(first_art + k).is_some_and(|a| a.env.on() || a.lfo.on());
+            ui.selectable_value(&mut tgt, k, RichText::new(*name).color(if live { TEXT } else { TEXT_DIM }));
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut which, 0, "Envelope");
+        ui.selectable_value(&mut which, 1, "Oscillator shape");
+        for (k, name) in ["Key", "Velocity", "X", "Y", "Random", "Unison"].iter().enumerate() {
+            ui.selectable_value(&mut which, 2 + k, format!("{name} map"));
+        }
+    });
+    ui.data_mut(|d| {
+        d.insert_temp(tgt_id, tgt);
+        d.insert_temp(which_id, which);
+    });
+    if let Some(a) = p.arts.get(first_art + tgt) {
+        let (mut c, kind) = match which {
+            0 => (a.env.clone(), crate::curve::Line::Envelope),
+            1 => (a.lfo.clone(), crate::curve::Line::Envelope),
+            k => (a.maps[k - 2].clone(), crate::curve::Line::Mapping),
+        };
+        let mut touched = false;
+        if which < 2 {
+            let end = c.span.1;
+            ui.horizontal(|ui| {
+                let mut on = c.on();
+                if ui.checkbox(&mut on, "On").changed() {
+                    c.flags ^= 1;
+                    touched = true;
+                }
+                if which == 0 {
+                    num(ui, &mut sets, end, 0, 256, 1.0, 0, "Attack length", "");
+                    num(ui, &mut sets, end + 4, 0, 256, 1.0, 0, "Decay length", "");
+                    num(ui, &mut sets, end + 12, 0, 256, 1.0, 0, "Release length", "");
+                } else {
+                    num(ui, &mut sets, end, 0, 65536, 1.0, 0, "Speed", "");
+                    ui.label(RichText::new(format!("{:.2} Hz", a.lfo_hz)).color(TEXT_DIM));
+                }
+            });
+        }
+        ui.push_id(("fmcurve", page, tgt, which), |ui| {
+            touched |= crate::curve::curve_editor(ui, &mut c, kind, 170.0);
+        });
+        if touched && c.span.1 > 0 {
+            line = Some(c);
+        }
+        ui.label(RichText::new("Drag a point to move it, drag a ring to bend the stretch before it (double-click straightens it). Right-click empty space for a new point, right-click a point for its menu.").small().color(TEXT_DIM));
+    }
+    if sets.is_empty() && bytes.is_empty() && floats.is_empty() && line.is_none() {
+        return false;
+    }
+    let done = Patch::edited(&g.raw, |d| {
+        for (o, v) in sets {
+            if let Some(b) = d.get_mut(o..o + 4) {
+                b.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        for (o, v) in floats {
+            if let Some(b) = d.get_mut(o..o + 4) {
+                b.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        for (o, v) in bytes {
+            if let Some(b) = d.get_mut(o) {
+                *b = v;
+            }
+        }
+        // the line goes in last: it can change the length of the block, and every other place was read before that
+        if let Some(c) = line {
+            c.store(d);
+        }
+    });
+    match done {
+        Some((raw, patch)) => {
+            g.raw = raw;
+            g.fm = Some(std::sync::Arc::new(patch));
+            true
+        }
+        None => false,
+    }
 }
