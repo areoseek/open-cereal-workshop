@@ -14,6 +14,7 @@ pub enum Kind {
     FastDist,
     Enhancer,
     Loud,
+    Warp,
     FastLp,
     Overdrive,
     Filter,
@@ -672,6 +673,22 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
+        kind: Kind::Warp,
+        ident: "Gross Beat",
+        title: "Beat Juggler",
+        size: 6960,
+        fixed: &[],
+        params: &[
+            p("Time slot", 4, 0, 35, 0),
+            p("Volume slot", 8, 0, 35, 0),
+            p("Time mix", 12, 0, 256, 256),
+            p("Volume mix", 16, 0, 256, 256),
+            p("Attack", 20, 0, 8192, 1765),
+            p("Release", 24, 0, 8192, 5000),
+            p("Tension", 28, 0, 256, 0),
+        ],
+    },
+    Def {
         kind: Kind::Xy,
         ident: "Fruity X-Y Controller",
         title: "Pad Controller",
@@ -931,6 +948,11 @@ fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
 /// Read one drawn line whose header (kind, layout, point count) sits at `head` into a table appended to `p`.
 /// After the header come the points (three layouts by age) and a 20-byte tail; returns the offset behind it.
 fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
+    drawn_table_n(state, head, CURVE_N, p)
+}
+
+/// The same with a table of `count` entries.
+fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec<f32>) -> Option<usize> {
     let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     if int(head)? != 3 {
         return None;
@@ -964,8 +986,8 @@ fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
     }
     let span = x.max(1e-6);
     let mut seg = 1;
-    for i in 0..CURVE_N {
-        let at = i as f32 / (CURVE_N - 1) as f32 * span;
+    for i in 0..count {
+        let at = i as f32 / (count - 1) as f32 * span;
         while seg + 1 < n && at > pts[seg].0 {
             seg += 1;
         }
@@ -999,6 +1021,70 @@ fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
         p.push(v);
     }
     Some(first + n * size + 20)
+}
+
+/// Entries in one of the beat juggler's tables: 128 to the beat over its four beats.
+const WARP_N: usize = 513;
+/// Slots of each sort (time first, then volume).
+const WARP_SLOTS: usize = 36;
+
+/// Where the beat juggler's 72 drawn lines start. The layout around them changed with the versions (newer
+/// blocks carry slot names), so the lines are found by their own shape.
+fn warp_lines(state: &[u8]) -> Option<Vec<usize>> {
+    let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut heads = Vec::with_capacity(2 * WARP_SLOTS);
+    let mut at = 44;
+    while at + 12 <= state.len() && heads.len() < 2 * WARP_SLOTS {
+        let fits = (|| {
+            if int(at)? != 3 || !matches!(int(at + 4)?, 2 | 3) {
+                return None;
+            }
+            let n = int(at + 8)? as usize;
+            let end = at + 12 + n.checked_mul(24)? + 20;
+            if n == 0 || n > 4096 || end > state.len() {
+                return None;
+            }
+            for k in 0..n {
+                let b = &state[at + 12 + k * 24..];
+                let x = f64::from_le_bytes(b[0..8].try_into().ok()?);
+                let y = f64::from_le_bytes(b[8..16].try_into().ok()?);
+                if !(0.0..1e4).contains(&x) || !(-0.01..=1.01).contains(&y) {
+                    return None;
+                }
+            }
+            Some(end)
+        })();
+        match fits {
+            Some(end) => {
+                heads.push(at);
+                at = end;
+            }
+            None => at += 1,
+        }
+    }
+    (heads.len() == 2 * WARP_SLOTS).then_some(heads)
+}
+
+/// A fresh beat juggler block: every slot holds a level line (no time shift, full volume).
+fn warp_fresh() -> Vec<u8> {
+    let mut v = Vec::with_capacity(6960);
+    for x in [4i32, 0, 0, 256, 256, 1765, 5000, 0, 0, 65536, 0, 0x0101_0000] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    for _ in 0..2 * WARP_SLOTS {
+        for x in [1280i32, 1280, 0, 0, 3, 2, 2] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [0f64, 4.0] {
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&1f64.to_le_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, 2, 0, 0, 0]);
+        }
+        for x in [0i32, -1, -1, -1, -1] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    v
 }
 
 /// The band split knob: 30 Hz to 16 kHz over its travel.
@@ -1088,6 +1174,9 @@ impl Fx {
         if kind == Kind::Maxi {
             return Self::decode(def(kind).ident, &maxi_fresh()).expect("our own block reads back");
         }
+        if kind == Kind::Warp {
+            return Self::decode(def(kind).ident, &warp_fresh()).expect("our own block reads back");
+        }
         Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
     }
 
@@ -1154,6 +1243,11 @@ impl Fx {
         if d.kind == Kind::Curve {
             curve_table(state, &mut p)?;
         }
+        if d.kind == Kind::Warp {
+            for head in warp_lines(state)? {
+                drawn_table_n(state, head, WARP_N, &mut p)?;
+            }
+        }
         Some(Self { kind: d.kind, p })
     }
 
@@ -1166,6 +1260,7 @@ impl Fx {
             None if self.kind == Kind::Curve => curve_fresh(),
             None if self.kind == Kind::Maxi => maxi_fresh(),
             None if self.kind == Kind::Xy => XY_FRESH.to_vec(),
+            None if self.kind == Kind::Warp => warp_fresh(),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -1472,6 +1567,8 @@ impl Unit {
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            // two bars at 40 beats a minute and up
+            Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Tuner => {
                 u.buf = vec![[0.0; 2]; (sr * 0.2) as usize + 8];
                 u.lines.push(vec![0.0; 2048]);
@@ -1556,6 +1653,7 @@ impl Unit {
             }
             Kind::Spread | Kind::Transient | Kind::Tuner => (cx.sr * 0.25) as usize,
             Kind::Peak => (cx.sr * 3.0) as usize,
+            Kind::Warp => (cx.step * 32.0) as usize + 64,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -2265,6 +2363,64 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Warp => {
+                // everything heard goes into a two-bar ring; the time line says how far back to read at each
+                // moment of the bar (top = now, bottom = two bars ago) and the volume line gates the result
+                let n = self.buf.len();
+                let bar = (cx.step * 16.0).max(1.0);
+                let span = (cx.step * 32.0).min(n as f32 - 4.0);
+                let table = |slot: f32, second: bool| {
+                    let k = (slot.round().clamp(0.0, WARP_SLOTS as f32 - 1.0)) as usize + if second { WARP_SLOTS } else { 0 };
+                    let from = 7 + k * WARP_N;
+                    p.get(from..from + WARP_N)
+                };
+                let (Some(time), Some(vol)) = (table(p[0], false), table(p[1], true)) else { return };
+                let (tmix, vmix) = ((p[2] / 256.0).clamp(0.0, 1.0), (p[3] / 256.0).clamp(0.0, 1.0));
+                let coef = |v: f32| {
+                    let ms = 500.0 * (v / 8192.0).clamp(0.0, 1.0).powi(2);
+                    1.0 - (-1.0 / ((ms / 1000.0 * sr).max(1.0))).exp()
+                };
+                let (up, down) = (coef(p[4]), coef(p[5]));
+                let fade = 1.0 / (0.003 * sr);
+                let buf = &mut self.buf;
+                let read = |buf: &Vec<[f32; 2]>, pos: usize, back: f32| {
+                    let at = pos as f32 - back.clamp(0.0, span);
+                    let at = if at < 0.0 { at + n as f32 } else { at };
+                    let i = at as usize % n;
+                    let w = at - at.floor();
+                    let (a, b) = (buf[i], buf[(i + 1) % n]);
+                    [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w]
+                };
+                for f in io.iter_mut() {
+                    buf[self.pos] = *f;
+                    let x = self.ph * (WARP_N - 1) as f32;
+                    let i = (x as usize).min(WARP_N - 2);
+                    let w = x - i as f32;
+                    // a drawn jump stays a jump; a slope is followed smoothly
+                    let (a, b) = (time[i], time[i + 1]);
+                    let y = if (b - a).abs() > 1.0 / 64.0 { a } else { a + (b - a) * w };
+                    let back = (1.0 - y) * span;
+                    // z[1] is the distance in use, z[2] the one being faded out, z[3] the fade
+                    if (back - z[1]).abs() > 48.0 {
+                        z[2] = z[1];
+                        z[3] = 1.0;
+                    }
+                    z[1] = back;
+                    let mut wet = if back < 0.5 { *f } else { read(buf, self.pos, back) };
+                    if z[3] > 0.0 {
+                        let old = read(buf, self.pos, z[2]);
+                        wet = [wet[0] + (old[0] - wet[0]) * z[3], wet[1] + (old[1] - wet[1]) * z[3]];
+                        z[3] = (z[3] - fade).max(0.0);
+                    }
+                    // z[0] holds how far the gate is closed, so a fresh unit starts open
+                    let want = 1.0 - (vol[i] + (vol[i + 1] - vol[i]) * w);
+                    z[0] += (want - z[0]) * if want < z[0] { up } else { down };
+                    let g = 1.0 - vmix * z[0];
+                    *f = [(f[0] + (wet[0] - f[0]) * tmix) * g, (f[1] + (wet[1] - f[1]) * tmix) * g];
+                    self.pos = (self.pos + 1) % n;
+                    self.ph = (self.ph + 1.0 / bar).fract();
+                }
+            }
             Kind::Peak => {
                 // the loudest moment of the block lifts the follower at once; it then falls back over the decay
                 let top = io.iter().fold(0f32, |m, f| m.max(f[0].abs()).max(f[1].abs())).min(1.0);
@@ -3062,6 +3218,35 @@ mod tests {
             let out = run(Fx::new(kind), sine, 8000);
             assert!(rms(&out[4000..]) > 0.05, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn beat_juggler_repeats_and_gates() {
+        // a fresh one changes nothing and writes a block that reads back
+        let fresh = Fx::new(Kind::Warp);
+        assert_eq!(fresh.p.len(), 7 + 72 * WARP_N);
+        let block = fresh.encode(None);
+        assert_eq!(block.len(), 6960);
+        assert_eq!(Fx::decode("Gross Beat", &block).unwrap(), fresh);
+        // time slot 0: from beat 2 on, read two beats back; volume slot 0: shut for the last beat
+        let mut fx = fresh.clone();
+        for i in 0..WARP_N {
+            let beat = i as f32 / 128.0;
+            fx.p[7 + i] = if beat >= 2.0 { 0.75 } else { 1.0 };
+            fx.p[7 + 36 * WARP_N + i] = if beat >= 3.0 { 0.0 } else { 1.0 };
+        }
+        fx.p[4] = 0.0;
+        fx.p[5] = 0.0;
+        let cx = Ctx { sr: 48000.0, step: 6000.0 };
+        let mut u = Unit::new(fx, cx.sr);
+        let src = |i: usize| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5;
+        let mut io: Vec<[f32; 2]> = (0..96000).map(|i| [src(i); 2]).collect();
+        for c in io.chunks_mut(512) {
+            u.process(c, &cx);
+        }
+        assert!((io[1000][0] - src(1000)).abs() < 1e-6);
+        assert!((io[60000][0] - src(60000 - 48000)).abs() < 1e-3, "beat 2.5 replays beat 0.5");
+        assert!(io[80000][0].abs() < 1e-3, "the gate is shut in the last beat");
     }
 
     #[test]
