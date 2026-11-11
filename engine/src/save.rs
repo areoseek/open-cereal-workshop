@@ -1376,6 +1376,12 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 records.push((64 + d as u8, cd, q(now.send_level(d), 12800.0)));
             }
         }
+        if now.audio_in != was.audio_in {
+            let last = ev.len();
+            if let Some(e) = ev[open..(close + 1).min(last)].iter_mut().find(|e| e.id == id::INSERT_INPUT) {
+                e.value = Value::Int(now.audio_in as u32);
+            }
+        }
         if (now.invert, now.swap) != (was.invert, was.swap) {
             if let Value::Data(d) = &mut ev[open].value {
                 let f = u32at(d, 4) & !(flp::INSERT_FLAG_INVERT | flp::INSERT_FLAG_SWAP);
@@ -1718,6 +1724,7 @@ mod tests {
         s.inserts[3].eq[2].q = 0.75;
         s.inserts[4].set_send_level(3, 0.5);
         s.inserts[4].swap = true;
+        s.inserts[4].audio_in = 1;
         s.tracks[2].name = "Fills".into();
         s.prepare();
 
@@ -1751,6 +1758,7 @@ mod tests {
         assert_eq!(r.inserts[2].eq, crate::song::EQ_DEFAULT);
         assert!((r.inserts[4].send_level(3) - 0.5).abs() < 1e-3);
         assert!(r.inserts[4].swap && !r.inserts[4].invert && !r.inserts[3].swap);
+        assert_eq!((r.inserts[4].audio_in, r.inserts[3].audio_in), (1, -1));
         assert_eq!(r.tracks[2].name, "Fills");
 
         // saving what was loaded changes nothing

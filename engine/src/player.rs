@@ -54,6 +54,11 @@ pub struct Transport {
     /// The slot whose passing sound is being recorded, and what has gathered since the window last took it.
     rec_want: AtomicU32,
     rec: Mutex<Vec<[f32; 2]>>,
+    /// Sound arriving from the sound card inputs, interleaved over `input_ch` channels, waiting for the mixer.
+    input: Mutex<std::collections::VecDeque<f32>>,
+    input_ch: AtomicUsize,
+    /// Whether any mixer track listens to an input, so the window knows to keep the inputs open.
+    input_wanted: AtomicBool,
 }
 
 /// The latest stretch of sound through the watched slot, kept going round.
@@ -98,6 +103,9 @@ impl Transport {
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
             rec_want: AtomicU32::new(u32::MAX),
             rec: Mutex::new(Vec::new()),
+            input: Mutex::new(std::collections::VecDeque::new()),
+            input_ch: AtomicUsize::new(0),
+            input_wanted: AtomicBool::new(false),
         })
     }
     pub fn playing(&self) -> bool {
@@ -177,6 +185,27 @@ impl Transport {
             *r = Vec::with_capacity(if at.is_some() { 96_000 } else { 0 });
         }
         self.rec_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
+    }
+    /// Hand over sound from the sound card inputs, interleaved over `channels`, at the engine's own rate.
+    /// At most a second is kept waiting; older sound is let go.
+    pub fn feed_input(&self, data: &[f32], channels: usize) {
+        if channels == 0 {
+            return;
+        }
+        if let Ok(mut q) = self.input.lock() {
+            if self.input_ch.swap(channels, Relaxed) != channels {
+                q.clear();
+            }
+            q.extend(data.iter().copied());
+            let cap = 48_000 * channels;
+            if q.len() > cap {
+                let over = (q.len() - cap).div_ceil(channels) * channels;
+                q.drain(..over);
+            }
+        }
+    }
+    pub fn input_wanted(&self) -> bool {
+        self.input_wanted.load(Relaxed)
     }
     pub fn recording_slot(&self) -> Option<(usize, u16)> {
         let v = self.rec_want.load(Relaxed);
@@ -295,6 +324,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         scratch: Vec::with_capacity(BLOCK),
         cap: Vec::new(),
         cap_at: Vec::new(),
+        inbuf: Vec::new(),
         blockno: 0,
         dirty: vec![],
         pos: 0.0,
@@ -738,6 +768,8 @@ pub struct Player {
     /// What each insert put out this block, kept for units on other inserts that listen to it.
     cap: Vec<Vec<[f32; 2]>>,
     cap_at: Vec<u64>,
+    /// This block's share of the sound card inputs.
+    inbuf: Vec<f32>,
     blockno: u64,
     dirty: Vec<bool>,
     pos: f64,
@@ -1507,6 +1539,40 @@ impl Player {
             self.cap = vec![Vec::new(); ni];
             self.cap_at = vec![0; ni];
         }
+        // sound card inputs join the tracks that listen to them, ahead of the effects
+        let listening = song.inserts.iter().any(|i| i.audio_in >= 0);
+        self.transport.input_wanted.store(listening, Relaxed);
+        if listening {
+            let ch = self.transport.input_ch.load(Relaxed);
+            self.inbuf.clear();
+            if let (true, Ok(mut q)) = (ch > 0, self.transport.input.try_lock()) {
+                // hold no more than a few blocks back, so what is heard stays close to what is played
+                let keep = (n + 2048) * ch;
+                if q.len() > keep {
+                    let over = (q.len() - keep).div_ceil(ch) * ch;
+                    q.drain(..over);
+                }
+                let take = (n * ch).min(q.len() / ch * ch);
+                self.inbuf.extend(q.drain(..take));
+            }
+            let got = if ch > 0 { self.inbuf.len() / ch } else { 0 };
+            if got > 0 {
+                let pairs = ch.div_ceil(2);
+                for (i, ins) in song.inserts.iter().enumerate() {
+                    if ins.audio_in < 0 || i >= ni {
+                        continue;
+                    }
+                    let want = ins.audio_in as usize;
+                    // stereo pairs come first in the list, single inputs after them
+                    let (l, r) = if want < pairs { (want * 2, (want * 2 + 1).min(ch - 1)) } else { ((want - pairs).min(ch - 1), (want - pairs).min(ch - 1)) };
+                    for (k, f) in self.buses[i][..got].iter_mut().enumerate() {
+                        f[0] += self.inbuf[k * ch + l];
+                        f[1] += self.inbuf[k * ch + r];
+                    }
+                    self.dirty[i] = true;
+                }
+            }
+        }
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
             let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy)));
@@ -2072,6 +2138,30 @@ mod tests {
         let late = buf.iter().fold(0.0f32, |m, x| m.max(x.abs()));
         assert!(early < 0.02, "{early}");
         assert!(late > 0.1 && late > early * 5.0, "{late}");
+    }
+
+    #[test]
+    fn a_sound_card_input_is_heard_on_its_track() {
+        let mut s = click_song();
+        let (mut h, mut p) = new_player(s.clone(), 48_000.0);
+        let mut buf = vec![0.0f32; 512];
+        // nobody listens: what arrives is not heard
+        h.transport.feed_input(&vec![0.5; 3 * 256], 3);
+        p.render(&mut buf, 2);
+        assert!(buf.iter().all(|v| v.abs() < 1e-6) && !h.transport.input_wanted());
+        // three inputs make two pairs and three singles; entry 3 is the second single, on both sides
+        s.inserts[2].audio_in = 3;
+        h.publish(s);
+        p.render(&mut buf, 2);
+        assert!(h.transport.input_wanted());
+        let frames: Vec<f32> = (0..256).flat_map(|_| [0.1, 0.25, 0.4]).collect();
+        h.transport.feed_input(&frames, 3);
+        p.render(&mut buf, 2);
+        assert!((buf[0] - 0.25).abs() < 0.02 && (buf[1] - 0.25).abs() < 0.02, "{} {}", buf[0], buf[1]);
+        // and it stops when the input runs dry
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        assert!(buf.iter().all(|v| v.abs() < 1e-3));
     }
 
     #[test]

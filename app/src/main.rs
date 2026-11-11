@@ -69,22 +69,42 @@ pub(crate) enum StateAsk {
     SaveTrack(usize),
 }
 
+/// How long sound takes from the engine to the speakers, in millionths of a second, as the output device reports it.
+static OUT_LAG_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The rate the engine runs at.
+static OUT_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(44_100);
+
+fn out_lag(info: &cpal::OutputCallbackInfo) {
+    let t = info.timestamp();
+    if let Some(d) = t.playback.duration_since(&t.callback) {
+        OUT_LAG_US.store(d.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn start_audio() -> Result<(cpal::Stream, String, f32, Handle), String> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or("no audio output device")?;
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     let channels = config.channels() as usize;
     let rate = config.sample_rate().0 as f32;
+    OUT_RATE.store(rate as u32, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{} ({} Hz, {} ch)", device.name().unwrap_or_default(), rate as u32, channels);
     let (handle, mut player): (Handle, Player) = new_player(Song::new(), rate);
     let err = |e| eprintln!("audio stream error: {e}");
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_output_stream(&config.into(), move |out: &mut [f32], _| player.render(out, channels), err, None),
+        cpal::SampleFormat::F32 => device.build_output_stream(&config.into(), move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                out_lag(info);
+                player.render(out, channels)
+            },
+            err,
+            None,
+        ),
         cpal::SampleFormat::I16 => {
             let mut scratch = vec![0.0f32; 1 << 16];
             device.build_output_stream(
                 &config.into(),
-                move |out: &mut [i16], _| {
+                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    out_lag(info);
                     let n = out.len().min(scratch.len());
                     player.render(&mut scratch[..n], channels);
                     for (o, s) in out.iter_mut().zip(&scratch[..n]) {
@@ -152,6 +172,9 @@ pub(crate) struct App {
     /// Record sound from the input device too while recording runs.
     rec_audio: bool,
     audio_rec: Option<record::AudioRec>,
+    /// The sound card inputs, open while a mixer track listens to one; the flag stops retries after a failure.
+    live_in: Option<record::LiveIn>,
+    live_in_failed: bool,
     save_preset: Option<(String, bool)>,
     pub(crate) state_ask: Option<StateAsk>,
     show_chanset: bool,
@@ -270,6 +293,8 @@ impl App {
             rec_held: Vec::new(),
             rec_audio: false,
             audio_rec: None,
+            live_in: None,
+            live_in_failed: false,
             save_preset: None,
             state_ask: None,
             show_chanset: false,
@@ -347,13 +372,30 @@ impl App {
         self.handle.transport.seek(0);
     }
 
+    /// Keep the sound card inputs open exactly while some mixer track listens to one.
+    fn keep_inputs(&mut self) {
+        let want = self.song.inserts.iter().any(|i| i.audio_in >= 0) && std::env::var_os("CEREAL_NO_INPUT").is_none();
+        if !want {
+            self.live_in = None;
+            self.live_in_failed = false;
+        } else if self.live_in.is_none() && !self.live_in_failed {
+            match record::LiveIn::start(self.handle.transport.clone(), OUT_RATE.load(std::sync::atomic::Ordering::Relaxed)) {
+                Ok(l) => self.live_in = Some(l),
+                Err(e) => {
+                    self.live_in_failed = true;
+                    self.status = format!("Audio input failed: {e}");
+                }
+            }
+        }
+    }
+
     /// Start capturing sound when recording begins and turn it into an audio clip when it ends.
     fn record_audio(&mut self) {
         let tr = self.handle.transport.clone();
         let want = self.rec_audio && tr.recording() && tr.playing();
         if want && self.audio_rec.is_none() {
             let at = if tr.song_mode() { tr.tick().max(0.0) as u32 } else { 0 };
-            match record::AudioRec::start(at) {
+            match record::AudioRec::start(at, tr.clone()) {
                 Ok(r) => self.audio_rec = Some(r),
                 Err(e) => {
                     self.status = format!("Audio recording failed: {e}");
@@ -362,8 +404,9 @@ impl App {
             }
         } else if !want {
             if let Some(r) = self.audio_rec.take() {
-                let at = r.at;
-                match r.finish(&record::folder(self.path.as_deref())) {
+                let tps = (if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo }) as f64 * self.song.ppq as f64 / 60.0;
+                let (at, cut) = r.placed(tr.song_mode(), OUT_LAG_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, tps);
+                match r.finish(&record::folder(self.path.as_deref()), cut) {
                     Ok(path) => {
                         self.add_audio_clip(&path, at, None);
                         self.status = format!("Recorded {}", path.display());
@@ -1723,6 +1766,7 @@ impl eframe::App for App {
         }
         self.record_notes(false);
         self.record_audio();
+        self.keep_inputs();
         self.toolbar(ctx);
         if self.show_browser {
             egui::SidePanel::left("browser").default_width(230.0).frame(egui::Frame::new().fill(PANEL_DARK).inner_margin(6.0)).show(ctx, |ui| self.browser_ui(ui));

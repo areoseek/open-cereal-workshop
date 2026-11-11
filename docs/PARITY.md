@@ -158,7 +158,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Transport, toolbars, hint bar
 - [~] Automation clips (channel levels and pitch, mixer levels, slot mix and switch, effect and instrument settings; made from a control's right-click menu, points added, moved, bent, reshaped and removed in the playlist, saved to the project; instrument settings take effect from the next note)
 - [x] Event editor
-- [~] Audio recording and audio editor: sound from the input device records to a file and lands on the playlist as an audio clip (REC with MIC on); sounds dragged to the playlist become audio clips. Input choice per mixer track, latency correction and the audio editor to do
+- [~] Audio recording and audio editor: sound from the input device records to a file and lands on the playlist as an audio clip (REC with MIC on); sounds dragged to the playlist become audio clips. Each mixer track can listen to a sound card input (stereo pairs or single inputs, read from and saved to the project), which passes the track's effects and is taken down by a Wave Recorder in a slot; takes are moved back by the time sound spends on its way out and in; the Wave Recorder is the audio editor. Choice of input device, and its regions and noise tools, to do
 - [ ] Plugin hosting (VST/CLAP)
 - [x] Project files: .flp read/write; .fst presets, channel states and mixer track states and .fsc scores load and save (state menus on the channel button and the mixer name plate)
 - [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)

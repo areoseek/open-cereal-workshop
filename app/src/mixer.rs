@@ -227,6 +227,26 @@ impl App {
                             changed = true;
                         }
                     }
+                    // which sound card input is heard on this track
+                    {
+                        let names = crate::record::input_names(crate::record::input_channels());
+                        let ins = &mut self.song.inserts[i];
+                        let now = match ins.audio_in {
+                            v if v < 0 => "(none)".to_string(),
+                            v => names.get(v as usize).cloned().unwrap_or_else(|| format!("Input {}", v + 1)),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Audio in:").small().color(TEXT_DIM));
+                            egui::ComboBox::from_id_salt(("insert input", i)).selected_text(RichText::new(now).small()).width(120.0).show_ui(ui, |ui| {
+                                changed |= ui.selectable_value(&mut ins.audio_in, -1, "(none)").changed();
+                                for (k, n) in names.iter().enumerate() {
+                                    changed |= ui.selectable_value(&mut ins.audio_in, k as i32, n).changed();
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("The sound card input heard on this track. It passes the track's effects, so a recorder in a slot takes it down.");
+                    }
                     ui.add_space(4.0);
                     // the track's own equaliser: gain on top, frequency and width under it
                     {

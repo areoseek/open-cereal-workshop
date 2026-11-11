@@ -603,6 +603,8 @@ pub struct Insert {
     pub levels: Vec<f32>,
     pub invert: bool,
     pub swap: bool,
+    /// The sound card input heard on this track: -1 for none, else stereo pairs first and then single inputs.
+    pub audio_in: i32,
 }
 
 /// One band of an insert's equaliser.
@@ -644,7 +646,7 @@ impl Insert {
 
 impl Default for Insert {
     fn default() -> Self {
-        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false }
+        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false, audio_in: -1 }
     }
 }
 
@@ -1188,6 +1190,7 @@ impl Song {
                         },
                         invert: ins.flags & flp::INSERT_FLAG_INVERT != 0,
                         swap: ins.flags & flp::INSERT_FLAG_SWAP != 0,
+                        audio_in: ins.input,
                     }
                 })
                 .collect()
