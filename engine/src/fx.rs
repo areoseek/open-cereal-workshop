@@ -39,6 +39,7 @@ pub enum Kind {
     OldEq,
     OldReverb,
     OldFlanger,
+    Plush,
     Curve,
 }
 
@@ -549,6 +550,55 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
+        kind: Kind::Plush,
+        ident: "LuxeVerb",
+        title: "Plush Reverb",
+        size: 169,
+        fixed: &[(0, 8)],
+        params: &[
+            p("Input gain", 13, -600, 1240, 746),
+            p("High cut", 17, 1000, 20000, 20000),
+            p("Low cut", 21, 20, 3000, 20),
+            p("Reverb on", 25, 0, 1, 1),
+            p("Decay", 29, 0, 16384, 6308),
+            p("Predelay", 33, 0, 5000, 320),
+            p("Predelay beats", 37, 1, 384, 192),
+            p("Brightness", 41, 0, 1000, 741),
+            p("Diffusion", 45, 0, 100, 50),
+            p("Size", 49, 1, 100, 60),
+            p("Mod amount", 53, 0, 1000, 103),
+            p("Mod speed", 57, 0, 100, 10),
+            p("Character", 61, 0, 1000, 196),
+            p("Freeze", 65, 0, 2, 0),
+            p("Quality", 69, 0, 1, 1),
+            p("Loop on", 73, 0, 1, 0),
+            p("Loop shift", 77, -120, 120, 120),
+            p("Loop delay", 81, 10, 5000, 2988),
+            p("Loop delay beats", 85, 48, 768, 192),
+            p("Loop gain", 89, 0, 1000, 0),
+            p("Loop high cut", 93, 700, 5000, 1719),
+            p("Loop low cut", 97, 20, 3000, 720),
+            p("Loop mix", 101, 0, 1000, 1000),
+            p("Follower scale", 105, -1000, 1000, 0),
+            p("Follower threshold", 109, -6000, 0, -4000),
+            p("Follower attack", 113, 50, 600, 50),
+            p("Follower release", 117, 50, 700, 400),
+            p("Follower offset", 121, 0, 100, 50),
+            p("Follower mode", 125, 0, 2, 0),
+            p("Follower side input", 129, 0, 1, 0),
+            p("Follower low cut", 133, 20, 1000, 301),
+            p("Follower smooth", 137, 10, 600, 10),
+            p("Dry", 141, -600, 1240, 746),
+            p("Wet", 145, -600, 1240, 746),
+            p("Peak frequency", 149, 40, 8000, 3536),
+            p("Peak gain", 153, -1800, 1800, 258),
+            p("Peak width", 157, 25, 4000, 487),
+            p("Width", 161, 0, 200, 125),
+            p("Limiter off", 165, 0, 1, 0),
+            p("Switches", 8, 0, 0x0101_0101, 0x1_0000),
+        ],
+    },
+    Def {
         kind: Kind::GrainShift,
         ident: "Pitch Shifter",
         title: "Grain Shifter",
@@ -977,6 +1027,7 @@ impl Fx {
         let least = match d.kind {
             Kind::Comp => 28,
             Kind::Reverb => 56,
+            Kind::Plush => 165,
             _ => need,
         };
         if state.len() < least {
@@ -1055,12 +1106,13 @@ fn successor(kind: Kind) -> Option<Kind> {
         Kind::OldEq => Some(Kind::Eq),
         Kind::OldReverb => Some(Kind::Reverb),
         Kind::OldFlanger => Some(Kind::Flanger),
+        Kind::Plush => Some(Kind::Reverb),
         _ => None,
     }
 }
 
 /// Settings of a classic unit `p` put into the terms of its successor `q`.
-fn translate(kind: Kind, p: &[f32], q: &mut [f32]) {
+fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
     match kind {
         Kind::OldEq => {
             q[..28].copy_from_slice(&p[..28]);
@@ -1095,6 +1147,27 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32]) {
             q[5] = p[6] * 1.28 * sign(p[7]);
             q[6] = p[9] / 5000.0 * 128.0;
             q[7] = p[10] / 5000.0 * 128.0 * sign(p[8]);
+        }
+        Kind::Plush => {
+            // gains: 746 is unity, twenty units to the dB, the bottom of the travel is silence
+            let lvl = |v: f32| if v <= -600.0 { 0.0 } else { db((v - 746.0) * 0.05) };
+            let wet = if p[3] < 0.5 { 0.0 } else { lvl(p[0]) * lvl(p[33]) };
+            let beat_ms = cx.step * 4.0 / cx.sr * 1000.0;
+            q[0] = if p[2] <= 20.0 { 19.0 } else { p[2].min(2500.0) };
+            q[1] = if p[1] >= 20000.0 { 221.0 } else { (p[1] / 100.0).clamp(5.0, 220.0) };
+            q[2] = if p[39] as i32 & 1 != 0 { p[6] / 192.0 * beat_ms } else { p[5] / 10.0 }.clamp(0.0, 1000.0);
+            q[3] = p[9].clamp(1.0, 100.0);
+            q[4] = p[8].clamp(0.0, 100.0);
+            q[5] = (1000f32.powf(p[4] / 16384.0)).clamp(1.0, 200.0);
+            q[6] = (5.0 * 40f32.powf(p[7] / 1000.0)).clamp(5.0, 221.0);
+            q[7] = 100.0;
+            q[8] = 500.0;
+            q[9] = 64.0 * (1.0 - p[37] / 125.0);
+            q[10] = 128.0 * lvl(p[32]);
+            q[11] = 32.0 * wet;
+            q[12] = 64.0 * wet;
+            q[13] = p[11] / 100.0 * 2048.0;
+            q[14] = p[10] / 1000.0 * 2048.0;
         }
         _ => {}
     }
@@ -1310,7 +1383,7 @@ impl Unit {
     pub fn tail(&self, cx: &Ctx) -> usize {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
-            translate(self.fx.kind, &self.fx.p, &mut q.p);
+            translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
             return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![] }.tail(cx);
         }
         let p = &self.fx.p;
@@ -1359,7 +1432,7 @@ impl Unit {
 
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
         if let Some(u) = &mut self.inner {
-            translate(self.fx.kind, &self.fx.p, &mut u.fx.p);
+            translate(self.fx.kind, &self.fx.p, &mut u.fx.p, cx);
             u.process(io, cx);
             return;
         }
@@ -1630,7 +1703,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger => {}
+            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush => {}
             Kind::Curve => {
                 if p.len() < 4 + CURVE_N {
                     return;
@@ -2490,7 +2563,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -2591,6 +2664,20 @@ mod tests {
         let out = run(loud, sine, 32768);
         let peak = out[16384..].iter().fold(0f32, |m, f| m.max(f[0].abs()));
         assert!(peak < 1.3 && peak > 0.7, "{peak}");
+
+        // plush reverb: fresh block reads back, a click leaves a tail, dry off and wet off behave
+        let fx = Fx::new(Kind::Plush);
+        assert_eq!(Fx::decode("LuxeVerb", &fx.encode(None)).unwrap(), fx);
+        let click = |i: usize| if i == 0 { [1.0f32; 2] } else { [0.0; 2] };
+        let mut wet_only = fx.clone();
+        wet_only.p[32] = -600.0;
+        let out = run(wet_only, click, 22050);
+        assert_eq!(out[0][0], 0.0);
+        assert!(rms(&out[2000..]) > 1e-5);
+        let mut dry_only = fx;
+        dry_only.p[33] = -600.0;
+        let out = run(dry_only, click, 4096);
+        assert!((out[0][0] - 1.0).abs() < 1e-3 && rms(&out[64..]) < 1e-6);
 
         // grain shifter: an octave up doubles the number of zero crossings
         let mut fx = Fx::new(Kind::GrainShift);

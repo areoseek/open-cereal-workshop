@@ -65,7 +65,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] EQUO
 - [ ] FL Studio Mobile Rack FX
 - [ ] Frequency Shifter
-- [ ] Frequency Splitter
+- [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
 - [ ] Fruity 7 Band EQ
 - [~] Fruity Balance (built, approximate)
 - [ ] Fruity Bass Boost
@@ -79,7 +79,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Delay
 - [~] Fruity Delay 2 (built, approximate)
 - [~] Fruity Delay 3 (built, approximate)
-- [ ] Fruity Delay Bank
+- [~] Fruity Delay Bank (built as Echo Bank; grain, shelf filters and filter gains not run)
 - [~] Fruity Fast Dist (built, approximate)
 - [~] Fruity Fast LP (built, approximate)
 - [~] Fruity Filter (built, approximate)
@@ -120,13 +120,14 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Hyper Chorus
 - [ ] Low Lifter
 - [ ] Luxeverb
+- [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read, no editor, look-ahead and second state not run)
 - [ ] Multiband Delay
 - [ ] Newtime
 - [ ] Newtone
 - [ ] Patcher
 - [ ] Pitcher
-- [ ] Pitch Shifter
+- [~] Pitch Shifter (built as Grain Shifter; formant setting not run)
 - [ ] Razer Chroma
 - [~] Soundgoodizer (built, approximate)
 - [ ] Spreader
@@ -141,7 +142,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] VFX Level Scaler
 - [ ] VFX Script
 - [ ] VFX Sequencer
-- [ ] Vintage Chorus
+- [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [ ] Vintage Phaser
 - [ ] Vocodex
 - [ ] Wave Candy
@@ -179,6 +180,13 @@ close, not identical:
   Band Maximiser: the drawn line is read as linear level with its middle as full level; attack, release and
   sustain time laws, the low cut scale, both saturation shapes and the separation direction are estimates.
   Three Band Compressor: band order, cutoff scale, threshold, ratio and knee scales are estimates.
+  Bucket Chorus: which stored fields are high pass, gain and noise, the time and speed scales.
+  Grain Shifter: meaning of density and colour, grain sizes.
+  Band Splitter: slopes above 24 dB an octave are capped.
+  Echo Bank: feedback mode numbering, cutoff and resonance scales, offset units.
+  Plush Reverb: which stored fields are size, diffusion, brightness and character, the decay law
+  (0.1 s to 100 s across the travel), the gain law (746 is unity, twenty units to the dB), which switch byte is
+  the predelay tempo lock.
 - Six Op: modulation depth, envelope time unit, LFO speed scale, knob laws, filter type order (worked out from
   statistics over the user's presets), curve tension sense, shaper curve reading, the level against other
   instruments. The effects send column is treated as plain output until the effects section exists.
