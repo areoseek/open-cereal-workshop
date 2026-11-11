@@ -82,6 +82,8 @@ impl App {
                     if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
                         if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
                             self.actions.push(crate::Action::LoadPreset((*path).clone(), crate::PresetTo::Chan(ci)));
+                        } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fsc") || x.eq_ignore_ascii_case("mid")) {
+                            self.actions.push(crate::Action::LoadScore((*path).clone(), Some(ci)));
                         } else {
                             self.actions.push(crate::Action::LoadSample((*path).clone(), Some(ci)));
                         }

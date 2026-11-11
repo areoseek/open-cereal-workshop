@@ -462,6 +462,7 @@ impl App {
                 Key::D => self.piano.sel.clear(),
                 Key::B => self.pr_duplicate(),
                 Key::Q => self.pr_quantise(),
+                Key::M if !m.shift => self.open_score_dialog(),
                 Key::L => self.pr_legato(),
                 Key::U => self.pr_chop(),
                 Key::G => self.pr_glue(),
@@ -507,6 +508,20 @@ impl App {
     fn piano_header(&mut self, ui: &mut Ui, pat: usize) {
         let name = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Open score...").clicked() {
+                    ui.close_menu();
+                    self.open_score_dialog();
+                }
+                if ui.button("Save score as...").clicked() {
+                    ui.close_menu();
+                    self.save_score_dialog();
+                }
+                if ui.button("Import MIDI file...     Ctrl+M").clicked() {
+                    ui.close_menu();
+                    self.open_score_dialog();
+                }
+            });
             ui.menu_button("Tools", |ui| {
                 let mut act: Option<fn(&mut App)> = None;
                 let items: [(&str, fn(&mut App)); 14] = [

@@ -42,6 +42,8 @@ pub(crate) enum Action {
     LoadSample(PathBuf, Option<usize>),
     /// Load a plugin preset onto the matching unit.
     LoadPreset(PathBuf, PresetTo),
+    /// Put a score or MIDI file's notes on a channel's piano roll (the selected one when not said).
+    LoadScore(PathBuf, Option<usize>),
 }
 
 /// Where a preset should land.
@@ -447,6 +449,58 @@ impl App {
         }
     }
 
+    /// Replace one channel's notes in the current pattern with a score file's (or a MIDI file's, all parts merged).
+    fn load_score(&mut self, path: &Path, to: Option<usize>) {
+        let ci = to.unwrap_or(self.sel_chan);
+        if ci >= self.song.channels.len() {
+            return;
+        }
+        let midi = path.extension().is_some_and(|e| !e.eq_ignore_ascii_case("fsc"));
+        let got = if midi {
+            std::fs::read(path).map_err(|e| e.to_string()).and_then(|d| cereal_engine::midifile::import(&d, self.song.ppq)).map(|m| m.parts.into_iter().flat_map(|p| p.notes).map(|n| cereal_engine::song::Note { chan: ci as u16, ..n }).collect::<Vec<_>>())
+        } else {
+            cereal_engine::score::read(path, self.song.ppq, ci as u16)
+        };
+        match got {
+            Ok(notes) if !notes.is_empty() => {
+                let pat = self.handle.transport.pattern();
+                let Some(p) = self.song.patterns.get_mut(pat) else { return };
+                p.notes.retain(|n| n.chan != ci as u16);
+                let count = notes.len();
+                p.notes.extend(notes);
+                p.sort();
+                self.sel_chan = ci;
+                self.piano.sel.clear();
+                self.dirty = true;
+                self.status = format!("Loaded {count} notes from {}", path.display());
+            }
+            Ok(_) => self.status = "That file holds no notes".into(),
+            Err(e) => self.status = e,
+        }
+    }
+
+    pub(crate) fn open_score_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Score or MIDI file", &["fsc", "mid", "midi"]).pick_file() {
+            self.load_score(&p, None);
+        }
+    }
+
+    pub(crate) fn save_score_dialog(&mut self) {
+        let ci = self.sel_chan as u16;
+        let Some(p) = self.song.patterns.get(self.handle.transport.pattern()) else { return };
+        let notes: Vec<&cereal_engine::song::Note> = p.notes.iter().filter(|n| n.chan == ci).collect();
+        if notes.is_empty() {
+            self.status = "This piano roll has no notes to save".into();
+            return;
+        }
+        let bytes = cereal_engine::score::write(&notes, self.song.ppq);
+        let Some(path) = rfd::FileDialog::new().add_filter("Score file", &["fsc"]).set_file_name("My score.fsc").save_file() else { return };
+        self.status = match std::fs::write(&path, bytes) {
+            Ok(()) => format!("Saved score {}", path.display()),
+            Err(e) => format!("Score not saved: {e}"),
+        };
+    }
+
     fn export_midi(&mut self) {
         let default = self.path.as_ref().map(|p| p.with_extension("mid")).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "untitled.mid".into());
         let Some(path) = rfd::FileDialog::new().add_filter("MIDI file", &["mid"]).set_file_name(default).save_file() else { return };
@@ -704,6 +758,7 @@ impl App {
                 Action::Open(p) => self.open(&p),
                 Action::LoadSample(p, into) => self.load_sample(&p, into),
                 Action::LoadPreset(p, to) => self.load_preset(&p, to),
+                Action::LoadScore(p, to) => self.load_score(&p, to),
             }
         }
     }
@@ -1214,6 +1269,8 @@ impl eframe::App for App {
         for p in dropped {
             if p.extension().map(|e| e.eq_ignore_ascii_case("flp")).unwrap_or(false) {
                 self.actions.push(Action::Open(p));
+            } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fsc")) {
+                self.actions.push(Action::LoadScore(p, None));
             } else if p.extension().map(|e| ["mid", "midi", "rmi", "kar"].iter().any(|x| e.eq_ignore_ascii_case(x))).unwrap_or(false) {
                 self.import_midi(&p);
             } else {

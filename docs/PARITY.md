@@ -160,7 +160,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Event editor
 - [ ] Audio recording and audio editor
 - [ ] Plugin hosting (VST/CLAP)
-- [~] Project files: .flp read/write done; .fst presets, .fsc scores to do
+- [~] Project files: .flp read/write done; .fst presets and .fsc scores load and save; channel state and mixer state files to do
 - [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)
 - [~] MIDI devices: keyboards and pads play the selected channel (Linux; hold pedal kept). Windows input, bend and wheels, controller linking, recording to do
 - [~] Rendering/export: WAV (16, 24, 32 float), FLAC and MIDI files done, with a rendering window (MIDI import too, by menu or drop); MP3, OGG to do

@@ -42,7 +42,7 @@ impl State {
                             let is_dir = p.is_dir();
                             let ext = ext_of(&p);
                             let hidden = e.file_name().to_string_lossy().starts_with('.');
-                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ext == "flp")).then_some((p, is_dir))
+                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid"].contains(&ext.as_str()))).then_some((p, is_dir))
                         })
                         .collect()
                 })
@@ -73,6 +73,7 @@ impl App {
                 let ext = ext_of(&path);
                 let project = ext == "flp";
                 let preset = ext == "fst";
+                let score = ext == "fsc" || ext == "mid";
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
                 let text = RichText::new(&name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
                 let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate());
@@ -80,7 +81,7 @@ impl App {
                     self.browser.selected = Some(path.clone());
                     if preset {
                         self.actions.push(Action::LoadPreset(path.clone(), crate::PresetTo::Auto));
-                    } else if !project {
+                    } else if !project && !score {
                         self.actions.push(Action::Preview(path.clone()));
                     }
                 }
@@ -94,6 +95,11 @@ impl App {
                     if project {
                         if ui.button("Open project").clicked() {
                             self.actions.push(Action::Open(path.clone()));
+                            ui.close_menu();
+                        }
+                    } else if score {
+                        if ui.button("Open in piano roll").clicked() {
+                            self.actions.push(Action::LoadScore(path.clone(), None));
                             ui.close_menu();
                         }
                     } else if preset {
