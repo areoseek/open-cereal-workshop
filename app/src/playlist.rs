@@ -326,6 +326,15 @@ impl App {
         let g = if mods.alt { 1 } else { self.pl_snap() };
         let snap = |t: f32| ((t.max(0.0) as u32) / g) * g;
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
+        // a sound dragged from the browser becomes an audio clip where it is dropped
+        if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
+            if let Some(pp) = pointer.filter(|pp| grid.contains(*pp)) {
+                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if !["fst", "fsc", "mid", "flp"].contains(&ext.as_str()) {
+                    self.add_audio_clip(&path, snap(tick_of(pp.x)), Some(track_of(pp.y) as u16));
+                }
+            }
+        }
         let tool = self.playlist.tool;
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
         if let Some(pp) = over {

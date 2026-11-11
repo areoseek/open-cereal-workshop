@@ -5,6 +5,7 @@ mod browser;
 mod chanset;
 mod fxwin;
 mod midi;
+mod record;
 mod setup;
 mod unpack;
 
@@ -133,6 +134,9 @@ pub(crate) struct App {
     show_about: bool,
     render: Option<RenderOpts>,
     rec_held: Vec<(u16, u8, f64, f32)>,
+    /// Record sound from the input device too while recording runs.
+    rec_audio: bool,
+    audio_rec: Option<record::AudioRec>,
     save_preset: Option<(String, bool)>,
     show_chanset: bool,
     /// The effect slot whose editor is open: insert, slot.
@@ -241,6 +245,8 @@ impl App {
             show_about: false,
             render: None,
             rec_held: Vec::new(),
+            rec_audio: false,
+            audio_rec: None,
             save_preset: None,
             show_chanset: false,
             fx_open: None,
@@ -296,6 +302,33 @@ impl App {
         self.handle.transport.set_playing(false);
         self.record_notes(true);
         self.handle.transport.seek(0);
+    }
+
+    /// Start capturing sound when recording begins and turn it into an audio clip when it ends.
+    fn record_audio(&mut self) {
+        let tr = self.handle.transport.clone();
+        let want = self.rec_audio && tr.recording() && tr.playing();
+        if want && self.audio_rec.is_none() {
+            let at = if tr.song_mode() { tr.tick().max(0.0) as u32 } else { 0 };
+            match record::AudioRec::start(at) {
+                Ok(r) => self.audio_rec = Some(r),
+                Err(e) => {
+                    self.status = format!("Audio recording failed: {e}");
+                    self.rec_audio = false;
+                }
+            }
+        } else if !want {
+            if let Some(r) = self.audio_rec.take() {
+                let at = r.at;
+                match r.finish(&record::folder(self.path.as_deref())) {
+                    Ok(path) => {
+                        self.add_audio_clip(&path, at, None);
+                        self.status = format!("Recorded {}", path.display());
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+        }
     }
 
     /// Write hand-played notes into the current pattern while recording runs. `flush` ends keys still held.
@@ -544,6 +577,31 @@ impl App {
             Ok(()) => format!("Saved score {}", path.display()),
             Err(e) => format!("Score not saved: {e}"),
         };
+    }
+
+    /// Put a sound on the playlist as an audio clip, on its own new channel.
+    pub(crate) fn add_audio_clip(&mut self, path: &Path, pos: u32, track: Option<u16>) {
+        let smp = match self.lib.load_path(path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let len = ((smp.seconds() * self.song.tempo / 60.0 * self.song.ppq as f32).ceil() as u32).max(1);
+        let mut c = Chan::default();
+        c.name = smp.name.clone();
+        c.kind = ChannelKind::AudioClip;
+        c.sample_path = path.to_string_lossy().to_string();
+        c.set_sample(Some(smp));
+        self.song.channels.push(c);
+        let ci = self.song.channels.len() - 1;
+        let free = |song: &Song, t: u16| !song.clips.iter().any(|c| c.track == t && c.pos < pos + len && pos < c.pos + c.len);
+        let ntracks = self.song.tracks.len().max(1) as u16;
+        let track = track.filter(|&t| free(&self.song, t)).or_else(|| (track.unwrap_or(0)..ntracks).chain(0..ntracks).find(|&t| free(&self.song, t))).unwrap_or(0);
+        self.song.clips.push(cereal_engine::song::Clip { pos, len, track, src: cereal_engine::song::ClipSrc::Audio(ci), offset: 0, muted: false });
+        self.song.clips.sort_by_key(|c| c.pos);
+        self.dirty = true;
     }
 
     fn export_midi(&mut self) {
@@ -1162,6 +1220,9 @@ impl App {
                 if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).on_hover_text("Record what you play into the current pattern (R)").clicked() {
                     tr.set_recording(!rec);
                 }
+                if ui.toggle_value(&mut self.rec_audio, "MIC").on_hover_text("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
+                    self.record_audio();
+                }
                 ui.separator();
                 let live = tr.tempo();
                 let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
@@ -1331,6 +1392,7 @@ impl eframe::App for App {
             }
         }
         self.record_notes(false);
+        self.record_audio();
         self.toolbar(ctx);
         if self.show_browser {
             egui::SidePanel::left("browser").default_width(230.0).frame(egui::Frame::new().fill(PANEL_DARK).inner_margin(6.0)).show(ctx, |ui| self.browser_ui(ui));

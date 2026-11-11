@@ -435,6 +435,11 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 }
             }
         }
+        if now.kind != was.kind && matches!(now.kind, ChannelKind::AudioClip | ChannelKind::Sampler) {
+            if let Some(i) = find(ev, end, id::CHAN_TYPE) {
+                ev[i].value = Value::Byte(if now.kind == ChannelKind::AudioClip { 4 } else { 0 });
+            }
+        }
         if now.enabled != was.enabled {
             match find(ev, end, id::CHAN_ENABLED) {
                 Some(i) => ev[i].value = Value::Byte(now.enabled as u8),
@@ -1390,6 +1395,8 @@ mod tests {
         s.channels[0].sample_path = "/tmp/boom.wav".into();
         s.channels[1].volume = 0.5;
         s.channels[1].pan = -0.25;
+        s.channels[3].kind = ChannelKind::AudioClip;
+        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false });
         s.channels[2].insert = 3;
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].toggle_step(0, 96);
@@ -1421,6 +1428,8 @@ mod tests {
         assert_eq!(r.channels.len(), 4);
         assert_eq!(r.channels[0].name, "Boom");
         assert_eq!(r.channels[0].sample_path, "/tmp/boom.wav");
+        assert_eq!(r.channels[3].kind, ChannelKind::AudioClip);
+        assert!(r.clips.iter().any(|c| c.src == ClipSrc::Audio(3) && (c.pos, c.len, c.track) == (96, 500, 4)));
         assert!((r.channels[1].volume - 0.5).abs() < 1e-3);
         assert!((r.channels[1].pan + 0.25).abs() < 1e-3);
         assert_eq!(r.channels[2].insert, 3);
