@@ -17,7 +17,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] FL Slayer
 - [ ] FL Studio Mobile
 - [ ] FL Studio Mobile Rack
-- [ ] FPC
+- [~] FPC: pads, their velocity layers, levels, pans, layer tune, cut groups and output offsets are read and played, with a pad page to audition them. Pad envelopes, the scale-volume and random-layer switches, the built-in pattern loops and editing are not done. The tune knob's reach is an estimate.
 - [~] Fruit Kick: all six knobs read; the end pitch is exact (taken from the step the block stores), the start pitch base, sweep and decay times, click and distortion scales are estimates.
 - [ ] Fruity Dance
 - [ ] Fruity DrumSynth Live

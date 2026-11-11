@@ -169,6 +169,61 @@ impl App {
                 ChannelKind::AutomationClip => {
                     ui.label("Automation clip. Its curve is drawn in the playlist.");
                 }
+                _ if c.zones.is_some() => {
+                    // a pad machine or multi-sample player: one button per key that has sounds, its layers on hover
+                    let map = c.zones.clone().unwrap();
+                    let mut keys: Vec<u8> = map.zones.iter().map(|z| z.key_lo).collect();
+                    keys.sort_unstable();
+                    keys.dedup();
+                    section(ui, "PADS");
+                    let mut hit = None;
+                    egui::Grid::new("pads").spacing([4.0, 4.0]).show(ui, |ui| {
+                        for (i, k) in keys.iter().enumerate() {
+                            let zs: Vec<_> = map.zones.iter().filter(|z| z.key_lo == *k).collect();
+                            let missing = zs.iter().all(|z| z.sample.is_none());
+                            let name = if zs[0].name.is_empty() { key_name(*k) } else { zs[0].name.clone() };
+                            let b = ui.add_sized([92.0, 44.0], egui::Button::new(RichText::new(name).small().color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })));
+                            let tip = zs.iter().map(|z| format!("{}  (velocity {} to {})", z.path.rsplit(['/', '\\']).next().unwrap_or(""), z.vel_lo, z.vel_hi)).collect::<Vec<_>>().join("\n");
+                            if b.on_hover_text(format!("{}\n{}", key_name(*k), tip)).clicked() {
+                                hit = Some(*k);
+                            }
+                            if i % 4 == 3 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                    if let Some(k) = hit {
+                        self.handle.send(cereal_engine::player::Cmd::NoteOn { chan: ci as u16, key: k, vel: 1.0 });
+                        self.handle.send(cereal_engine::player::Cmd::NoteOff { chan: ci as u16, key: k });
+                    }
+                    let lost = map.zones.iter().filter(|z| z.sample.is_none()).count();
+                    if lost > 0 {
+                        ui.label(RichText::new(format!("{lost} of {} sound files were not found.", map.zones.len())).small().color(Color32::from_rgb(255, 120, 110)));
+                    }
+                }
+                _ if c.slices.is_some() => {
+                    let sl = c.slices.clone().unwrap();
+                    section(ui, "SLICES");
+                    ui.label(RichText::new(format!("{}  ({} slices, {:.0} beats at {:.0} BPM)", sl.path.rsplit(['/', '\\']).next().unwrap_or(""), sl.cuts.len(), sl.beats, sl.bpm)).small().color(TEXT_DIM));
+                    if let Some(s) = &c.sample {
+                        draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                    } else {
+                        ui.label(RichText::new("The loop file was not found.").small().color(Color32::from_rgb(255, 120, 110)));
+                    }
+                    let mut hit = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for i in 0..sl.cuts.len() {
+                            let key = if sl.cuts[i].key >= 0 { sl.cuts[i].key } else { sl.base + i as i32 };
+                            if ui.small_button(format!("{}", i + 1)).on_hover_text(key_name(key.clamp(0, 127) as u8)).clicked() {
+                                hit = Some(key.clamp(0, 127) as u8);
+                            }
+                        }
+                    });
+                    if let Some(k) = hit {
+                        self.handle.send(cereal_engine::player::Cmd::NoteOn { chan: ci as u16, key: k, vel: 1.0 });
+                        self.handle.send(cereal_engine::player::Cmd::NoteOff { chan: ci as u16, key: k });
+                    }
+                }
                 _ => {
                     ui.label(format!("Instrument: {}", c.plugin));
                     ui.label(RichText::new("This instrument is not built in yet, so a plain stand-in voice plays its notes.").color(TEXT_DIM).small());

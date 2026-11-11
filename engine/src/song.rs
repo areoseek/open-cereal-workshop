@@ -45,6 +45,8 @@ pub struct Chan {
     pub gen: Option<crate::synth::Gen>,
     /// The cuts of a loop slicer channel; its loop is in `sample`.
     pub slices: Option<Arc<crate::slicer::Slices>>,
+    /// The sample map of a pad machine or multi-sample player.
+    pub zones: Option<Arc<crate::zones::Map>>,
 }
 
 /// One envelope of a sampler channel. Times are seconds.
@@ -398,7 +400,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, slices: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, slices: None, zones: None }
     }
 }
 
@@ -904,6 +906,12 @@ impl Song {
                     (ChannelKind::Plugin, Some(lib)) if slices.is_some() => lib.load_stored(&slices.as_ref().unwrap().path, project_dir),
                     _ => None,
                 };
+                let zones = (c.kind == ChannelKind::Plugin).then(|| crate::zones::Map::parse(&c.plugin, &c.state)).flatten().map(|mut m| {
+                    if let Some(lib) = lib.as_deref_mut() {
+                        m.load(lib, project_dir);
+                    }
+                    Arc::new(m)
+                });
                 let mut ch = Chan {
                     name: if c.name.is_empty() { if c.plugin.is_empty() { "Sampler".into() } else { c.plugin.clone() } } else { c.name.clone() },
                     kind: c.kind,
@@ -936,6 +944,7 @@ impl Song {
                     raw: None,
                     gen: if c.kind == ChannelKind::Plugin { crate::synth::Gen::decode(&c.plugin, &c.state) } else { None },
                     slices,
+                    zones,
                 };
                 ch.bake();
                 ch

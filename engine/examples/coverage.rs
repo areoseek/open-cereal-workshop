@@ -26,7 +26,7 @@ fn main() {
                     if c.kind == cereal_engine::flp::ChannelKind::Plugin {
                         let e = gen.entry((c.plugin.clone(), c.state.len())).or_default();
                         e.0 += 1;
-                        e.1 += (cereal_engine::synth::Gen::decode(&c.plugin, &c.state).is_some() || (cereal_engine::slicer::is_slicer(&c.plugin) && cereal_engine::slicer::Slices::parse(&c.state).is_some())) as usize;
+                        e.1 += (cereal_engine::synth::Gen::decode(&c.plugin, &c.state).is_some() || (cereal_engine::slicer::is_slicer(&c.plugin) && cereal_engine::slicer::Slices::parse(&c.state).is_some()) || cereal_engine::zones::Map::parse(&c.plugin, &c.state).is_some()) as usize;
                     }
                 }
             }

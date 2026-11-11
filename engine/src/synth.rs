@@ -310,7 +310,9 @@ pub fn def(kind: Kind) -> &'static Def {
 }
 
 pub fn title_for(ident: &str) -> Option<&'static str> {
-    DEFS.iter().find(|d| d.ident == ident).map(|d| d.title)
+    // instruments that are not settings tables: sample maps and the loop slicer
+    const OTHER: &[(&str, &str)] = &[("FPC", "Pad Machine"), ("Fruity Slicer", "Loop Slicer")];
+    DEFS.iter().find(|d| d.ident == ident).map(|d| d.title).or_else(|| OTHER.iter().find(|o| o.0.eq_ignore_ascii_case(ident)).map(|o| o.1))
 }
 
 /// One instrument's settings, in file units, in the order of its table.

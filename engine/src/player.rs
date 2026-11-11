@@ -690,6 +690,49 @@ impl Player {
                     });
                 }
             }
+            ChannelKind::Plugin | ChannelKind::Other(_) if ch.zones.is_some() => {
+                // a sample map: every zone the key and velocity fall in sounds its recording
+                let Some(map) = ch.zones.clone() else { return };
+                let vel = (n.vel * 100.0).round().clamp(0.0, 127.0) as u8;
+                let fade = ms(4.0);
+                for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.chan == n.chan && v.sample.is_some()) {
+                    if map.cuts(n.key, v.key) {
+                        v.kill = true;
+                        v.release = v.release.max(fade);
+                        v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
+                    }
+                }
+                let last = song.inserts.len().saturating_sub(1);
+                for z in map.hit(n.key, vel) {
+                    let Some(smp) = z.sample.clone() else { continue };
+                    let keys = if z.track { (n.key as i32 - z.root) as f32 * 100.0 } else { 0.0 };
+                    let step = smp.rate as f64 / sr as f64 * 2f64.powf((keys + z.tune_cents + ch.pitch_cents + n.fine_cents) as f64 / 1200.0);
+                    let note_gain = if z.vel_scale { law::velocity_gain(n.vel) } else { 1.0 };
+                    let (pl, pr) = law::pan((chan_pan + n.pan + z.pan).clamp(-1.0, 1.0));
+                    let gain = chan_vol * note_gain * z.gain;
+                    self.start(Voice {
+                        sample: Some(smp),
+                        step,
+                        step_to: step,
+                        step_now: step,
+                        level: 0.0,
+                        attack: ms(z.attack * 1000.0),
+                        release: ms(z.release * 1000.0),
+                        remaining: if z.one_shot && !live { None } else { len_frames },
+                        gl: gain * pl,
+                        gr: gain * pr,
+                        insert: if z.out > 0 { (ch.insert + z.out).min(last) } else { ch.insert },
+                        delay,
+                        chan: n.chan,
+                        key: n.key,
+                        live: live && !z.one_shot,
+                        note_gain,
+                        note_pan: n.pan,
+                        follow: false,
+                        ..Default::default()
+                    });
+                }
+            }
             ChannelKind::Plugin | ChannelKind::Other(_) if ch.slices.is_some() => {
                 // a loop slicer: the key picks a slice of the loop, which plays through at the channel's pitch
                 let (Some(sl), Some(smp)) = (&ch.slices, ch.sample.clone()) else { return };
@@ -1507,6 +1550,35 @@ mod tests {
         s.patterns[0].notes[0].key = 70;
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 1.0) < 1e-6);
+    }
+
+    #[test]
+    fn a_pad_machine_plays_layers_by_velocity_and_cuts_by_group() {
+        let mut s = tone_song(2.0);
+        let tone = s.channels[0].sample.take().unwrap();
+        s.channels[0].kind = ChannelKind::Plugin;
+        let pad = |key: u8, lo: u8, hi: u8, cut: i32| crate::zones::Zone { key_lo: key, key_hi: key, vel_lo: lo, vel_hi: hi, root: key as i32, track: false, sample: Some(tone.clone()), one_shot: true, cut, cut_by: cut, ..Default::default() };
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)] }));
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].notes[0].key = 36;
+        // a short note still plays the whole recording
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 1.0, 1.8) > 0.1);
+        // a velocity outside every layer is silent
+        s.patterns[0].notes[0].vel = 1.2;
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 1.8) < 1e-6);
+        // an open hat is stopped by a closed one in its group; the closed one is a different key, so check the level drop
+        s.patterns[0].notes[0].vel = 1.0;
+        s.patterns[0].notes[0].key = 46;
+        let alone = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        s.patterns[0].toggle_step(0, 4);
+        let k = s.patterns[0].notes.len() - 1;
+        s.patterns[0].notes[k].key = 42;
+        s.patterns[0].notes[k].vel = 0.05;
+        let cut = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&alone, 1.0, 1.8) > 0.1);
+        assert!(loud(&cut, 1.0, 1.8) < 0.01, "the open hat was stopped");
     }
 
     #[test]
