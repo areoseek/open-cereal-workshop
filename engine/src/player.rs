@@ -365,6 +365,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         arps: Vec::new(),
         midi_wait: Vec::with_capacity(64),
         midi_live: Vec::new(),
+        pad_turn: Vec::with_capacity(128),
         midi_seen: Vec::new(),
         midi_ran: false,
         seed: 0x2545_f491,
@@ -814,6 +815,8 @@ pub struct Player {
     midi_wait: Vec<(u64, crate::midiout::Msg)>,
     /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
     midi_live: Vec<(u16, u8, crate::midiout::Msg)>,
+    /// The layer each pad last played, for pads whose layers take turns: channel, key, layer.
+    pad_turn: Vec<(u16, u8, usize)>,
     /// What each sender channel last put on the wire, so only changes are sent.
     midi_seen: Vec<MidiSeen>,
     midi_ran: bool,
@@ -1220,7 +1223,14 @@ impl Player {
                     }
                 }
                 let last = song.inserts.len().saturating_sub(1);
-                for z in map.hit(n.key, vel) {
+                // layers that share the note either sound together or take turns, as the pad asks
+                let mode = map.hit(n.key, vel).next().map_or(0, |z| z.pick);
+                let among = map.hit(n.key, vel).count();
+                let only = (mode != 0 && among > 1).then(|| self.pad_pick(n.chan, n.key, mode, among));
+                for (i, z) in map.hit(n.key, vel).enumerate() {
+                    if only.is_some_and(|o| o != i) {
+                        continue;
+                    }
                     let Some(smp) = z.sample.clone() else { continue };
                     let keys = if z.track { (n.key as i32 - z.root) as f32 * 100.0 } else { 0.0 };
                     let step = smp.rate as f64 / sr as f64 * 2f64.powf((keys + z.tune_cents + ch.pitch_cents + n.fine_cents) as f64 / 1200.0);
@@ -1247,7 +1257,8 @@ impl Player {
                         chan: n.chan,
                         key: n.key,
                         live: live && !z.one_shot,
-                        note_gain,
+                        // the zone's own level rides with the note's, so later volume moves keep it
+                        note_gain: note_gain * z.gain,
                         note_pan: n.pan,
                         follow: z.track,
                         venv: z.env.unwrap_or_default(),
@@ -1417,6 +1428,29 @@ impl Player {
     }
 
     /// Sends what the sender channels have due in the next `n` frames, and any of their settings that changed.
+    /// Which of `among` layers a pad plays this time: in turn (1), at random (2), or at random but not the
+    /// one it played last (3).
+    fn pad_pick(&mut self, chan: u16, key: u8, mode: u8, among: usize) -> usize {
+        let at = match self.pad_turn.iter().position(|p| p.0 == chan && p.1 == key) {
+            Some(i) => i,
+            None => {
+                self.pad_turn.push((chan, key, usize::MAX));
+                self.pad_turn.len() - 1
+            }
+        };
+        let last = self.pad_turn[at].2;
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let roll = (self.seed >> 8) as usize;
+        let now = match mode {
+            1 if last >= among => 0,
+            1 => (last + 1) % among,
+            3 if last < among => (last + 1 + roll % (among - 1)) % among,
+            _ => roll % among,
+        };
+        self.pad_turn[at].2 = now;
+        now
+    }
+
     fn run_midi(&mut self, song: &Song, n: usize) {
         use crate::midiout::{knob_msgs, patch_msgs, Head, Msg, IDENT, KNOBS};
         let playing = self.transport.playing();
@@ -2871,7 +2905,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = |key: u8, lo: u8, hi: u8, cut: i32| crate::zones::Zone { key_lo: key, key_hi: key, vel_lo: lo, vel_hi: hi, root: key as i32, track: false, sample: Some(tone.clone()), one_shot: true, cut, cut_by: cut, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None, kit: None }));
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].key = 36;
         // a short note still plays the whole recording
@@ -2892,6 +2926,29 @@ mod tests {
         let cut = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&alone, 1.0, 1.8) > 0.1);
         assert!(loud(&cut, 1.0, 1.8) < 0.01, "the open hat was stopped");
+    }
+
+    #[test]
+    fn layers_that_share_a_note_take_turns_when_the_pad_asks() {
+        let mut s = tone_song(2.0);
+        let tone = s.channels[0].sample.take().unwrap();
+        s.channels[0].kind = ChannelKind::Plugin;
+        let layer = |gain: f32, pick: u8| crate::zones::Zone { key_lo: 36, key_hi: 36, root: 36, track: false, sample: Some(tone.clone()), one_shot: true, gain, pick, ..Default::default() };
+        s.patterns[0].toggle_step(0, 0);
+        let second = s.ppq as u32 * 2;
+        s.patterns[0].toggle_step(0, second);
+        for n in &mut s.patterns[0].notes {
+            n.key = 36;
+        }
+        // together: the loud layer is heard from the first note
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 0), layer(1.0, 0)], bank: None, kit: None }));
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 0.3) > 0.1);
+        // in turn: the first note plays the silent layer, the second the loud one
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 1), layer(1.0, 1)], bank: None, kit: None }));
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.0, 0.9) < 1e-6);
+        assert!(loud(&buf, 1.1, 1.8) > 0.1);
     }
 
     #[test]
@@ -2922,7 +2979,7 @@ mod tests {
         s.channels[0].kind = ChannelKind::Plugin;
         let env = crate::song::Env { on: true, decay: 0.3, sustain: 0.0, release: 0.01, ..Default::default() };
         let zone = crate::zones::Zone { root: 60, sample: Some(tone), one_shot: true, env: Some(env), ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None, kit: None }));
         s.patterns[0].toggle_step(0, 0);
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         // loud at the start, gone once the decay has run to its silent sustain

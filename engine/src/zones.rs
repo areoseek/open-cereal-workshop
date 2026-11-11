@@ -40,11 +40,14 @@ pub struct Zone {
     pub env: Option<crate::song::Env>,
     /// A low-pass the zone asks for: cutoff on the voice filter's 0..=1 scale, and resonance.
     pub filter: Option<(f32, f32)>,
+    /// How a note chooses among the zones it falls in: 0 sounds them all, 1 takes them in turn,
+    /// 2 picks one at random, 3 picks one at random but never the same twice running.
+    pub pick: u8,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None }
     }
 }
 
@@ -53,6 +56,8 @@ pub struct Map {
     pub zones: Vec<Zone>,
     /// The sound bank file behind the zones, when they come from one.
     pub bank: Option<crate::sf2::Info>,
+    /// The pad machine's own block behind the zones, when they come from one.
+    pub kit: Option<Vec<u8>>,
 }
 
 impl Map {
@@ -124,6 +129,9 @@ fn pads(state: &[u8]) -> Option<Map> {
             continue;
         }
         let name = parts.iter().find(|p| p.0 == 101).map(|p| wide(p.1)).unwrap_or_default();
+        let opt = parts.iter().find(|p| p.0 == 102).map(|p| ints(p.1)).unwrap_or_default().first().copied().unwrap_or(1);
+        // the pad's pitch knob: taken as cents, an estimate
+        let pitch = set.get(7).copied().unwrap_or(0) as f32;
         for (pid, layer) in &parts {
             if *pid != 105 {
                 continue;
@@ -146,7 +154,9 @@ fn pads(state: &[u8]) -> Option<Map> {
                 gain: (set[0] as f32 / 128.0).clamp(0.0, 1.0) * (l[0] as f32 / 127.0).clamp(0.0, 1.0),
                 pan: ((set[1] + l[1]) as f32 / 64.0).clamp(-1.0, 1.0),
                 // the tune knob's reach is an estimate: an octave either way at its ends
-                tune_cents: l[5] as f32 * 12.0,
+                tune_cents: l[5] as f32 * 12.0 + pitch,
+                vel_scale: opt & 1 != 0,
+                pick: if opt & 2 != 0 { 1 } else { 0 },
                 one_shot: true,
                 cut: set[5],
                 cut_by: set[6],
@@ -155,7 +165,240 @@ fn pads(state: &[u8]) -> Option<Map> {
             });
         }
     }
-    Some(Map { zones, bank: None })
+    Some(Map { zones, bank: None, kit: Some(state.to_vec()) })
+}
+
+type Parts = Vec<(u32, Vec<u8>)>;
+
+fn own(b: &[u8]) -> Option<Parts> {
+    Some(pieces(b)?.into_iter().map(|(i, p)| (i, p.to_vec())).collect())
+}
+
+fn join(parts: &Parts) -> Vec<u8> {
+    let mut out = vec![];
+    for (id, body) in parts {
+        out.extend(id.to_le_bytes());
+        out.extend((body.len() as u64).to_le_bytes());
+        out.extend(body);
+    }
+    out
+}
+
+fn int_at(parts: &Parts, id: u32, at: usize) -> i32 {
+    parts.iter().find(|p| p.0 == id).and_then(|p| p.1.get(at * 4..at * 4 + 4)).map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+}
+
+fn put_int(parts: &mut Parts, id: u32, at: usize, v: i32) {
+    if let Some(b) = parts.iter_mut().find(|p| p.0 == id).and_then(|p| p.1.get_mut(at * 4..at * 4 + 4)) {
+        b.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn to_wide(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+}
+
+/// One layer of a pad, held as its pieces: the file's stored path (300) and its settings (301).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layer {
+    parts: Parts,
+}
+
+impl Layer {
+    pub const LEVEL: usize = 0;
+    pub const PAN: usize = 1;
+    pub const VEL_LO: usize = 2;
+    pub const VEL_HI: usize = 3;
+    pub const TUNE: usize = 5;
+
+    /// An empty layer as a fresh pad holds one.
+    pub fn fresh() -> Self {
+        let set: Vec<u8> = [99i32, 0, 0, 127, 1, 0, -1].iter().flat_map(|v| v.to_le_bytes()).collect();
+        Self { parts: vec![(300, vec![]), (301, set), (302, vec![])] }
+    }
+
+    pub fn path(&self) -> String {
+        self.parts.iter().find(|p| p.0 == 300).map(|p| wide(&p.1)).unwrap_or_default()
+    }
+
+    pub fn put_path(&mut self, path: &str) {
+        if let Some(p) = self.parts.iter_mut().find(|p| p.0 == 300) {
+            p.1 = to_wide(path);
+        }
+    }
+
+    pub fn val(&self, at: usize) -> i32 {
+        int_at(&self.parts, 301, at)
+    }
+
+    pub fn put(&mut self, at: usize, v: i32) {
+        put_int(&mut self.parts, 301, at, v);
+    }
+}
+
+/// One pad, held as its pieces so that what is not understood goes back as it came.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pad {
+    head: Parts,
+    pub layers: Vec<Layer>,
+    tail: Parts,
+}
+
+impl Pad {
+    pub const LEVEL: usize = 0;
+    pub const PAN: usize = 1;
+    pub const KEY: usize = 3;
+    pub const OUT: usize = 4;
+    pub const CUT: usize = 5;
+    pub const CUT_BY: usize = 6;
+    pub const PITCH: usize = 7;
+
+    fn read(b: &[u8]) -> Option<Self> {
+        let parts = own(b)?;
+        let first = parts.iter().position(|p| p.0 == 105).unwrap_or(parts.len().min(3));
+        let n = parts[first..].iter().take_while(|p| p.0 == 105).count();
+        if parts[first + n..].iter().any(|p| p.0 == 105) || !parts.iter().any(|p| p.0 == 100 && p.1.len() >= 32) {
+            return None;
+        }
+        let layers = parts[first..first + n].iter().map(|p| own(&p.1).map(|parts| Layer { parts })).collect::<Option<Vec<_>>>()?;
+        Some(Self { head: parts[..first].to_vec(), layers, tail: parts[first + n..].to_vec() })
+    }
+
+    fn store(&self) -> Vec<u8> {
+        let mut all = self.head.clone();
+        all.extend(self.layers.iter().map(|l| (105, join(&l.parts))));
+        all.extend(self.tail.iter().cloned());
+        join(&all)
+    }
+
+    pub fn val(&self, at: usize) -> i32 {
+        int_at(&self.head, 100, at)
+    }
+
+    pub fn put(&mut self, at: usize, v: i32) {
+        put_int(&mut self.head, 100, at, v);
+    }
+
+    pub fn name(&self) -> String {
+        self.head.iter().find(|p| p.0 == 101).map(|p| wide(&p.1)).unwrap_or_default()
+    }
+
+    pub fn put_name(&mut self, name: &str) {
+        if let Some(p) = self.head.iter_mut().find(|p| p.0 == 101) {
+            p.1 = to_wide(name);
+        }
+    }
+
+    /// Whether the note's velocity scales the pad's level.
+    pub fn scale_volume(&self) -> bool {
+        int_at(&self.head, 102, 0) & 1 != 0
+    }
+
+    pub fn put_scale_volume(&mut self, on: bool) {
+        let v = int_at(&self.head, 102, 0);
+        put_int(&mut self.head, 102, 0, if on { v | 1 } else { v & !1 });
+    }
+
+    /// Whether layers with overlapping velocity ranges take turns instead of sounding together.
+    pub fn random_layers(&self) -> bool {
+        int_at(&self.head, 102, 0) & 2 != 0
+    }
+
+    /// In the stored blocks seen, the third setting carries 8 whenever this switch is on; both are kept in step.
+    pub fn put_random_layers(&mut self, on: bool) {
+        let (v, s) = (int_at(&self.head, 102, 0), self.val(2));
+        put_int(&mut self.head, 102, 0, if on { v | 2 } else { v & !2 });
+        self.put(2, if on { s | 8 } else { s & !8 });
+    }
+
+    /// Share the velocity range out among the layers, lowest first, with no overlap.
+    pub fn spread_even(&mut self) {
+        let n = self.layers.len().max(1) as i32;
+        for (i, l) in self.layers.iter_mut().enumerate() {
+            let i = i as i32;
+            l.put(Layer::VEL_LO, i * 128 / n);
+            l.put(Layer::VEL_HI, (i + 1) * 128 / n - 1);
+        }
+    }
+
+    /// Back to an empty pad on the same key.
+    pub fn clear(&mut self) {
+        let key = self.val(Self::KEY);
+        *self = Self::fresh(key);
+    }
+
+    fn fresh(key: i32) -> Self {
+        let ints = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        // a drawn line: kind, sub-kind, point count, a spare, the points, five closing numbers, then four knobs
+        let line = |sub: i32, pts: &[(f64, f64, u8)]| -> Vec<u8> {
+            let mut b = ints(&[1, sub, pts.len() as i32, 0]);
+            for (x, y, mark) in pts {
+                b.extend(x.to_le_bytes());
+                b.extend(y.to_le_bytes());
+                b.extend(0.2f32.to_le_bytes());
+                b.extend([0, 0, 0, *mark]);
+            }
+            b.extend(ints(&[-1, -1, -1, 128, 128, 0, 128]));
+            b
+        };
+        let mut set = [0i32; 16];
+        set[0] = 128;
+        set[3] = key;
+        set[5] = -1;
+        set[6] = -1;
+        let mut opt = [0i32; 8];
+        opt[0] = 1;
+        Self {
+            head: vec![(100, ints(&set)), (101, vec![]), (102, ints(&opt))],
+            layers: vec![Layer::fresh()],
+            tail: vec![(103, ints(&[0, 0])), (104, line(3, &[(0.0, 1.0, 0), (1.25, 0.0, 1)])), (103, ints(&[1, 0])), (104, line(3, &[(0.0, 0.5, 0)])), (106, vec![])],
+        }
+    }
+}
+
+/// The pad machine's whole block, pad by pad, so edits can be written back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kit {
+    mark: [u8; 4],
+    top: Parts,
+    pub pads: Vec<Pad>,
+}
+
+impl Kit {
+    pub const IDENT: &'static str = "FPC";
+
+    /// The keys of a new kit's 32 pads, bank A then bank B.
+    const KEYS: [i32; 32] = [37, 36, 42, 54, 40, 38, 46, 44, 48, 47, 45, 43, 49, 55, 51, 53, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75];
+
+    pub fn fresh() -> Self {
+        Self { mark: [3, 0xe4, 0x84, 0x1e], top: vec![(1, vec![]), (3, vec![1]), (4, vec![0; 32]), (u32::MAX, vec![])], pads: Self::KEYS.iter().map(|k| Pad::fresh(*k)).collect() }
+    }
+
+    /// Read a block. Pads must sit together, as they do in every block seen.
+    pub fn parse(state: &[u8]) -> Option<Self> {
+        let all = own(state.get(4..)?)?;
+        let first = all.iter().position(|p| p.0 == 2)?;
+        let n = all[first..].iter().take_while(|p| p.0 == 2).count();
+        if all[first + n..].iter().any(|p| p.0 == 2) {
+            return None;
+        }
+        let pads = all[first..first + n].iter().map(|p| Pad::read(&p.1)).collect::<Option<Vec<_>>>()?;
+        let mut top = all[..first].to_vec();
+        // what follows the pads is kept behind a marker piece that is never written
+        top.push((u32::MAX, vec![]));
+        top.extend(all[first + n..].iter().cloned());
+        Some(Self { mark: state[..4].try_into().unwrap(), top, pads })
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let split = self.top.iter().position(|p| p.0 == u32::MAX).unwrap_or(self.top.len());
+        let mut all: Parts = self.top[..split].to_vec();
+        all.extend(self.pads.iter().map(|p| (2, p.store())));
+        all.extend(self.top.iter().skip(split + 1).cloned());
+        let mut out = self.mark.to_vec();
+        out.extend(join(&all));
+        out
+    }
 }
 
 /// The multi-sample player's block: a 4-byte number, then pieces; each program is a piece (number 1) whose
@@ -202,7 +445,7 @@ fn programs(state: &[u8]) -> Option<Map> {
             break;
         }
     }
-    Some(Map { zones, bank: None })
+    Some(Map { zones, bank: None, kit: None })
 }
 
 #[cfg(test)]
@@ -288,5 +531,56 @@ pub(crate) mod tests {
         assert!(!m.cuts(36, 46));
         assert!(!m.zones[0].track);
         assert!(Map::parse("FPC", &b[..b.len() - 3]).is_none(), "a torn block is refused");
+    }
+
+    #[test]
+    fn a_kit_is_edited_and_written_back() {
+        let mut k = Kit::fresh();
+        assert_eq!(Kit::parse(&k.write()).as_ref(), Some(&k));
+        let p = &mut k.pads[1];
+        p.put_name("Kick");
+        p.put(Pad::PITCH, 50);
+        p.put_scale_volume(false);
+        p.put_random_layers(true);
+        p.layers[0].put_path("a.wav");
+        p.layers.push(Layer::fresh());
+        p.layers[1].put_path("b.wav");
+        let block = k.write();
+        assert_eq!(Kit::parse(&block).unwrap(), k);
+        let m = Map::parse("FPC", &block).unwrap();
+        assert_eq!(m.kit.as_deref(), Some(&block[..]));
+        let hit: Vec<_> = m.hit(36, 100).collect();
+        assert_eq!(hit.len(), 2, "both layers cover the note");
+        assert!(hit.iter().all(|z| z.pick == 1 && !z.vel_scale && z.name == "Kick" && z.tune_cents == 50.0));
+        k.pads[1].spread_even();
+        let m = Map::parse("FPC", &k.write()).unwrap();
+        assert_eq!(m.hit(36, 100).map(|z| z.path.as_str()).collect::<Vec<_>>(), ["b.wav"]);
+        assert_eq!(m.hit(36, 63).map(|z| z.path.as_str()).collect::<Vec<_>>(), ["a.wav"]);
+        k.pads[1].clear();
+        assert_eq!(k.pads[1], Kit::fresh().pads[1]);
+    }
+
+    #[test]
+    fn stored_kits_come_back_byte_for_byte() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut seen = 0;
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) && p.to_string_lossy().contains("FPC") {
+                    let Ok(pre) = crate::preset::read(&p) else { continue };
+                    if !pre.ident.eq_ignore_ascii_case("FPC") {
+                        continue;
+                    }
+                    let kit = Kit::parse(&pre.state).unwrap_or_else(|| panic!("{} is not read", p.display()));
+                    assert_eq!(kit.write(), pre.state, "{}", p.display());
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 10, "only {seen} kits were found");
     }
 }

@@ -485,6 +485,43 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                     }
                 }
             }
+        } else if let Some(block) = now.zones.as_ref().and_then(|z| z.kit.as_ref()).filter(|b| was.zones.as_ref().and_then(|z| z.kit.as_ref()) != Some(b) || now.kind != was.kind) {
+            // a pad machine whose pads were edited (or a new one): the channel carries the block as it now stands
+            let ident = crate::zones::Kit::IDENT;
+            if let Some(i) = find(ev, end, id::CHAN_TYPE) {
+                ev[i].value = Value::Byte(2);
+            }
+            let at = match find(ev, end, id::PLUGIN_INTERNAL_NAME) {
+                Some(i) => {
+                    ev[i] = text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode);
+                    i
+                }
+                None => {
+                    let at = find(ev, end, id::CHAN_TYPE).map(|i| i + 1).unwrap_or(start + 1);
+                    ev.insert(at, text_event(id::PLUGIN_INTERNAL_NAME, ident, unicode));
+                    end += 1;
+                    at
+                }
+            };
+            if find(ev, end, id::NEW_PLUGIN).is_none() {
+                let mut h = vec![0u8; 52];
+                put_u32(&mut h, 8, 2);
+                put_u32(&mut h, 16, 0x50);
+                put_u32(&mut h, 36, 128);
+                put_u32(&mut h, 40, 410);
+                put_u32(&mut h, 44, 558);
+                put_u32(&mut h, 48, 389);
+                ev.insert(at + 1, Event::data(id::NEW_PLUGIN, h));
+                end += 1;
+            }
+            match find(ev, end, id::PLUGIN_PARAMS) {
+                Some(i) => ev[i].value = Value::Data(block.clone()),
+                None => {
+                    let at = find(ev, end, id::COLOR).or(find(ev, end, id::PLUGIN_NAME)).map(|i| i + 1).unwrap_or(at + 2);
+                    ev.insert(at, Event::data(id::PLUGIN_PARAMS, block.clone()));
+                    end += 1;
+                }
+            }
         } else if let Some(info) = now.zones.as_ref().and_then(|z| z.bank.as_ref()) {
             // a sound bank player: its block goes back when the file or the preset was changed
             let ident = "SoundFont Player";
@@ -1968,6 +2005,31 @@ mod tests {
         let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
         let (r3, _) = reload(&bytes3);
         assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
+    }
+
+    #[test]
+    fn a_pad_machine_is_saved_with_its_edits() {
+        use crate::zones::{Kit, Map};
+        use crate::song::Chan;
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        let at = r.channels.len();
+        let mut kit = Kit::fresh();
+        kit.pads[1].layers[0].put_path("kick.wav");
+        let mut c = Chan { name: "Pads".into(), kind: ChannelKind::Plugin, plugin: Kit::IDENT.into(), ..Chan::default() };
+        c.zones = Map::parse(Kit::IDENT, &kit.write()).map(std::sync::Arc::new);
+        r.channels.push(c);
+        r.prepare();
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        assert_eq!(r2.channels[at].zones.as_ref().and_then(|z| z.kit.clone()), Some(kit.write()));
+        kit.pads[1].put_random_layers(true);
+        kit.pads[1].put_name("Kick");
+        r2.channels[at].zones = Map::parse(Kit::IDENT, &kit.write()).map(std::sync::Arc::new);
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        let back = Kit::parse(r3.channels[at].zones.as_ref().and_then(|z| z.kit.as_ref()).unwrap()).unwrap();
+        assert_eq!(back, kit);
     }
 
     #[test]
