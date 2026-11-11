@@ -455,12 +455,12 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 }
             }
         }
-        if let (Some((_, k)), Some(g), true) = (now.bay(), now.gen.as_ref(), was.bay().is_some()) {
+        if let (Some(bay), Some(g), true) = (now.bay(), now.gen.as_ref(), was.bay().is_some()) {
             // still a patch bay: only its instrument's settings go back, inside the bay's own block
             if now.gen != was.gen {
                 if let Some(i) = find(ev, end, id::PLUGIN_PARAMS) {
                     if let Value::Data(d) = &mut ev[i].value {
-                        *d = crate::fxpatch::encode_gen(d, *k, g);
+                        *d = crate::fxpatch::encode_gen(d, bay.lead, g);
                     }
                 }
             }

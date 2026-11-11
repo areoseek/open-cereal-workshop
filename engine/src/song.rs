@@ -45,7 +45,7 @@ pub struct Chan {
     pub gen: Option<crate::synth::Gen>,
     /// When the channel's generator is a patch bay: the bay its instrument plays through, and which of the
     /// bay's held units that instrument is. Read through [`Channel::bay`].
-    pub bay: Option<(crate::fx::Fx, usize)>,
+    pub bay: Option<Bay>,
     /// The cuts of a loop slicer channel; its loop is in `sample`.
     pub slices: Option<Arc<crate::slicer::Slices>>,
     /// The sample map of a pad machine or multi-sample player.
@@ -240,7 +240,7 @@ impl Sampler {
 
 impl Chan {
     /// The patch bay this channel's instrument plays through, while the channel is still a bay.
-    pub fn bay(&self) -> Option<&(crate::fx::Fx, usize)> {
+    pub fn bay(&self) -> Option<&Bay> {
         self.bay.as_ref().filter(|_| self.kind == ChannelKind::Plugin && self.plugin.eq_ignore_ascii_case(BAY))
     }
     /// Set the sample this channel plays, applying the treatments that are worked out ahead of time.
@@ -519,6 +519,17 @@ pub struct Slot {
     pub fx: Option<crate::fx::Fx>,
     /// Where the slot sits in the file the project came from (insert, slot); None for one added since.
     pub src: Option<(u16, u16)>,
+}
+
+/// A patch bay standing in a channel as its instrument.
+#[derive(Debug, Clone)]
+pub struct Bay {
+    /// The bay itself, with the first instrument's cables starting at the bay's input.
+    pub fx: crate::fx::Fx,
+    /// Which held unit the channel's own instrument is.
+    pub lead: usize,
+    /// The other held instruments that play the same notes.
+    pub layers: crate::fxpatch::Layers,
 }
 
 /// The stored identifier of the patch bay.
@@ -965,9 +976,9 @@ impl Song {
                     zones,
                 };
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
-                    if let Some((p, k, g)) = crate::fxpatch::decode_gen(&c.state) {
+                    if let Some((p, lead, g, layers)) = crate::fxpatch::decode_gen(&c.state) {
                         ch.gen = Some(g);
-                        ch.bay = Some((crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)) }, k));
+                        ch.bay = Some(Bay { fx: crate::fx::Fx { kind: crate::fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(p)) }, lead, layers });
                     }
                 }
                 if let Some(g) = ch.gen.as_mut().filter(|g| matches!(g.kind, crate::synth::Kind::Grain | crate::synth::Kind::Travel)) {

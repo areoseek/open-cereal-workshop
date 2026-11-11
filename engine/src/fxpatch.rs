@@ -54,6 +54,8 @@ pub struct Patch {
     pub cables: Vec<Cable>,
     /// The order the units run in: every unit after the ones that feed it, where the cables allow.
     pub order: Vec<usize>,
+    /// Held instruments, besides the first, whose notes are played outside and handed in as sound.
+    pub feeds: Vec<usize>,
 }
 
 fn u32at(b: &[u8], at: usize) -> Option<u32> {
@@ -99,12 +101,15 @@ pub fn decode(state: &[u8]) -> Option<Patch> {
 
 /// A bay that stands in a channel as an instrument: the bay, with the cables of the instrument the notes
 /// reach starting at the bay's input instead, then which held unit that instrument is and its settings.
-/// Only one held instrument plays for now; others in the same bay stay silent.
-pub fn decode_gen(state: &[u8]) -> Option<(Patch, usize, crate::synth::Gen)> {
-    let (p, lead) = read(state, true)?;
+/// Further instruments the notes reach come back as layers.
+pub fn decode_gen(state: &[u8]) -> Option<(Patch, usize, crate::synth::Gen, Layers)> {
+    let (p, lead, layers) = read(state, true)?;
     let (k, g) = lead?;
-    Some((p, k, g))
+    Some((p, k, g, layers))
 }
+
+/// Further held instruments that play the same notes: which held unit each is, and its settings.
+pub type Layers = Vec<(usize, crate::synth::Gen)>;
 
 /// The block of a bay standing as an instrument, with that instrument's settings brought up to date.
 pub fn encode_gen(base: &[u8], k: usize, gen: &crate::synth::Gen) -> Vec<u8> {
@@ -133,7 +138,7 @@ pub fn encode_gen(base: &[u8], k: usize, gen: &crate::synth::Gen) -> Vec<u8> {
     out
 }
 
-fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synth::Gen)>)> {
+fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synth::Gen)>, Layers)> {
     use std::collections::HashMap;
     let top = chunks(state, 4)?;
     let mut nodes = Vec::new();
@@ -185,6 +190,7 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
     let sound = |id: &u64| own.get(id) == Some(&0);
     let mut main_in = raw.iter().map(|c| c.1).filter(sound).min();
     let mut lead = None;
+    let mut layers: Layers = Vec::new();
     if as_gen {
         main_in = None;
         // follow the note cables from the bay's note sockets, through any note-shaping units, to instruments
@@ -205,14 +211,18 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
             }
         }
         reached.sort();
-        let all = reached.into_iter().chain(0..nodes.len());
+        // with no note cable we can follow, every held instrument is taken to play
+        let all: Vec<usize> = if reached.is_empty() { (0..nodes.len()).collect() } else { reached };
         for n in all {
             if nodes[n].fx.as_ref().is_some_and(|f| f.kind != crate::fx::Kind::Thru) {
                 continue;
             }
             if let Some(g) = crate::synth::Gen::decode(&nodes[n].ident, blocks[n]) {
-                lead = Some((n, g));
-                break;
+                if lead.is_none() {
+                    lead = Some((n, g));
+                } else {
+                    layers.push((n, g));
+                }
             }
         }
     }
@@ -236,7 +246,8 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
         cables.push(Cable { from, to, level });
     }
     let order = sort(nodes.len(), &cables);
-    Some((Patch { nodes, cables, order }, lead))
+    let feeds = layers.iter().map(|l| l.0).collect();
+    Some((Patch { nodes, cables, order, feeds }, lead, layers))
 }
 
 /// Units in an order where each comes after the ones feeding it. Units caught in a loop of cables go last,
@@ -353,6 +364,8 @@ pub struct State {
     units: Vec<Option<Unit>>,
     bufs: Vec<Vec<[f32; 2]>>,
     scratch: Vec<[f32; 2]>,
+    /// Sound handed in for a held instrument this block: the unit, the sound, and whether any came.
+    feeds: Vec<(usize, Vec<[f32; 2]>, bool)>,
 }
 
 impl State {
@@ -361,7 +374,18 @@ impl State {
             units: p.nodes.iter().map(|n| n.fx.clone().map(|f| Unit::new(f, sr))).collect(),
             bufs: vec![vec![[0.0; 2]; 1024]; p.nodes.len()],
             scratch: vec![[0.0; 2]; 1024],
+            feeds: p.feeds.iter().map(|&n| (n, vec![[0.0; 2]; 1024], false)).collect(),
         }
+    }
+
+    /// Where to add this block's sound for layer `k` (in the order of the bay's `feeds`).
+    pub fn feed(&mut self, k: usize, n: usize) -> Option<&mut [[f32; 2]]> {
+        let f = self.feeds.get_mut(k)?;
+        if f.1.len() < n {
+            f.1.resize(n, [0.0; 2]);
+        }
+        f.2 = true;
+        Some(&mut f.1[..n])
     }
 
     /// How long the bay rings after its input stops, in frames.
@@ -397,7 +421,7 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             b.resize(n, [0.0; 2]);
         }
     }
-    let State { units, bufs, scratch } = st;
+    let State { units, bufs, scratch, feeds } = st;
     let gather = |to: End, scratch: &mut [[f32; 2]], bufs: &[Vec<[f32; 2]>], io: &[[f32; 2]]| {
         scratch.fill([0.0; 2]);
         for c in p.cables.iter().filter(|c| c.to == to) {
@@ -413,6 +437,14 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     };
     for &i in &p.order {
         gather(End::Node(i), &mut scratch[..n], bufs, io);
+        for f in feeds.iter_mut().filter(|f| f.0 == i && f.2) {
+            for (o, s) in scratch[..n].iter_mut().zip(f.1.iter_mut()) {
+                o[0] += s[0];
+                o[1] += s[1];
+                *s = [0.0; 2];
+            }
+            f.2 = false;
+        }
         if let Some(u) = &mut units[i] {
             u.process(&mut scratch[..n], cx);
         }

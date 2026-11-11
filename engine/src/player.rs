@@ -333,6 +333,8 @@ struct Voice {
     note_gain: f32,
     note_pan: f32,
     follow: bool,
+    /// For a channel that is a patch bay: 0 for its own instrument, else one more than the layer played.
+    feed: u8,
     /// Octaves the channel's pitch automation has moved the note by.
     bend: f32,
     sr: f32,
@@ -796,8 +798,12 @@ impl Player {
                 let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + n.fine_cents) / 1200.0);
                 let min_len = (sr * 0.12) as u64;
                 let remaining = if live { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
+                let layers = ch.bay().map_or(&[][..], |b| &b.layers[..]);
+                for li in 0..=layers.len() {
+                let g = if li == 0 { ch.gen.as_ref() } else { Some(&layers[li - 1].1) };
                 let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, ..Default::default() };
-                if let Some(g) = &ch.gen {
+                v.feed = li as u8;
+                if let Some(g) = g {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
                     let tone = g.tone();
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(n.key as u32));
@@ -826,6 +832,7 @@ impl Player {
                     v.fon = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
                 }
                 self.start(v);
+                }
             }
             ChannelKind::Layer | ChannelKind::AutomationClip => {}
         }
@@ -1140,8 +1147,8 @@ impl Player {
             match (ch.bay(), slot.as_mut()) {
                 (None, None) => {}
                 (None, Some(_)) => *slot = None,
-                (Some((f, _)), Some(cf)) if cf.unit.fx.sub.as_ref().zip(f.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
-                (Some((f, _)), _) => *slot = Some(ChanFx { unit: fx::Unit::new(f.clone(), self.sr), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+                (Some(b), Some(cf)) if cf.unit.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
+                (Some(b), _) => *slot = Some(ChanFx { unit: fx::Unit::new(b.fx.clone(), self.sr), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
             }
         }
         let mut live = 0;
@@ -1163,7 +1170,8 @@ impl Player {
                 }
             }
             if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {
-                if v.render(&mut cf.buf[..n]) {
+                let into = if v.feed == 0 { Some(&mut cf.buf[..n]) } else { cf.unit.bay_feed(v.feed as usize - 1, n) };
+                if into.is_some_and(|b| v.render(b)) {
                     cf.dirty = true;
                 }
                 continue;

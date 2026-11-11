@@ -2377,6 +2377,11 @@ impl Unit {
         }
     }
 
+    /// For a patch bay standing as an instrument: where to add the sound of its layer `k` this block.
+    pub fn bay_feed(&mut self, k: usize, n: usize) -> Option<&mut [[f32; 2]]> {
+        self.patch.as_mut()?.feed(k, n)
+    }
+
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
         if let Some(u) = &mut self.inner {
             translate(self.fx.kind, &self.fx.p, &mut u.fx.p, cx);
