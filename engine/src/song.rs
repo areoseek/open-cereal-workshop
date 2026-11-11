@@ -900,11 +900,13 @@ impl Song {
             .iter()
             .enumerate()
             .map(|(pos, c)| {
-                let slices = (c.kind == ChannelKind::Plugin && crate::slicer::is_slicer(&c.plugin)).then(|| crate::slicer::Slices::parse(&c.state)).flatten().map(Arc::new);
+                let (slices, loop_smp) = match (c.kind == ChannelKind::Plugin).then(|| crate::slicer::open(&c.plugin, &c.state, lib.as_deref_mut(), project_dir)).flatten() {
+                    Some((sl, smp)) => (Some(Arc::new(sl)), smp),
+                    None => (None, None),
+                };
                 let sample = match (c.kind, lib.as_deref_mut()) {
                     (ChannelKind::Sampler | ChannelKind::AudioClip, Some(lib)) => lib.load_stored(&c.sample_path, project_dir),
-                    (ChannelKind::Plugin, Some(lib)) if slices.is_some() => lib.load_stored(&slices.as_ref().unwrap().path, project_dir),
-                    _ => None,
+                    _ => loop_smp,
                 };
                 let zones = (c.kind == ChannelKind::Plugin).then(|| crate::zones::Map::parse(&c.plugin, &c.state)).flatten().map(|mut m| {
                     if let Some(lib) = lib.as_deref_mut() {

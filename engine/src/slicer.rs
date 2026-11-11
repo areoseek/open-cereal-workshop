@@ -24,7 +24,71 @@ pub struct Slices {
 }
 
 pub fn is_slicer(ident: &str) -> bool {
-    ident.eq_ignore_ascii_case("Fruity Slicer")
+    ident.eq_ignore_ascii_case("Fruity Slicer") || ident.eq_ignore_ascii_case("Slicex")
+}
+
+/// The marker points stored in a wave file, in frames, with the file's rate.
+pub fn markers(wav: &[u8]) -> (Vec<usize>, u32) {
+    let mut out = vec![];
+    let mut rate = 44100;
+    if wav.len() < 12 || &wav[..4] != b"RIFF" {
+        return (out, rate);
+    }
+    let int = |at: usize| wav.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let mut at = 12;
+    while let (Some(id), Some(n)) = (wav.get(at..at + 4), int(at + 4)) {
+        let body = at + 8;
+        if id == b"fmt " {
+            rate = int(body + 4).unwrap_or(44100) as u32;
+        } else if id == b"cue " {
+            let count = int(body).unwrap_or(0).min(4096);
+            for k in 0..count {
+                // each point: its number, its place, the piece it is in, two starts, and the frame
+                if let Some(frame) = int(body + 4 + k * 24 + 20) {
+                    out.push(frame);
+                }
+            }
+        }
+        at = body + n + (n & 1);
+    }
+    out.sort_unstable();
+    out.dedup();
+    (out, rate)
+}
+
+/// Read a slicing instrument's block and load its loop. The second kind keeps its cuts as markers inside
+/// the wave, which is either stored whole in the block or named by its path.
+pub fn open(ident: &str, state: &[u8], mut lib: Option<&mut crate::sample::Library>, project_dir: Option<&std::path::Path>) -> Option<(Slices, Option<std::sync::Arc<crate::sample::Sample>>)> {
+    if !is_slicer(ident) {
+        return None;
+    }
+    if ident.eq_ignore_ascii_case("Fruity Slicer") {
+        let sl = Slices::parse(state)?;
+        let smp = lib.as_deref_mut().and_then(|l| l.load_stored(&sl.path, project_dir));
+        return Some((sl, smp));
+    }
+    // a fixed head, the stored path, then the length of a wave kept in the block (0 for none)
+    let n = *state.get(96)? as usize;
+    let path = String::from_utf8_lossy(state.get(97..97 + n)?).into_owned();
+    let at = 97 + n;
+    let size = u32::from_le_bytes(state.get(at..at + 4)?.try_into().unwrap()) as usize;
+    let (points, rate, smp) = if size > 0 {
+        let wav = state.get(at + 4..at + 4 + size)?;
+        let (points, rate) = markers(wav);
+        (points, rate, crate::sample::Sample::decode(wav.to_vec(), "wav").ok().map(std::sync::Arc::new))
+    } else {
+        let lib = lib.as_deref_mut()?;
+        let file = lib.resolve(&path, project_dir);
+        let (points, rate) = file.as_ref().and_then(|f| std::fs::read(f).ok()).map(|b| markers(&b)).unwrap_or((vec![], 44100));
+        (points, rate, lib.load_stored(&path, project_dir))
+    };
+    let mut cuts: Vec<Cut> = points.into_iter().map(|pos| Cut { pos, key: -1, reverse: false, name: String::new() }).collect();
+    if cuts.is_empty() {
+        // no markers: the whole loop is one slice
+        cuts.push(Cut { pos: 0, key: -1, reverse: false, name: String::new() });
+    }
+    let f64_at = |o: usize| state.get(at + 4 + size + o..at + 12 + size + o).map(|b| f64::from_le_bytes(b.try_into().unwrap()) as f32);
+    Some((Slices { beats: f64_at(24).unwrap_or(0.0), bpm: 0.0, path, cuts, base: 60, rate }, smp))
 }
 
 impl Slices {
@@ -75,6 +139,34 @@ impl Slices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wave_kept_in_the_block_gives_its_markers_as_slices() {
+        let tone: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
+        let mut cur = std::io::Cursor::new(Vec::new());
+        crate::wav::write_pcm16(&mut cur, &tone, 48_000, 1).unwrap();
+        let mut wav = cur.into_inner();
+        let mut cue = 3u32.to_le_bytes().to_vec();
+        for (k, f) in [0u32, 1200, 2400].iter().enumerate() {
+            for v in [k as u32 + 1, *f, u32::from_le_bytes(*b"data"), 0, 0, *f] {
+                cue.extend(v.to_le_bytes());
+            }
+        }
+        wav.extend(b"cue ");
+        wav.extend((cue.len() as u32).to_le_bytes());
+        wav.extend(&cue);
+        let mut block = vec![0u8; 96];
+        block.push(5);
+        block.extend(b"a.wav");
+        block.extend((wav.len() as u32).to_le_bytes());
+        block.extend(&wav);
+        block.extend([0u8; 40]);
+        let (sl, smp) = open("Slicex", &block, None, None).unwrap();
+        assert_eq!(sl.cuts.iter().map(|c| c.pos).collect::<Vec<_>>(), [0, 1200, 2400]);
+        assert_eq!(sl.rate, 48_000);
+        assert_eq!(smp.unwrap().frames.len(), 4800);
+        assert_eq!(sl.for_key(61, 4800), Some((1200, 1200, false)));
+    }
 
     #[test]
     fn a_block_is_read_and_keys_find_slices() {

@@ -46,7 +46,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Sakura
 - [ ] Sawer
 - [ ] SimSynth
-- [ ] Slicex
+- [~] Slicex: the loop (kept in the block or named by path) and its marker points are read, and each key from C5 plays its slice. Decks, articulators, envelopes, filters, the wave editor and region tools are not done.
 - [ ] Soundfont Player
 - [~] Sytrus (built as Six Op, approximate: operators, modulation matrix, three filters with shapers, envelopes, LFOs, mappings, unison; state layouts 17 to 25 are read, older ones 5 to 15 are not yet; its effects section and arpeggio breaks are not run, the panel is read-only and it cannot yet be added fresh from the menu)
 - [ ] Toxic Biohazard
