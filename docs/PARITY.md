@@ -5,7 +5,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 ## Instruments (51)
 - [~] 3x Osc (built, approximate)
 - [~] Autogun (plays as Metal Bank from the settings stored with the project; picking another preset number is not done)
-- [~] BassDrum (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
+- [~] BassDrum (built as Kick Designer: all 23 stored settings read, shown as knobs and saved back; two sliding oscillators, click, sub tone, drive, attack, sampling ratio, fixed duration and the layered sample with its envelope, delay, pitch and low pass all play; new ones can be added. The settings sit in their stored places, but the curves behind the knobs are our own and have not been matched by ear against the original; old-format preset conversion is not done)
 - [~] BeepMap (opens as Picture Synth and plays the stored picture: rows as sine waves, red left, green right, range, pixel length, cents or linear scale, loop; blue, grainy, widen and loading a new picture are not done; pitch and time scales are estimates)
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
 - [~] Dashboard (opens as Control Panel and keeps its block; makes no sound by design; the panel of controls is not drawn)

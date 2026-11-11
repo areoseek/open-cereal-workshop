@@ -972,6 +972,37 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
         }
+        Kind::KickD => {
+            use cereal_engine::kickd::{params, sample_list, sample_name, sample_path, set_sample_path, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default drum plays.").color(TEXT_DIM));
+                return false;
+            }
+            ui.horizontal(|ui| {
+                let now = sample_name(&g.raw);
+                let shown = if now.is_empty() { "None".to_string() } else { now.clone() };
+                egui::ComboBox::from_id_salt(("kickd_sample", ci)).selected_text(format!("Layered sample: {shown}")).show_ui(ui, |ui| {
+                    if ui.selectable_label(now.is_empty(), "None").clicked() && !now.is_empty() {
+                        set_sample_path(&mut g.raw, "");
+                        changed = true;
+                    }
+                    for (name, path) in sample_list() {
+                        if ui.selectable_label(name.eq_ignore_ascii_case(&now), &name).clicked() && path != sample_path(&g.raw) {
+                            set_sample_path(&mut g.raw, &path);
+                            changed = true;
+                        }
+                    }
+                });
+                if ui.button("Load...").on_hover_text("Pick a sample file of your own for the layer").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aiff", "wv"]).pick_file() {
+                        set_sample_path(&mut g.raw, &p.to_string_lossy());
+                        changed = true;
+                    }
+                }
+            });
+            changed |= float_panel(ui, ci, g, &GROUPS, params());
+            ui.label(RichText::new("The drum sounds for its duration whatever the length of the note. The layered samples in the list come from your own imported content.").small().color(TEXT_DIM));
+        }
         Kind::Morph => {
             use cereal_engine::morph::{params, COUNT, GROUPS};
             if g.p.len() < COUNT {

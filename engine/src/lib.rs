@@ -22,6 +22,7 @@ pub mod tailfx;
 pub mod strmodel;
 pub mod hybrid;
 pub mod morph;
+pub mod kickd;
 pub mod triple;
 pub mod fm;
 pub mod formula;

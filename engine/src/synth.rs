@@ -62,6 +62,7 @@ pub enum Kind {
     Hybrid,
     /// Four generators of sine overtones blended along a path.
     Morph,
+    KickD,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -498,7 +499,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Triple, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Morph, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Trio, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::KickD, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Image, ident: "BeepMap", title: "Picture Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Quiet, ident: "Fruity Keyboard Controller", title: "Key Controller", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -596,15 +597,7 @@ fn sub_patch(ident: &str, state: &[u8]) -> crate::additive::Patch {
 }
 
 /// Settings for the swept sine drum from a drum synth's block.
-fn thump(ident: &str, state: &[u8]) -> Vec<f32> {
-    let at = |i: usize| state.get(1292 + i * 4..1296 + i * 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
-    if ident.eq_ignore_ascii_case("BassDrum") {
-        if let (Some(dur), Some(base), Some(peak), Some(slide)) = (at(1), at(2), at(3), at(4)) {
-            let end = -1800.0 + base * 1800.0;
-            return vec![(end + peak * 3000.0).min(3600.0), end, slide * 128.0, 40.0 + dur * 216.0, 32.0, 0.0];
-        }
-        return vec![1200.0, -900.0, 48.0, 140.0, 32.0, 0.0];
-    }
+fn thump(_ident: &str, _state: &[u8]) -> Vec<f32> {
     // a struck skin: a short fall onto the played key
     vec![700.0, 0.0, 40.0, 140.0, 16.0, 0.0]
 }
@@ -755,6 +748,10 @@ impl Gen {
             g.p = crate::hybrid::defaults();
             g.raw = crate::hybrid::fresh();
         }
+        if kind == Kind::KickD {
+            g.p = crate::kickd::defaults();
+            g.raw = crate::kickd::fresh();
+        }
         if kind == Kind::Morph {
             g.p = crate::morph::defaults();
             g.raw = crate::morph::fresh();
@@ -799,6 +796,9 @@ impl Gen {
         }
         if d.kind == Kind::Hybrid {
             return Some(Self { kind: d.kind, p: crate::hybrid::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::KickD {
+            return Some(Self { kind: d.kind, p: crate::kickd::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::Morph {
             return Some(Self { kind: d.kind, p: crate::morph::values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -977,12 +977,13 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::Hybrid => crate::hybrid::base(&out).unwrap_or(usize::MAX / 8),
                 Kind::Morph => crate::morph::base(&out).unwrap_or(usize::MAX / 8),
+                Kind::KickD => crate::kickd::FIRST,
                 _ => 12,
             };
             for (i, &v) in self.p.iter().enumerate() {
@@ -1087,6 +1088,15 @@ impl Gen {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
                 Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None, smp: None })), ..Default::default() }
+            }
+            Kind::KickD => {
+                // the layered sample rides along as one number after the list
+                let mut p = self.p.clone();
+                if p.len() >= crate::kickd::COUNT {
+                    p.truncate(crate::kickd::COUNT);
+                    p.push(crate::kickd::sample_id(&self.raw));
+                }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
             }
             Kind::Morph => {
                 // the snapshots ride along as one number after the list
@@ -1613,6 +1623,50 @@ mod tests {
         }
     }
 
+    /// With CEREAL_FLP_CORPUS set: every stored kick designer sound there reads, finds its layered sample and plays.
+    #[test]
+    fn every_stored_kick_designer_sound_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let root = std::path::Path::new(&root);
+        if let Some(up) = root.parent() {
+            crate::keys::add_root(up);
+        }
+        let mut stack = vec![root.join("Patches/Plugin presets/Generators/BassDrum")];
+        let (mut seen, mut layered, mut peaks) = (0, 0, Vec::new());
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    continue;
+                }
+                let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+                assert_eq!(g.kind, Kind::KickD);
+                assert_eq!(g.p.len(), crate::kickd::COUNT, "{path:?}");
+                assert_eq!(g.encode(None), g.raw);
+                let tone = g.tone();
+                let patch = tone.mini.as_ref().unwrap();
+                if patch.p[crate::kickd::COUNT] >= 1.0 {
+                    layered += 1;
+                }
+                let dp = 261.63 / 44100.0;
+                let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+                let buf: Vec<[f32; 2]> = (0..44100).map(|_| v.frame(patch, dp)).collect();
+                let peak = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+                assert!(peak.is_finite() && peak > 0.05 && peak < 2.5, "{path:?}: {peak}");
+                peaks.push(peak);
+                seen += 1;
+            }
+        }
+        if seen > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            eprintln!("kick designer sounds: {seen}, with a layered sample found {layered}, loudest {}, middle {}, softest {}", peaks[seen - 1], peaks[seen / 2], peaks[0]);
+        }
+    }
+
     /// With CEREAL_FLP_CORPUS set: every stored sound of the hybrid synth there reads, plays and stays in range.
     #[test]
     fn every_stored_morph_additive_sound_plays() {
@@ -1937,13 +1991,11 @@ mod tests {
         let g = Gen::decode("Morphine", &b).unwrap();
         assert!(g.tone().mini.is_some());
         assert_eq!(g.encode(None), b);
-        let mut k = vec![0u8; 1384];
-        for (i, v) in [(1usize, 0.5f32), (2, 0.5), (3, 1.0), (4, 0.5)] {
-            k[1292 + i * 4..1296 + i * 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let k = vec![0u8; 1384];
         let g = Gen::decode("BassDrum", &k).unwrap();
-        assert_eq!(g.p, vec![2100.0, -900.0, 64.0, 148.0, 32.0, 0.0]);
+        assert!(g.p.is_empty());
         assert!(g.tone().mini.is_some());
+        assert_eq!(g.encode(None), k);
         assert!(Gen::decode("drumpad", &[0u8; 300]).unwrap().tone().mini.is_some());
         assert_eq!(Gen::decode("Kepler", &[1u8; 178]).unwrap().encode(None), vec![1u8; 178]);
     }
