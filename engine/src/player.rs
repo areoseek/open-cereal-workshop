@@ -48,7 +48,21 @@ pub struct Transport {
     countdown: AtomicBool,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
+    /// The effect slot whose sound the window wants to look at (insert * 64 + slot), or all ones for none.
+    tap_want: AtomicU32,
+    tap: Mutex<Tap>,
 }
+
+/// The latest stretch of sound through the watched slot, kept going round.
+struct Tap {
+    buf: Vec<[f32; 2]>,
+    at: usize,
+    /// Frames written so far, so the reader can tell fresh sound from stale.
+    count: u64,
+    rate: f32,
+}
+
+const TAP_LEN: usize = 16_384;
 
 /// A key going down or up while recording, stamped with the play position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +91,8 @@ impl Transport {
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
+            tap_want: AtomicU32::new(u32::MAX),
+            tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
         })
     }
     pub fn playing(&self) -> bool {
@@ -148,6 +164,18 @@ impl Transport {
     }
     pub fn set_master(&self, v: f32) {
         self.master.store(v.clamp(0.0, 1.25).to_bits(), Relaxed);
+    }
+    /// Choose the effect slot whose sound is kept for the pictures of the meter units, or none.
+    pub fn watch_slot(&self, at: Option<(usize, u16)>) {
+        self.tap_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
+    }
+    /// The last `n` frames through the watched slot, oldest first, with the count of frames seen so far
+    /// (a count that stands still means the track has gone quiet).
+    pub fn watched(&self, n: usize) -> (Vec<[f32; 2]>, u64, f32) {
+        let Ok(t) = self.tap.lock() else { return (Vec::new(), 0, 48_000.0) };
+        let n = n.min(TAP_LEN);
+        let from = (t.at + TAP_LEN - n) % TAP_LEN;
+        ((0..n).map(|i| t.buf[(from + i) % TAP_LEN]).collect(), t.count, t.rate)
     }
     /// Read and reset the peak meter of an insert (0 = master).
     pub fn take_peak(&self, insert: usize) -> (f32, f32) {
@@ -1547,6 +1575,18 @@ impl Player {
                         for (w, d) in bus[..n].iter_mut().zip(&self.scratch) {
                             w[0] = d[0] + (w[0] - d[0]) * s.mix;
                             w[1] = d[1] + (w[1] - d[1]) * s.mix;
+                        }
+                    }
+                    if self.transport.tap_want.load(Relaxed) == (i as u32) << 6 | (slots_index as u32 & 63) {
+                        // never wait for the window here: if it is reading, this block is simply not shown
+                        if let Ok(mut t) = self.transport.tap.try_lock() {
+                            for f in &bus[..n] {
+                                let at = t.at;
+                                t.buf[at] = *f;
+                                t.at = (at + 1) % TAP_LEN;
+                            }
+                            t.count += n as u64;
+                            t.rate = self.sr;
                         }
                     }
                 }

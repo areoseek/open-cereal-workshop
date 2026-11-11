@@ -135,7 +135,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Transient Processor (built, approximate)
 - [~] Transmitter
 - [~] Transporter (built as Relooper; transient-marked loops with reverse and octave chances, spread, bounce and tempo modes; adaptive mode, sidechain trigger, deterministic bias and the wave display are not done)
-- [~] Tuner (opens, block kept; the pitch display is not drawn)
+- [~] Tuner (Pitch Meter: note name, cents needle and frequency of the sound on its track; its display options are not read)
 - [~] VFX Color Mapper
 - [~] VFX Envelope
 - [~] VFX Keyboard Splitter
@@ -146,7 +146,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [~] Vintage Phaser (built as Stone Phaser; four stages, sweep range, feedback, speed and stereo phase; its echo, noise, colour and drive sections are not run and several setting positions are guesses)
 - [~] Vocodex (Band Vocoder: bands, follower, mapping envelopes read, built-in carrier, listens to routed mixer tracks; envelopes not yet editable, noise detection and freeze missing)
-- [~] Wave Candy (opens as Scope Meter, block kept, sound passes through; the displays are not drawn)
+- [~] Wave Candy (Scope Meter: wave, spectrum, level and left/right displays of the sound on its track; its saved display options are not read)
 - [~] ZGameEditor Visualizer (opens as Visual Stage, block kept, sound passes through; no visuals)
 
 ## Core windows
