@@ -20,6 +20,7 @@ pub mod beep;
 pub mod conv;
 pub mod drumbank;
 pub mod grain;
+pub mod guitar;
 pub mod wavpack;
 pub mod metal;
 pub mod zones;

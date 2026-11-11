@@ -30,6 +30,7 @@ pub enum Voice {
     Image(Box<crate::beep::Voice>),
     Grain(Box<crate::grain::Voice>),
     String(Box<Ks>),
+    Guitar(Box<crate::guitar::Voice>),
     Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
     Quiet,
 }
@@ -143,6 +144,7 @@ impl Voice {
                 let keep = 0.001f32.powf(1.0 / trips.max(1.0));
                 Voice::String(Box::new(Ks { line: [a, b], pos: 0, frac: len - len.floor(), last: [0.0; 2], keep, fade: 1.0, fade_by: 1.0, wide, vel }))
             }
+            Kind::Guitar => Voice::Guitar(Box::new(crate::guitar::Voice::start(s, sr, key, vel, dphase, seed))),
             Kind::Buzz | Kind::BuzzXt => {
                 let set = crate::analog::buzz(s);
                 Voice::Analog(Box::new((crate::analog::Voice::start(&set, sr, key, vel, seed), set)))
@@ -258,6 +260,7 @@ impl Voice {
             Voice::Bank(v) => v.left(),
             Voice::Image(v) => v.release(),
             Voice::Grain(v) => v.release(),
+            Voice::Guitar(v) => v.release(),
             Voice::String(v) => {
                 if s_gate(p) {
                     v.fade_by = 0.99;
@@ -283,6 +286,7 @@ impl Voice {
             Voice::Bank(v) => v.frame(),
             Voice::Image(v) => v.frame(),
             Voice::Grain(v) => v.frame(),
+            Voice::Guitar(v) => v.frame(),
             Voice::String(v) => {
                 let n = v.line[0].len();
                 let (at, next) = (v.pos, (v.pos + 1) % n);

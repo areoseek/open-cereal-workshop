@@ -14,7 +14,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Drumpad (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] FLEX (opens as Pack Player and keeps its block; the pack sounds are protected files that we do not unlock, so a stand-in voice of our own, chosen by the preset's name, plays instead; its knobs are not read)
 - [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
-- [ ] FL Slayer
+- [~] FL Slayer (opens as Six String: seven string types, pickups, tone, slap, fret noise, damping, four amps, tone stack, four cabinets, hold and power chords play; the amp works per note; the effects unit, feedback, second pitch wheel and the strummed and gliding play modes are not done)
 - [ ] FL Studio Mobile
 - [ ] FL Studio Mobile Rack
 - [~] FPC: pads, their velocity layers, levels, pans, layer tune, cut groups and output offsets are read and played, with a pad page to audition them. Pad envelopes, the scale-volume and random-layer switches, the built-in pattern loops and editing are not done. The tune knob's reach is an estimate.

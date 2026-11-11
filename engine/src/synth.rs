@@ -43,6 +43,8 @@ pub enum Kind {
     Travel,
     /// The small three-oscillator analog-style synth and its wider sibling (`analog.rs`).
     Buzz,
+    /// The electric guitar (`guitar.rs`).
+    Guitar,
     /// A plucked string made from a wearing loop of noise (`minis.rs`).
     String,
     BuzzXt,
@@ -143,6 +145,33 @@ const BUZZ: &[Param] = &[
     p("Drive", 156, 0, 128, 0),
     p("Tone", 160, 0, 128, 64),
     p("Dual voice", 164, 0, 1, 0),
+];
+
+/// The electric guitar's settings; `guitar.rs` reads them by position in this list.
+const GUITAR: &[Param] = &[
+    p("String type", 4, 0, 6, 1),
+    p("Pickup", 8, 0, 2, 1),
+    p("Tone", 12, 0, 65535, 32768),
+    p("Slap", 16, 0, 65535, 0),
+    p("Fret noise", 20, 0, 65535, 8000),
+    p("Harmonics", 24, 0, 65535, 40000),
+    p("Velocity", 28, 0, 65535, 32768),
+    p("Damping", 32, 0, 65535, 16000),
+    p("Damping by velocity", 36, 0, 65535, 0),
+    p("Amp type", 52, 0, 3, 1),
+    p("Drive", 56, 0, 65535, 20000),
+    p("Presence", 60, 0, 65535, 32768),
+    p("Feedback", 64, 0, 65535, 0),
+    p("Low", 68, 0, 65535, 32768),
+    p("Mid", 72, 0, 65535, 32768),
+    p("High", 76, 0, 65535, 32768),
+    p("Cabinet", 80, 0, 3, 2),
+    p("Effect", 84, 0, 15, 0),
+    p("Effect setting 1", 88, 0, 65535, 32768),
+    p("Effect setting 2", 92, 0, 65535, 32768),
+    p("Play mode", 100, 0, 5, 0),
+    p("Speed", 104, 0, 65535, 0),
+    p("Hold", 108, 0, 1, 0),
 ];
 
 pub static DEFS: &[Def] = &[Def {
@@ -433,6 +462,7 @@ pub static DEFS: &[Def] = &[Def {
         tail: &[],
         params: &[p("Decay", 0, 0, 128, 128), p("Colour", 4, 0, 128, 64), p("Even decay", 8, 0, 1, 1), p("Gate", 12, 0, 1, 0), p("Widen", 16, 0, 1, 1)],
     },
+    Def { kind: Kind::Guitar, ident: "FL Slayer", title: "Six String", size: 116, fixed: &[], tail: &[], params: GUITAR },
     Def { kind: Kind::Sub, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -1120,6 +1150,35 @@ mod tests {
         // one period is about 200 samples: the sound matches itself there and not half a period on
         let corr = |lag: usize| (20000..30000).map(|i| out[i] * out[i + lag]).sum::<f32>();
         assert!(corr(200) > 0.8 * corr(0) && corr(100) < 0.5 * corr(0), "{} {} {}", corr(0), corr(200), corr(100));
+    }
+
+    #[test]
+    fn the_guitar_sounds_in_every_amp_and_cabinet() {
+        let fresh = Gen::decode("FL Slayer", &[]).unwrap();
+        assert_eq!(fresh.raw.len(), 116);
+        assert_eq!(Gen::decode("FL Slayer", &fresh.raw).unwrap().encode(None), fresh.raw);
+        for amp in 0..4 {
+            for cab in 0..4 {
+                for mode in [0, 2] {
+                    let mut g = fresh.clone();
+                    g.p[9] = amp as f32;
+                    g.p[16] = cab as f32;
+                    g.p[20] = mode as f32;
+                    g.p[1] = (amp % 3) as f32;
+                    g.p[3] = 40000.0;
+                    let tone = g.tone();
+                    let patch = tone.mini.as_ref().unwrap();
+                    let dp = 110.0 / 44100.0;
+                    let mut v = crate::minis::Voice::start(patch, 44100.0, 45, 1.0, dp, 3);
+                    let peak = (0..12000).map(|_| v.frame(patch, dp)[0].abs()).fold(0.0, f32::max);
+                    assert!(peak > 0.02 && peak < 2.0, "amp {amp} cab {cab} mode {mode}: {peak}");
+                    let tail = v.release(patch);
+                    let n = (tail * 44100.0 * 3.0) as usize;
+                    let end = (0..n).map(|_| v.frame(patch, dp)[0].abs()).skip(n - 400).fold(0.0, f32::max);
+                    assert!(end < 0.01, "amp {amp} cab {cab}: {end}");
+                }
+            }
+        }
     }
 
     #[test]
