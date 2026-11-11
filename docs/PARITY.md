@@ -1,0 +1,163 @@
+# Parity checklist
+
+What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list. Names on the left are theirs and are used here only to track coverage; our own parts get our own names.
+
+## Instruments (51)
+- [ ] 3x Osc
+- [ ] Autogun
+- [ ] BassDrum
+- [ ] BeepMap
+- [ ] BooBass
+- [ ] Dashboard
+- [ ] DirectWave
+- [ ] Drumaxx
+- [ ] Drumpad
+- [ ] FLEX
+- [ ] FL Keys
+- [ ] FL Slayer
+- [ ] FL Studio Mobile
+- [ ] FL Studio Mobile Rack
+- [ ] FPC
+- [ ] Fruit Kick
+- [ ] Fruity Dance
+- [ ] Fruity DrumSynth Live
+- [ ] Fruity DX10
+- [ ] Fruity Envelope Controller
+- [ ] Fruity Granulizer
+- [ ] Fruity Keyboard Controller
+- [ ] Fruity Slicer
+- [ ] Fruity Slicer 2
+- [ ] Fruity Video Player
+- [ ] Fruity Voltage Controller
+- [ ] Fruity Wrapper
+- [ ] GMS
+- [ ] Harmless
+- [ ] Harmor
+- [ ] Kepler
+- [ ] Kepler Exo
+- [ ] MIDI Out
+- [ ] Minisynth
+- [ ] Morphine
+- [ ] Ogun
+- [ ] Patcher
+- [ ] Plucked!
+- [ ] PoiZone
+- [ ] ReWired
+- [ ] Sakura
+- [ ] Sawer
+- [ ] SimSynth
+- [ ] Slicex
+- [ ] Soundfont Player
+- [ ] Sytrus
+- [ ] Toxic Biohazard
+- [ ] Transistor Bass
+- [ ] Wasp
+- [ ] Wasp XT
+- [ ] Wave Traveller
+
+## Effects and tools (90)
+- [ ] Control Surface
+- [ ] Distructor
+- [ ] Edison
+- [ ] Effector
+- [ ] Emphasis
+- [ ] Emphasizer
+- [ ] EQUO
+- [ ] FL Studio Mobile Rack FX
+- [ ] Frequency Shifter
+- [ ] Frequency Splitter
+- [ ] Fruity 7 Band EQ
+- [ ] Fruity Balance
+- [ ] Fruity Bass Boost
+- [ ] Fruity Big Clock
+- [ ] Fruity Blood Overdrive
+- [ ] Fruity Center
+- [ ] Fruity Chorus
+- [ ] Fruity Compressor
+- [ ] Fruity Convolver
+- [ ] Fruity dB Meter
+- [ ] Fruity Delay
+- [ ] Fruity Delay 2
+- [ ] Fruity Delay 3
+- [ ] Fruity Delay Bank
+- [ ] Fruity Fast Dist
+- [ ] Fruity Fast LP
+- [ ] Fruity Filter
+- [ ] Fruity Flanger
+- [ ] Fruity Flangus
+- [ ] Fruity Formula Controller
+- [ ] Fruity Free Filter
+- [ ] Fruity HTML NoteBook
+- [ ] Fruity Limiter
+- [ ] Fruity Love Philter
+- [ ] Fruity LSD
+- [ ] Fruity Multiband Compressor
+- [ ] Fruity Mute 2
+- [ ] Fruity NoteBook
+- [ ] Fruity NoteBook 2
+- [ ] Fruity PanOMatic
+- [ ] Fruity Parametric EQ
+- [ ] Fruity Parametric EQ 2
+- [ ] Fruity Peak Controller
+- [ ] Fruity Phase Inverter
+- [ ] Fruity Phaser
+- [ ] Fruity Reeverb
+- [ ] Fruity Reeverb 2
+- [ ] Fruity Scratcher
+- [ ] Fruity Send
+- [ ] Fruity Soft Clipper
+- [ ] Fruity Spectroman
+- [ ] Fruity Squeeze
+- [ ] Fruity Stereo Enhancer
+- [ ] Fruity Stereo Shaper
+- [ ] Fruity Vocoder
+- [ ] Fruity WaveShaper
+- [ ] Fruity Wrapper
+- [ ] Fruity X-Y Controller
+- [ ] Fruity X-Y-Z Controller
+- [ ] Gross Beat
+- [ ] Hardcore
+- [ ] Hyper Chorus
+- [ ] Low Lifter
+- [ ] Luxeverb
+- [ ] Maximus
+- [ ] Multiband Delay
+- [ ] Newtime
+- [ ] Newtone
+- [ ] Patcher
+- [ ] Pitcher
+- [ ] Pitch Shifter
+- [ ] Razer Chroma
+- [ ] Soundgoodizer
+- [ ] Spreader
+- [ ] Transient Processor
+- [ ] Transmitter
+- [ ] Transporter
+- [ ] Tuner
+- [ ] VFX Color Mapper
+- [ ] VFX Envelope
+- [ ] VFX Keyboard Splitter
+- [ ] VFX Key Mapper
+- [ ] VFX Level Scaler
+- [ ] VFX Script
+- [ ] VFX Sequencer
+- [ ] Vintage Chorus
+- [ ] Vintage Phaser
+- [ ] Vocodex
+- [ ] Wave Candy
+- [ ] ZGameEditor Visualizer
+
+## Core windows
+- [ ] Channel rack (step sequencer: M0 slice done)
+- [ ] Piano roll
+- [ ] Playlist
+- [ ] Mixer
+- [ ] Browser
+- [ ] Transport, toolbars, hint bar
+- [ ] Automation clips and event editor
+- [ ] Audio recording and Edison-style editor
+- [ ] Plugin hosting (VST/CLAP)
+- [ ] Project files: .flp read/write, .fst presets, .fsc scores
+- [ ] Keyboard and mouse bindings table (from the public manual)
+- [ ] MIDI devices, controller linking
+- [ ] Rendering/export: WAV, MP3, OGG, FLAC, MIDI
