@@ -4,7 +4,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 
 ## Instruments (51)
 - [~] 3x Osc (built, approximate)
-- [ ] Autogun
+- [~] Autogun (plays as Metal Bank from the settings stored with the project; picking another preset number is not done)
 - [ ] BassDrum
 - [ ] BeepMap
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
@@ -38,7 +38,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] MIDI Out
 - [ ] Minisynth
 - [ ] Morphine
-- [ ] Ogun
+- [~] Ogun (plays as Metal Stack: seeds, fullness, morph, decay, release, pitch and level are read at estimated scales and give our own seeded spread of harmonics; richness, drawn maps, envelopes, unison, filter, effects and editing are not done)
 - [ ] Patcher
 - [ ] Plucked!
 - [ ] PoiZone

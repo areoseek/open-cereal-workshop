@@ -12,6 +12,7 @@ pub mod fm;
 pub mod minis;
 pub mod keys;
 pub mod slicer;
+pub mod metal;
 pub mod zones;
 pub mod preset;
 pub mod sample;

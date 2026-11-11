@@ -25,12 +25,16 @@ pub enum Kind {
     Forge,
     /// The pack player: its sounds live in protected pack files, so a stand-in voice is chosen by the preset's name.
     Packs,
+    /// The metallic additive instrument (`metal.rs`).
+    Metal,
+    /// The same instrument behind a preset picker.
+    MetalBank,
 }
 
 impl Kind {
     /// The small instruments that share the voice code of `minis.rs`.
     pub fn mini(self) -> bool {
-        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge | Kind::Packs)
+        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank)
     }
 }
 
@@ -56,6 +60,13 @@ pub struct Def {
     /// Bytes a fresh block carries after the fixed-size part.
     pub tail: &'static [u8],
     pub params: &'static [Param],
+}
+
+impl Def {
+    /// Instruments we can play from a stored block but cannot yet make a fresh block for.
+    pub fn arrives_only(&self) -> bool {
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank)
+    }
 }
 
 const fn p(name: &'static str, off: usize, min: i32, max: i32, def: i32) -> Param {
@@ -341,6 +352,8 @@ pub static DEFS: &[Def] = &[Def {
             p("Phaser speed", 332, -8000, 8000, 3000),
         ],
     },
+    Def { kind: Kind::Metal, ident: "Ogun", title: "Metal Stack", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::MetalBank, ident: "Autogun", title: "Metal Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
 ];
 
@@ -404,6 +417,8 @@ pub struct Gen {
     pub raw: Vec<u8>,
     /// The read patch of the six-operator instrument, shared by its notes.
     pub fm: Option<std::sync::Arc<crate::fm::Patch>>,
+    /// A patch worked out once at load, for the instruments whose settings we only play and never edit.
+    pub pre: Option<std::sync::Arc<crate::additive::Patch>>,
 }
 
 /// Two sets of settings are the same when they would be stored as the same block.
@@ -415,7 +430,7 @@ impl PartialEq for Gen {
 
 impl Gen {
     pub fn new(kind: Kind) -> Self {
-        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None };
+        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None };
         g.raw = g.encode(None);
         if kind == Kind::Fm {
             g.fm = Some(Default::default());
@@ -431,7 +446,11 @@ impl Gen {
         if d.kind == Kind::Fm {
             // layouts we cannot read stay with the project as an unknown instrument
             let patch = crate::fm::Patch::parse(state)?;
-            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)) });
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)), pre: None });
+        }
+        if matches!(d.kind, Kind::Metal | Kind::MetalBank) {
+            let patch = crate::metal::patch(state)?;
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(patch)) });
         }
         if d.kind == Kind::Osc3 && state.len() == 44 {
             return Some(Self::old_osc3(state));
@@ -465,7 +484,11 @@ impl Gen {
                 v.clamp(p.min, p.max) as f32
             })
             .collect();
-        Some(Self { kind: d.kind, p, raw: state.to_vec(), fm: None })
+        let mut g = Self { kind: d.kind, p, raw: state.to_vec(), fm: None, pre: None };
+        if d.kind == Kind::Packs {
+            g.pre = Some(std::sync::Arc::new(stand_in(&g.preset_name())));
+        }
+        Some(g)
     }
 
     /// The pack and preset a pack player block names.
@@ -626,7 +649,7 @@ impl Gen {
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
-            Kind::Packs => Tone { add: Some(std::sync::Arc::new(stand_in(&self.preset_name()))), ..Default::default() },
+            Kind::Packs | Kind::Metal | Kind::MetalBank => Tone { add: self.pre.clone().or_else(|| Some(std::sync::Arc::new(stand_in("")))), ..Default::default() },
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
