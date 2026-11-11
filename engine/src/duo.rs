@@ -20,6 +20,8 @@ pub enum Ctl {
     Pick(&'static [&'static str]),
     /// A whole number from 0 to this.
     Whole(u32),
+    /// One of these by name, stored as its place in the list.
+    Choice(&'static [&'static str]),
     /// Not placed yet: kept, not shown.
     Kept,
 }
@@ -275,9 +277,11 @@ pub fn tail(p: &[f32]) -> tailfx::Set {
             low_hz: if u(36) < 0.005 { 0.0 } else { 20.0 * 2f32.powf(u(36) * 8.0) },
             high_hz: 200.0 * 100f32.powf(u(37)),
             wet: u(38),
+            free: 0.0,
         }),
         chorus: (p[39] >= 0.5 && u(42) > 0.0).then(|| tailfx::Chorus { depth: u(40), hz: 0.05 * 100f32.powf(u(41)), wet: u(42) }),
         gate: (u(47) > 0.0).then(|| tailfx::Gate { wet: u(47), smooth: u(48), steps: pattern, len: 1.0 }),
+        ..Default::default()
     }
 }
 

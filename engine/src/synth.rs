@@ -55,6 +55,8 @@ pub enum Kind {
     SawSyn,
     /// The two-oscillator synth with sync, ring, a gate and its own echo: its stored values in file order (`duo.rs`).
     Duo,
+    /// The two-string model with its touch, links, body, echo, chorus and room: its stored values in file order (`strmodel.rs`).
+    StrModel,
     /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
     Trio,
     /// The electric guitar (`guitar.rs`).
@@ -463,7 +465,7 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::MetalBank, ident: "Autogun", title: "Metal Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Duo, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::SawSyn, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
-    Def { kind: Kind::Sub, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::StrModel, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Buzz, ident: "Wasp", title: "Hornet", size: 169, fixed: &[(0, 1)], tail: &[], params: BUZZ },
     Def { kind: Kind::BuzzXt, ident: "Wasp XT", title: "Hornet XT", size: 213, fixed: &[(0, 11)], tail: &[], params: BUZZ },
@@ -517,7 +519,6 @@ struct SubMap {
 
 const SUBS: &[SubMap] = &[
     SubMap { ident: "Sawer", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "lead" },
-    SubMap { ident: "Sakura", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "pluck" },
 ];
 
 /// The values of the vintage polys: a name with its length in front at `at`, a version, a count, then that many
@@ -737,6 +738,10 @@ impl Gen {
             g.p = crate::duo::defaults();
             g.raw = crate::duo::fresh();
         }
+        if kind == Kind::StrModel {
+            g.p = crate::strmodel::defaults();
+            g.raw = crate::strmodel::fresh();
+        }
         if kind == Kind::Fm {
             // a new one carries a full block of its own, so every page of its window can be edited and saved
             g.raw = crate::fm::Patch::blank_state();
@@ -771,6 +776,9 @@ impl Gen {
         }
         if d.kind == Kind::Duo {
             return Some(Self { kind: d.kind, p: tagged_values(state, crate::duo::COUNT), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
+        }
+        if d.kind == Kind::StrModel {
+            return Some(Self { kind: d.kind, p: tagged_values(state, crate::strmodel::COUNT), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::SawSyn {
             return Some(Self { kind: d.kind, p: tagged_values(state, 96), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
@@ -943,7 +951,7 @@ impl Gen {
                 v
             }
         };
-        if self.kind == Kind::Duo {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel) {
             // a list of numbers from the twelfth byte: only the ones that were moved are written
             for (i, &v) in self.p.iter().enumerate() {
                 let o = 12 + i * 4;
@@ -987,6 +995,7 @@ impl Gen {
     pub fn tail(&self) -> crate::tailfx::Set {
         match self.kind {
             Kind::Duo => crate::duo::tail(&self.p),
+            Kind::StrModel => crate::strmodel::tail(&self.p),
             _ => Default::default(),
         }
     }
@@ -1398,6 +1407,87 @@ mod tests {
         assert!(g.p.is_empty() && g.encode(None) == odd && g.mono().is_none() && !g.tail().any());
     }
 
+    #[test]
+    fn the_string_model_keeps_its_block_and_writes_only_what_moved() {
+        let mut b = crate::strmodel::fresh();
+        b[468..476].copy_from_slice(b"My pluck");
+        let mut g = Gen::decode("Sakura", &b).unwrap();
+        assert_eq!(g.kind, Kind::StrModel);
+        assert_eq!(g.p, crate::strmodel::defaults());
+        assert_eq!(g.encode(None), b);
+        g.p[29] = 0.75;
+        let out = g.encode(None);
+        let moved: Vec<usize> = (0..b.len()).filter(|&i| out[i] != b[i]).collect();
+        assert!(!moved.is_empty() && moved.iter().all(|&i| (12 + 29 * 4..12 + 30 * 4).contains(&i)), "{moved:?}");
+        let g = Gen::new(Kind::StrModel);
+        assert_eq!(g.raw.len(), 596);
+        assert!(!def(Kind::StrModel).arrives_only());
+        let tone = g.tone();
+        let patch = tone.mini.as_ref().unwrap();
+        let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
+        assert!((0..8000).map(|_| v.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.01);
+        // a block of another make is kept and plays the default sound
+        let odd = vec![7u8; 40];
+        let g = Gen::decode("Sakura", &odd).unwrap();
+        assert!(g.p.is_empty() && g.encode(None) == odd && !g.tail().any());
+    }
+
+    /// With CEREAL_FLP_CORPUS set: every stored sound of the string model there reads, plays and stays in range.
+    #[test]
+    fn every_stored_string_model_sound_plays() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let dir = std::path::Path::new(&root).join("Patches/Plugin presets/Generators/Sakura");
+        let (mut seen, mut quiet, mut top, mut loud, mut worst) = (0, Vec::new(), 0.0f32, 0, String::new());
+        let mut stack = vec![dir];
+        let mut files = Vec::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    files.push(path);
+                }
+            }
+        }
+        let mut peaks = Vec::new();
+        for path in files {
+            let Some(crate::preset::Unit::Gen(g)) = crate::preset::read(&path).ok().and_then(|p| p.unit()) else { panic!("{path:?} does not read") };
+            assert_eq!(g.p.len(), crate::strmodel::COUNT, "{path:?}");
+            assert_eq!(g.encode(None), g.raw);
+            let tone = g.tone();
+            let patch = tone.mini.as_ref().unwrap();
+            let dp = 261.63 / 44100.0;
+            let mut v = crate::minis::Voice::start(patch, 44100.0, 60, 0.8, dp, 3);
+            let mut buf: Vec<[f32; 2]> = (0..66150).map(|_| v.frame(patch, dp)).collect();
+            let set = g.tail();
+            if set.any() {
+                crate::tailfx::State::new(44100.0).process(&set, &mut buf, 5512.0, None);
+            }
+            let peak = buf.iter().fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+            assert!(peak.is_finite(), "{path:?}: {peak}");
+            if peak > top {
+                top = peak;
+                worst = path.file_name().unwrap().to_string_lossy().into_owned();
+            }
+            peaks.push(peak);
+            if peak > 1.5 {
+                loud += 1;
+            }
+            // a few are stored with the volume all the way down
+            if peak < 0.003 && g.p[0] > 0.05 {
+                quiet.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            seen += 1;
+        }
+        if seen > 0 {
+            peaks.sort_by(|a, b| a.total_cmp(b));
+            eprintln!("string model sounds: {seen}, loudest {top}, middle {}, tenth {}, over 1.5: {loud}, quiet {}: {:?}", peaks[seen / 2], peaks[seen / 10], quiet.len(), &quiet[..quiet.len().min(12)]);
+            assert!(top < 4.0, "{worst}: {top}");
+            assert!(quiet.len() * 10 < seen, "{} of {seen} stay silent: {quiet:?}", quiet.len());
+        }
+    }
+
     /// With CEREAL_FLP_CORPUS set: every stored sound of the duo synth there reads, plays and stays in range.
     #[test]
     fn every_stored_duo_sound_plays() {
@@ -1603,15 +1693,9 @@ mod tests {
     }
     #[test]
     fn stand_in_synths_take_their_envelope_and_drums_their_sweep() {
-        use crate::additive::ix;
-        let mut b = vec![0u8; 700];
-        let mut put = |i: usize, v: f32| b[12 + i * 4..16 + i * 4].copy_from_slice(&v.to_le_bytes());
-        put(2, 0.5);
-        put(4, 0.9);
-        put(5, 0.4);
-        let g = Gen::decode("Sakura", &b).unwrap();
-        let p = g.tone().add.unwrap();
-        assert_eq!((p.p[ix::ATTACK], p.p[ix::RELEASE], p.p[ix::DECAY]), (500.0, 400.0, 1000.0));
+        let b = vec![3u8; 700];
+        let g = Gen::decode("GMS", &b).unwrap();
+        assert!(g.tone().add.is_some());
         assert_eq!(g.encode(None), b);
         let mut k = vec![0u8; 1384];
         for (i, v) in [(1usize, 0.5f32), (2, 0.5), (3, 1.0), (4, 0.5)] {

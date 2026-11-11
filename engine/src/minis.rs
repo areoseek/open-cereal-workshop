@@ -33,6 +33,7 @@ pub enum Voice {
     Guitar(Box<crate::guitar::Voice>),
     Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
     Duo(Box<(crate::duo::Voice, crate::duo::Set)>),
+    Str(Box<(crate::strmodel::Voice, crate::strmodel::Set)>),
     Quiet,
 }
 
@@ -161,6 +162,10 @@ impl Voice {
             Kind::Duo => {
                 let set = crate::duo::set(s);
                 Voice::Duo(Box::new((crate::duo::Voice::start(&set, sr, key, vel, seed), set)))
+            }
+            Kind::StrModel => {
+                let set = crate::strmodel::set(s);
+                Voice::Str(Box::new((crate::strmodel::Voice::start(&set, sr, key, vel, seed), set)))
             }
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
             Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel },
@@ -292,6 +297,10 @@ impl Voice {
                 let (v, set) = &mut **v;
                 v.release(set)
             }
+            Voice::Str(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Quiet => 0.0,
         }
     }
@@ -334,6 +343,10 @@ impl Voice {
                 v.frame(set, dphase)
             }
             Voice::Duo(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set, dphase)
+            }
+            Voice::Str(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set, dphase)
             }

@@ -30,6 +30,67 @@ pub fn key_name(key: u8) -> String {
     format!("{}{}", KEY_NAMES[key as usize % 12], key / 12)
 }
 
+/// The controls of an instrument stored as a list of numbers, group by group. True when one was moved.
+fn float_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen, groups: &[&str], params: &[cereal_engine::duo::Info]) -> bool {
+    use cereal_engine::duo::Ctl;
+    let mut changed = false;
+    for (gi, title) in groups.iter().enumerate() {
+        ui.label(RichText::new(*title).small().color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            for (i, info) in params.iter().enumerate().filter(|(_, p)| p.group as usize == gi) {
+                let mut v = g.p[i];
+                match info.ctl {
+                    Ctl::Knob => {
+                        if cap_knob(ui, &info.name.to_uppercase(), &mut v, 0.0, 1.0, info.def, |v| format!("{:.0} %", v * 100.0)) {
+                            g.p[i] = v;
+                            changed = true;
+                        }
+                    }
+                    Ctl::Switch => {
+                        let mut on = v >= 0.5;
+                        if ui.toggle_value(&mut on, info.name).changed() {
+                            g.p[i] = if on { 1.0 } else { 0.0 };
+                            changed = true;
+                        }
+                    }
+                    Ctl::Pick(names) => {
+                        let now = cereal_engine::duo::pick(v, names.len());
+                        egui::ComboBox::from_id_salt(("floats", ci, i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
+                            for (k, name) in names.iter().enumerate() {
+                                if ui.selectable_label(k == now, *name).clicked() && k != now {
+                                    g.p[i] = k as f32 / (names.len() - 1) as f32;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+                    Ctl::Whole(top) => {
+                        let mut n = v.round().clamp(0.0, top as f32) as u32 + 1;
+                        if ui.add(egui::DragValue::new(&mut n).range(1..=top + 1).prefix(format!("{} ", info.name))).changed() {
+                            g.p[i] = (n - 1) as f32;
+                            changed = true;
+                        }
+                    }
+                    Ctl::Choice(names) => {
+                        let now = (v.round().max(0.0) as usize).min(names.len() - 1);
+                        egui::ComboBox::from_id_salt(("floats", ci, i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
+                            for (k, name) in names.iter().enumerate() {
+                                if ui.selectable_label(k == now, *name).clicked() && k != now {
+                                    g.p[i] = k as f32;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+                    Ctl::Kept => {}
+                }
+            }
+        });
+        ui.add_space(3.0);
+    }
+    changed
+}
+
 /// A knob with a caption under it. Returns true when the value moved.
 fn cap_knob(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, default: f32, hint: impl Fn(f32) -> String) -> bool {
     cap_knob_for(ui, label, v, min, max, default, hint, None)
@@ -903,55 +964,22 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             });
         }
         Kind::Duo => {
-            use cereal_engine::duo::{Ctl, COUNT, GROUPS, PARAMS};
+            use cereal_engine::duo::{COUNT, GROUPS, PARAMS};
             if g.p.len() < COUNT {
                 ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
                 return false;
             }
-            for (gi, title) in GROUPS.iter().enumerate() {
-                ui.label(RichText::new(*title).small().color(TEXT_DIM));
-                ui.horizontal_wrapped(|ui| {
-                    for (i, info) in PARAMS.iter().enumerate().filter(|(_, p)| p.group as usize == gi) {
-                        let mut v = g.p[i];
-                        match info.ctl {
-                            Ctl::Knob => {
-                                if cap_knob(ui, &info.name.to_uppercase(), &mut v, 0.0, 1.0, info.def, |v| format!("{:.0} %", v * 100.0)) {
-                                    g.p[i] = v;
-                                    changed = true;
-                                }
-                            }
-                            Ctl::Switch => {
-                                let mut on = v >= 0.5;
-                                if ui.toggle_value(&mut on, info.name).changed() {
-                                    g.p[i] = if on { 1.0 } else { 0.0 };
-                                    changed = true;
-                                }
-                            }
-                            Ctl::Pick(names) => {
-                                let now = cereal_engine::duo::pick(v, names.len());
-                                egui::ComboBox::from_id_salt(("duo", ci, i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
-                                    for (k, name) in names.iter().enumerate() {
-                                        if ui.selectable_label(k == now, *name).clicked() && k != now {
-                                            g.p[i] = k as f32 / (names.len() - 1) as f32;
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                            }
-                            Ctl::Whole(top) => {
-                                let mut n = v.round().clamp(0.0, top as f32) as u32 + 1;
-                                if ui.add(egui::DragValue::new(&mut n).range(1..=top + 1).prefix(format!("{} ", info.name))).changed() {
-                                    g.p[i] = (n - 1) as f32;
-                                    changed = true;
-                                }
-                            }
-                            Ctl::Kept => {}
-                        }
-                    }
-                });
-                ui.add_space(3.0);
-            }
+            changed |= float_panel(ui, ci, g, &GROUPS, &PARAMS);
             ui.label(RichText::new("The gate and the echo keep step with the song. The built-in note runner and the tempo choices of the gate and the slow oscillator are kept in the file but not worked yet.").small().color(TEXT_DIM));
+        }
+        Kind::StrModel => {
+            use cereal_engine::strmodel::{params, COUNT, GROUPS};
+            if g.p.len() < COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, &GROUPS, params());
+            ui.label(RichText::new("The wheels and key pressure are not worked yet, so links from them rest. A few stored settings are not placed yet: they are kept in the file as they are.").small().color(TEXT_DIM));
         }
         Kind::Sub | Kind::Thump => {
             ui.label(RichText::new("Plays a stand-in voice of our own, shaped by the few stored settings we can read so far. Its block is kept untouched.").color(TEXT_DIM));
