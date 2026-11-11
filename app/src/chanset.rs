@@ -638,6 +638,9 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.label(RichText::new(format!("{preset}  ({pack})")).strong());
             ui.label(RichText::new("Pack sounds are protected files and are not read. A stand-in voice chosen by the preset's name plays instead.").color(TEXT_DIM));
         }
+        Kind::Sub | Kind::Thump => {
+            ui.label(RichText::new("Plays a stand-in voice of our own, shaped by the few stored settings we can read so far. Its block is kept untouched.").color(TEXT_DIM));
+        }
         Kind::Metal | Kind::MetalBank => {
             ui.label(RichText::new("Plays from its stored settings: seeds, fullness, decay, release, pitch and level. Editing pages are still to come.").color(TEXT_DIM));
         }

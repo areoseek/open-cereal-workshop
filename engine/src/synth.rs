@@ -29,12 +29,16 @@ pub enum Kind {
     Metal,
     /// The same instrument behind a preset picker.
     MetalBank,
+    /// Synths we cannot read in full yet: a voice of our own shaped by the few settings we can place (`SUBS`).
+    Sub,
+    /// Drum synths we cannot read in full yet: played by the swept sine drum.
+    Thump,
 }
 
 impl Kind {
     /// The small instruments that share the voice code of `minis.rs`.
     pub fn mini(self) -> bool {
-        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank)
+        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub)
     }
 }
 
@@ -65,7 +69,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump)
     }
 }
 
@@ -354,8 +358,80 @@ pub static DEFS: &[Def] = &[Def {
     },
     Def { kind: Kind::Metal, ident: "Ogun", title: "Metal Stack", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::MetalBank, ident: "Autogun", title: "Metal Bank", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "PoiZone", title: "Duo Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Sawer", title: "Saw Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Sakura", title: "String Model", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Toxic Biohazard", title: "Hybrid Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Thump, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
 ];
+
+/// What we can place in the float lists of the synths played by a stand-in: where the list starts, the four
+/// envelope settings of the level (attack, decay, sustain, release), the filter cutoff, and the kind of voice.
+struct SubMap {
+    ident: &'static str,
+    base: usize,
+    adsr: Option<[usize; 4]>,
+    cutoff: Option<usize>,
+    voice: &'static str,
+}
+
+const SUBS: &[SubMap] = &[
+    SubMap { ident: "PoiZone", base: 12, adsr: Some([22, 23, 24, 25]), cutoff: Some(5), voice: "lead" },
+    SubMap { ident: "Sawer", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "lead" },
+    SubMap { ident: "Sakura", base: 12, adsr: Some([2, 3, 4, 5]), cutoff: None, voice: "pluck" },
+];
+
+/// The stand-in voice of one of the `Kind::Sub` synths.
+fn sub_patch(ident: &str, state: &[u8]) -> crate::additive::Patch {
+    use crate::additive::ix;
+    let Some(m) = SUBS.iter().find(|m| m.ident.eq_ignore_ascii_case(ident)) else { return stand_in("synth") };
+    let mut patch = stand_in(m.voice);
+    let at = |i: usize| {
+        let o = m.base + i * 4;
+        state.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0))
+    };
+    if let Some([a, d, su, r]) = m.adsr {
+        if let (Some(a), Some(d), Some(su), Some(r)) = (at(a), at(d), at(su), at(r)) {
+            let p = &mut patch.p;
+            p[ix::ATTACK] = a * 1000.0;
+            p[ix::RELEASE] = r * 1000.0;
+            // the engine has no sustain level: a low one becomes a note that dies away
+            if su < 0.5 {
+                p[ix::DECAY] = 300.0 + d * 600.0;
+                p[ix::PLUCK] = 400.0 + d * 500.0;
+            } else {
+                p[ix::DECAY] = 1000.0;
+                p[ix::PLUCK] = 1000.0;
+            }
+        }
+    }
+    if let Some(c) = m.cutoff.and_then(at) {
+        patch.p[ix::CUTOFF] = 2600.0 + c * 5592.0;
+    }
+    patch
+}
+
+/// Settings for the swept sine drum from a drum synth's block.
+fn thump(ident: &str, state: &[u8]) -> Vec<f32> {
+    let at = |i: usize| state.get(1292 + i * 4..1296 + i * 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
+    if ident.eq_ignore_ascii_case("BassDrum") {
+        if let (Some(dur), Some(base), Some(peak), Some(slide)) = (at(1), at(2), at(3), at(4)) {
+            let end = -1800.0 + base * 1800.0;
+            return vec![(end + peak * 3000.0).min(3600.0), end, slide * 128.0, 40.0 + dur * 216.0, 32.0, 0.0];
+        }
+        return vec![1200.0, -900.0, 48.0, 140.0, 32.0, 0.0];
+    }
+    // a struck skin: a short fall onto the played key
+    vec![700.0, 0.0, 40.0, 140.0, 16.0, 0.0]
+}
 
 /// A voice of our own for a pack preset we cannot read, picked from the words in its name.
 pub fn stand_in(name: &str) -> crate::additive::Patch {
@@ -405,7 +481,7 @@ pub fn def(kind: Kind) -> &'static Def {
 pub fn title_for(ident: &str) -> Option<&'static str> {
     // instruments that are not settings tables: sample maps and the loop slicer
     const OTHER: &[(&str, &str)] = &[("FPC", "Pad Machine"), ("DirectWave", "Zone Sampler"), ("Fruity Slicer", "Loop Slicer"), ("Slicex", "Marker Slicer")];
-    DEFS.iter().find(|d| d.ident == ident).map(|d| d.title).or_else(|| OTHER.iter().find(|o| o.0.eq_ignore_ascii_case(ident)).map(|o| o.1))
+    DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident)).map(|d| d.title).or_else(|| OTHER.iter().find(|o| o.0.eq_ignore_ascii_case(ident)).map(|o| o.1))
 }
 
 /// One instrument's settings, in file units, in the order of its table.
@@ -439,7 +515,7 @@ impl Gen {
     }
 
     pub fn decode(ident: &str, state: &[u8]) -> Option<Self> {
-        let d = DEFS.iter().find(|d| d.ident == ident)?;
+        let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if state.is_empty() {
             return Some(Self::new(d.kind));
         }
@@ -447,6 +523,12 @@ impl Gen {
             // layouts we cannot read stay with the project as an unknown instrument
             let patch = crate::fm::Patch::parse(state)?;
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)), pre: None });
+        }
+        if d.kind == Kind::Sub {
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(sub_patch(ident, state))) });
+        }
+        if d.kind == Kind::Thump {
+            return Some(Self { kind: d.kind, p: thump(ident, state), raw: state.to_vec(), fm: None, pre: None });
         }
         if matches!(d.kind, Kind::Metal | Kind::MetalBank) {
             let patch = crate::metal::patch(state)?;
@@ -649,7 +731,11 @@ impl Gen {
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
-            Kind::Packs | Kind::Metal | Kind::MetalBank => Tone { add: self.pre.clone().or_else(|| Some(std::sync::Arc::new(stand_in("")))), ..Default::default() },
+            Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub => Tone { add: self.pre.clone().or_else(|| Some(std::sync::Arc::new(stand_in("")))), ..Default::default() },
+            Kind::Thump => {
+                let p = if self.p.len() == 6 { self.p.clone() } else { thump("", &[]) };
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Kick, p, set: None })), ..Default::default() }
+            }
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
@@ -950,5 +1036,28 @@ mod tests {
         assert!(p.p[ix::ATTACK] > 0.0 && p.p[ix::UNI_ORDER] > 1.0);
         assert_eq!(stand_in("808 Deep").p[ix::UNI_ORDER], 1.0);
         assert_eq!(g.encode(None), b);
+    }
+    #[test]
+    fn stand_in_synths_take_their_envelope_and_drums_their_sweep() {
+        use crate::additive::ix;
+        let mut b = vec![0u8; 700];
+        let mut put = |i: usize, v: f32| b[12 + i * 4..16 + i * 4].copy_from_slice(&v.to_le_bytes());
+        put(22, 0.5);
+        put(24, 0.9);
+        put(25, 0.4);
+        put(5, 1.0);
+        let g = Gen::decode("PoiZone", &b).unwrap();
+        let p = g.tone().add.unwrap();
+        assert_eq!((p.p[ix::ATTACK], p.p[ix::RELEASE], p.p[ix::DECAY], p.p[ix::CUTOFF]), (500.0, 400.0, 1000.0, 8192.0));
+        assert_eq!(g.encode(None), b);
+        let mut k = vec![0u8; 1384];
+        for (i, v) in [(1usize, 0.5f32), (2, 0.5), (3, 1.0), (4, 0.5)] {
+            k[1292 + i * 4..1296 + i * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let g = Gen::decode("BassDrum", &k).unwrap();
+        assert_eq!(g.p, vec![2100.0, -900.0, 64.0, 148.0, 32.0, 0.0]);
+        assert!(g.tone().mini.is_some());
+        assert!(Gen::decode("drumpad", &[0u8; 300]).unwrap().tone().mini.is_some());
+        assert_eq!(Gen::decode("Kepler", &[1u8; 178]).unwrap().encode(None), vec![1u8; 178]);
     }
 }

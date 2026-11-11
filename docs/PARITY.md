@@ -5,13 +5,13 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 ## Instruments (51)
 - [~] 3x Osc (built, approximate)
 - [~] Autogun (plays as Metal Bank from the settings stored with the project; picking another preset number is not done)
-- [ ] BassDrum
+- [~] BassDrum (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] BeepMap
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
 - [ ] Dashboard
 - [~] DirectWave: the playing program's zones (keys, velocities, root key, file, loop points) are read and played across the keyboard. Zone envelopes, filters, LFOs, tuning and level settings, the effects section and program switching are not done; a short fade stands in for the release.
-- [ ] Drumaxx
-- [ ] Drumpad
+- [~] Drumaxx (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
+- [~] Drumpad (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] FLEX (opens as Pack Player and keeps its block; the pack sounds are protected files that we do not unlock, so a stand-in voice of our own, chosen by the preset's name, plays instead; its knobs are not read)
 - [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
 - [ ] FL Slayer
@@ -30,26 +30,27 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Fruity Video Player
 - [ ] Fruity Voltage Controller
 - [ ] Fruity Wrapper
-- [ ] GMS
+- [~] GMS (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Harmless (built as Harmonic Stack, approximate; its built-in chorus, delay, reverb and compressor, harmonic detune, grit, slides and velocity links are not run yet)
 - [~] Harmor (built as Harmonic Forge on the additive engine: timbre mix, unison, the lower filter, pluck, phaser and harmonizer of the first layer are read at estimated scales; the second layer, picture resynthesis, drawn envelopes, filter types, built-in effects and a fresh block for new instances are not done, so it arrives with projects and presets only)
-- [ ] Kepler
+- [~] Kepler (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] Kepler Exo
 - [ ] MIDI Out
 - [ ] Minisynth
-- [ ] Morphine
+- [~] MiniSynth (opens as Pocket Synth and keeps its block; a stand-in voice plays; the real synthesis and its editing are not done)
+- [~] Morphine (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Ogun (plays as Metal Stack: seeds, fullness, morph, decay, release, pitch and level are read at estimated scales and give our own seeded spread of harmonics; richness, drawn maps, envelopes, unison, filter, effects and editing are not done)
 - [ ] Patcher
 - [ ] Plucked!
-- [ ] PoiZone
+- [~] PoiZone (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] ReWired
-- [ ] Sakura
-- [ ] Sawer
-- [ ] SimSynth
+- [~] Sakura (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
+- [~] Sawer (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
+- [~] SimSynth (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Slicex: the loop (kept in the block or named by path) and its marker points are read, and each key from C5 plays its slice. Decks, articulators, envelopes, filters, the wave editor and region tools are not done.
 - [ ] Soundfont Player
 - [~] Sytrus (built as Six Op, approximate: operators, modulation matrix, three filters with shapers, envelopes, LFOs, mappings, unison; state layouts 17 to 25 are read, older ones 5 to 15 are not yet; its effects section and arpeggio breaks are not run, the panel is read-only and it cannot yet be added fresh from the menu)
-- [ ] Toxic Biohazard
+- [~] Toxic Biohazard (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] Transistor Bass
 - [ ] Wasp
 - [ ] Wasp XT
