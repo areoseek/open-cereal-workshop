@@ -20,6 +20,7 @@ pub(crate) enum Win {
 }
 mod mixer;
 mod pianoroll;
+mod prtools;
 mod playlist;
 mod rack;
 mod widgets;

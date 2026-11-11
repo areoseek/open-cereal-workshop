@@ -151,8 +151,8 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 
 ## Core windows
 - [~] Channel rack (steps, channel strip, layers, add sampler or instrument)
-- [~] Piano roll (draw, move, resize, delete; tools and lanes still to do)
-- [~] Playlist (pattern, audio and automation clips; tools still to do)
+- [x] Piano roll (eight tools, slide and portamento notes, note colours, six control lanes, scale highlighting, helper tools: riff machine, quantise, chop, arpeggiate, strum, flam, claw, limit, flip, randomise, scale levels, LFO, articulate)
+- [x] Playlist (pattern, audio and automation clips; nine tools)
 - [~] Mixer (inserts, sends, routing, EQ, effect slots; docking and metering details still to do)
 - [~] Browser (folders, preview, drag to channel)
 - [~] Transport, toolbars, hint bar

@@ -22,8 +22,36 @@ use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense,
 use cereal_engine::song::Note;
 use cereal_engine::Cmd;
 
+use crate::prtools::{self, Helper, Prop, PROPS, SCALES};
 use crate::widgets::*;
 use crate::{App, Win};
+
+/// A helper tool's window while it is open: the notes as they were, and which of them it works on.
+pub struct HelperRun {
+    h: Helper,
+    base: Vec<Note>,
+    targets: Vec<usize>,
+    pat: usize,
+    chan: u16,
+    fresh: bool,
+}
+
+/// The helper tools in menu order: label with its key, and the Alt+key that opens it.
+const HELPERS: [(&str, Key); 13] = [
+    ("Riff machine                Alt+E", Key::E),
+    ("Quantise...                 Alt+Q", Key::Q),
+    ("Chop...                     Alt+U", Key::U),
+    ("Arpeggiate...               Alt+A", Key::A),
+    ("Strum...                    Alt+S", Key::S),
+    ("Flam...                     Alt+F", Key::F),
+    ("Claw machine...             Alt+W", Key::W),
+    ("Limit...                    Alt+K", Key::K),
+    ("Flip...                     Alt+Y", Key::Y),
+    ("Randomise...                Alt+R", Key::R),
+    ("Scale levels...             Alt+X", Key::X),
+    ("LFO...                      Alt+O", Key::O),
+    ("Articulate...               Alt+L", Key::L),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -135,6 +163,10 @@ pub struct State {
     slide: bool,
     porta: bool,
     color: u8,
+    helper: Option<HelperRun>,
+    /// The scale whose keys the grid lights up: root (0 = C) and an index into the scale list (0 = none).
+    scale_root: u8,
+    scale: usize,
     drag: Option<Drag>,
     sounding: Option<(u16, u8)>,
     pub tool: Tool,
@@ -164,6 +196,9 @@ impl Default for State {
             slide: false,
             porta: false,
             color: 0,
+            helper: None,
+            scale_root: 0,
+            scale: 0,
             drag: None,
             sounding: None,
             tool: Tool::Draw,
@@ -475,6 +510,253 @@ impl App {
         self.pr_remove(pat, &gone);
     }
 
+    /// Open one of the helper tools on the selected notes (all of the channel's when nothing is selected).
+    fn pr_helper(&mut self, which: usize) {
+        let pat = self.pr_pat();
+        let (ppq, step, snap) = (self.song.ppq, self.song.step(), self.pr_snap().max(1));
+        let grid = if snap <= 1 { step } else { snap };
+        let (root, scale) = (self.piano.scale_root, self.piano.scale);
+        let h = match which {
+            0 => Helper::Riff { root, scale: scale.max(1), bars: 2, every: step, gate: 0.9, range: 2, density: 0.6, chord: 1, seed: 1 },
+            1 => Helper::Quantise { start: 1.0, end: 0.0, grid },
+            2 => Helper::Chop { every: grid, gate: 1.0, fade: 0.0 },
+            3 => Helper::Arp { dir: 0, octaves: 1, every: step, gate: 1.0, seed: 1 },
+            4 => Helper::Strum { spread: (ppq / 16) as i32, fade: 0.0 },
+            5 => Helper::Flam { offset: -((ppq / 16) as i32), vel: 0.6, count: 1 },
+            6 => Helper::Claw { period: 2, skip: 0 },
+            7 => Helper::Limit { lo: 48, hi: 84, root, scale },
+            8 => Helper::Flip { vertical: true, horizontal: false },
+            9 => Helper::Random { amount: [0.3, 0.0, 0.0, 0.0, 0.0, 0.0], seed: 1, notes: 0, every: step, len: step, lo: 48, hi: 72, root, scale, bars: 1 },
+            10 => Helper::Levels { prop: Prop::Vel, offset: 0.0, mul: 1.0, tension: 0.0 },
+            11 => Helper::Lfo { prop: Prop::Vel, base: 0.6, depth: 0.5, period: ppq * 4, shape: 0, phase: 0.0 },
+            _ => Helper::Articulate { mul: 1.0, gap: 0, vary: 0.0, seed: 1 },
+        };
+        // the riff machine writes its own notes, so with nothing selected it replaces nothing
+        let targets = if which == 0 && self.piano.sel.is_empty() { vec![] } else { self.pr_targets(pat) };
+        self.piano.helper = Some(HelperRun { h, base: self.song.patterns[pat].notes.clone(), targets, pat, chan: self.sel_chan as u16, fresh: true });
+        self.piano.sel.clear();
+    }
+
+    /// The open helper tool's window: every change shows at once, Accept keeps it and Cancel puts the notes back.
+    fn helper_window(&mut self, ctx: &egui::Context) {
+        let Some(mut run) = self.piano.helper.take() else { return };
+        if run.pat >= self.song.patterns.len() {
+            return;
+        }
+        let (ppq, step) = (self.song.ppq, self.song.step().max(1));
+        let before = run.h.clone();
+        let (mut accept, mut cancel) = (false, false);
+        let mut open = true;
+        let ticks = |ui: &mut Ui, label: &str, v: &mut u32| {
+            ui.label(label);
+            let mut steps = *v as f32 / step as f32;
+            if ui.add(egui::Slider::new(&mut steps, 0.125..=16.0).logarithmic(true).suffix(" steps")).changed() {
+                *v = ((steps * step as f32).round() as u32).max(1);
+            }
+            ui.end_row();
+        };
+        let unit = |ui: &mut Ui, label: &str, v: &mut f32, lo: f32, hi: f32| {
+            ui.label(label);
+            let mut pc = *v * 100.0;
+            if ui.add(egui::Slider::new(&mut pc, lo * 100.0..=hi * 100.0).suffix(" %").fixed_decimals(0)).changed() {
+                *v = pc / 100.0;
+            }
+            ui.end_row();
+        };
+        let key = |ui: &mut Ui, label: &str, v: &mut u8| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(v).range(0..=131).custom_formatter(|k, _| format!("{}{}", NAMES[k as usize % 12], k as usize / 12)));
+            ui.end_row();
+        };
+        let prop = |ui: &mut Ui, v: &mut Prop| {
+            ui.label("Property");
+            egui::ComboBox::from_id_salt("hp_prop").selected_text(PROPS.iter().find(|p| p.0 == *v).map(|p| p.1).unwrap_or("")).show_ui(ui, |ui| {
+                for (p, name) in PROPS {
+                    ui.selectable_value(v, p, name);
+                }
+            });
+            ui.end_row();
+        };
+        let scale_pick = |ui: &mut Ui, root: &mut u8, scale: &mut usize| {
+            ui.label("Scale");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("hp_root").width(40.0).selected_text(NAMES[*root as usize % 12]).show_ui(ui, |ui| {
+                    for (i, n) in NAMES.iter().enumerate() {
+                        ui.selectable_value(root, i as u8, *n);
+                    }
+                });
+                egui::ComboBox::from_id_salt("hp_scale").selected_text(SCALES[*scale].0).show_ui(ui, |ui| {
+                    for (i, (n, _)) in SCALES.iter().enumerate() {
+                        ui.selectable_value(scale, i, *n);
+                    }
+                });
+            });
+            ui.end_row();
+        };
+        let seed_row = |ui: &mut Ui, seed: &mut u32| {
+            ui.label("Seed");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(seed).range(1..=9999));
+                if ui.button("Throw dice").clicked() {
+                    *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) % 9999 + 1;
+                }
+            });
+            ui.end_row();
+        };
+        egui::Window::new(run.h.title()).id(egui::Id::new("pr_helper")).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            egui::Grid::new("hp").num_columns(2).show(ui, |ui| match &mut run.h {
+                Helper::Quantise { start, end, grid } => {
+                    unit(ui, "Start time", start, 0.0, 1.0);
+                    unit(ui, "End time", end, 0.0, 1.0);
+                    ticks(ui, "Grid", grid);
+                }
+                Helper::Chop { every, gate, fade } => {
+                    ticks(ui, "Time", every);
+                    unit(ui, "Gate", gate, 0.05, 1.0);
+                    unit(ui, "Fade", fade, 0.0, 1.0);
+                }
+                Helper::Arp { dir, octaves, every, gate, seed } => {
+                    ui.label("Direction");
+                    egui::ComboBox::from_id_salt("hp_dir").selected_text(["Up", "Down", "Up and down", "Random"][*dir as usize % 4]).show_ui(ui, |ui| {
+                        for (i, n) in ["Up", "Down", "Up and down", "Random"].iter().enumerate() {
+                            ui.selectable_value(dir, i as u8, *n);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Range");
+                    ui.add(egui::Slider::new(octaves, 1..=4).suffix(" oct"));
+                    ui.end_row();
+                    ticks(ui, "Time", every);
+                    unit(ui, "Gate", gate, 0.05, 1.0);
+                    if *dir == 3 {
+                        seed_row(ui, seed);
+                    }
+                }
+                Helper::Strum { spread, fade } => {
+                    ui.label("Spread");
+                    ui.add(egui::Slider::new(spread, -(ppq as i32) / 2..=ppq as i32 / 2).suffix(" ticks"));
+                    ui.end_row();
+                    unit(ui, "Fade", fade, 0.0, 1.0);
+                }
+                Helper::Flam { offset, vel, count } => {
+                    ui.label("Offset");
+                    ui.add(egui::Slider::new(offset, -(ppq as i32)..=ppq as i32).suffix(" ticks"));
+                    ui.end_row();
+                    unit(ui, "Velocity", vel, 0.0, 1.0);
+                    ui.label("Count");
+                    ui.add(egui::Slider::new(count, 1..=4));
+                    ui.end_row();
+                }
+                Helper::Limit { lo, hi, root, scale } => {
+                    key(ui, "Lowest", lo);
+                    key(ui, "Highest", hi);
+                    scale_pick(ui, root, scale);
+                }
+                Helper::Flip { vertical, horizontal } => {
+                    ui.label("Vertical");
+                    ui.checkbox(vertical, "");
+                    ui.end_row();
+                    ui.label("Horizontal");
+                    ui.checkbox(horizontal, "");
+                    ui.end_row();
+                }
+                Helper::Random { amount, seed, notes, every, len, lo, hi, root, scale, bars } => {
+                    ui.label("New notes");
+                    ui.add(egui::Slider::new(notes, 0..=100).suffix(" %"));
+                    ui.end_row();
+                    if *notes > 0 {
+                        ui.label("Length");
+                        ui.add(egui::Slider::new(bars, 1..=16).suffix(" bars"));
+                        ui.end_row();
+                        ticks(ui, "Grid", every);
+                        ticks(ui, "Note length", len);
+                        key(ui, "Lowest", lo);
+                        key(ui, "Highest", hi);
+                        scale_pick(ui, root, scale);
+                    }
+                    for (i, (_, name)) in PROPS.iter().enumerate() {
+                        unit(ui, name, &mut amount[i], 0.0, 1.0);
+                    }
+                    seed_row(ui, seed);
+                }
+                Helper::Levels { prop: p, offset, mul, tension } => {
+                    prop(ui, p);
+                    unit(ui, "Offset", offset, -1.0, 1.0);
+                    unit(ui, "Multiply", mul, 0.0, 2.0);
+                    unit(ui, "Tension", tension, -1.0, 1.0);
+                }
+                Helper::Lfo { prop: p, base, depth, period, shape, phase } => {
+                    prop(ui, p);
+                    unit(ui, "Start value", base, 0.0, 1.0);
+                    unit(ui, "Range", depth, -1.0, 1.0);
+                    ticks(ui, "Speed", period);
+                    ui.label("Shape");
+                    egui::ComboBox::from_id_salt("hp_shape").selected_text(["Sine", "Triangle", "Square", "Saw"][*shape as usize % 4]).show_ui(ui, |ui| {
+                        for (i, n) in ["Sine", "Triangle", "Square", "Saw"].iter().enumerate() {
+                            ui.selectable_value(shape, i as u8, *n);
+                        }
+                    });
+                    ui.end_row();
+                    unit(ui, "Phase", phase, 0.0, 1.0);
+                }
+                Helper::Articulate { mul, gap, vary, seed } => {
+                    unit(ui, "Multiply", mul, 0.05, 2.0);
+                    ui.label("Gap");
+                    ui.add(egui::Slider::new(gap, 0..=ppq as i32).suffix(" ticks"));
+                    ui.end_row();
+                    unit(ui, "Variation", vary, 0.0, 1.0);
+                    seed_row(ui, seed);
+                }
+                Helper::Claw { period, skip } => {
+                    ui.label("Drop every");
+                    ui.add(egui::Slider::new(period, 2..=16));
+                    ui.end_row();
+                    ui.label("Shift");
+                    ui.add(egui::Slider::new(skip, 0..=15));
+                    ui.end_row();
+                }
+                Helper::Riff { root, scale, bars, every, gate, range, density, chord, seed } => {
+                    scale_pick(ui, root, scale);
+                    ui.label("Length");
+                    ui.add(egui::Slider::new(bars, 1..=16).suffix(" bars"));
+                    ui.end_row();
+                    ticks(ui, "Time", every);
+                    unit(ui, "Gate", gate, 0.05, 1.0);
+                    ui.label("Range");
+                    ui.add(egui::Slider::new(range, 1..=4).suffix(" oct"));
+                    ui.end_row();
+                    unit(ui, "Density", density, 0.0, 1.0);
+                    ui.label("Chord");
+                    ui.add(egui::Slider::new(chord, 1..=4).suffix(" notes"));
+                    ui.end_row();
+                    seed_row(ui, seed);
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                accept = ui.button("Accept").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        let keys = ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+        accept |= keys.0;
+        cancel |= keys.1 || !open;
+        if cancel {
+            self.song.patterns[run.pat].notes = run.base;
+            self.piano.sel.clear();
+            return;
+        }
+        if run.fresh || run.h != before {
+            run.fresh = false;
+            self.song.patterns[run.pat].notes = prtools::apply(&run.h, &run.base, &run.targets, run.chan, ppq);
+            self.piano.sel.clear();
+            self.dirty = true;
+        }
+        if !accept {
+            self.piano.helper = Some(run);
+        }
+    }
+
     fn pr_mute(&mut self, muted: bool) {
         let pat = self.pr_pat();
         let t = self.pr_targets(pat);
@@ -505,7 +787,10 @@ impl App {
         if m.alt {
             match key {
                 Key::M => self.pr_mute(!m.shift),
-                _ => return false,
+                k => match HELPERS.iter().position(|h| h.1 == k) {
+                    Some(i) => self.pr_helper(i),
+                    None => return false,
+                },
             }
             return true;
         }
@@ -578,8 +863,19 @@ impl App {
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                let mut helper = None;
+                for (i, (label, _)) in HELPERS.iter().enumerate() {
+                    if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
+                        helper = Some(i);
+                        ui.close_menu();
+                    }
+                }
                 if let Some(f) = act {
                     f(self);
+                }
+                if let Some(i) = helper {
+                    self.pr_helper(i);
                 }
             });
             for (t, label, hint) in TOOLS {
@@ -618,6 +914,24 @@ impl App {
                     }
                 }
             });
+            let (root, scale) = (self.piano.scale_root, self.piano.scale);
+            let scale_name = if scale == 0 { "Scale".to_string() } else { format!("{} {}", NAMES[root as usize % 12], SCALES[scale].0) };
+            ui.menu_button(RichText::new(scale_name).small(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        for (i, n) in NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.piano.scale_root, i as u8, *n);
+                        }
+                    });
+                    ui.vertical(|ui| {
+                        for (i, (n, _)) in SCALES.iter().enumerate() {
+                            ui.selectable_value(&mut self.piano.scale, i, *n);
+                        }
+                    });
+                });
+            })
+            .response
+            .on_hover_text("Scale highlighting");
             if ui.selectable_label(self.piano.ghosts, RichText::new("Ghosts").small()).on_hover_text("Show the other channels' notes behind").clicked() {
                 self.piano.ghosts = !self.piano.ghosts;
             }
@@ -731,7 +1045,9 @@ impl App {
         for key in bottom_key..=top_key {
             let y = y_of(key);
             let row = Rect::from_min_max(Pos2::new(grid.left(), y), Pos2::new(grid.right(), y + KEY_H));
-            if !is_black(key) {
+            // with a scale chosen its keys are the light rows, else the white keys are
+            let lit = if self.piano.scale == 0 { !is_black(key) } else { prtools::in_scale(key as u8, self.piano.scale_root, self.piano.scale) };
+            if lit {
                 gp.rect_filled(row, 0.0, GRID_LIGHT);
             }
             gp.line_segment([row.left_top(), row.right_top()], Stroke::new(1.0_f32, if key % 12 == 11 { LINE } else { LINE_SOFT }));
@@ -1186,6 +1502,7 @@ impl App {
         }
 
         self.note_props(ui.ctx(), pat);
+        self.helper_window(ui.ctx());
     }
 
     /// The small window a double-click on a note opens.
