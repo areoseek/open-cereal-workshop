@@ -133,6 +133,12 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                     held.off(&to, n.note);
                 }
             }
+            EventType::Pitchbend => {
+                // two semitones each way, the usual wheel range
+                if let Some(cc) = ev.get_data::<EvCtrl>() {
+                    to.send(cereal_engine::Cmd::Bend { chan: c, octaves: cc.value as f32 / 8192.0 * 2.0 / 12.0 });
+                }
+            }
             EventType::Controller => {
                 if let Some(cc) = ev.get_data::<EvCtrl>() {
                     if cc.param == 64 {

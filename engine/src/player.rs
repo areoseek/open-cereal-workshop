@@ -22,6 +22,8 @@ const BLOCK: usize = 256;
 pub enum Cmd {
     NoteOn { chan: u16, key: u8, vel: f32 },
     NoteOff { chan: u16, key: u8 },
+    /// The pitch wheel: bend everything on a channel by this many octaves.
+    Bend { chan: u16, octaves: f32 },
     /// Audition a sample (browser preview).
     Preview(Arc<Sample>),
     StopPreview,
@@ -222,6 +224,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         inbox: Vec::with_capacity(64),
         sr: sample_rate,
         voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
+        wheel: Vec::new(),
         buses: vec![],
         eq: vec![],
         fx: vec![],
@@ -394,6 +397,8 @@ struct Voice {
     feed: u8,
     /// Octaves the channel's pitch automation has moved the note by.
     bend: f32,
+    /// Octaves the pitch wheel bends it by.
+    hand: f32,
     sr: f32,
     /// Frames sounded, and frames since the note was let go.
     t: u32,
@@ -471,8 +476,8 @@ impl Voice {
         } else {
             self.step
         };
-        if self.bend != 0.0 {
-            self.step_now *= (self.bend as f64).exp2();
+        if self.bend != 0.0 || self.hand != 0.0 {
+            self.step_now *= ((self.bend + self.hand) as f64).exp2();
         }
         if self.fon {
             let mut x = self.fcut;
@@ -621,6 +626,8 @@ pub struct Player {
     inbox: Vec<Cmd>,
     sr: f32,
     voices: Vec<Voice>,
+    /// Pitch wheel position per channel, in octaves.
+    wheel: Vec<f32>,
     buses: Vec<Vec<[f32; 2]>>,
     /// Equaliser memory per insert and band: two values per side.
     eq: Vec<[[f32; 4]; 3]>,
@@ -953,6 +960,13 @@ impl Player {
                         v.let_go();
                     }
                 }
+                Cmd::Bend { chan, octaves } => {
+                    let c = chan as usize;
+                    if self.wheel.len() <= c {
+                        self.wheel.resize(c + 1, 0.0);
+                    }
+                    self.wheel[c] = octaves.clamp(-4.0, 4.0);
+                }
                 Cmd::Panic => {
                     for v in self.voices.iter_mut() {
                         v.active = false;
@@ -1212,6 +1226,9 @@ impl Player {
         let follow = self.ov.any_chan;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             live += 1;
+            if !v.preview {
+                v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0);
+            }
             if follow && v.follow {
                 if let Some(&(vol, pan)) = self.ov.chan.get(v.chan as usize) {
                     if vol.is_some() || pan.is_some() {
@@ -1543,6 +1560,24 @@ mod tests {
         assert!(got[0].on && !got[1].on && got[0].key == 62);
         assert!(got[0].tick > 0.0 && got[1].tick > got[0].tick);
         assert!(h.transport.take_live().is_empty());
+    }
+
+    #[test]
+    fn the_pitch_wheel_bends_held_notes() {
+        let mut song = Song::new();
+        song.channels = vec![crate::song::Chan::instrument(crate::synth::Kind::Osc3)];
+        let (h, mut p) = new_player(song, 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        let mut buf = vec![0.0; 24_000 * 2];
+        p.render(&mut buf, 2);
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        p.render(&mut buf, 2);
+        let flat = rises(&buf);
+        h.send(Cmd::Bend { chan: 0, octaves: 1.0 });
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        let up = rises(&buf);
+        assert!(flat > 50.0 && (up / flat - 2.0).abs() < 0.2, "{flat} rises, then {up}");
     }
 
     #[test]
