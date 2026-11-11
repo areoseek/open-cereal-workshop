@@ -45,6 +45,8 @@ pub enum Kind {
     Buzz,
     /// The six-voice vintage poly: its stored values, 0 to 1, in file order (`analog::poly`).
     Poly,
+    /// The acid bass line synth (`analog::acid`).
+    Acid,
     /// The larger vintage poly (`analog::poly2`).
     Poly2,
     /// The small touch-screen synth: its stored values, 0 to 1, in file order (`analog::pocket`).
@@ -92,7 +94,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -471,6 +473,14 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Guitar, ident: "FL Slayer", title: "Six String", size: 116, fixed: &[], tail: &[], params: GUITAR },
     Def { kind: Kind::Poly, ident: "Kepler", title: "Vintage Poly", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Poly2, ident: "Kepler Exo", title: "Vintage Poly II", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Acid, ident: "Transistor Bass", title: "Acid Line", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Soundfont Player", title: "Sound Bank Player", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Sub, ident: "Fruity Soundfont Player", title: "Sound Bank Player", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Dashboard", title: "Control Panel", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Dance", title: "Dancer", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Video Player", title: "Video Player", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "ReWired", title: "Rewire Link", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "FL Studio Mobile", title: "Mobile Rack", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Pocket, ident: "MiniSynth", title: "Pocket Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "GMS", title: "Triple Synth", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Sub, ident: "Morphine", title: "Morph Additive", size: 0, fixed: &[], tail: &[], params: &[] },
@@ -692,7 +702,7 @@ impl Gen {
         if d.kind == Kind::Pocket {
             return Some(Self { kind: d.kind, p: pocket_values(state), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
-        if matches!(d.kind, Kind::Quiet | Kind::Grain | Kind::Travel) {
+        if matches!(d.kind, Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Acid) {
             return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img: None, smp: None });
         }
         if d.kind == Kind::DrumBank {
@@ -1273,7 +1283,7 @@ mod tests {
         let g = Gen::decode("Kepler", &b).unwrap();
         assert_eq!(g.p.len(), 34);
         assert_eq!(g.encode(None), b);
-        for g in [g, Gen::decode("Kepler", &[]).unwrap(), Gen::decode("Kepler Exo", &[]).unwrap()] {
+        for g in [g, Gen::decode("Kepler", &[]).unwrap(), Gen::decode("Kepler Exo", &[]).unwrap(), Gen::decode("Transistor Bass", &[7; 40]).unwrap()] {
             let tone = g.tone();
             let patch = tone.mini.as_ref().unwrap();
             let dp = 220.0 / 44100.0;

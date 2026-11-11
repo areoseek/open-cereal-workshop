@@ -8,18 +8,18 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] BassDrum (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] BeepMap (opens as Picture Synth and plays the stored picture: rows as sine waves, red left, green right, range, pixel length, cents or linear scale, loop; blue, grainy, widen and loading a new picture are not done; pitch and time scales are estimates)
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
-- [ ] Dashboard
+- [~] Dashboard (opens as Control Panel and keeps its block; makes no sound by design; the panel of controls is not drawn)
 - [~] DirectWave: the playing program's zones (keys, velocities, root key, file, loop points) are read and played across the keyboard. Zone envelopes, filters, LFOs, tuning and level settings, the effects section and program switching are not done; a short fade stands in for the release.
 - [~] Drumaxx (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Drumpad (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] FLEX (opens as Pack Player and keeps its block; the pack sounds are protected files that we do not unlock, so a stand-in voice of our own, chosen by the preset's name, plays instead; its knobs are not read)
 - [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
 - [~] FL Slayer (opens as Six String: seven string types, pickups, tone, slap, fret noise, damping, four amps, tone stack, four cabinets, hold and power chords play; the amp works per note; the effects unit, feedback, second pitch wheel and the strummed and gliding play modes are not done)
-- [ ] FL Studio Mobile
+- [~] FL Studio Mobile (opens as Mobile Rack and keeps its block; silent, the embedded mobile project is not played)
 - [ ] FL Studio Mobile Rack
 - [~] FPC: pads, their velocity layers, levels, pans, layer tune, cut groups and output offsets are read and played, with a pad page to audition them. Pad envelopes, the scale-volume and random-layer switches, the built-in pattern loops and editing are not done. The tune knob's reach is an estimate.
 - [~] Fruit Kick: all six knobs read; the end pitch is exact (taken from the step the block stores), the start pitch base, sweep and decay times, click and distortion scales are estimates.
-- [ ] Fruity Dance
+- [~] Fruity Dance (opens as Dancer and keeps its block; the animated figure is artwork we do not have, nothing is drawn)
 - [~] Fruity DrumSynth Live (opens as Drum Bank; every key plays its own stored patch: swept tone or band noise, second noise band with attack, harmonics, ring, repeated hits; scales are estimates, the recorded drum waves are replaced by stand-ins of our own (square-wave cymbals, cowbell, noise snare and clap), cut groups, release, velocity knobs, morphing and the patch editor are not done; the oldest block layout plays a small kit of our own)
 - [~] Fruity DX10: follows the public two-operator design it descends from; the second modulator's settings are read in an assumed order and share the first one's touch setting.
 - [~] Fruity Envelope Controller (opens as Envelope Sender, block kept, correctly silent; sending its envelopes to linked controls is not done)
@@ -27,7 +27,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Keyboard Controller (opens as Key Controller, block kept, correctly silent; sending key and velocity to linked controls is not done)
 - [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
 - [ ] Fruity Slicer 2
-- [ ] Fruity Video Player
+- [~] Fruity Video Player (opens as Video Player and keeps its block; no video is shown or heard)
 - [~] Fruity Voltage Controller (opens as Voltage Sender, block kept, correctly silent; sending to hardware is not done)
 - [ ] Fruity Wrapper
 - [~] GMS (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
@@ -36,22 +36,22 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Kepler (opens as Vintage Poly and keeps its block; pulse, saw, sub and noise, pulse width from the slider, slow oscillator or envelope, low cut, four-pole filter with envelope, slow oscillator and key follow, gate or envelope level, octave and the three ensemble modes play; the arpeggiator, hold, tempo sync and the menu options are not done and there is no editing yet)
 - [~] Kepler Exo (opens as Vintage Poly II and keeps its block; only the first oscillator's wave mix and pulse width are read, the rest of the 151 settings could not be placed without a running copy, so it plays a plain version of the sound; no editing)
 - [~] MIDI Out (opens as MIDI Sender, block kept, correctly silent; sending notes and controllers to a MIDI port is not done)
-- [ ] Minisynth
+- [~] Minisynth (the same unit as MiniSynth below)
 - [~] MiniSynth (opens as Pocket Synth and keeps its block; the ten wave modes, modifier, noise, filter with its envelope, fine tune and level envelope play on our analog voice, placed from how values move between presets; play modes, the slow oscillator and the effects are not read and there is no editing yet)
 - [~] Morphine (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Ogun (plays as Metal Stack: seeds, fullness, morph, decay, release, pitch and level are read at estimated scales and give our own seeded spread of harmonics; richness, drawn maps, envelopes, unison, filter, effects and editing are not done)
 - [~] Patcher (as an instrument: the held instruments the notes reach play through the bay's effects; note shapers and setting cables are not built)
 - [~] Plucked! (opens as Pluck String: decay, colour, even decay, gate and widen all play; per-note offsets of decay and colour from the piano roll are not done)
 - [~] PoiZone (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
-- [ ] ReWired
+- [~] ReWired (opens as Rewire Link and keeps its block; the link protocol itself is closed, so it stays silent)
 - [~] Sakura (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Sawer (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] SimSynth (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Slicex: the loop (kept in the block or named by path) and its marker points are read, and each key from C5 plays its slice. Decks, articulators, envelopes, filters, the wave editor and region tools are not done.
-- [ ] Soundfont Player
+- [~] Soundfont Player (opens as Sound Bank Player and keeps its block; a stand-in voice plays, sound bank files are not read yet)
 - [~] Sytrus (built as Six Op, approximate: operators, modulation matrix, three filters with shapers, envelopes, LFOs, mappings, unison; state layouts 17 to 25 are read, older ones 5 to 15 are not yet; its effects section and arpeggio breaks are not run, the panel is read-only and it cannot yet be added fresh from the menu)
 - [~] Toxic Biohazard (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
-- [ ] Transistor Bass
+- [~] Transistor Bass (opens as Acid Line and keeps its block; a one-oscillator resonant bass plays at a middle setting; the knobs could not be placed from the stored examples and the built-in pattern player does not run)
 - [~] Wasp (opens as Hornet: our own three-oscillator voice with ring mod, FM, dual voice, six filter types, two envelopes, two slow oscillators and drive; the layout is placed from value ranges, so a few switches may be on the wrong control; tempo sync of the slow oscillators and the envelope link are not done)
 - [~] Wasp XT (opens as Hornet XT on the same voice; the eleven added settings are kept but not played)
 - [~] Wave Traveller (opens as Path Scratcher, block kept; its sample is found and played straight through; the per-key travel paths, regions, speed, volume paths and editing are not done)

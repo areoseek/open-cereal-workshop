@@ -596,6 +596,24 @@ pub fn poly2(p: &[f32]) -> Set {
     }
 }
 
+/// The one-oscillator acid bass at a middle setting. Its block is a large tagged file (knobs and a pattern
+/// memory) whose places we cannot tell apart from the few stored examples, so every note plays this one sound and
+/// the built-in pattern player does not run.
+pub fn acid() -> Set {
+    Set {
+        osc: [Osc { shape: Shape::Saw, semis: -12.0, level: 1.0 }, Osc::default(), Osc::default()],
+        amp: Adsr { a: 0.002, d: 1.5, s: 0.0, r: 0.02 },
+        fenv: Adsr { a: 0.002, d: 0.25, s: 0.0, r: 0.05 },
+        filter: Filter::Low24,
+        cutoff_hz: 320.0,
+        res: 0.72,
+        env_oct: 3.6,
+        drive: Some((0.08, 0.9)),
+        gain: 0.9,
+        ..Default::default()
+    }
+}
+
 const PI_F: f32 = std::f32::consts::PI;
 
 #[cfg(test)]
