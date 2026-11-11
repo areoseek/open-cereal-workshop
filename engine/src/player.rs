@@ -847,6 +847,15 @@ pub struct Player {
     clicks: [Arc<Sample>; 2],
 }
 
+/// How many keys a channel's root key moves the notes it is sent: none for channels that play a recording
+/// (their root key sets the pitch instead) and for layers, which hand the note on as it came.
+fn root_shift(ch: &crate::song::Chan) -> i32 {
+    match ch.kind {
+        ChannelKind::Sampler | ChannelKind::AudioClip | ChannelKind::Layer | ChannelKind::AutomationClip => 0,
+        _ => 60 - ch.root_key as i32,
+    }
+}
+
 impl Player {
     pub fn sample_rate(&self) -> f32 {
         self.sr
@@ -1081,6 +1090,19 @@ impl Player {
         if !ch.enabled || n.muted {
             return;
         }
+        // keys outside the channel's region are not for it
+        if (n.key as u32) < ch.smp.key_lo || n.key as u32 > ch.smp.key_hi {
+            return;
+        }
+        // an instrument has no recording to repitch: its root key moves the keys it is sent
+        let moved;
+        let n = match root_shift(ch) {
+            0 => n,
+            by => {
+                moved = Note { key: (n.key as i32 + by).clamp(0, 131) as u8, ..n.clone() };
+                &moved
+            }
+        };
         if ch.kind == ChannelKind::Layer {
             // a layer plays its children with the same note
             if depth < 4 {
@@ -1391,8 +1413,11 @@ impl Player {
     }
 
     fn note_off(&mut self, song: &Song, chan: u16, key: u8) {
+        let shift = song.channels.get(chan as usize).map_or(0, root_shift);
+        let sent = key;
+        let key = (key as i32 + shift).clamp(0, 131) as u8;
         for r in self.arps.iter_mut().filter(|r| r.chan == chan) {
-            r.held.retain(|h| !(h.live && h.note.key == key));
+            r.held.retain(|h| !(h.live && h.note.key == sent));
         }
         for r in self.env_runs.iter_mut().filter(|r| r.chan == chan && r.key == key && r.rel.is_none()) {
             r.rel = Some(r.t);
@@ -1401,7 +1426,7 @@ impl Player {
             if ch.kind == ChannelKind::Layer {
                 for &k in &ch.children {
                     if song.channels.get(k as usize).map(|c| c.kind != ChannelKind::Layer).unwrap_or(false) {
-                        self.note_off(song, k, key);
+                        self.note_off(song, k, sent);
                     }
                 }
                 return;
@@ -1427,7 +1452,6 @@ impl Player {
         }
     }
 
-    /// Sends what the sender channels have due in the next `n` frames, and any of their settings that changed.
     /// Which of `among` layers a pad plays this time: in turn (1), at random (2), or at random but not the
     /// one it played last (3).
     fn pad_pick(&mut self, chan: u16, key: u8, mode: u8, among: usize) -> usize {
@@ -1451,6 +1475,7 @@ impl Player {
         now
     }
 
+    /// Sends what the sender channels have due in the next `n` frames, and any of their settings that changed.
     fn run_midi(&mut self, song: &Song, n: usize) {
         use crate::midiout::{knob_msgs, patch_msgs, Head, Msg, IDENT, KNOBS};
         let playing = self.transport.playing();
@@ -2926,6 +2951,25 @@ mod tests {
         let cut = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&alone, 1.0, 1.8) > 0.1);
         assert!(loud(&cut, 1.0, 1.8) < 0.01, "the open hat was stopped");
+    }
+
+    #[test]
+    fn the_key_region_and_an_instruments_root_key_are_kept() {
+        let mut s = tone_song(1.0);
+        s.patterns[0].toggle_step(0, 0);
+        // a sampler outside its key region stays silent
+        s.channels[0].smp.key_lo = 61;
+        assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
+        s.channels[0].smp.key_lo = 0;
+        assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
+        // an instrument's root key moves the key it is sent: the pad on key 48 answers key 60 once the root is an octave up
+        let tone = s.channels[0].sample.take().unwrap();
+        s.channels[0].kind = ChannelKind::Plugin;
+        let pad = crate::zones::Zone { key_lo: 48, key_hi: 48, root: 48, track: false, sample: Some(tone), one_shot: true, ..Default::default() };
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad], bank: None, kit: None }));
+        assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
+        s.channels[0].root_key = 72;
+        assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
     }
 
     #[test]

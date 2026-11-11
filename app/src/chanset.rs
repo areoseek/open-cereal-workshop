@@ -538,6 +538,25 @@ impl App {
                         ui.label(RichText::new("ROOT").small().color(TEXT_DIM));
                     });
                     changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
+                    ui.vertical(|ui| {
+                        changed |= ui.checkbox(&mut f.add_to_key, "Add to key").on_hover_text("The root note's shift is added to the key of each note instead of to its pitch").changed();
+                        ui.horizontal(|ui| {
+                            let (mut lo, mut hi) = (f.key_lo.min(131), f.key_hi.min(131));
+                            ui.label(RichText::new("KEY RANGE").small().color(TEXT_DIM));
+                            let a = ui.add(egui::DragValue::new(&mut lo).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("The lowest key this channel answers to. Right-click for every key");
+                            let b = ui.add(egui::DragValue::new(&mut hi).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("The highest key this channel answers to. Right-click for every key");
+                            if a.changed() || b.changed() {
+                                f.key_lo = lo.min(hi);
+                                f.key_hi = if hi >= 131 { 256 } else { hi.max(lo) };
+                                changed = true;
+                            }
+                            if a.secondary_clicked() || b.secondary_clicked() {
+                                f.key_lo = 0;
+                                f.key_hi = 256;
+                                changed = true;
+                            }
+                        });
+                    });
                 });
                 section(ui, "POLYPHONY");
                 ui.horizontal(|ui| {

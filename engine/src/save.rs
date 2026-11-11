@@ -972,6 +972,17 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             }
         }
     }
+    if (now.add_to_key, now.key_lo, now.key_hi) != (was.add_to_key, was.key_lo, was.key_hi) {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                if d.len() >= 76 {
+                    d[63] = now.add_to_key as u8;
+                    put_u32(d, 68, now.key_lo);
+                    put_u32(d, 72, now.key_hi);
+                }
+            }
+        }
+    }
     if (now.echo_ping, now.echo_fat) != (was.echo_ping, was.echo_fat) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
             if let Value::Data(d) = &mut ev[i].value {
@@ -1908,6 +1919,9 @@ mod tests {
             f.gate_steps = 0.75;
             f.shift = 0.25;
             f.full_porta = false;
+            f.add_to_key = true;
+            f.key_lo = 48;
+            f.key_hi = 72;
             f.echo_ping = true;
             f.track_vel = [90.0, 0.5, 0.0, -0.25];
             f.track_key = [72.0, -0.5, 0.25, 0.0];
@@ -1922,6 +1936,7 @@ mod tests {
         assert_eq!((b.cut, b.cut_by, b.filter, b.echoes), (3, 3, 3, 6));
         assert_eq!((b.arp_dir, b.arp_range, b.arp_chord, b.arp_slide, b.arp_repeat, b.full_porta), (3, 2, 2, true, 3, false));
         assert!(b.echo_ping && !b.echo_fat);
+        assert_eq!((b.add_to_key, b.key_lo, b.key_hi), (true, 48, 72));
         assert_eq!((a.track_vel, a.track_key), (b.track_vel, b.track_key));
         let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
         for (x, y) in [

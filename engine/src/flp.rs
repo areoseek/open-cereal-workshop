@@ -422,6 +422,9 @@ pub struct FlpChannel {
     /// Longest a note may last, on the same scale as the arpeggiator time; 1447 and up = no limit.
     pub gate: u16,
     pub full_porta: bool,
+    pub add_to_key: bool,
+    /// Lowest and highest key the channel answers to.
+    pub key_range: (u32, u32),
     /// How much of the project swing this channel takes, 0..=128.
     pub swing: u16,
     /// Echo: feedback (0..=12800), pan (centre 6400), pitch step in cents, count, time (48 = one step).
@@ -762,7 +765,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, key_range: (0, 256), ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     scope = Scope::Arrangement;
@@ -922,6 +925,10 @@ impl Flp {
                                 c.arp_slide = d[60] != 0;
                                 c.full_porta = d[62] != 0;
                                 c.gate = u32at(d, 64) as u16;
+                                c.add_to_key = d[63] != 0;
+                            }
+                            if d.len() >= 76 {
+                                c.key_range = (u32at(d, 68), u32at(d, 72));
                             }
                             if d.len() >= 96 {
                                 c.arp[5] = u32at(d, 92) as i32;
