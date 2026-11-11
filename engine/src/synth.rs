@@ -23,12 +23,14 @@ pub enum Kind {
     Keys,
     /// The larger additive instrument, played by the additive engine (`additive.rs`).
     Forge,
+    /// The pack player: its sounds live in protected pack files, so a stand-in voice is chosen by the preset's name.
+    Packs,
 }
 
 impl Kind {
     /// The small instruments that share the voice code of `minis.rs`.
     pub fn mini(self) -> bool {
-        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge)
+        !matches!(self, Kind::Osc3 | Kind::Additive | Kind::Fm | Kind::Forge | Kind::Packs)
     }
 }
 
@@ -339,7 +341,49 @@ pub static DEFS: &[Def] = &[Def {
             p("Phaser speed", 332, -8000, 8000, 3000),
         ],
     },
+    Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
 ];
+
+/// A voice of our own for a pack preset we cannot read, picked from the words in its name.
+pub fn stand_in(name: &str) -> crate::additive::Patch {
+    use crate::additive::ix;
+    let n = name.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    let mut p: Vec<f32> = def(Kind::Additive).params.iter().map(|p| p.def as f32).collect();
+    p[ix::F_AMOUNT] = 0.0;
+    p[ix::CUTOFF] = 8192.0;
+    // (timbre, attack, decay, release, pluck, cutoff, unison voices)
+    let (timbre, attack, decay, release, pluck, cut, uni) = if has(&["808", "sub"]) {
+        (3.0, 0.0, 780.0, 200.0, 1000.0, 3600.0, 1.0)
+    } else if has(&["bas", "bss"]) {
+        (0.0, 0.0, 1000.0, 150.0, 520.0, 5200.0, 1.0)
+    } else if has(&["organ", "accord", "harmonica"]) {
+        (9.0, 0.0, 1000.0, 120.0, 1000.0, 8192.0, 1.0)
+    } else if has(&["pad", "string", "choir", "voice", "atmos", "drone", "sphere", "sweep", "ensemble", "orchestra", "violin", "cello", "viola"]) {
+        (2.0, 420.0, 1000.0, 520.0, 1000.0, 5600.0, 5.0)
+    } else if has(&["brass", "horn", "trumpet", "trombone", "tuba", "sax"]) {
+        (0.0, 120.0, 1000.0, 180.0, 1000.0, 5400.0, 1.0)
+    } else if has(&["flute", "whistle", "ocarina", "pipe", "recorder", "piccolo", "clarinet", "oboe", "bassoon"]) {
+        (3.0, 150.0, 1000.0, 180.0, 1000.0, 7000.0, 1.0)
+    } else if has(&["bell", "glock", "celesta", "chime", "kalimba", "music box", "vibra", "tinke"]) {
+        (7.0, 0.0, 640.0, 520.0, 1000.0, 8192.0, 1.0)
+    } else if has(&["piano", "key", "clav", "harp", "pluck", "guitar", "marimba", "xylo", "koto", "banjo", "sitar", "pizz", "dulcimer"]) {
+        (2.0, 0.0, 620.0, 300.0, 560.0, 7000.0, 1.0)
+    } else if has(&["lead", "saw", "sync", "synth"]) {
+        (0.0, 0.0, 1000.0, 200.0, 1000.0, 6400.0, 3.0)
+    } else {
+        (2.0, 0.0, 800.0, 300.0, 700.0, 6400.0, 1.0)
+    };
+    p[ix::TIMBRE] = timbre;
+    p[ix::ATTACK] = attack;
+    p[ix::DECAY] = decay;
+    p[ix::RELEASE] = release;
+    p[ix::PLUCK] = pluck;
+    p[ix::CUTOFF] = cut;
+    p[ix::KEY_TRACK] = 500.0;
+    p[ix::UNI_ORDER] = uni;
+    crate::additive::Patch { p, custom: None }
+}
 
 pub fn def(kind: Kind) -> &'static Def {
     DEFS.iter().find(|d| d.kind == kind).expect("every kind has a table entry")
@@ -422,6 +466,20 @@ impl Gen {
             })
             .collect();
         Some(Self { kind: d.kind, p, raw: state.to_vec(), fm: None })
+    }
+
+    /// The pack and preset a pack player block names.
+    pub fn pack_and_preset(&self) -> (String, String) {
+        let text = |at: usize| {
+            let b = self.raw.get(at..).unwrap_or(&[]);
+            let b = &b[..b.len().min(1024)];
+            String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]).into_owned()
+        };
+        (text(16), text(1041))
+    }
+
+    fn preset_name(&self) -> String {
+        self.pack_and_preset().1
     }
 
     /// The larger additive instrument as a patch of the additive engine: the settings both share carry over, the
@@ -568,6 +626,7 @@ impl Gen {
             }
             Kind::Additive => Tone { add: Some(std::sync::Arc::new(crate::additive::Patch::new(&self.p, &self.raw))), ..Default::default() },
             Kind::Fm => Tone { fm: self.fm.clone(), ..Default::default() },
+            Kind::Packs => Tone { add: Some(std::sync::Arc::new(stand_in(&self.preset_name()))), ..Default::default() },
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
@@ -854,6 +913,19 @@ mod tests {
         let (amp, _) = p.custom.as_ref().expect("a half square has its own table");
         assert!((amp[0] - 1.0).abs() < 1e-6 && (amp[1] - 0.25).abs() < 1e-6);
         // untouched settings are stored back byte for byte
+        assert_eq!(g.encode(None), b);
+    }
+    #[test]
+    fn a_pack_player_block_gets_a_stand_in_voice_by_name() {
+        use crate::additive::ix;
+        let mut b = vec![0u8; 2707];
+        b[16..20].copy_from_slice(b"Pack");
+        b[1041..1049].copy_from_slice(b"Warm Pad");
+        let g = Gen::decode("FLEX", &b).unwrap();
+        assert_eq!(g.pack_and_preset(), ("Pack".to_string(), "Warm Pad".to_string()));
+        let p = g.tone().add.unwrap();
+        assert!(p.p[ix::ATTACK] > 0.0 && p.p[ix::UNI_ORDER] > 1.0);
+        assert_eq!(stand_in("808 Deep").p[ix::UNI_ORDER], 1.0);
         assert_eq!(g.encode(None), b);
     }
 }

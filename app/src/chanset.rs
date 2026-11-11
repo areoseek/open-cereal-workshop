@@ -633,6 +633,11 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.add_space(6.0);
             ui.label(format!("Volume {:.0} %    Pitch {:+.0} st    Unison {}", p.volume * 100.0, p.pitch, p.uni));
         }
+        Kind::Packs => {
+            let (pack, preset) = g.pack_and_preset();
+            ui.label(RichText::new(format!("{preset}  ({pack})")).strong());
+            ui.label(RichText::new("Pack sounds are protected files and are not read. A stand-in voice chosen by the preset's name plays instead.").color(TEXT_DIM));
+        }
         _ => {
             // the small instruments: one knob per stored setting
             let d = def(g.kind);

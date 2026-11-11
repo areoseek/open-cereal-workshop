@@ -12,7 +12,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] DirectWave: the playing program's zones (keys, velocities, root key, file, loop points) are read and played across the keyboard. Zone envelopes, filters, LFOs, tuning and level settings, the effects section and program switching are not done; a short fade stands in for the release.
 - [ ] Drumaxx
 - [ ] Drumpad
-- [ ] FLEX
+- [~] FLEX (opens as Pack Player and keeps its block; the pack sounds are protected files that we do not unlock, so a stand-in voice of our own, chosen by the preset's name, plays instead; its knobs are not read)
 - [~] FL Keys: plays the user's own sample sets (the documented set description files), all fifteen settings read; built tones stand in when no set is found. The stereo ambience, the exact treble filter and the overdrive curve are estimates.
 - [ ] FL Slayer
 - [ ] FL Studio Mobile
