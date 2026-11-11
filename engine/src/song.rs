@@ -906,6 +906,8 @@ impl Song {
                 };
                 let sample = match (c.kind, lib.as_deref_mut()) {
                     (ChannelKind::Sampler | ChannelKind::AudioClip, Some(lib)) => lib.load_stored(&c.sample_path, project_dir),
+                    // the grain player works on the channel's own sample
+                    (ChannelKind::Plugin, Some(lib)) if c.plugin.eq_ignore_ascii_case("Fruity Granulizer") && !c.sample_path.is_empty() => lib.load_stored(&c.sample_path, project_dir),
                     _ => loop_smp,
                 };
                 let zones = (c.kind == ChannelKind::Plugin).then(|| crate::zones::Map::parse(&c.plugin, &c.state)).flatten().map(|mut m| {
@@ -948,6 +950,9 @@ impl Song {
                     slices,
                     zones,
                 };
+                if let Some(g) = ch.gen.as_mut().filter(|g| g.kind == crate::synth::Kind::Grain) {
+                    g.smp = ch.sample.clone();
+                }
                 ch.bake();
                 ch
             })

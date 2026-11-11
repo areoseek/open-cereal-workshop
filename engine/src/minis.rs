@@ -13,6 +13,8 @@ pub struct Patch {
     pub set: Option<std::sync::Arc<crate::keys::KeySet>>,
     /// The picture of the picture instrument.
     pub img: Option<std::sync::Arc<crate::beep::Image>>,
+    /// The sample and settings of the grain player.
+    pub smp: Option<(std::sync::Arc<crate::sample::Sample>, crate::grain::Set)>,
 }
 
 /// Cycles per second of key 60.
@@ -26,6 +28,7 @@ pub enum Voice {
     Keys(Box<crate::keys::Voice>),
     Bank(Box<crate::drumbank::Voice>),
     Image(Box<crate::beep::Voice>),
+    Grain(Box<crate::grain::Voice>),
     Quiet,
 }
 
@@ -83,8 +86,11 @@ impl Voice {
         if let (Kind::Image, Some(img)) = (p.kind, &p.img) {
             return Voice::Image(Box::new(crate::beep::Voice::start(img, sr, vel, dphase)));
         }
+        if let (Kind::Grain, Some((smp, set))) = (p.kind, &p.smp) {
+            return Voice::Grain(Box::new(crate::grain::Voice::start(smp, *set, sr, vel, dphase)));
+        }
         match p.kind {
-            Kind::Image | Kind::Quiet => Voice::Quiet,
+            Kind::Image | Kind::Quiet | Kind::Grain => Voice::Quiet,
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
             Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel },
             Kind::Fm2 => {
@@ -195,6 +201,7 @@ impl Voice {
             Voice::Keys(v) => v.release(),
             Voice::Bank(v) => v.left(),
             Voice::Image(v) => v.release(),
+            Voice::Grain(v) => v.release(),
             Voice::Quiet => 0.0,
         }
     }
@@ -205,6 +212,7 @@ impl Voice {
             Voice::Keys(v) => v.frame(dphase),
             Voice::Bank(v) => v.frame(),
             Voice::Image(v) => v.frame(),
+            Voice::Grain(v) => v.frame(),
             Voice::Quiet => [0.0; 2],
             Voice::Kick { sr, t, ph, scale, vel } => {
                 let sec = *t as f32 / *sr;

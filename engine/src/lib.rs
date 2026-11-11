@@ -14,6 +14,7 @@ pub mod keys;
 pub mod slicer;
 pub mod beep;
 pub mod drumbank;
+pub mod grain;
 pub mod metal;
 pub mod zones;
 pub mod preset;

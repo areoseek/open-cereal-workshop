@@ -23,7 +23,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity DrumSynth Live (opens as Drum Bank; every key plays its own stored patch: swept tone or band noise, second noise band with attack, harmonics, ring, repeated hits; scales are estimates, the recorded drum waves are replaced by stand-ins of our own (square-wave cymbals, cowbell, noise snare and clap), cut groups, release, velocity knobs, morphing and the patch editor are not done; the oldest block layout plays a small kit of our own)
 - [~] Fruity DX10: follows the public two-operator design it descends from; the second modulator's settings are read in an assumed order and share the first one's touch setting.
 - [~] Fruity Envelope Controller (opens as Envelope Sender, block kept, correctly silent; sending its envelopes to linked controls is not done)
-- [ ] Fruity Granulizer
+- [~] Fruity Granulizer (opens as Grain Player and plays the channel's sample as grains: hold, fade, grain spacing, wave spacing incl. backwards; scales are estimates; pan and depth effects, random, start by key, transients and editing are not done)
 - [~] Fruity Keyboard Controller (opens as Key Controller, block kept, correctly silent; sending key and velocity to linked controls is not done)
 - [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
 - [ ] Fruity Slicer 2
