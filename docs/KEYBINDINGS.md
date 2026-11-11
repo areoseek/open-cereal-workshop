@@ -1,31 +1,42 @@
 # Keyboard and mouse bindings
 
-Parity goal: every binding an experienced user relies on behaves the same. This table is compiled from the public
-manual and will be filled in as each window is built. "Done" marks bindings already wired in this build.
+Parity goal: every binding an experienced user relies on behaves the same. Listed as behaviour, never as copied
+manual text. "yes" means wired in this build.
 
-## Global transport
+## Global
 | Binding | Action | Done |
 |---|---|---|
-| Space | Play / pause (stop from start when stopped) | yes |
-| Ctrl+S | Save project | yes (our format for now) |
-| Ctrl+O | Open project | yes |
-| Ctrl+R | Export / render to WAV | yes (bridging; full render dialog later) |
-| Ctrl+Z / Ctrl+Alt+Z | Undo / redo | no |
-| Ctrl+N | New project | no |
+| Space | Play / stop | yes |
+| L | Switch pattern / song mode | yes |
+| Ctrl+Space | Play / pause | yes |
+| Ctrl+N / Ctrl+O | New / open project | yes |
+| Ctrl+S / Ctrl+Shift+S | Save / save as | yes |
+| Ctrl+R | Export to WAV | yes |
+| Ctrl+Z / Ctrl+Alt+Z | Undo-redo last step / step back through history | yes |
+| Ctrl+T | Typing keyboard to piano on / off | yes |
+| Ctrl+M | Metronome | yes |
+| Ctrl+H | Stop all sound | yes |
+| Ctrl+Shift+C | Clone pattern | yes |
+| F2 | Rename pattern | yes |
+| F4 | New pattern | yes |
+| F5 / F6 / F7 / F9 | Playlist / channel rack / piano roll / mixer | yes |
+| F8 | Browser | yes |
+| F11 / F12 | Project info / close all windows | yes |
+| + / - | Next / previous pattern | yes |
+| Z S X D C ... and Q 2 W 3 E ... | Play notes from the typing keyboard (two rows, two octaves) | yes |
+| Ctrl+L, Alt+L etc. | Channel routing and other menu shortcuts | no |
 
-## Pattern / channel rack (target bindings, not yet built)
-| Binding | Action |
-|---|---|
-| Click / drag on a step | Draw or erase steps (done in this build) |
-| Right-click a channel | Channel options menu |
-| Alt+click a step | Fine step property (velocity) |
+## Channel rack
+| Binding | Action | Done |
+|---|---|---|
+| Click / right-click a step | Set / clear | yes |
+| Click the channel name | Select, open channel settings | yes |
+| Drop a sample on a channel | Load it | yes |
+| Alt+Up / Alt+Down | Move channel | no |
+| Shift+Ctrl+Left / Right | Shift steps | no |
 
-## Piano roll (target bindings, not yet built)
-| Binding | Action |
-|---|---|
-| Draw / Paint / Delete / Slice tools | P / B / D / C |
-| Ctrl+A | Select all |
-| Shift+drag | Add to selection |
-
-The bindings above that are marked "not yet built" are the parity targets for the windows on docs/ROADMAP.md.
-They are listed as behaviour (what the key does), never copied text from any manual.
+## Piano roll and playlist
+See the tables in the source next to each tool as they are wired (app/src/pianoroll.rs, app/src/playlist.rs).
+Targets: tool keys P (draw), B (paint), D (delete), T (mute), C (slice), E (select), Z (zoom), Y (playback);
+Ctrl+A/C/X/V/B, Shift+arrows nudges, Ctrl+Up/Down octave, Alt+snap off, Ctrl+Q quick quantise, Shift+wheel and
+Ctrl+wheel scrolling and zoom.

@@ -3,7 +3,7 @@
 What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list. Names on the left are theirs and are used here only to track coverage; our own parts get our own names.
 
 ## Instruments (51)
-- [ ] 3x Osc
+- [~] 3x Osc (built, approximate)
 - [ ] Autogun
 - [ ] BassDrum
 - [ ] BeepMap
@@ -67,49 +67,49 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Frequency Shifter
 - [ ] Frequency Splitter
 - [ ] Fruity 7 Band EQ
-- [ ] Fruity Balance
+- [~] Fruity Balance (built, approximate)
 - [ ] Fruity Bass Boost
 - [ ] Fruity Big Clock
-- [ ] Fruity Blood Overdrive
+- [~] Fruity Blood Overdrive (built, approximate)
 - [ ] Fruity Center
-- [ ] Fruity Chorus
-- [ ] Fruity Compressor
+- [~] Fruity Chorus (built, approximate)
+- [~] Fruity Compressor (built, approximate)
 - [ ] Fruity Convolver
 - [ ] Fruity dB Meter
 - [ ] Fruity Delay
-- [ ] Fruity Delay 2
-- [ ] Fruity Delay 3
+- [~] Fruity Delay 2 (built, approximate)
+- [~] Fruity Delay 3 (built, approximate)
 - [ ] Fruity Delay Bank
-- [ ] Fruity Fast Dist
-- [ ] Fruity Fast LP
-- [ ] Fruity Filter
+- [~] Fruity Fast Dist (built, approximate)
+- [~] Fruity Fast LP (built, approximate)
+- [~] Fruity Filter (built, approximate)
 - [ ] Fruity Flanger
-- [ ] Fruity Flangus
+- [~] Fruity Flangus (built, approximate)
 - [ ] Fruity Formula Controller
 - [ ] Fruity Free Filter
 - [ ] Fruity HTML NoteBook
-- [ ] Fruity Limiter
+- [~] Fruity Limiter (built, approximate)
 - [ ] Fruity Love Philter
 - [ ] Fruity LSD
 - [ ] Fruity Multiband Compressor
 - [ ] Fruity Mute 2
 - [ ] Fruity NoteBook
 - [ ] Fruity NoteBook 2
-- [ ] Fruity PanOMatic
+- [~] Fruity PanOMatic (built, approximate)
 - [ ] Fruity Parametric EQ
-- [ ] Fruity Parametric EQ 2
+- [~] Fruity Parametric EQ 2 (built, approximate)
 - [ ] Fruity Peak Controller
 - [ ] Fruity Phase Inverter
 - [ ] Fruity Phaser
 - [ ] Fruity Reeverb
-- [ ] Fruity Reeverb 2
+- [~] Fruity Reeverb 2 (built, approximate)
 - [ ] Fruity Scratcher
 - [ ] Fruity Send
-- [ ] Fruity Soft Clipper
+- [~] Fruity Soft Clipper (built, approximate)
 - [ ] Fruity Spectroman
 - [ ] Fruity Squeeze
-- [ ] Fruity Stereo Enhancer
-- [ ] Fruity Stereo Shaper
+- [~] Fruity Stereo Enhancer (built, approximate)
+- [~] Fruity Stereo Shaper (built, approximate)
 - [ ] Fruity Vocoder
 - [ ] Fruity WaveShaper
 - [ ] Fruity Wrapper
@@ -128,7 +128,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Pitcher
 - [ ] Pitch Shifter
 - [ ] Razer Chroma
-- [ ] Soundgoodizer
+- [~] Soundgoodizer (built, approximate)
 - [ ] Spreader
 - [ ] Transient Processor
 - [ ] Transmitter
@@ -148,16 +148,33 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] ZGameEditor Visualizer
 
 ## Core windows
-- [ ] Channel rack (step sequencer: M0 slice done)
-- [ ] Piano roll
-- [ ] Playlist
-- [ ] Mixer
-- [ ] Browser
-- [ ] Transport, toolbars, hint bar
-- [ ] Automation clips and event editor
-- [ ] Audio recording and Edison-style editor
+- [~] Channel rack (steps, channel strip, layers, add sampler or instrument)
+- [~] Piano roll (draw, move, resize, delete; tools and lanes still to do)
+- [~] Playlist (pattern, audio and automation clips; tools still to do)
+- [~] Mixer (inserts, sends, routing, EQ, effect slots; docking and metering details still to do)
+- [~] Browser (folders, preview, drag to channel)
+- [~] Transport, toolbars, hint bar
+- [~] Automation clips (channel and mixer levels; effect and instrument settings still to do)
+- [ ] Event editor
+- [ ] Audio recording and audio editor
 - [ ] Plugin hosting (VST/CLAP)
-- [ ] Project files: .flp read/write, .fst presets, .fsc scores
-- [ ] Keyboard and mouse bindings table (from the public manual)
+- [~] Project files: .flp read/write done; .fst presets, .fsc scores to do
+- [~] Keyboard and mouse bindings (docs/KEYBINDINGS.md)
 - [ ] MIDI devices, controller linking
-- [ ] Rendering/export: WAV, MP3, OGG, FLAC, MIDI
+- [~] Rendering/export: WAV done; MP3, OGG, FLAC, MIDI to do
+
+## What "approximate" means
+`[~]` marks a part that works but has not been measured against the reference. Until measured, treat these as
+close, not identical:
+- Level laws: channel volume, mixer fader, velocity, pan law, send levels.
+- Sampler: envelope curve shapes and tension, filter cutoff and resonance scales, filter types, time stretch
+  quality, echo spacing, portamento time.
+- Track EQ frequency and width scales.
+- Every effect unit: how stored values map to decibels, milliseconds, hertz and percentages. The stored layout
+  was worked out by comparing many project files, so a few settings may be attached to the wrong knob. The
+  least certain: Flanger (eight stored values against twelve knobs), Echo Lab (feedback, diffusion and
+  modulation positions), Chorus wave selectors, Limiter time laws, Reverb character, Compressor knee types.
+- Triple Osc: field order inside an oscillator block, the mix law between oscillators, detune width, the
+  meaning of the four switches.
+- Instruments and effects not listed as built play a stand-in voice or pass sound through. Their settings are
+  kept and saved untouched.
