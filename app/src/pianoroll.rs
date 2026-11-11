@@ -258,7 +258,7 @@ impl App {
     }
 
     /// The snap grid in ticks.
-    fn pr_snap(&self) -> u32 {
+    pub(crate) fn pr_snap(&self) -> u32 {
         let (_, unit, div) = SNAPS[self.piano.snap.min(SNAPS.len() - 1)];
         let base = match unit {
             0 => self.piano.grid_line,

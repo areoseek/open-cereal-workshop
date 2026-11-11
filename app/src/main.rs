@@ -112,6 +112,8 @@ pub(crate) struct App {
     show_mixer: bool,
     show_browser: bool,
     typing_keys: bool,
+    /// Snap hand-played notes to the piano roll's grid as they are recorded.
+    rec_quantise: bool,
     /// The window key commands go to.
     pub(crate) focus: Win,
     pub(crate) setup: setup::State,
@@ -231,6 +233,7 @@ impl App {
             show_mixer: false,
             show_browser: true,
             typing_keys: true,
+            rec_quantise: false,
             focus: Win::None,
             setup: Default::default(),
             settings,
@@ -369,7 +372,14 @@ impl App {
                 self.rec_held.push((e.chan, e.key, e.tick, e.vel));
             } else if let Some(i) = self.rec_held.iter().position(|h| (h.0, h.1) == (e.chan, e.key)) {
                 let (chan, key, start, vel) = self.rec_held.remove(i);
-                let pos = clip(&self.song, start).round().max(0.0);
+                let mut pos = clip(&self.song, start).round().max(0.0);
+                if self.rec_quantise {
+                    let grid = self.pr_snap().max(1) as f64;
+                    pos = (pos / grid).round() * grid;
+                    if !song_mode && pos >= plen && plen > 0.0 {
+                        pos = 0.0;
+                    }
+                }
                 let mut len = e.tick - start;
                 if len < 0.0 && !song_mode {
                     // the loop came round while the key was down
@@ -1101,6 +1111,10 @@ impl App {
                         tr.set_metronome(!tr.metronome());
                     }
                     Key::H => self.handle.send(Cmd::Panic),
+                    Key::P => {
+                        let tr = &self.handle.transport;
+                        tr.set_countdown(!tr.countdown());
+                    }
                     Key::C if modifiers.shift => self.clone_pattern(),
                     Key::Space => {
                         let tr = &self.handle.transport;
@@ -1272,6 +1286,11 @@ impl App {
                     if ui.checkbox(&mut m, "Metronome                              Ctrl+M").changed() {
                         self.handle.transport.set_metronome(m);
                     }
+                    let mut c = self.handle.transport.countdown();
+                    if ui.checkbox(&mut c, "Countdown before recording   Ctrl+P").changed() {
+                        self.handle.transport.set_countdown(c);
+                    }
+                    ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");
                     if ui.button("Stop all sound                          Ctrl+H").clicked() {
                         self.handle.send(Cmd::Panic);
                         ui.close_menu();

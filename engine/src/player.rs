@@ -45,6 +45,7 @@ pub struct Transport {
     tempo: AtomicU32,
     metronome: AtomicBool,
     recording: AtomicBool,
+    countdown: AtomicBool,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
 }
@@ -74,6 +75,7 @@ impl Transport {
             tempo: AtomicU32::new(0f32.to_bits()),
             metronome: AtomicBool::new(false),
             recording: AtomicBool::new(false),
+            countdown: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
         })
     }
@@ -107,6 +109,13 @@ impl Transport {
     }
     pub fn set_recording(&self, on: bool) {
         self.recording.store(on, Relaxed);
+    }
+    /// Whether a bar of clicks is counted in before recording starts.
+    pub fn countdown(&self) -> bool {
+        self.countdown.load(Relaxed)
+    }
+    pub fn set_countdown(&self, on: bool) {
+        self.countdown.store(on, Relaxed);
     }
     /// The hand-played notes logged since the last call.
     pub fn take_live(&self) -> Vec<Live> {
@@ -239,6 +248,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         pos: 0.0,
         was_playing: false,
         chase: false,
+        count_in: 0.0,
         born: 0,
         ov: Overrides::default(),
         tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
@@ -665,6 +675,8 @@ pub struct Player {
     was_playing: bool,
     /// Set after a start or a seek: clips already under the play head must be picked up mid-way.
     chase: bool,
+    /// Ticks of the count-in bar still to click through before the song moves.
+    count_in: f64,
     born: u64,
     ov: Overrides,
     /// Ticks per frame at the tempo of the block being played.
@@ -1095,12 +1107,34 @@ impl Player {
         if playing && !self.was_playing {
             self.chase = true;
             self.ov.clear();
+            self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 } else { 0.0 };
         }
         if !playing && self.was_playing {
             self.silence(false);
         }
         self.was_playing = playing;
         if !playing {
+            return n;
+        }
+        if self.count_in > 0.0 {
+            // one bar of clicks while the song waits where it is
+            let tpf = (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
+            let n = n.min(((self.count_in / tpf).ceil() as usize).max(1));
+            let beat = (song.ppq * 4 / song.time_sig.1.max(1) as u32).max(1) as f64;
+            let bar = song.bar() as f64;
+            let t0 = bar - self.count_in;
+            let t1 = t0 + n as f64 * tpf;
+            let mut b = (t0 / beat - 1e-9).ceil().max(0.0) * beat;
+            while b < t1 && b < bar - 0.5 {
+                let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+                let smp = self.clicks[if b < 0.5 { 0 } else { 1 }].clone();
+                self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+                b += beat;
+            }
+            self.count_in -= n as f64 * tpf;
+            if self.count_in < 1e-6 {
+                self.count_in = 0.0;
+            }
             return n;
         }
         let song_mode = tr.song_mode();
@@ -1915,6 +1949,27 @@ mod tests {
         let cut = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&alone, 1.0, 1.8) > 0.1);
         assert!(loud(&cut, 1.0, 1.8) < 0.01, "the open hat was stopped");
+    }
+
+    #[test]
+    fn a_count_in_bar_clicks_before_the_song_moves() {
+        let s = tone_song(2.0);
+        let mut s2 = s.clone();
+        s2.patterns[0].toggle_step(0, 0);
+        let (handle, mut player) = crate::new_player(s2.clone(), 48_000.0);
+        let tr = handle.transport.clone();
+        tr.set_recording(true);
+        tr.set_countdown(true);
+        tr.set_playing(true);
+        // 140 beats a minute by default or not, a bar is four beats: run half a bar and the song has not moved
+        let bar_secs = 4.0 * 60.0 / s2.tempo as f64;
+        let mut buf = vec![0.0f32; ((bar_secs * 0.5 * 48_000.0) as usize) * 2];
+        player.render(&mut buf, 2);
+        assert_eq!(tr.tick(), 0.0);
+        assert!(buf.iter().any(|x| x.abs() > 0.01), "the clicks are heard");
+        let mut buf = vec![0.0f32; ((bar_secs * 0.75 * 48_000.0) as usize) * 2];
+        player.render(&mut buf, 2);
+        assert!(tr.tick() > 0.0, "the song runs once the bar is counted");
     }
 
     #[test]

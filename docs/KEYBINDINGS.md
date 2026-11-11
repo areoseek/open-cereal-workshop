@@ -15,6 +15,7 @@ manual text. "yes" means wired in this build.
 | Ctrl+Z / Ctrl+Alt+Z | Undo-redo last step / step back through history | yes |
 | Ctrl+T | Typing keyboard to piano on / off | yes |
 | Ctrl+M | Metronome | yes |
+| Ctrl+P | Countdown before recording | yes |
 | Ctrl+H | Stop all sound | yes |
 | Ctrl+Shift+C | Clone pattern | yes |
 | F2 | Rename pattern | yes |
