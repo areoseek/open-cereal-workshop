@@ -374,7 +374,7 @@ impl App {
                 _ if c.ext.is_some() => {
                     let h = c.ext.clone().unwrap();
                     let title = c.name.clone();
-                    changed |= crate::hostui::panel(ui, &h.0, &title);
+                    changed |= crate::hostui::panel(ui, &h.0, &title, &|k| cereal_engine::song::Target::ChanParam(ci, k));
                 }
                 _ => {
                     ui.label(format!("Instrument: {}", c.plugin));

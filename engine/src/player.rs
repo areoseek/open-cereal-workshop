@@ -2064,6 +2064,10 @@ impl Player {
             self.host_evs.sort_by_key(|e| match e {
                 crate::host::Ev::NoteOn { at, .. } | crate::host::Ev::NoteOff { at, .. } | crate::host::Ev::Midi { at, .. } => *at,
             });
+            // settings a clip or an event is driving
+            for e in self.ov.gen.iter().filter(|e| e.0 == c) {
+                h.0.set_travel(e.1 as usize, e.2);
+            }
             let buf = &mut self.host_buf[..n];
             buf.fill([0.0; 2]);
             if !h.0.process(buf, &self.host_evs, &cx.clock, self.sr) || !ch.enabled {
@@ -3130,6 +3134,21 @@ mod tests {
         assert!((twice / plain - 2.0).abs() < 0.1, "{twice} against {plain}");
         inst.set(gain, 0.0);
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.1, 0.4) < 1e-4);
+
+        // a clip drives that setting by its place: held at the top it doubles, at the bottom it silences
+        inst.set(gain, 1.0);
+        let len = s.ppq as u32 * 4;
+        for (value, want) in [(1.0f32, 2.0f32), (0.0, 0.0)] {
+            let mut s = s.clone();
+            let pts = vec![crate::song::AutoPt { tick: 0.0, value, tension: 0.0, mode: 0 }, crate::song::AutoPt { tick: len as f64, value, tension: 0.0, mode: 0 }];
+            s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: Some(Arc::new(crate::song::Automation { points: pts, targets: vec![Target::SlotParam(0, 0, 0)] })), ..Default::default() });
+            let ac = s.channels.len() - 1;
+            s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
+            s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+            let got = loud(&crate::render_song(&s, 48_000.0, true, 0, 0.0), 0.1, 0.4);
+            assert!((got / plain - want).abs() < 0.1, "{got} against {plain}, wanted {want} times");
+            assert_eq!(s.target_name(Target::SlotParam(0, 0, 0)).rsplit(" - ").next(), Some("Gain"));
+        }
     }
 
     #[test]

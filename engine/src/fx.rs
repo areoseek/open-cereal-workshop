@@ -1724,6 +1724,9 @@ impl Fx {
     /// Put setting `k` at `v` (0..=1) of its travel, as a controller does. Settings past the unit's listed
     /// ones (drawn tables) are left alone.
     pub fn set_travel(&mut self, k: usize, v: f32) {
+        if let Some(h) = &self.ext {
+            return h.0.set_travel(k, v);
+        }
         if let (Some(q), Some(slot)) = (def(self.kind).params.get(k), self.p.get_mut(k)) {
             *slot = q.min as f32 + (q.max as f32 - q.min as f32) * v.clamp(0.0, 1.0);
         }

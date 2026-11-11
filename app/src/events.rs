@@ -44,6 +44,11 @@ impl App {
             for t in [Target::ChanVolume(c), Target::ChanPan(c), Target::ChanPitch(c)] {
                 add(self.song.event_address(t));
             }
+            if let Some(h) = &self.song.channels[c].ext {
+                for k in 0..h.0.param_count().min(256) {
+                    add(self.song.event_address(Target::ChanParam(c, k as u16)));
+                }
+            }
         }
         let i = self.sel_insert;
         if let Some(ins) = self.song.inserts.get(i) {
@@ -53,7 +58,8 @@ impl App {
             for s in &ins.slots {
                 add(self.song.event_address(Target::SlotMix(i, s.index)));
                 if let Some(fx) = &s.fx {
-                    for k in 0..cereal_engine::fx::def(fx.kind).params.len() {
+                    let count = fx.ext.as_ref().map(|h| h.0.param_count().min(256)).unwrap_or(cereal_engine::fx::def(fx.kind).params.len());
+                    for k in 0..count {
                         add(self.song.event_address(Target::SlotParam(i, s.index, k as u16)));
                     }
                 }

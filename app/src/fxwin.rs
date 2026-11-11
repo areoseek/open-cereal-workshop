@@ -172,7 +172,7 @@ impl App {
                 return;
             };
             if let Some(h) = &f.ext {
-                changed |= crate::hostui::panel(ui, &h.0, &shown);
+                changed |= crate::hostui::panel(ui, &h.0, &shown, &|k| cereal_engine::song::Target::SlotParam(ins, slot, k));
                 return;
             }
             let d = fx::def(f.kind);

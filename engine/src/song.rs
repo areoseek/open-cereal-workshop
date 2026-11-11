@@ -441,6 +441,9 @@ pub enum Target {
     Other { param: u16, dest: u16 },
 }
 
+/// The run of a hosted plug-in's setting as events count it.
+const HOSTED_RANGE: (i32, i32) = (0, 65536);
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoPt {
     /// Ticks from the start of the clip.
@@ -1491,6 +1494,9 @@ impl Song {
                 }
             }
             Target::ChanParam(c, p) => {
+                if let Some(h) = self.channels.get(c).and_then(|c| c.ext.as_ref()) {
+                    h.0.set_travel(p as usize, v);
+                }
                 if let Some(g) = self.channels.get_mut(c).and_then(|c| c.gen.as_mut()) {
                     g.set_travel(p as usize, v);
                 }
@@ -1512,10 +1518,16 @@ impl Song {
             Target::SlotOn(..) => (0, 1),
             Target::SlotParam(i, s, k) => {
                 let fx = self.inserts.get(i)?.slots.iter().find(|x| x.index == s)?.fx.as_ref()?;
+                if let Some(h) = &fx.ext {
+                    return ((k as usize) < h.0.param_count()).then_some(HOSTED_RANGE);
+                }
                 let q = crate::fx::def(fx.kind).params.get(k as usize)?;
                 (q.min, q.max)
             }
             Target::ChanParam(c, k) => {
+                if let Some(h) = &self.channels.get(c)?.ext {
+                    return ((k as usize) < h.0.param_count()).then_some(HOSTED_RANGE);
+                }
                 let g = self.channels.get(c)?.gen.as_ref()?;
                 let q = crate::synth::def(g.kind).params.get(k as usize)?;
                 (q.min, q.max)
@@ -1543,11 +1555,17 @@ impl Song {
             Target::SlotMix(i, s) => format!("{} - {} - Mix", ins(i), slot(i, s)),
             Target::SlotOn(i, s) => format!("{} - {} - On", ins(i), slot(i, s)),
             Target::SlotParam(i, s, k) => {
-                let name = self.inserts.get(i).and_then(|x| x.slots.iter().find(|x| x.index == s)).and_then(|x| x.fx.as_ref()).and_then(|f| crate::fx::def(f.kind).params.get(k as usize)).map(|q| q.name.to_string()).unwrap_or_else(|| format!("control {}", k + 1));
+                let name = self.inserts.get(i).and_then(|x| x.slots.iter().find(|x| x.index == s)).and_then(|x| x.fx.as_ref()).and_then(|f| match &f.ext {
+                    Some(h) => h.0.param_name(k as usize),
+                    None => crate::fx::def(f.kind).params.get(k as usize).map(|q| q.name.to_string()),
+                }).unwrap_or_else(|| format!("control {}", k + 1));
                 format!("{} - {} - {}", ins(i), slot(i, s), name)
             }
             Target::ChanParam(c, k) => {
-                let name = self.channels.get(c).and_then(|x| x.gen.as_ref()).and_then(|g| crate::synth::def(g.kind).params.get(k as usize)).map(|q| q.name.to_string()).unwrap_or_else(|| format!("control {}", k + 1));
+                let name = self.channels.get(c).and_then(|x| match &x.ext {
+                    Some(h) => h.0.param_name(k as usize),
+                    None => x.gen.as_ref().and_then(|g| crate::synth::def(g.kind).params.get(k as usize)).map(|q| q.name.to_string()),
+                }).unwrap_or_else(|| format!("control {}", k + 1));
                 format!("{} - {}", chan(c), name)
             }
             Target::Other { param, dest } => format!("Control {param:#06x} of {dest:#06x}"),

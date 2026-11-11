@@ -145,9 +145,13 @@ impl App {
             Target::SlotMix(i, k) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).map(|x| x.mix),
             Target::SlotOn(i, k) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).map(|x| x.enabled as u8 as f32),
             Target::SlotParam(i, k, p) => s.inserts.get(i).and_then(|i| i.slots.iter().find(|x| x.index == k)).and_then(|x| x.fx.as_ref()).and_then(|f| {
+                if let Some(h) = &f.ext {
+                    return h.0.travel(p as usize);
+                }
                 let q = cereal_engine::fx::def(f.kind).params.get(p as usize)?;
                 Some((f.p.get(p as usize)? - q.min as f32) / (q.max - q.min).max(1) as f32)
             }),
+            Target::ChanParam(c, p) if s.channels.get(c).is_some_and(|c| c.ext.is_some()) => s.channels[c].ext.as_ref().and_then(|h| h.0.travel(p as usize)),
             Target::ChanParam(c, p) => s.channels.get(c).and_then(|c| c.gen.as_ref()).and_then(|g| {
                 let q = cereal_engine::synth::def(g.kind).params.get(p as usize)?;
                 Some((g.p.get(p as usize)? - q.min as f32) / (q.max - q.min).max(1) as f32)

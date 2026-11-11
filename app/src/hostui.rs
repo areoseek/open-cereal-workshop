@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 /// The settings of a hosted plug-in as rows of sliders, and a button for its own window. True when a
 /// setting was moved here.
-pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str) -> bool {
+pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str, target: &dyn Fn(u16) -> cereal_engine::song::Target) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new(&inst.found.name).strong());
@@ -49,7 +49,7 @@ pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str) -> bool {
     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
         let mut module = String::new();
         egui::Grid::new("host-params").num_columns(3).spacing([8.0, 3.0]).show(ui, |ui| {
-            for p in params.iter().filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.module.to_lowercase().contains(&needle)) {
+            for (place, p) in params.iter().enumerate().filter(|(_, p)| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.module.to_lowercase().contains(&needle)) {
                 if p.module != module {
                     module = p.module.clone();
                     // a heading is worth its row only when it gathers several settings
@@ -66,6 +66,9 @@ pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str) -> bool {
                     s = s.step_by(1.0);
                 }
                 let r = ui.add_enabled(!p.readonly && p.max > p.min, s);
+                if !p.readonly && place < 0x8000 {
+                    crate::widgets::control_menu(&r, target(place as u16));
+                }
                 if r.double_clicked() {
                     v = p.default;
                 }

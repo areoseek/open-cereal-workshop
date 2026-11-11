@@ -524,6 +524,9 @@ pub struct Instance {
     pub has_note_in: bool,
     /// Set when the plug-in is of the VST3 kind; the fields above then stay empty.
     v3: Option<vst3::Plug>,
+    /// The settings in the plug-in's own order as last listed, and the travel last sent to each, for
+    /// clips and controllers that drive a setting by its place.
+    table: Mutex<(Vec<Param>, Vec<f32>)>,
 }
 
 // SAFETY: the standard lets the audio thread call `process` while the main thread calls the rest; what we
@@ -540,6 +543,12 @@ impl std::fmt::Debug for Instance {
 impl Instance {
     /// Make one plug-in out of a file. `id` picks among several in the file; empty takes the first.
     pub fn open(path: &Path, id: &str) -> Option<Arc<Instance>> {
+        let inst = Self::open_raw(path, id)?;
+        inst.params();
+        Some(inst)
+    }
+
+    fn open_raw(path: &Path, id: &str) -> Option<Arc<Instance>> {
         if is_vst3(path) {
             let (plug, found) = vst3::Plug::open(path, id)?;
             let none = std::ptr::null();
@@ -563,6 +572,7 @@ impl Instance {
                 offline: AtomicBool::new(false),
                 has_note_in: plug.has_note_in,
                 v3: Some(plug),
+                table: Mutex::new((Vec::new(), Vec::new())),
             }));
         }
         let found = inside(path).into_iter().find(|f| id.is_empty() || f.id == id)?;
@@ -666,6 +676,7 @@ impl Instance {
                 offline: AtomicBool::new(false),
                 has_note_in,
                 v3: None,
+                table: Mutex::new((Vec::new(), Vec::new())),
             }))
         }
     }
@@ -901,6 +912,49 @@ impl Instance {
 
     /// The plug-in's settings. Window thread.
     pub fn params(&self) -> Vec<Param> {
+        let out = self.params_now();
+        if let Ok(mut t) = self.table.lock() {
+            if t.0 != out {
+                t.1 = vec![f32::NAN; out.len()];
+                t.0 = out.clone();
+            }
+        }
+        out
+    }
+
+    /// How many settings the plug-in listed last time.
+    pub fn param_count(&self) -> usize {
+        self.table.lock().map(|t| t.0.len()).unwrap_or(0)
+    }
+
+    /// The name of the setting at place `k`.
+    pub fn param_name(&self, k: usize) -> Option<String> {
+        self.table.lock().ok()?.0.get(k).map(|p| p.name.clone())
+    }
+
+    /// Where the setting at place `k` stands, 0..1 of its run.
+    pub fn travel(&self, k: usize) -> Option<f32> {
+        let (id, min, max) = self.table.lock().ok()?.0.get(k).map(|p| (p.id, p.min, p.max))?;
+        let v = self.value(id)?;
+        Some(if max > min { ((v - min) / (max - min)) as f32 } else { 0.0 })
+    }
+
+    /// Put the setting at place `k` at 0..1 of its run. Cheap when it is there already, so a clip may call
+    /// it every block; safe from the sound thread.
+    pub fn set_travel(&self, k: usize, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        let Ok(mut t) = self.table.lock() else { return };
+        let Some((id, min, max, stepped, readonly)) = t.0.get(k).map(|p| (p.id, p.min, p.max, p.stepped, p.readonly)) else { return };
+        if readonly || t.1.get(k).is_some_and(|last| (last - v).abs() < 1e-6) {
+            return;
+        }
+        t.1[k] = v;
+        drop(t);
+        let x = min + (max - min) * v as f64;
+        self.set_now(id, if stepped { x.round() } else { x });
+    }
+
+    fn params_now(&self) -> Vec<Param> {
         if let Some(v) = &self.v3 {
             return v.params();
         }
@@ -944,6 +998,16 @@ impl Instance {
 
     /// Change a setting; it goes over with the next stretch of sound, or at the next `idle` when none runs.
     pub fn set(&self, id: u32, value: f64) {
+        // a change by hand: whatever a clip sent last no longer stands
+        if let Ok(mut t) = self.table.lock() {
+            if let Some(k) = t.0.iter().position(|p| p.id == id) {
+                t.1[k] = f32::NAN;
+            }
+        }
+        self.set_now(id, value);
+    }
+
+    fn set_now(&self, id: u32, value: f64) {
         if let Some(v) = &self.v3 {
             return v.set(id, value);
         }
