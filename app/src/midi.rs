@@ -2,7 +2,7 @@
 //! reference) and what is played goes to the selected channel. The hold pedal keeps notes ringing.
 //!
 //! Linux: a sequencer client with one input port that connects itself to every readable port, including
-//! devices plugged in later. Other systems: nothing yet.
+//! devices plugged in later. Windows: every device of the multimedia system, reopened when one comes or goes.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -151,7 +151,87 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+impl Held {
+    /// One raw three-byte message, as the Windows driver hands them over.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    fn message(&mut self, to: &CmdSender, chan: u16, status: u8, d1: u8, d2: u8) {
+        match status & 0xf0 {
+            0x90 if d2 > 0 => self.on(to, chan, d1 & 127, d2 & 127),
+            0x80 | 0x90 => self.off(to, d1 & 127),
+            0xb0 if d1 == 64 => self.set_hold(to, d2 >= 64),
+            0xe0 => {
+                let v = ((d2 as i32 & 127) << 7 | (d1 as i32 & 127)) - 8192;
+                to.send(cereal_engine::Cmd::Bend { chan, octaves: v as f32 / 8192.0 * 2.0 / 12.0 });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Windows: every input device of the multimedia system is opened, and reopened when the count changes.
+#[cfg(windows)]
+fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Mutex;
+
+    #[link(name = "winmm")]
+    extern "system" {
+        fn midiInGetNumDevs() -> u32;
+        fn midiInOpen(handle: *mut isize, device: u32, callback: usize, instance: usize, flags: u32) -> u32;
+        fn midiInStart(handle: isize) -> u32;
+        fn midiInStop(handle: isize) -> u32;
+        fn midiInClose(handle: isize) -> u32;
+    }
+    const CALLBACK_FUNCTION: u32 = 0x0003_0000;
+    const MIM_DATA: u32 = 0x3c3;
+
+    struct Shared {
+        held: Mutex<Held>,
+        to: CmdSender,
+        chan: Arc<AtomicUsize>,
+        seen: Arc<AtomicUsize>,
+    }
+
+    extern "system" fn heard(_handle: isize, msg: u32, instance: usize, p1: usize, _p2: usize) {
+        if msg != MIM_DATA || instance == 0 {
+            return;
+        }
+        // SAFETY: `instance` is the leaked `Shared` below, which lives as long as the program.
+        let sh = unsafe { &*(instance as *const Shared) };
+        sh.seen.fetch_add(1, Ordering::Relaxed);
+        let c = sh.chan.load(Ordering::Relaxed) as u16;
+        if let Ok(mut h) = sh.held.lock() {
+            h.message(&sh.to, c, p1 as u8, (p1 >> 8) as u8, (p1 >> 16) as u8);
+        }
+    }
+
+    let shared: &'static Shared = Box::leak(Box::new(Shared { held: Mutex::new(Held { down: vec![], pedal: vec![], hold: false }), to, chan, seen }));
+    let mut open: Vec<isize> = Vec::new();
+    let mut count = u32::MAX;
+    loop {
+        // SAFETY: plain calls into the system's MIDI library with valid pointers.
+        let now = unsafe { midiInGetNumDevs() };
+        if now != count {
+            for h in open.drain(..) {
+                unsafe {
+                    midiInStop(h);
+                    midiInClose(h);
+                }
+            }
+            for id in 0..now {
+                let mut h: isize = 0;
+                let ok = unsafe { midiInOpen(&mut h, id, heard as *const () as usize, shared as *const Shared as usize, CALLBACK_FUNCTION) };
+                if ok == 0 {
+                    unsafe { midiInStart(h) };
+                    open.push(h);
+                }
+            }
+            count = now;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn run(_to: CmdSender, _chan: Arc<AtomicUsize>, _seen: Arc<AtomicUsize>) -> Result<(), Box<dyn std::error::Error>> {
     let _ = Held { down: vec![], pedal: vec![], hold: false };
     Ok(())
@@ -172,5 +252,8 @@ mod tests {
         assert_eq!(h.pedal, vec![(60, 2)]);
         h.set_hold(&to, false);
         assert!(h.pedal.is_empty() && h.down.is_empty());
+        h.message(&to, 1, 0x90, 64, 90);
+        h.message(&to, 1, 0x90, 64, 0);
+        assert!(h.down.is_empty(), "a note on at zero velocity is a release");
     }
 }
