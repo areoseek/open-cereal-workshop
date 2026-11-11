@@ -205,6 +205,18 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    if ui.button("MIDI Sender").on_hover_text("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
+                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+                        c.plugin = cereal_engine::midiout::IDENT.into();
+                        c.name = "MIDI Sender".into();
+                        if let Some(g) = c.gen.as_mut() {
+                            g.raw = cereal_engine::midiout::Set::fresh().write();
+                        }
+                        self.song.channels.push(c);
+                        self.sel_chan = self.song.channels.len() - 1;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Envelope Sender").on_hover_text("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::fm::ENV_SENDER.into();

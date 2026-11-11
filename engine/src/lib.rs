@@ -32,6 +32,7 @@ pub mod scope;
 pub mod waveed;
 pub mod minis;
 pub mod midifile;
+pub mod midiout;
 pub mod keys;
 pub mod slicer;
 pub mod beep;

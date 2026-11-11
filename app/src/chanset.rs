@@ -382,6 +382,8 @@ impl App {
                 ui.add_space(4.0);
                 if ident.eq_ignore_ascii_case(cereal_engine::fm::ENV_SENDER) {
                     changed |= env_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
+                } else if ident.eq_ignore_ascii_case(cereal_engine::midiout::IDENT) {
+                    changed |= midi_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw, &self.handle.transport);
                 } else if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                     changed |= key_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
                 } else {
@@ -773,6 +775,169 @@ fn env_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
 }
 
 /// The key sender: what each key sends to the controls linked to it, drawn as a bar per key.
+/// The MIDI sender's page: where its notes go, and eight pages of nine knobs that send controller values.
+fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::player::Transport) -> bool {
+    use cereal_engine::midiout::{Msg, Set, KINDS};
+    let mut set = Set::parse(raw).unwrap_or_else(Set::fresh);
+    let was = set.clone();
+    let orange = Color32::from_rgb(255, 160, 60);
+    let page_id = ui.id().with("midipage");
+    let sel_id = ui.id().with("midisel");
+    let mut page: usize = ui.data(|d| d.get_temp(page_id)).unwrap_or(0);
+    let mut sel: Option<usize> = ui.data(|d| d.get_temp(sel_id)).unwrap_or(None);
+    ui.horizontal(|ui| {
+        let mut chan = set.chan as i32 + 1;
+        ui.label("Channel");
+        ui.add(egui::DragValue::new(&mut chan).range(1..=16).speed(0.1));
+        set.chan = (chan - 1).clamp(0, 15) as u8;
+        ui.label("Patch").on_hover_text("The program the device is switched to; none leaves it alone");
+        num_or_none(ui, &mut set.patch, 127, 1);
+        ui.label("Bank");
+        num_or_none(ui, &mut set.bank[0], 127, 0).on_hover_text("Coarse");
+        num_or_none(ui, &mut set.bank[1], 127, 0).on_hover_text("Fine");
+        let mut port = set.port as i32;
+        ui.label("Port").on_hover_text(if cfg!(windows) { "Port N plays through the Nth MIDI output device of the system" } else { "Each port in use shows up as a port of the client \"Breakfast Cereal Out\"; connect it to a synth or an interface" });
+        ui.add(egui::DragValue::new(&mut port).range(0..=255).speed(0.1));
+        set.port = port.clamp(0, 255) as u8;
+        let lit = crate::midi::SENT.load(std::sync::atomic::Ordering::Relaxed);
+        let lit_id = ui.id().with("midilit");
+        let (last, at): (usize, f64) = ui.data(|d| d.get_temp(lit_id)).unwrap_or((lit, -1.0));
+        let now = ui.input(|i| i.time);
+        let at = if last != lit { now } else { at };
+        ui.data_mut(|d| d.insert_temp(lit_id, (lit, at)));
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 4.0, if now - at < 0.15 { orange } else { Color32::from_rgb(60, 60, 66) });
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut set.by_color, "Map note color to MIDI channel").on_hover_text("Each note goes out on the channel of its piano roll colour, counted from the channel above");
+        ui.checkbox(&mut set.send_mix, "Send pan, volume and pitch").on_hover_text("The channel's volume, pan and pitch wheel go out as controllers 7 and 10 and pitch bend");
+        if ui.button("Reset").on_hover_text("Sends the reset-all-controllers message (CC 121)").clicked() {
+            transport.send_midi(Msg::new(set.port, &[0xb0 | set.chan, 121, 0]));
+        }
+        if ui.button("Deactivate all").on_hover_text("Switches every knob off; their set-up is kept").clicked() {
+            for c in set.ctls.iter_mut() {
+                c.on = false;
+            }
+        }
+    });
+    section(ui, "CONTROLLERS");
+    ui.horizontal(|ui| {
+        for p in 0..8 {
+            let used = set.ctls.iter().any(|c| c.slot as usize / 9 == p && c.on);
+            if ui.selectable_label(page == p, RichText::new(format!("{}", p + 1)).color(if used { orange } else { TEXT })).on_hover_text(set.pages[p].clone()).clicked() {
+                page = p;
+                sel = None;
+            }
+        }
+        ui.add(egui::TextEdit::singleline(&mut set.pages[page]).desired_width(180.0)).on_hover_text("Page name");
+    });
+    ui.horizontal(|ui| {
+        for col in 0..9 {
+            let slot = page * 9 + col;
+            ui.vertical(|ui| {
+                ui.set_width(58.0);
+                let c = set.ctl(slot).cloned();
+                let (lo, hi) = c.as_ref().map(|c| (c.lo.min(c.hi), c.hi.max(c.lo))).unwrap_or((0, 127));
+                let mut v = set.values[slot] as f32;
+                let r = knob(ui, &mut v, lo as f32, hi.max(lo + 1) as f32, lo as f32, 34.0).on_hover_text(match &c {
+                    Some(c) if !c.name.is_empty() => format!("{}: {}", c.name, set.values[slot]),
+                    _ => format!("{}", set.values[slot]),
+                });
+                if r.changed() {
+                    set.values[slot] = v.round() as i32;
+                }
+                if r.secondary_clicked() || r.clicked() {
+                    sel = Some(slot);
+                }
+                let (text, on) = match &c {
+                    Some(c) => (if c.short.is_empty() { format!("{} {}", KINDS.get(c.kind as usize).unwrap_or(&"CC"), c.num) } else { c.short.clone() }, c.on),
+                    None => ("-".to_string(), false),
+                };
+                let label = ui.add(egui::Label::new(RichText::new(text).small().color(if on { orange } else if sel == Some(slot) { TEXT } else { TEXT_DIM })).truncate().sense(Sense::click()));
+                if label.on_hover_text("Click to switch this knob on or off; right-click the knob to set it up").clicked() {
+                    match set.ctls.iter_mut().find(|c| c.slot as usize == slot) {
+                        Some(c) => c.on = !c.on,
+                        None => sel = Some(slot),
+                    }
+                }
+            });
+        }
+    });
+    if let Some(slot) = sel.filter(|s| s / 9 == page) {
+        section(ui, "CONTROL SETTINGS");
+        let made = set.ctl(slot).is_some();
+        if !made {
+            if ui.button(format!("Set up knob {}", slot % 9 + 1)).clicked() {
+                set.ctl_mut(slot);
+            }
+        } else {
+            let own = set.chan as i32;
+            let c = set.ctl_mut(slot);
+            egui::Grid::new("midictl").num_columns(2).show(ui, |ui| {
+                ui.label("Full name");
+                ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(240.0));
+                ui.end_row();
+                ui.label("Short name");
+                ui.add(egui::TextEdit::singleline(&mut c.short).desired_width(120.0));
+                ui.end_row();
+                ui.label("Controller");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut c.num).range(0..=16383).speed(0.2));
+                    let mut kind = (c.kind.clamp(0, 4)) as usize;
+                    egui::ComboBox::from_id_salt("midikind").width(70.0).selected_text(KINDS[kind]).show_ui(ui, |ui| {
+                        for (i, k) in KINDS.iter().enumerate() {
+                            ui.selectable_value(&mut kind, i, *k);
+                        }
+                    });
+                    c.kind = kind as i32;
+                    ui.checkbox(&mut c.on, "Active");
+                });
+                ui.end_row();
+                ui.label("Range");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut c.lo).range(0..=127).speed(0.2));
+                    ui.label("to");
+                    ui.add(egui::DragValue::new(&mut c.hi).range(0..=127).speed(0.2));
+                });
+                ui.end_row();
+                ui.label("Channel");
+                ui.horizontal(|ui| {
+                    let mut own_chan = c.chan < 0;
+                    if ui.checkbox(&mut own_chan, "The unit's own").changed() {
+                        c.chan = if own_chan { -1 } else { own };
+                    }
+                    if c.chan >= 0 {
+                        let mut ch = c.chan + 1;
+                        ui.add(egui::DragValue::new(&mut ch).range(1..=16).speed(0.1));
+                        c.chan = (ch - 1).clamp(0, 15);
+                    }
+                });
+                ui.end_row();
+            });
+            if ui.button("Remove this knob's set-up").clicked() {
+                set.ctls.retain(|c| c.slot as usize != slot);
+            }
+        }
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(page_id, page);
+        d.insert_temp(sel_id, sel);
+    });
+    ui.add_space(4.0);
+    ui.label(RichText::new("Makes no sound of its own. Notes on this channel, with their echoes and arpeggios, go out as MIDI; record what the device plays back through a mixer track's input.").small().color(TEXT_DIM));
+    if set != was {
+        *raw = set.write();
+        return true;
+    }
+    false
+}
+
+/// A number box that reads "none" below zero. `shift` is added for show (patches count from one).
+fn num_or_none(ui: &mut Ui, v: &mut i32, max: i32, shift: i32) -> egui::Response {
+    let r = ui.add(egui::DragValue::new(v).range(-1..=max).speed(0.15).custom_formatter(move |x, _| if x < 0.0 { "none".into() } else { format!("{}", x as i32 + shift) }).custom_parser(move |s| s.trim().parse::<f64>().ok().map(|x| x - shift as f64).or(Some(-1.0))));
+    r
+}
+
 fn key_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
     use cereal_engine::synth::{key_sender_range, key_sender_set, key_sender_value};
     const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];

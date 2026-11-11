@@ -48,6 +48,8 @@ pub struct Transport {
     countdown: AtomicBool,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
+    /// MIDI messages the sender channels made, for the window's sender thread to put on the wire.
+    midi: Mutex<Vec<crate::midiout::Msg>>,
     /// The effect slot whose sound the window wants to look at (insert * 64 + slot), or all ones for none.
     tap_want: AtomicU32,
     tap: Mutex<Tap>,
@@ -81,6 +83,14 @@ struct ArpHeld {
     live: bool,
     /// Already sounded whole, as a lone note under the holding chord choice.
     sus: bool,
+}
+
+/// What a MIDI sender channel last sent: its block and its volume, pan and bend.
+struct MidiSeen {
+    chan: u16,
+    raw: Vec<u8>,
+    fresh: bool,
+    mix: [i32; 3],
 }
 
 /// One arpeggiator run: all held notes of a channel, or one note spelling its own chord.
@@ -120,6 +130,7 @@ impl Transport {
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
+            midi: Mutex::new(Vec::with_capacity(256)),
             tap_want: AtomicU32::new(u32::MAX),
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
             rec_want: AtomicU32::new(u32::MAX),
@@ -166,6 +177,18 @@ impl Transport {
     }
     pub fn set_countdown(&self, on: bool) {
         self.countdown.store(on, Relaxed);
+    }
+    /// Puts one message of the window's own in the queue (a reset button, say).
+    pub fn send_midi(&self, m: crate::midiout::Msg) {
+        if let Ok(mut q) = self.midi.lock() {
+            q.push(m);
+        }
+    }
+    /// The MIDI messages made since the last call, in order.
+    pub fn take_midi(&self, into: &mut Vec<crate::midiout::Msg>) {
+        if let Ok(mut m) = self.midi.lock() {
+            into.extend(m.drain(..));
+        }
     }
     /// The hand-played notes logged since the last call.
     pub fn take_live(&self) -> Vec<Live> {
@@ -340,6 +363,10 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         driven: Vec::with_capacity(64),
         env_runs: Vec::new(),
         arps: Vec::new(),
+        midi_wait: Vec::with_capacity(64),
+        midi_live: Vec::new(),
+        midi_seen: Vec::new(),
+        midi_ran: false,
         seed: 0x2545_f491,
         ring: vec![],
         chan_fx: vec![],
@@ -783,6 +810,13 @@ pub struct Player {
     env_runs: Vec<EnvRun>,
     /// Arpeggiators at work: the notes each holds and where it is in its run.
     arps: Vec<ArpRun>,
+    /// MIDI messages on their way out, with the frames each still waits.
+    midi_wait: Vec<(u64, crate::midiout::Msg)>,
+    /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
+    midi_live: Vec<(u16, u8, crate::midiout::Msg)>,
+    /// What each sender channel last put on the wire, so only changes are sent.
+    midi_seen: Vec<MidiSeen>,
+    midi_ran: bool,
     seed: u32,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
@@ -1062,6 +1096,21 @@ impl Player {
                 let rand = (self.seed >> 8) as f32 / (1u32 << 24) as f32;
                 self.env_runs.retain(|r| r.chan != n.chan);
                 self.env_runs.push(EnvRun { chan: n.chan, key: n.key, vel: n.vel, rand, t: 0.0, rel: None, left: len_frames.map(|f| f + delay as u64), set });
+            }
+            return;
+        }
+        if ch.plugin.eq_ignore_ascii_case(crate::midiout::IDENT) {
+            // the MIDI sender makes no sound: the note goes out as a message, and its end follows when it is due
+            let h = crate::midiout::Head::read(ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]));
+            let mc = if h.by_color { (h.chan + n.color) & 15 } else { h.chan };
+            let key = n.key.min(127);
+            let vel = ((n.vel * 100.0).round() as i32).clamp(1, 127) as u8;
+            let off = crate::midiout::Msg::new(h.port, &[0x80 | mc, key, 0]);
+            self.midi_wait.push((delay as u64, crate::midiout::Msg::new(h.port, &[0x90 | mc, key, vel])));
+            match len_frames {
+                Some(f) => self.midi_wait.push((delay as u64 + f.max(1), off)),
+                None if live => self.midi_live.push((n.chan, n.key, off)),
+                None => self.midi_wait.push((delay as u64 + (self.sr * 0.25) as u64, off)),
             }
             return;
         }
@@ -1347,13 +1396,123 @@ impl Player {
                 return;
             }
         }
+        while let Some(i) = self.midi_live.iter().position(|m| m.0 == chan && m.1 == key) {
+            let m = self.midi_live.swap_remove(i);
+            self.midi_wait.push((0, m.2));
+        }
         for v in self.voices.iter_mut().filter(|v| v.active && v.live && v.chan == chan && v.key == key) {
             v.let_go();
         }
     }
 
+    /// Ends every note a sender channel has out, now.
+    fn midi_hush(&mut self) {
+        self.midi_wait.retain_mut(|(left, m)| {
+            *left = 0;
+            m.data[0] & 0xf0 == 0x80
+        });
+        for (_, _, off) in self.midi_live.drain(..) {
+            self.midi_wait.push((0, off));
+        }
+    }
+
+    /// Sends what the sender channels have due in the next `n` frames, and any of their settings that changed.
+    fn run_midi(&mut self, song: &Song, n: usize) {
+        use crate::midiout::{knob_msgs, patch_msgs, Head, Msg, IDENT, KNOBS};
+        let playing = self.transport.playing();
+        if playing && !self.midi_ran {
+            // starting the song sends every setting afresh
+            self.midi_seen.clear();
+        }
+        self.midi_ran = playing;
+        let mut out: Vec<(u64, Msg)> = Vec::new();
+        for (i, ch) in song.channels.iter().enumerate() {
+            if !ch.plugin.eq_ignore_ascii_case(IDENT) {
+                continue;
+            }
+            let raw = ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]);
+            let mix = [(ch.volume * 127.0).round() as i32, ((ch.pan * 0.5 + 0.5) * 127.0).round() as i32, (self.wheel.get(i).copied().unwrap_or(0.0) * 12.0 / 2.0 * 8192.0) as i32];
+            let at = match self.midi_seen.iter().position(|s| s.chan == i as u16) {
+                Some(at) => at,
+                None => {
+                    self.midi_seen.push(MidiSeen { chan: i as u16, raw: Vec::new(), fresh: true, mix: [i32::MIN; 3] });
+                    self.midi_seen.len() - 1
+                }
+            };
+            let seen = &mut self.midi_seen[at];
+            if !seen.fresh && seen.raw == raw && seen.mix == mix {
+                continue;
+            }
+            let h = Head::read(raw);
+            let old = Head::read(&seen.raw);
+            let all = seen.fresh || old.port != h.port || old.chan != h.chan;
+            if all || old.patch != h.patch || old.bank != h.bank {
+                patch_msgs(&h, |m| out.push((0, m)));
+            }
+            h.each(raw, |slot, num, on, kind, lo, hi, chan| {
+                if !on || slot >= KNOBS {
+                    return;
+                }
+                let v = h.value(raw, slot);
+                let mut was = None;
+                if !all {
+                    old.each(&seen.raw, |s, num2, on2, kind2, _, _, chan2| {
+                        if s == slot && on2 && (num2, kind2, chan2) == (num, kind, chan) {
+                            was = Some(old.value(&seen.raw, slot));
+                        }
+                    });
+                }
+                if was != Some(v) {
+                    let v = if hi > lo { v.clamp(lo, hi) } else { v };
+                    knob_msgs(h.port, if chan >= 0 { chan as u8 } else { h.chan }, kind, num, v, |m| out.push((0, m)));
+                }
+            });
+            if h.send_mix {
+                if all || seen.mix[0] != mix[0] {
+                    out.push((0, Msg::new(h.port, &[0xb0 | h.chan, 7, mix[0].clamp(0, 127) as u8])));
+                }
+                if all || seen.mix[1] != mix[1] {
+                    out.push((0, Msg::new(h.port, &[0xb0 | h.chan, 10, mix[1].clamp(0, 127) as u8])));
+                }
+                if all || seen.mix[2] != mix[2] {
+                    let b = (mix[2] + 8192).clamp(0, 16383);
+                    out.push((0, Msg::new(h.port, &[0xe0 | h.chan, (b & 127) as u8, (b >> 7) as u8])));
+                }
+            }
+            seen.fresh = false;
+            seen.mix = mix;
+            seen.raw.clear();
+            seen.raw.extend_from_slice(raw);
+        }
+        if self.midi_wait.is_empty() && out.is_empty() {
+            return;
+        }
+        // settings go ahead of the notes that need them
+        let n = n as u64;
+        let mut i = 0;
+        while i < self.midi_wait.len() {
+            if self.midi_wait[i].0 < n {
+                out.push(self.midi_wait.remove(i));
+            } else {
+                self.midi_wait[i].0 -= n;
+                i += 1;
+            }
+        }
+        if out.is_empty() {
+            return;
+        }
+        let head = out.iter().take_while(|m| m.0 == 0 && m.1.data[0] & 0xe0 != 0x80).count();
+        out[head..].sort_by_key(|m| m.0);
+        if let Ok(mut q) = self.transport.midi.lock() {
+            if q.len() < 65_536 {
+                q.extend(out.iter().map(|m| m.1));
+            }
+        }
+    }
+
     fn silence(&mut self, fast: bool) {
         self.arps.clear();
+        self.midi_hush();
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });
         for v in self.voices.iter_mut().filter(|v| v.active && !v.preview) {
             v.kill = true;
@@ -1404,6 +1563,7 @@ impl Player {
                 }
                 Cmd::Panic => {
                     self.arps.clear();
+                    self.midi_hush();
                     for v in self.voices.iter_mut() {
                         v.active = false;
                         v.sample = None;
@@ -2072,6 +2232,7 @@ impl Player {
             let want = (total - done).min(BLOCK);
             let n = self.advance(&song, want).clamp(1, want);
             self.run_arps(&song, n);
+            self.run_midi(&song, n);
             self.mix(&song, &mut out[done * channels..(done + n) * channels], channels);
             done += n;
         }
@@ -2288,6 +2449,55 @@ mod tests {
             p.render(block, 2);
         }
         buf
+    }
+
+    #[test]
+    fn a_sender_channel_turns_notes_and_knobs_into_messages() {
+        use crate::midiout::{Ctl, Msg, Set};
+        let mut s = click_song();
+        let mut set = Set::fresh();
+        set.chan = 3;
+        set.port = 9;
+        set.patch = 17;
+        set.send_mix = false;
+        *set.ctl_mut(0) = Ctl { slot: 0, num: 74, on: true, kind: 0, lo: 0, hi: 127, chan: -1, name: String::new(), short: String::new() };
+        set.values[0] = 40;
+        s.channels[0].kind = ChannelKind::Plugin;
+        s.channels[0].plugin = crate::midiout::IDENT.into();
+        s.channels[0].gen = crate::synth::Gen::decode(crate::midiout::IDENT, &set.write());
+        assert!(s.channels[0].gen.is_some());
+        s.patterns[0].notes.push(Note { pos: 0, len: 24, chan: 0, key: 64, ..Default::default() });
+        let (mut h, mut p) = new_player(s.clone(), 48_000.0);
+        h.transport.set_playing(true);
+        let mut buf = vec![0.0f32; 2 * 333];
+        let mut got: Vec<Msg> = vec![];
+        let mut when = vec![];
+        for i in 0..40 {
+            p.render(&mut buf, 2);
+            let had = got.len();
+            h.transport.take_midi(&mut got);
+            when.extend((had..got.len()).map(|_| i));
+            assert!(buf.iter().all(|x| *x == 0.0));
+        }
+        let bytes: Vec<Vec<u8>> = got.iter().map(|m| m.bytes().to_vec()).collect();
+        assert_eq!(bytes, vec![vec![0xc3, 17], vec![0xb3, 74, 40], vec![0x93, 64, 100], vec![0x83, 64, 0]], "{when:?}");
+        assert!(got.iter().all(|m| m.port == 9));
+        // the note is one step long: 6000 frames, so its end leaves in the nineteenth block
+        assert_eq!(when, vec![0, 0, 0, 18]);
+        // a moved knob is sent alone; a held key ends when it is let go
+        set.values[0] = 41;
+        s.channels[0].gen = crate::synth::Gen::decode(crate::midiout::IDENT, &set.write());
+        h.transport.set_playing(false);
+        p.render(&mut buf, 2);
+        h.publish(s);
+        h.send(Cmd::NoteOn { chan: 0, key: 50, vel: 0.5 });
+        p.render(&mut buf, 2);
+        h.send(Cmd::NoteOff { chan: 0, key: 50 });
+        p.render(&mut buf, 2);
+        got.clear();
+        h.transport.take_midi(&mut got);
+        let bytes: Vec<Vec<u8>> = got.iter().map(|m| m.bytes().to_vec()).collect();
+        assert_eq!(bytes, vec![vec![0xb3, 74, 41], vec![0x93, 50, 50], vec![0x83, 50, 0]]);
     }
 
     #[test]

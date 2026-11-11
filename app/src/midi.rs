@@ -106,7 +106,8 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
             for client in ClientIter::new(&seq) {
                 let id = client.get_client();
                 // not ourselves, not the system's own ports, not the loop-back port
-                if id == me || id == 0 || id == 14 {
+                // nor our own sending client: what we send must not come back in as played notes
+                if id == me || id == 0 || id == 14 || client.get_name().map(|n| n.starts_with("Breakfast Cereal")).unwrap_or(false) {
                     continue;
                 }
                 for p in PortIter::new(&seq, id) {
@@ -275,4 +276,106 @@ mod tests {
         h.message(&to, 1, 0x90, 64, 0);
         assert!(h.down.is_empty(), "a note on at zero velocity is a release");
     }
+}
+
+/// Counts every message sent, so a sender's page can blink its light.
+pub static SENT: AtomicUsize = AtomicUsize::new(0);
+
+/// Starts the thread that puts the sender channels' messages on the wire.
+///
+/// Linux: a sequencer client "Breakfast Cereal Out" with one readable port per port number in use, for
+/// synths and hardware to be connected to. Windows: port N plays through the Nth output device.
+pub fn start_out(from: Arc<cereal_engine::player::Transport>) {
+    if std::env::var_os("CEREAL_NO_MIDI").is_some() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("midi-out".into()).spawn(move || {
+        let _ = run_out(from);
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn std::error::Error>> {
+    use alsa::seq::{EvCtrl, EvNote, Event, EventType, PortCap, PortType};
+    use std::ffi::CString;
+
+    let seq = alsa::Seq::open(None, Some(alsa::Direction::Playback), true)?;
+    seq.set_client_name(&CString::new("Breakfast Cereal Out")?)?;
+    let mut ports: Vec<(u8, i32)> = Vec::new();
+    let mut got = Vec::with_capacity(256);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        got.clear();
+        from.take_midi(&mut got);
+        for m in &got {
+            let port = match ports.iter().find(|p| p.0 == m.port) {
+                Some(p) => p.1,
+                None => {
+                    let p = seq.create_simple_port(&CString::new(format!("Port {}", m.port))?, PortCap::READ | PortCap::SUBS_READ, PortType::MIDI_GENERIC | PortType::APPLICATION)?;
+                    ports.push((m.port, p));
+                    p
+                }
+            };
+            let d = m.data;
+            let channel = d[0] & 15;
+            let note = EvNote { channel, note: d[1], velocity: d[2], off_velocity: 0, duration: 0 };
+            let ctl = |param: u32, value: i32| EvCtrl { channel, param, value };
+            let mut ev = match d[0] & 0xf0 {
+                0x80 => Event::new(EventType::Noteoff, &note),
+                0x90 => Event::new(EventType::Noteon, &note),
+                0xb0 => Event::new(EventType::Controller, &ctl(d[1] as u32, d[2] as i32)),
+                0xc0 => Event::new(EventType::Pgmchange, &ctl(0, d[1] as i32)),
+                0xd0 => Event::new(EventType::Chanpress, &ctl(0, d[1] as i32)),
+                0xe0 => Event::new(EventType::Pitchbend, &ctl(0, (d[1] as i32 | (d[2] as i32) << 7) - 8192)),
+                _ => continue,
+            };
+            ev.set_source(port);
+            ev.set_subs();
+            ev.set_direct();
+            let _ = seq.event_output_direct(&mut ev);
+            SENT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn std::error::Error>> {
+    #[link(name = "winmm")]
+    extern "system" {
+        fn midiOutGetNumDevs() -> u32;
+        fn midiOutOpen(handle: *mut isize, device: u32, callback: usize, instance: usize, flags: u32) -> u32;
+        fn midiOutShortMsg(handle: isize, msg: u32) -> u32;
+    }
+    // port number -> open device (0 = could not be opened; not tried again)
+    let mut open: Vec<(u8, isize)> = Vec::new();
+    let mut got = Vec::with_capacity(256);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        got.clear();
+        from.take_midi(&mut got);
+        for m in &got {
+            let handle = match open.iter().find(|p| p.0 == m.port) {
+                Some(p) => p.1,
+                None => {
+                    let mut h: isize = 0;
+                    // SAFETY: plain calls into the multimedia system; `h` outlives the call that fills it.
+                    let ok = unsafe { (m.port as u32) < midiOutGetNumDevs() && midiOutOpen(&mut h, m.port as u32, 0, 0, 0) == 0 };
+                    let h = if ok { h } else { 0 };
+                    open.push((m.port, h));
+                    h
+                }
+            };
+            if handle != 0 {
+                let d = m.data;
+                // SAFETY: the handle came from midiOutOpen above and is never closed while the thread lives.
+                unsafe { midiOutShortMsg(handle, d[0] as u32 | (d[1] as u32) << 8 | (d[2] as u32) << 16) };
+                SENT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run_out(_from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
 }

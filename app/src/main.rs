@@ -252,6 +252,7 @@ impl App {
             browser.add_root("Documents", home.join("Documents"));
         }
         let midi = midi::MidiIn::start(handle.sender());
+        midi::start_out(handle.transport.clone());
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -362,6 +363,16 @@ impl App {
                         if let Some(d) = cereal_engine::synth::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&x[4..])) {
                             if let Some(c) = app.song.channels.first_mut() {
                                 *c = cereal_engine::song::Chan::instrument(d.kind);
+                                if d.ident.eq_ignore_ascii_case(cereal_engine::midiout::IDENT) {
+                                    c.plugin = d.ident.into();
+                                    c.name = d.title.into();
+                                    let mut set = cereal_engine::midiout::Set::fresh();
+                                    *set.ctl_mut(0) = cereal_engine::midiout::Ctl { slot: 0, num: 74, on: true, kind: 0, lo: 0, hi: 127, chan: -1, name: "Filter cutoff".into(), short: "Cutoff".into() };
+                                    set.values[0] = 90;
+                                    if let Some(g) = c.gen.as_mut() {
+                                        g.raw = set.write();
+                                    }
+                                }
                                 app.sel_chan = 0;
                                 app.show_chanset = true;
                                 app.handle.publish(app.song.clone());
