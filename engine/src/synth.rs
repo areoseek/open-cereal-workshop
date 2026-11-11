@@ -35,6 +35,10 @@ pub enum Kind {
     Thump,
     /// One drum patch per key (`drumbank.rs`).
     DrumBank,
+    /// A picture swept from left to right, each row a sine wave (`beep.rs`).
+    Image,
+    /// Units that make no sound of their own: they send control values or notes elsewhere.
+    Quiet,
 }
 
 impl Kind {
@@ -71,7 +75,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank)
+        matches!(self.kind, Kind::Fm | Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::Thump | Kind::DrumBank | Kind::Image | Kind::Quiet)
     }
 }
 
@@ -371,6 +375,11 @@ pub static DEFS: &[Def] = &[Def {
     Def { kind: Kind::Sub, ident: "SimSynth", title: "Analog Trio", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "BassDrum", title: "Kick Designer", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumpad", title: "Membrane Drum", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Image, ident: "BeepMap", title: "Picture Synth", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Keyboard Controller", title: "Key Controller", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Envelope Controller", title: "Envelope Sender", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "Fruity Voltage Controller", title: "Voltage Sender", size: 0, fixed: &[], tail: &[], params: &[] },
+    Def { kind: Kind::Quiet, ident: "MIDI Out", title: "MIDI Sender", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::DrumBank, ident: "Fruity DrumSynth Live", title: "Drum Bank", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Thump, ident: "Drumaxx", title: "Drum Modeler", size: 0, fixed: &[], tail: &[], params: &[] },
     Def { kind: Kind::Packs, ident: "FLEX", title: "Pack Player", size: 1105, fixed: &[], tail: &[], params: &[] },
@@ -498,6 +507,8 @@ pub struct Gen {
     pub fm: Option<std::sync::Arc<crate::fm::Patch>>,
     /// A patch worked out once at load, for the instruments whose settings we only play and never edit.
     pub pre: Option<std::sync::Arc<crate::additive::Patch>>,
+    /// The picture of the picture instrument.
+    pub img: Option<std::sync::Arc<crate::beep::Image>>,
 }
 
 /// Two sets of settings are the same when they would be stored as the same block.
@@ -509,7 +520,7 @@ impl PartialEq for Gen {
 
 impl Gen {
     pub fn new(kind: Kind) -> Self {
-        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None };
+        let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None };
         g.raw = g.encode(None);
         if kind == Kind::Fm {
             g.fm = Some(Default::default());
@@ -525,20 +536,28 @@ impl Gen {
         if d.kind == Kind::Fm {
             // layouts we cannot read stay with the project as an unknown instrument
             let patch = crate::fm::Patch::parse(state)?;
-            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)), pre: None });
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: Some(std::sync::Arc::new(patch)), pre: None, img: None });
         }
         if d.kind == Kind::Sub {
-            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(sub_patch(ident, state))) });
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(sub_patch(ident, state))), img: None });
+        }
+        if d.kind == Kind::Image {
+            // a block without a readable picture stays with the project and plays nothing
+            let img = crate::beep::Image::parse(state).map(std::sync::Arc::new);
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img });
+        }
+        if d.kind == Kind::Quiet {
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: None, img: None });
         }
         if d.kind == Kind::DrumBank {
-            return Some(Self { kind: d.kind, p: crate::drumbank::parse(state), raw: state.to_vec(), fm: None, pre: None });
+            return Some(Self { kind: d.kind, p: crate::drumbank::parse(state), raw: state.to_vec(), fm: None, pre: None, img: None });
         }
         if d.kind == Kind::Thump {
-            return Some(Self { kind: d.kind, p: thump(ident, state), raw: state.to_vec(), fm: None, pre: None });
+            return Some(Self { kind: d.kind, p: thump(ident, state), raw: state.to_vec(), fm: None, pre: None, img: None });
         }
         if matches!(d.kind, Kind::Metal | Kind::MetalBank) {
             let patch = crate::metal::patch(state)?;
-            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(patch)) });
+            return Some(Self { kind: d.kind, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(patch)), img: None });
         }
         if d.kind == Kind::Osc3 && state.len() == 44 {
             return Some(Self::old_osc3(state));
@@ -572,7 +591,7 @@ impl Gen {
                 v.clamp(p.min, p.max) as f32
             })
             .collect();
-        let mut g = Self { kind: d.kind, p, raw: state.to_vec(), fm: None, pre: None };
+        let mut g = Self { kind: d.kind, p, raw: state.to_vec(), fm: None, pre: None, img: None };
         if d.kind == Kind::Packs {
             g.pre = Some(std::sync::Arc::new(stand_in(&g.preset_name())));
         }
@@ -740,15 +759,16 @@ impl Gen {
             Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub => Tone { add: self.pre.clone().or_else(|| Some(std::sync::Arc::new(stand_in("")))), ..Default::default() },
             Kind::Thump => {
                 let p = if self.p.len() == 6 { self.p.clone() } else { thump("", &[]) };
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Kick, p, set: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Kick, p, set: None, img: None })), ..Default::default() }
             }
+            Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone() })), ..Default::default() },
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None })), ..Default::default() }
             }
-            k => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: k, p: self.p.clone(), set: None })), ..Default::default() },
+            k => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: k, p: self.p.clone(), set: None, img: None })), ..Default::default() },
         }
     }
 }

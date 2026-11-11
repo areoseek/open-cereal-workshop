@@ -638,8 +638,22 @@ fn instrument_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.label(RichText::new(format!("{preset}  ({pack})")).strong());
             ui.label(RichText::new("Pack sounds are protected files and are not read. A stand-in voice chosen by the preset's name plays instead.").color(TEXT_DIM));
         }
+        Kind::Image => {
+            match &g.img {
+                Some(im) => {
+                    ui.label(RichText::new(format!("Picture {} x {}, {:.1} s a pass, {}", im.w, im.h, im.seconds(), if im.looped { "looped" } else { "played once" })).strong());
+                    ui.label(RichText::new("Red plays on the left, green on the right; each row is one sine wave above the played key. Loading and pasting pictures is still to come.").color(TEXT_DIM));
+                }
+                None => {
+                    ui.label(RichText::new("The stored picture could not be read. The block is kept untouched.").color(TEXT_DIM));
+                }
+            }
+        }
+        Kind::Quiet => {
+            ui.label(RichText::new("Makes no sound of its own: it sends control values or notes to other units. Its settings are kept untouched; sending is still to come.").color(TEXT_DIM));
+        }
         Kind::DrumBank => {
-            ui.label(RichText::new("One drum patch per key, played from the stored settings. The recorded drum waves are replaced by noise. The patch editor is still to come.").color(TEXT_DIM));
+            ui.label(RichText::new("One drum patch per key, played from the stored settings. The recorded drum waves are replaced by stand-ins of our own. The patch editor is still to come.").color(TEXT_DIM));
             let names = cereal_engine::drumbank::names(&g.raw);
             egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                 for (k, n) in names.iter().enumerate() {

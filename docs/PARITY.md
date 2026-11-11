@@ -6,7 +6,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] 3x Osc (built, approximate)
 - [~] Autogun (plays as Metal Bank from the settings stored with the project; picking another preset number is not done)
 - [~] BassDrum (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
-- [ ] BeepMap
+- [~] BeepMap (opens as Picture Synth and plays the stored picture: rows as sine waves, red left, green right, range, pixel length, cents or linear scale, loop; blue, grainy, widen and loading a new picture are not done; pitch and time scales are estimates)
 - [~] BooBass: a plucked string model stands in for the sampled bass; the three tone knobs are read. Tone and decay are estimates.
 - [ ] Dashboard
 - [~] DirectWave: the playing program's zones (keys, velocities, root key, file, loop points) are read and played across the keyboard. Zone envelopes, filters, LFOs, tuning and level settings, the effects section and program switching are not done; a short fade stands in for the release.
@@ -20,22 +20,22 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] FPC: pads, their velocity layers, levels, pans, layer tune, cut groups and output offsets are read and played, with a pad page to audition them. Pad envelopes, the scale-volume and random-layer switches, the built-in pattern loops and editing are not done. The tune knob's reach is an estimate.
 - [~] Fruit Kick: all six knobs read; the end pitch is exact (taken from the step the block stores), the start pitch base, sweep and decay times, click and distortion scales are estimates.
 - [ ] Fruity Dance
-- [~] Fruity DrumSynth Live (opens as Drum Bank; every key plays its own stored patch: swept tone or band noise, second noise band with attack, harmonics, ring, repeated hits; scales are estimates, the recorded waves are replaced by noise, cut groups, release, velocity knobs, morphing and the patch editor are not done; the oldest block layout plays a small kit of our own)
+- [~] Fruity DrumSynth Live (opens as Drum Bank; every key plays its own stored patch: swept tone or band noise, second noise band with attack, harmonics, ring, repeated hits; scales are estimates, the recorded drum waves are replaced by stand-ins of our own (square-wave cymbals, cowbell, noise snare and clap), cut groups, release, velocity knobs, morphing and the patch editor are not done; the oldest block layout plays a small kit of our own)
 - [~] Fruity DX10: follows the public two-operator design it descends from; the second modulator's settings are read in an assumed order and share the first one's touch setting.
-- [ ] Fruity Envelope Controller
+- [~] Fruity Envelope Controller (opens as Envelope Sender, block kept, correctly silent; sending its envelopes to linked controls is not done)
 - [ ] Fruity Granulizer
-- [ ] Fruity Keyboard Controller
+- [~] Fruity Keyboard Controller (opens as Key Controller, block kept, correctly silent; sending key and velocity to linked controls is not done)
 - [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
 - [ ] Fruity Slicer 2
 - [ ] Fruity Video Player
-- [ ] Fruity Voltage Controller
+- [~] Fruity Voltage Controller (opens as Voltage Sender, block kept, correctly silent; sending to hardware is not done)
 - [ ] Fruity Wrapper
 - [~] GMS (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [~] Harmless (built as Harmonic Stack, approximate; its built-in chorus, delay, reverb and compressor, harmonic detune, grit, slides and velocity links are not run yet)
 - [~] Harmor (built as Harmonic Forge on the additive engine: timbre mix, unison, the lower filter, pluck, phaser and harmonizer of the first layer are read at estimated scales; the second layer, picture resynthesis, drawn envelopes, filter types, built-in effects and a fresh block for new instances are not done, so it arrives with projects and presets only)
 - [~] Kepler (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)
 - [ ] Kepler Exo
-- [ ] MIDI Out
+- [~] MIDI Out (opens as MIDI Sender, block kept, correctly silent; sending notes and controllers to a MIDI port is not done)
 - [ ] Minisynth
 - [~] MiniSynth (opens as Pocket Synth and keeps its block; a stand-in voice plays; the real synthesis and its editing are not done)
 - [~] Morphine (opens under our own title and keeps its block; a stand-in voice plays, shaped by the level envelope where we can place it; the real synthesis and its editing are not done)

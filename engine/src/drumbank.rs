@@ -25,6 +25,10 @@ mod ix {
     pub const ATTACK2: usize = 12;
     pub const DECAY2: usize = 13;
     pub const MIX2: usize = 14;
+    /// Which recorded wave, or -1 for none; then its tuning in semitones and its level.
+    pub const WAVE: usize = 15;
+    pub const WAVE_TUNE: usize = 16;
+    pub const WAVE_MIX: usize = 17;
     pub const COUNT: usize = 18;
     pub const RATE: usize = 19;
     pub const TRIG_DECAY: usize = 20;
@@ -132,6 +136,69 @@ pub struct Voice {
     gap: f32,
     hit_dec: f32,
     gain: [f32; 2],
+    wave: Option<Wave>,
+}
+
+/// Our own stand-in for a recorded drum wave: six square waves at fixed uneven pitches (the classic analogue
+/// cymbal circuit), or noise, through a high-pass and a decay. The shapes are chosen by the wave's number.
+#[derive(Debug, Clone)]
+struct Wave {
+    step: [f32; 6],
+    ph: [f32; 6],
+    /// How many of the squares sound; none means noise.
+    squares: usize,
+    hp: f32,
+    z: f32,
+    decay: f32,
+    level: f32,
+    /// Noise bursts before the body, for a clap.
+    bursts: u32,
+}
+
+impl Wave {
+    fn new(which: i32, tune: f32, level: f32, sr: f32) -> Self {
+        // (squares, high-pass in cycles per second, seconds of decay, bursts)
+        let (squares, hp, decay, bursts) = match which {
+            0 | 3 => (6, 7000.0, 0.035, 0),
+            1 => (2, 500.0, 0.09, 0),
+            4 => (6, 7000.0, 0.3, 0),
+            5 => (6, 4000.0, 1.1, 0),
+            6 => (6, 5500.0, 0.8, 0),
+            8 => (0, 900.0, 0.11, 0),
+            9 => (0, 700.0, 0.12, 3),
+            _ => (0, 2000.0, 0.08, 0),
+        };
+        let bend = 2f32.powf(tune / 12.0);
+        let hz = if squares == 2 { [540.0, 800.0, 0.0, 0.0, 0.0, 0.0] } else { [205.3, 304.4, 369.6, 522.7, 540.0, 800.0] };
+        Self {
+            step: hz.map(|h| h * bend / sr),
+            ph: [0.0, 0.31, 0.62, 0.17, 0.83, 0.45],
+            squares,
+            hp: (1.0 - (-TAU * hp * bend / sr).exp()).clamp(0.0, 1.0),
+            z: 0.0,
+            decay,
+            level,
+            bursts,
+        }
+    }
+
+    fn run(&mut self, sec: f32, noise: f32) -> f32 {
+        let x = if self.squares == 0 {
+            noise
+        } else {
+            let mut x = 0.0;
+            for k in 0..self.squares {
+                x += if self.ph[k] < 0.5 { 1.0 } else { -1.0 };
+                self.ph[k] += self.step[k];
+                self.ph[k] -= self.ph[k].floor();
+            }
+            x / self.squares as f32 * 0.9
+        };
+        self.z += self.hp * (x - self.z);
+        let since = if self.bursts > 0 && sec < self.bursts as f32 * 0.011 { sec % 0.011 } else { sec - self.bursts as f32 * 0.011 };
+        let e = if self.bursts > 0 && sec < self.bursts as f32 * 0.011 { (-since / 0.004).exp() } else { (-since / self.decay).exp() };
+        (x - self.z) * e * self.level
+    }
 }
 
 fn hz_of(v: f32) -> f32 {
@@ -178,12 +245,13 @@ impl Voice {
             gap: 0.004 + r[ix::RATE] / 127.0 * 0.03,
             hit_dec: decay_s(r[ix::TRIG_DECAY]),
             gain: [level * (1.0 - pan).min(1.0), level * (1.0 + pan).min(1.0)],
+            wave: (r[ix::WAVE] >= 0.0 && r[ix::WAVE_MIX] > 0.0).then(|| Wave::new(r[ix::WAVE] as i32, r[ix::WAVE_TUNE], r[ix::WAVE_MIX] / 127.0, sr)),
         }
     }
 
     /// Seconds of sound left.
     pub fn left(&self) -> f32 {
-        (self.hits as f32 * self.gap + self.att2 + self.dec1.max(self.dec2) * 7.0 - self.t as f32 / self.sr).max(0.0)
+        (self.hits as f32 * self.gap + self.att2 + self.dec1.max(self.dec2).max(self.wave.as_ref().map_or(0.0, |w| w.decay + 0.01)) * 7.0 - self.t as f32 / self.sr).max(0.0)
     }
 
     fn noise(&mut self) -> f32 {
@@ -226,7 +294,13 @@ impl Voice {
         let n = self.noise();
         let b = self.b2.run(n);
         let a = a * (1.0 + (b - 1.0) * self.ring);
-        let o = (a * e1 * self.mix1).clamp(-1.0, 1.0) + (b * e2 * self.mix2).clamp(-1.0, 1.0);
+        let mut o = (a * e1 * self.mix1).clamp(-1.0, 1.0) + (b * e2 * self.mix2).clamp(-1.0, 1.0);
+        if self.wave.is_some() {
+            let n = self.noise();
+            if let Some(w) = &mut self.wave {
+                o += w.run(sec, n);
+            }
+        }
         [o * self.gain[0], o * self.gain[1]]
     }
 }
@@ -287,5 +361,13 @@ mod tests {
         assert_eq!(parse(&[1, 0, 0, 0, 9, 9]).len(), KEYS * REC);
         let v = Voice::start(&[], 44100.0, 200, 1.0, 1);
         assert!(v.left() > 0.0);
+        // a patch that is only a recorded wave still sounds, through our stand-in
+        let mut bank = parse(&[]);
+        bank[ix::MIX1] = 0.0;
+        bank[ix::MIX2] = 0.0;
+        bank[ix::WAVE] = 4.0;
+        bank[ix::WAVE_MIX] = 127.0;
+        let mut v = Voice::start(&bank, 44100.0, 0, 1.0, 1);
+        assert!((0..4000).map(|_| v.frame()[0].abs()).sum::<f32>() > 1.0);
     }
 }
