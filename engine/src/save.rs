@@ -1760,27 +1760,34 @@ mod tests {
 
     #[test]
     fn hosted_plugins_round_trip() {
-        use crate::host::{self, Instance};
+        use crate::host;
+        for kind in ["clap", "vst3"] {
+            // installed the way a user would have it: of the right kind, in a folder we search
+            let dir = std::env::temp_dir().join(format!("cereal-host-{kind}-{}", std::process::id()));
+            let Some(path) = host::test_install(&dir, kind) else {
+                eprintln!("test plug-in not built; skipped");
+                return;
+            };
+            host::add_folder(&dir);
+            hosted_round_trip(&path, if kind == "clap" { 1.0 } else { 0.5 });
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `k` scales the values to the range the kind's settings run over.
+    #[cfg(test)]
+    fn hosted_round_trip(path: &std::path::Path, k: f64) {
+        use crate::host::Instance;
         use crate::song::{Chan, Slot};
-        let Some(built) = host::test_plugin() else {
-            eprintln!("test plug-in not built; skipped");
-            return;
-        };
-        // installed the way a user would have it: a file of the right kind in a folder we search
-        let dir = std::env::temp_dir().join(format!("cereal-host-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test-tone.clap");
-        std::fs::copy(&built, &path).unwrap();
-        host::add_folder(&dir);
         let mut song = Song::new();
         let n = song.channels.len();
-        let a = Instance::open(&path, "").unwrap();
-        let b = Instance::open(&path, "").unwrap();
+        let a = Instance::open(path, "").unwrap();
+        let b = Instance::open(path, "").unwrap();
         let gain = a.params()[0].id;
         a.activate(48_000.0);
         b.activate(48_000.0);
-        a.set(gain, 1.5);
-        b.set(gain, 0.25);
+        a.set(gain, 1.5 * k);
+        b.set(gain, 0.25 * k);
         a.idle();
         b.idle();
         song.channels.push(Chan::hosted(a));
@@ -1789,17 +1796,16 @@ mod tests {
         let (back, _) = reload(&bytes);
         let chan = back.channels[n].ext.as_ref().expect("the channel's plug-in is opened again");
         assert_eq!(back.channels[n].plugin, crate::song::WRAPPER);
-        assert_eq!(chan.0.value(gain), Some(1.5));
+        assert_eq!(chan.0.value(gain), Some(1.5 * k));
         let slot = &back.inserts[0].slots[0];
         assert_eq!((slot.index, slot.title().as_str()), (3, "Test Tone"));
-        assert_eq!(slot.fx.as_ref().unwrap().ext.as_ref().unwrap().0.value(gain), Some(0.25));
+        assert_eq!(slot.fx.as_ref().unwrap().ext.as_ref().unwrap().0.value(gain), Some(0.25 * k));
         // nothing changed: the file comes out the same; a change in the plug-in is written
         assert_eq!(to_bytes(&song, Some(&flp)).unwrap(), bytes);
-        song.channels[n].ext.as_ref().unwrap().0.set(gain, 0.75);
+        song.channels[n].ext.as_ref().unwrap().0.set(gain, 0.75 * k);
         song.channels[n].ext.as_ref().unwrap().0.idle();
         let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
-        assert_eq!(reload(&bytes).0.channels[n].ext.as_ref().unwrap().0.value(gain), Some(0.75));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(reload(&bytes).0.channels[n].ext.as_ref().unwrap().0.value(gain), Some(0.75 * k));
     }
 
     #[test]

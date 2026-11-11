@@ -1,9 +1,11 @@
-//! A tiny plug-in for the host's tests: sound in is passed on times the Gain setting, and every held note
+//! A tiny plug-in for the host's tests, with a CLAP face (this file) and a VST3 one (`v3`): sound in is passed on times the Gain setting, and every held note
 //! adds a sine at its pitch. Its state is the gain, eight bytes.
 
 use std::ffi::{c_char, c_void, CStr};
 
 use cereal_engine::host::abi::*;
+
+mod v3;
 
 struct Tone {
     plugin: Plugin,

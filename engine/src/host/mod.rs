@@ -1,10 +1,12 @@
-//! Other makers' plug-ins of the open CLAP kind, loaded and run inside our own channels and effect slots.
+//! Other makers' plug-ins of the CLAP and VST3 kinds, loaded and run inside our own channels and effect slots.
 //!
 //! One `Instance` is one loaded plug-in. The song holds it behind an `Arc`, so every snapshot of the song
 //! (the playing one, the undo steps) points at the same live plug-in. The audio thread calls `process`;
 //! everything else is called from the window's thread, which must also call `idle` regularly.
 
 pub mod abi;
+pub mod abi3;
+mod vst3;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -115,8 +117,15 @@ fn field(raw: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+fn is_vst3(path: &Path) -> bool {
+    path.extension().is_some_and(|x| x.eq_ignore_ascii_case("vst3"))
+}
+
 /// The plug-ins inside one file.
 pub fn inside(path: &Path) -> Vec<Found> {
+    if is_vst3(path) {
+        return vst3::inside(path);
+    }
     let Some(l) = load(path) else { return vec![] };
     let mut out = Vec::new();
     // SAFETY: the factory's own functions, called as the standard describes.
@@ -151,16 +160,21 @@ pub fn folders() -> Vec<PathBuf> {
         for k in ["COMMONPROGRAMFILES", "LOCALAPPDATA"] {
             if let Some(d) = std::env::var_os(k) {
                 let d = PathBuf::from(d);
-                v.push(if k == "LOCALAPPDATA" { d.join("Programs").join("Common").join("CLAP") } else { d.join("CLAP") });
+                for kind in ["CLAP", "VST3"] {
+                    v.push(if k == "LOCALAPPDATA" { d.join("Programs").join("Common").join(kind) } else { d.join(kind) });
+                }
             }
         }
     } else {
         if let Some(h) = std::env::var_os("HOME") {
-            v.push(PathBuf::from(h).join(".clap"));
+            v.push(PathBuf::from(&h).join(".clap"));
+            v.push(PathBuf::from(h).join(".vst3"));
         }
-        v.push("/usr/lib/clap".into());
-        v.push("/usr/local/lib/clap".into());
-        v.push("/usr/lib64/clap".into());
+        for kind in ["clap", "vst3"] {
+            for at in ["/usr/lib", "/usr/local/lib", "/usr/lib64"] {
+                v.push(Path::new(at).join(kind));
+            }
+        }
     }
     if let Ok(more) = EXTRA.lock() {
         v.extend(more.iter().cloned());
@@ -244,7 +258,7 @@ pub fn block(inst: &Instance, base: Option<&[u8]>) -> Vec<u8> {
 fn from_parts(parts: &[(u32, &[u8])]) -> Option<(PathBuf, String)> {
     let text = |want: u32| parts.iter().find(|p| p.0 == want).map(|p| String::from_utf8_lossy(p.1).trim_end_matches('\0').to_string());
     let path = PathBuf::from(text(P_PATH)?);
-    if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) {
+    if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) && !is_vst3(&path) {
         return None;
     }
     Some((path, text(P_ID).unwrap_or_default()))
@@ -271,7 +285,10 @@ pub fn files() -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            if is_vst3(&p) {
+                // a folder of this name is one plug-in, with its code inside
+                out.push(p);
+            } else if p.is_dir() {
                 if depth < 4 {
                     walk(&p, depth + 1, out);
                 }
@@ -505,6 +522,8 @@ pub struct Instance {
     gui_open: AtomicBool,
     offline: AtomicBool,
     pub has_note_in: bool,
+    /// Set when the plug-in is of the VST3 kind; the fields above then stay empty.
+    v3: Option<vst3::Plug>,
 }
 
 // SAFETY: the standard lets the audio thread call `process` while the main thread calls the rest; what we
@@ -521,6 +540,31 @@ impl std::fmt::Debug for Instance {
 impl Instance {
     /// Make one plug-in out of a file. `id` picks among several in the file; empty takes the first.
     pub fn open(path: &Path, id: &str) -> Option<Arc<Instance>> {
+        if is_vst3(path) {
+            let (plug, found) = vst3::Plug::open(path, id)?;
+            let none = std::ptr::null();
+            let proc = Proc { rate: 0.0, active: false, processing: false, ins: vec![], outs: vec![], in_data: vec![], out_data: vec![], in_ptrs: vec![], out_ptrs: vec![], in_bufs: vec![], out_bufs: vec![], events: Vec::new(), steady: 0, midi_notes: false };
+            return Some(Arc::new(Instance {
+                found,
+                plugin: none,
+                host: std::ptr::null_mut(),
+                shared: std::ptr::null_mut(),
+                _names: vec![],
+                params: none as *const PluginParams,
+                state: none as *const PluginState,
+                gui: none as *const PluginGui,
+                timer: none as *const PluginTimer,
+                fd: none as *const PluginFd,
+                proc: Mutex::new(proc),
+                to_plugin: Mutex::new(Vec::new()),
+                calls: AtomicU64::new(0),
+                seen_calls: AtomicU64::new(0),
+                gui_open: AtomicBool::new(false),
+                offline: AtomicBool::new(false),
+                has_note_in: plug.has_note_in,
+                v3: Some(plug),
+            }));
+        }
         let found = inside(path).into_iter().find(|f| id.is_empty() || f.id == id)?;
         let l = load(path)?;
         let names: Vec<CString> = ["Breakfast Cereal DAW", "Breakfast Cereal", "", env!("CARGO_PKG_VERSION")].iter().filter_map(|s| CString::new(*s).ok()).collect();
@@ -619,8 +663,9 @@ impl Instance {
                 calls: AtomicU64::new(0),
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
-            offline: AtomicBool::new(false),
+                offline: AtomicBool::new(false),
                 has_note_in,
+                v3: None,
             }))
         }
     }
@@ -637,16 +682,25 @@ impl Instance {
 
     /// The rate the plug-in is running at, when it is.
     pub fn rate(&self) -> Option<f32> {
+        if let Some(v) = &self.v3 {
+            return v.rate();
+        }
         self.proc.lock().ok().filter(|p| p.active).map(|p| p.rate)
     }
 
     /// Whether the plug-in takes sound in (an effect) or only gives it out.
     pub fn takes_sound(&self) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.takes_sound();
+        }
         self.proc.lock().map(|p| p.ins.first().is_some_and(|&c| c > 0)).unwrap_or(false)
     }
 
     /// Get ready to run at this rate. Window thread; cheap when nothing changes.
     pub fn activate(&self, rate: f32) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.activate(rate, self.offline.load(Relaxed));
+        }
         let Ok(mut p) = self.proc.lock() else { return false };
         if p.active && p.rate == rate && !self.shared().restart.load(Relaxed) {
             return true;
@@ -698,6 +752,13 @@ impl Instance {
         // while a file is being rendered the plug-in belongs to the render; the sound card goes without
         if self.offline.load(Relaxed) != clock.offline {
             return false;
+        }
+        if let Some(v) = &self.v3 {
+            let ran = v.process(io, evs, clock, rate);
+            if ran {
+                self.calls.fetch_add(1, Relaxed);
+            }
+            return ran;
         }
         let got = if clock.offline { self.proc.lock().ok() } else { self.proc.try_lock().ok() };
         let Some(mut guard) = got else { return false };
@@ -818,6 +879,9 @@ impl Instance {
 
     /// The plug-in's settings. Window thread.
     pub fn params(&self) -> Vec<Param> {
+        if let Some(v) = &self.v3 {
+            return v.params();
+        }
         let mut out = Vec::new();
         // SAFETY: the settings table of a live plug-in, called from the window's thread.
         unsafe {
@@ -834,6 +898,9 @@ impl Instance {
     }
 
     pub fn value(&self, id: u32) -> Option<f64> {
+        if let Some(v) = &self.v3 {
+            return v.value(id);
+        }
         // a change of ours that has not gone over yet is the value
         if let Some(v) = self.to_plugin.lock().ok().and_then(|q| q.iter().rev().find(|x| x.0 == id).map(|x| x.1)) {
             return Some(v);
@@ -845,6 +912,9 @@ impl Instance {
 
     /// How the plug-in itself writes a value (with its unit).
     pub fn value_text(&self, id: u32, value: f64) -> Option<String> {
+        if let Some(v) = &self.v3 {
+            return v.value_text(id, value);
+        }
         let mut buf = [0 as c_char; 128];
         // SAFETY: as in `params`; the buffer's size is handed over.
         unsafe { self.params.as_ref()?.value_to_text?(self.plugin, id, value, buf.as_mut_ptr(), buf.len() as u32).then(|| field(&buf)) }
@@ -852,6 +922,9 @@ impl Instance {
 
     /// Change a setting; it goes over with the next stretch of sound, or at the next `idle` when none runs.
     pub fn set(&self, id: u32, value: f64) {
+        if let Some(v) = &self.v3 {
+            return v.set(id, value);
+        }
         if let Ok(mut q) = self.to_plugin.lock() {
             q.retain(|x| x.0 != id);
             q.push((id, value));
@@ -860,11 +933,17 @@ impl Instance {
 
     /// Settings the plug-in changed by itself since the last call.
     pub fn changed(&self) -> Vec<(u32, f64)> {
+        if let Some(v) = &self.v3 {
+            return v.changed();
+        }
         self.shared().from_plugin.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
     /// Everything the plug-in wants kept with the song.
     pub fn save(&self) -> Option<Vec<u8>> {
+        if let Some(v) = &self.v3 {
+            return v.save();
+        }
         unsafe extern "C" fn write(s: *const OStream, buffer: *const c_void, size: u64) -> i64 {
             let out = &mut *((*s).ctx as *mut Vec<u8>);
             out.extend_from_slice(std::slice::from_raw_parts(buffer as *const u8, size as usize));
@@ -877,6 +956,9 @@ impl Instance {
     }
 
     pub fn restore(&self, state: &[u8]) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.restore(state);
+        }
         unsafe extern "C" fn read(s: *const IStream, buffer: *mut c_void, size: u64) -> i64 {
             let (data, at) = &mut *((*s).ctx as *mut (&[u8], usize));
             let n = (data.len() - *at).min(size as usize);
@@ -892,17 +974,27 @@ impl Instance {
 
     /// Whether the plug-in says its state changed since the last ask.
     pub fn take_dirty(&self) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.take_dirty();
+        }
         self.shared().dirty.swap(false, Relaxed)
     }
 
     /// Whether the plug-in says its list of settings changed since the last ask.
     pub fn take_rescan(&self) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.take_rescan();
+        }
         self.shared().rescan.swap(false, Relaxed)
     }
 
     /// Housekeeping the plug-in asked for: its callbacks, timers, watched files, and settings changes when
     /// no sound is running. Window thread, every frame or so.
     pub fn idle(&self) {
+        if let Some(v) = &self.v3 {
+            let calls = self.calls.load(Relaxed);
+            return v.idle(self.seen_calls.swap(calls, Relaxed) == calls);
+        }
         let s = self.shared();
         // SAFETY: main-thread calls into a live plug-in.
         unsafe {
@@ -969,6 +1061,9 @@ impl Instance {
     }
 
     fn window_api(&self) -> Option<&'static [u8]> {
+        if self.v3.is_some() {
+            return None;
+        }
         let apis: &[&'static [u8]] = if cfg!(windows) { &[WINDOW_WIN32] } else { &[WINDOW_WAYLAND, WINDOW_X11] };
         // SAFETY: the window table of a live plug-in, on the window's thread.
         unsafe {
@@ -1012,7 +1107,7 @@ impl Instance {
     }
 
     pub fn hide_window(&self) {
-        if self.gui_open.swap(false, Relaxed) {
+        if self.v3.is_none() && self.gui_open.swap(false, Relaxed) {
             // SAFETY: as in `window_api`.
             unsafe {
                 if let Some(g) = self.gui.as_ref() {
@@ -1028,7 +1123,7 @@ impl Instance {
     }
 
     pub fn window_open(&self) -> bool {
-        self.gui_open.load(Relaxed) && !self.shared().gui_closed.load(Relaxed)
+        self.v3.is_none() && self.gui_open.load(Relaxed) && !self.shared().gui_closed.load(Relaxed)
     }
 }
 
@@ -1047,6 +1142,9 @@ extern "C" {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        if self.v3.is_some() {
+            return;
+        }
         self.hide_window();
         // SAFETY: nothing else can reach the plug-in any more; it is stopped in the order the standard asks.
         unsafe {
@@ -1116,9 +1214,100 @@ pub(crate) fn test_plugin() -> Option<PathBuf> {
     ["release", "debug"].iter().flat_map(|p| [target.join(p).join(name), target.join(p).join("deps").join(name)]).find(|p| p.is_file())
 }
 
+/// The test plug-in put into `dir` the way a user would have a plug-in of that kind ("clap" or "vst3").
+#[cfg(test)]
+pub(crate) fn test_install(dir: &Path, kind: &str) -> Option<PathBuf> {
+    let built = test_plugin()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("test-tone.{kind}"));
+    if kind == "vst3" && cfg!(not(windows)) {
+        // a folder with the code some levels down
+        let inner = path.join("Contents").join(format!("{}-linux", std::env::consts::ARCH));
+        std::fs::create_dir_all(&inner).ok()?;
+        std::fs::copy(&built, inner.join("test-tone.so")).ok()?;
+    } else {
+        std::fs::copy(&built, &path).ok()?;
+    }
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vst3_plugin_is_loaded_played_set_and_saved() {
+        let dir = std::env::temp_dir().join(format!("cereal-vst3-{}", std::process::id()));
+        let Some(path) = test_install(&dir, "vst3") else {
+            eprintln!("test plug-in not built; skipped");
+            return;
+        };
+        let found = inside(&path);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].instrument && found[0].name == "Test Tone" && found[0].vendor == "Breakfast Cereal");
+        assert_eq!(found[0].id, "B7EAFA57CE4EA1007E57701100000003");
+        let inst = Instance::open(&path, "").expect("opens");
+        assert!(inst.has_note_in && inst.takes_sound() && !inst.has_window());
+        let params = inst.params();
+        assert_eq!(params.len(), 1);
+        // settings of this kind run 0..1; the plug-in's own text says what that stands for
+        assert_eq!((params[0].name.as_str(), params[0].max, params[0].default), ("Gain", 1.0, 0.5));
+        assert_eq!(inst.value_text(params[0].id, 0.25).as_deref(), Some("50 %"));
+        assert_eq!(inst.value(params[0].id), Some(0.5));
+
+        let mut io = vec![[0.25f32; 2]; 512];
+        let clock = Clock { playing: true, tempo: 120.0, beats: 0.0, sig: (4, 4), offline: false };
+        assert!(!inst.process(&mut io, &[], &clock, 48_000.0));
+        assert!(inst.activate(48_000.0));
+        assert_eq!(inst.rate(), Some(48_000.0));
+        assert!(inst.process(&mut io, &[], &clock, 48_000.0));
+        assert!(io.iter().all(|s| (s[0] - 0.25).abs() < 1e-6));
+        // a note half way in, by name and as a MIDI message; then off
+        for on in [Ev::NoteOn { at: 256, key: 69, chan: 0, vel: 1.0 }, Ev::Midi { at: 256, data: [0x90, 69, 127] }] {
+            let mut io = vec![[0.0f32; 2]; 512];
+            inst.process(&mut io, &[on], &clock, 48_000.0);
+            assert!(io[..256].iter().all(|s| s[0] == 0.0));
+            assert!(io[256..].iter().any(|s| s[0].abs() > 0.1));
+            let mut io = vec![[0.0f32; 2]; 512];
+            inst.process(&mut io, &[Ev::NoteOff { at: 0, key: 69, chan: 0 }], &clock, 48_000.0);
+            assert!(io.iter().all(|s| s[0] == 0.0));
+        }
+
+        // a setting goes over with the next stretch of sound, and is read back at once
+        inst.set(params[0].id, 1.0);
+        assert_eq!(inst.value(params[0].id), Some(1.0));
+        let mut io = vec![[0.25f32; 2]; 64];
+        inst.process(&mut io, &[], &clock, 48_000.0);
+        assert!((io[10][1] - 0.5).abs() < 1e-6);
+        // and by hand when no sound runs
+        inst.set(params[0].id, 0.25);
+        inst.idle();
+        inst.idle();
+        let state = inst.save().expect("has state");
+        assert_eq!(state[..4], 8u32.to_le_bytes());
+        assert_eq!(state[4..], 0.5f64.to_le_bytes());
+
+        // a second one takes the state over; a longer stretch than one call holds is cut up
+        let other = Instance::open(&path, "B7EAFA57CE4EA1007E57701100000003").expect("opens again");
+        assert!(other.restore(&state));
+        assert_eq!(other.value(params[0].id), Some(0.25));
+        assert!(!other.restore(&[1, 2]));
+        assert!(other.activate(44_100.0));
+        let mut io = vec![[1.0f32; 2]; MAX_FRAMES * 2 + 100];
+        assert!(other.process(&mut io, &[Ev::NoteOn { at: MAX_FRAMES as u32 + 5, key: 60, chan: 0, vel: 0.5 }], &clock, 44_100.0));
+        assert!(io[..MAX_FRAMES].iter().all(|s| (s[0] - 0.5).abs() < 1e-6));
+        assert!(io[MAX_FRAMES + 50..].iter().any(|s| (s[0] - 0.5).abs() > 0.01));
+        // a render borrows it: the sound card's calls are turned away meanwhile
+        other.set_offline(true);
+        assert!(other.activate(44_100.0));
+        let mut io = vec![[1.0f32; 2]; 64];
+        assert!(!other.process(&mut io, &[], &clock, 44_100.0));
+        assert!(other.process(&mut io, &[], &Clock { offline: true, ..clock }, 44_100.0));
+        assert!(Instance::open(&path, "00000000000000000000000000000000").is_none());
+        assert!(inside(Path::new("/nonexistent/thing.vst3")).is_empty());
+        drop((inst, other));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Run every plug-in under the folders in CEREAL_PLUGIN_TRY: a check against other makers' work.
     #[test]
@@ -1149,12 +1338,37 @@ mod tests {
                 }
                 inst.idle();
             }
+            // a setting we move is heard by the plug-in, kept in what it saves, and comes back from there
+            let moved = params.iter().find(|p| !p.readonly && !p.stepped && p.max > p.min && !p.name.to_lowercase().contains("program")).map(|p| (p.id, p.min + (p.max - p.min) * 0.3125));
+            if let Some((id, v)) = moved {
+                inst.set(id, v);
+                let mut io = vec![[0.0f32; 2]; 512];
+                assert!(inst.process(&mut io, &[], &clock, 48_000.0));
+                inst.idle();
+                let now = inst.value(id).unwrap_or(f64::NAN);
+                assert!((now - v).abs() < 1e-3 * (1.0 + v.abs()), "{}: set {v}, reads {now}", f.name);
+                eprintln!("  moved {:?}", params.iter().find(|p| p.id == id).map(|p| p.name.clone()));
+            }
             let saved = inst.save();
             let text = params.first().and_then(|p| inst.value(p.id).and_then(|v| inst.value_text(p.id, v)));
             eprintln!("{:28} {:12} instrument {:5} notes {:5} sound in {:5} settings {:4} window {:5} saved {:?} peak {:.4} first {:?} {:?}", f.name, f.vendor, f.instrument, inst.has_note_in, inst.takes_sound(), params.len(), inst.has_window(), saved.as_ref().map(|s| s.len()), peak, params.first().map(|p| p.name.clone()), text);
             if let Some(s) = saved {
                 let again = Instance::open(&f.path, &f.id).unwrap();
                 assert!(again.restore(&s), "{} does not take its saved settings back", f.name);
+                if let Some((id, v)) = moved {
+                    // some only tell their settings half once sound runs
+                    assert!(again.activate(48_000.0));
+                    let mut io = vec![[0.0f32; 2]; 512];
+                    again.process(&mut io, &[], &clock, 48_000.0);
+                    again.idle();
+                    let now = again.value(id).unwrap_or(f64::NAN);
+                    // a synth's first settings are often stand-ins for the wheels, which no state keeps
+                    if f.instrument && (now - v).abs() >= 1e-3 * (1.0 + v.abs()) {
+                        eprintln!("  {} does not keep that one", f.name);
+                    } else {
+                        assert!((now - v).abs() < 1e-3 * (1.0 + v.abs()), "{}: saved {v}, restored {now}", f.name);
+                    }
+                }
             }
             assert!(peak > 1e-5, "{} is silent", f.name);
         }

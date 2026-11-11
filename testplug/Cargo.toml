@@ -3,7 +3,7 @@ name = "cereal-testplug"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 edition = "2021"
-description = "A tiny CLAP plug-in the engine's tests load: a gain with a sine voice. Not shipped."
+description = "A tiny plug-in (CLAP and VST3 in one file) the engine's tests load: a gain with a sine voice. Not shipped."
 publish = false
 
 [lib]
