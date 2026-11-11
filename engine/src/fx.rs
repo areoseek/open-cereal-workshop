@@ -31,6 +31,7 @@ pub enum Kind {
     Transient,
     Swarm,
     MultiComp,
+    Maxi,
     OldEq,
     OldReverb,
     OldFlanger,
@@ -451,6 +452,74 @@ pub static DEFS: &[Def] = &[
             p("Cross", 48, 0, 5000, 2500),
         ],
     },
+    Def {
+        kind: Kind::Maxi,
+        ident: "Maximus",
+        title: "Band Maximiser",
+        size: 1342,
+        fixed: &[],
+        params: &[
+            p("Low split", 4, 0, 65536, 19800),
+            p("Low slope", 8, 0, 1, 1),
+            p("High split", 12, 0, 65536, 48065),
+            p("High slope", 16, 0, 1, 1),
+            p("Band delay", 20, 0, 10000, 1115),
+            p("Band mix", 24, 0, 1000, 1000),
+            p("Low cut", 28, -1, 65536, 32768),
+            p("Low mode", 32, 0, 3, 0),
+            p("Low pre", 36, 0, 2000, 1000),
+            p("Low post", 40, 0, 2000, 1000),
+            p("Low separation", 44, -1000, 1000, 0),
+            p("Low saturation", 48, -1000, 1000, 0),
+            p("Low ceiling", 52, 0, 2000, 1000),
+            p("Low attack", 56, 0, 10000, 1115),
+            p("Low release 2", 60, 0, 10000, 0),
+            p("Low curve", 64, 1, 8, 2),
+            p("Low release", 68, 0, 10000, 5000),
+            p("Low option", 72, 0, 4, 3),
+            p("Low sustain", 76, 0, 10000, 2882),
+            p("Low average", 80, 0, 1, 0),
+            p("Mid mode", 84, 0, 3, 0),
+            p("Mid pre", 88, 0, 2000, 1000),
+            p("Mid post", 92, 0, 2000, 1000),
+            p("Mid separation", 96, -1000, 1000, 0),
+            p("Mid saturation", 100, -1000, 1000, 0),
+            p("Mid ceiling", 104, 0, 2000, 1000),
+            p("Mid attack", 108, 0, 10000, 1115),
+            p("Mid release 2", 112, 0, 10000, 0),
+            p("Mid curve", 116, 1, 8, 2),
+            p("Mid release", 120, 0, 10000, 5000),
+            p("Mid option", 124, 0, 4, 3),
+            p("Mid sustain", 128, 0, 10000, 2015),
+            p("Mid average", 132, 0, 1, 0),
+            p("High mode", 136, 0, 3, 0),
+            p("High pre", 140, 0, 2000, 1000),
+            p("High post", 144, 0, 2000, 1000),
+            p("High separation", 148, -1000, 1000, 0),
+            p("High saturation", 152, -1000, 1000, 0),
+            p("High ceiling", 156, 0, 2000, 1000),
+            p("High attack", 160, 0, 10000, 1115),
+            p("High release 2", 164, 0, 10000, 0),
+            p("High curve", 168, 1, 8, 2),
+            p("High release", 172, 0, 10000, 5000),
+            p("High option", 176, 0, 4, 3),
+            p("High sustain", 180, 0, 10000, 1115),
+            p("High average", 184, 0, 1, 0),
+            p("Main mode", 188, 0, 3, 0),
+            p("Main pre", 192, 0, 2000, 1000),
+            p("Main post", 196, 0, 2000, 1000),
+            p("Main separation", 200, -1000, 1000, 0),
+            p("Main saturation", 204, -1000, 1000, 0),
+            p("Main ceiling", 208, 0, 2000, 1000),
+            p("Main attack", 212, 0, 10000, 1115),
+            p("Main release 2", 216, 0, 10000, 8096),
+            p("Main curve", 220, 1, 8, 2),
+            p("Main release", 224, 0, 10000, 5000),
+            p("Main option", 228, 0, 4, 3),
+            p("Main sustain", 232, 0, 10000, 2882),
+            p("Main average", 236, 0, 1, 0),
+        ],
+    },
     Def { kind: Kind::Curve, ident: "Fruity WaveShaper", title: "Curve Shaper", size: 102, fixed: &[], params: &[p("Pre", 4, 0, 256, 128), p("Mix", 8, 0, 128, 128), p("Post", 12, 0, 128, 128)] },
 ];
 
@@ -479,24 +548,35 @@ fn curve_fresh() -> Vec<u8> {
 }
 
 /// Read the curve shaper's drawn line into a table over the input range; appends the two-sided switch and the
-/// table to `p`. The block holds a header, the point list (three layouts by age) and a short tail.
+/// table to `p`.
 fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
+    p.push(if *state.get(16)? != 0 { 1.0 } else { 0.0 });
+    drawn_table(state, 22, p).map(|_| ())
+}
+
+/// Read one drawn line whose header (kind, layout, point count) sits at `head` into a table appended to `p`.
+/// After the header come the points (three layouts by age) and a 20-byte tail; returns the offset behind it.
+fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
     let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    let sub = int(26)?;
-    let n = int(30)? as usize;
+    if int(head)? != 3 {
+        return None;
+    }
+    let sub = int(head + 4)?;
+    let n = int(head + 8)? as usize;
+    let first = head + 12;
     let size = match sub {
         0 => 12,
         1 => 16,
         _ => 24,
     };
-    if n == 0 || n > 4096 || state.len() < 34 + n * size {
+    if n == 0 || n > 4096 || state.len() < first + n * size {
         return None;
     }
     // (x, y, tension, segment type); x is stored as the distance from the point before
     let mut pts = Vec::with_capacity(n);
     let mut x = 0f32;
     for k in 0..n {
-        let b = &state[34 + k * size..34 + (k + 1) * size];
+        let b = &state[first + k * size..first + (k + 1) * size];
         let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
         let d = |o: usize| f64::from_le_bytes(b[o..o + 8].try_into().unwrap()) as f32;
         let (dx, y, t, kind) = match size {
@@ -509,7 +589,6 @@ fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
         pts.push((x, ok(y).clamp(0.0, 1.0), ok(t), kind));
     }
     let span = x.max(1e-6);
-    p.push(if state[16] != 0 { 1.0 } else { 0.0 });
     let mut seg = 1;
     for i in 0..CURVE_N {
         let at = i as f32 / (CURVE_N - 1) as f32 * span;
@@ -545,7 +624,65 @@ fn curve_table(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
         };
         p.push(v);
     }
-    Some(())
+    Some(first + n * size + 20)
+}
+
+/// Where the maximiser's first drawn line starts: the eight lines (four bands, two states) are the last thing
+/// in the block, so the start is the one offset from which eight lines end exactly at the end.
+fn maxi_lines(state: &[u8]) -> Option<usize> {
+    let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    'find: for s in 470..600usize.min(state.len()) {
+        let mut at = s;
+        for _ in 0..8 {
+            let (Some(3), Some(sub), Some(n)) = (int(at), int(at + 4), int(at + 8)) else { continue 'find };
+            if !(0..=3).contains(&sub) || !(1..=4096).contains(&n) {
+                continue 'find;
+            }
+            at += 12 + n as usize * [12, 16, 24, 24][sub as usize] + 20;
+        }
+        if at == state.len() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Where a maximiser setting sits in a block of the given version: the oldest layout has no low cut.
+fn maxi_off(version: u32, off: usize) -> Option<usize> {
+    match (version, off) {
+        (2, 28) => None,
+        (2, o) if o > 28 => Some(o - 4),
+        (_, o) => Some(o),
+    }
+}
+
+/// A fresh maximiser block: default settings in both states and eight lines that follow the input up to full
+/// level and hold it there.
+fn maxi_fresh() -> Vec<u8> {
+    let d = def(Kind::Maxi);
+    let mut v = Vec::with_capacity(d.size);
+    v.extend_from_slice(&0xa0003u32.to_le_bytes());
+    for _ in 0..2 {
+        for q in d.params {
+            v.extend_from_slice(&q.def.to_le_bytes());
+        }
+    }
+    v.extend_from_slice(&50i32.to_le_bytes());
+    v.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    for _ in 0..8 {
+        for x in [3i32, 3, 3] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        for (k, (x, y)) in [(0f64, 0f64), (0.5, 0.5), (0.5, 0.5)].into_iter().enumerate() {
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, if k == 0 { 0 } else { 2 }]);
+        }
+        for x in [0i32, -1, -1, -1, -1] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    v
 }
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -568,6 +705,9 @@ impl Fx {
     pub fn new(kind: Kind) -> Self {
         if kind == Kind::Curve {
             return Self::decode(def(kind).ident, &curve_fresh()).expect("our own block reads back");
+        }
+        if kind == Kind::Maxi {
+            return Self::decode(def(kind).ident, &maxi_fresh()).expect("our own block reads back");
         }
         Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect() }
     }
@@ -594,6 +734,22 @@ impl Fx {
         if state.len() < least {
             return None;
         }
+        if d.kind == Kind::Maxi {
+            let version = u32::from_le_bytes([state[0], state[1], state[2], state[3]]);
+            let mut p: Vec<f32> = d
+                .params
+                .iter()
+                .map(|q| match maxi_off(version, q.off).and_then(|o| state.get(o..o + 4)) {
+                    Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32,
+                    None => -1.0,
+                })
+                .collect();
+            let mut at = maxi_lines(state)?;
+            for _ in 0..4 {
+                at = drawn_table(state, at, &mut p)?;
+            }
+            return Some(Self { kind: d.kind, p });
+        }
         let mut p: Vec<f32> = d
             .params
             .iter()
@@ -615,6 +771,7 @@ impl Fx {
         let mut out = match base {
             Some(b) => b.to_vec(),
             None if self.kind == Kind::Curve => curve_fresh(),
+            None if self.kind == Kind::Maxi => maxi_fresh(),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -625,9 +782,11 @@ impl Fx {
                 v
             }
         };
+        let version = if self.kind == Kind::Maxi && out.len() >= 4 { u32::from_le_bytes([out[0], out[1], out[2], out[3]]) } else { 0 };
         for (p, v) in d.params.iter().zip(&self.p) {
-            if p.off + 4 <= out.len() {
-                out[p.off..p.off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
+            let Some(off) = (if self.kind == Kind::Maxi { maxi_off(version, p.off) } else { Some(p.off) }) else { continue };
+            if off + 4 <= out.len() {
+                out[off..off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
             }
         }
         out
@@ -891,7 +1050,7 @@ impl Unit {
             Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
-            Kind::Comp | Kind::MultiComp | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
+            Kind::Comp | Kind::MultiComp | Kind::Maxi | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
             _ => 0,
         }
     }
@@ -1191,6 +1350,126 @@ impl Unit {
                         let w = if two { read(d * 0.5 + 0.5) * 2.0 - 1.0 } else { read(d.abs()) * d.signum() };
                         *x = (*x * (1.0 - mix) + w * mix) * post;
                     }
+                }
+            }
+            Kind::Maxi => {
+                if p.len() < 59 + 4 * CURVE_N {
+                    return;
+                }
+                let hz = |v: f32| 20.0 * 1000f32.powf((v / 65536.0).clamp(0.0, 1.0));
+                let g_lo = svf_g(hz(p[0]), sr);
+                let g_hi = svf_g(hz(p[2]), sr);
+                let (steep_lo, steep_hi) = (p[1] >= 0.5, p[3] >= 0.5);
+                let mix = (p[5] / 1000.0).clamp(0.0, 1.0);
+                // the low cut knob rests at 20 Hz in the middle; -1 is off
+                let cut = if p[6] < 0.0 { None } else { Some(svf_g(20.0 * 4f32.powf((p[6] - 32768.0) / 32768.0), sr)) };
+                struct Band {
+                    mode: i32,
+                    pre: f32,
+                    post: f32,
+                    width: f32,
+                    sat: f32,
+                    ceil: f32,
+                    att: f32,
+                    rel: f32,
+                    rms: Option<f32>,
+                }
+                let band = |b: usize| {
+                    let q = &p[7 + b * 13..20 + b * 13];
+                    let rel = 0.005 + ((q[9] / 10000.0).powi(2) + (q[7] / 10000.0).powi(2)) * 4.0;
+                    Band {
+                        mode: q[0] as i32,
+                        pre: q[1] / 1000.0,
+                        post: q[2] / 1000.0,
+                        width: 1.0 - (q[3] / 1000.0).clamp(-1.0, 1.0),
+                        sat: (q[4] / 1000.0).clamp(-1.0, 1.0),
+                        ceil: (q[5] / 1000.0).max(0.01),
+                        att: (-1.0 / ((0.0002 + (q[6] / 10000.0).powi(2) * 0.25) * sr)).exp(),
+                        rel: (-1.0 / (rel * sr)).exp(),
+                        rms: (q[12] >= 0.5).then(|| (-1.0 / ((0.001 + (q[11] / 10000.0).powi(2) * 4.0) * sr)).exp()),
+                    }
+                };
+                let bands = [band(0), band(1), band(2), band(3)];
+                let top = (CURVE_N - 1) as f32;
+                // one band: gain in, level follower, the drawn line as an in/out map (its middle is full level),
+                // saturation, width, gain out
+                let run = |b: usize, s: [f32; 2], z: &mut [f32]| -> [f32; 2] {
+                    let k = &bands[b];
+                    match k.mode {
+                        2 => return [0.0; 2],
+                        3 => return s,
+                        _ => {}
+                    }
+                    let mut s = [s[0] * k.pre, s[1] * k.pre];
+                    if k.mode == 0 {
+                        let peak = s[0].abs().max(s[1].abs());
+                        let lv = match k.rms {
+                            Some(c) => {
+                                let sq = (s[0] * s[0] + s[1] * s[1]) * 0.5;
+                                z[1] = sq + (z[1] - sq) * c;
+                                // a sine at full level reads as full level
+                                (z[1] * 2.0).sqrt()
+                            }
+                            None => peak,
+                        };
+                        let c = if lv > z[0] { k.att } else { k.rel };
+                        z[0] = lv + (z[0] - lv) * c;
+                        let at = (z[0] * 0.5).clamp(1.0 / 512.0, 1.0);
+                        let table = &p[59 + b * CURVE_N..59 + (b + 1) * CURVE_N];
+                        let x = at * top;
+                        let i = (x as usize).min(CURVE_N - 2);
+                        let out = table[i] + (table[i + 1] - table[i]) * (x - i as f32);
+                        let g = (out / at).min(64.0);
+                        s = [s[0] * g, s[1] * g];
+                    }
+                    if k.sat != 0.0 {
+                        let thr = k.ceil * (1.0 - k.sat.abs());
+                        let room = (k.ceil - thr).max(1e-6);
+                        for v in s.iter_mut() {
+                            let a = v.abs();
+                            if a > thr {
+                                let t = (a - thr) / room;
+                                let bent = if k.sat < 0.0 { t.tanh() } else { 1.0 - (-t).exp() };
+                                *v = v.signum() * (thr + room * bent);
+                            }
+                        }
+                    }
+                    if k.width != 1.0 {
+                        let (m, d) = ((s[0] + s[1]) * 0.5, (s[0] - s[1]) * 0.5 * k.width);
+                        s = [m + d, m - d];
+                    }
+                    [s[0] * k.post, s[1] * k.post]
+                };
+                const Q: f32 = std::f32::consts::SQRT_2;
+                for f in io.iter_mut() {
+                    let mut part = [[0f32; 2]; 3];
+                    let mut dry = [0f32; 2];
+                    for c in 0..2 {
+                        let mut x = f[c];
+                        if let Some(g) = cut {
+                            x = svf(&mut z[c * 10 + 8..], x, g, Q).2;
+                        }
+                        dry[c] = x;
+                        let (mut low, _, _) = svf(&mut z[c * 10..], x, g_lo, Q);
+                        if steep_lo {
+                            low = svf(&mut z[c * 10 + 2..], low, g_lo, Q).0;
+                        }
+                        let (_, _, mut high) = svf(&mut z[c * 10 + 4..], x, g_hi, Q);
+                        if steep_hi {
+                            high = svf(&mut z[c * 10 + 6..], high, g_hi, Q).2;
+                        }
+                        part[0][c] = low;
+                        part[2][c] = high;
+                        part[1][c] = x - low - high;
+                    }
+                    let mut sum = [0f32; 2];
+                    for b in 0..3 {
+                        let y = run(b, part[b], &mut z[20 + b * 2..22 + b * 2]);
+                        sum[0] += y[0];
+                        sum[1] += y[1];
+                    }
+                    let into = [dry[0] + (sum[0] - dry[0]) * mix, dry[1] + (sum[1] - dry[1]) * mix];
+                    *f = run(3, into, &mut z[26..28]);
                 }
             }
             Kind::MultiComp => {
@@ -1693,7 +1972,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::OldReverb | Kind::OldFlanger) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::MultiComp | Kind::Maxi | Kind::OldReverb | Kind::OldFlanger) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -1780,6 +2059,20 @@ mod tests {
         fx.p[2] = 500.0;
         let out = run(fx, sine, 8192);
         assert!(out.iter().all(|f| f[0].abs() <= 0.5001));
+
+        // band maximiser: a quiet tone passes close to untouched, a loud one is held near full level, and the
+        // fresh block writes back unchanged
+        let fx = Fx::new(Kind::Maxi);
+        assert_eq!(fx.encode(None), maxi_fresh());
+        let quiet = rms(&run(fx.clone(), sine, 16384)[8192..]);
+        assert!((quiet / rms(&(8192..16384).map(sine).collect::<Vec<_>>()) - 1.0).abs() < 0.1, "{quiet}");
+        let mut loud = fx;
+        loud.p[7 + 3 * 13 + 1] = 2000.0;
+        loud.p[7 + 1] = 2000.0;
+        loud.p[20 + 1] = 2000.0;
+        let out = run(loud, sine, 32768);
+        let peak = out[16384..].iter().fold(0f32, |m, f| m.max(f[0].abs()));
+        assert!(peak < 1.3 && peak > 0.7, "{peak}");
 
         // equaliser: a 18 dB bell at the tone's frequency makes it much louder, a low-pass far below removes it
         let mut fx = Fx::new(Kind::Eq);

@@ -83,7 +83,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Fast Dist (built, approximate)
 - [~] Fruity Fast LP (built, approximate)
 - [~] Fruity Filter (built, approximate)
-- [ ] Fruity Flanger
+- [~] Fruity Flanger (built as Flanger (classic), settings carried onto the newer unit)
 - [~] Fruity Flangus (built, approximate)
 - [ ] Fruity Formula Controller
 - [ ] Fruity Free Filter
@@ -91,17 +91,17 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Limiter (built, approximate)
 - [ ] Fruity Love Philter
 - [ ] Fruity LSD
-- [ ] Fruity Multiband Compressor
+- [~] Fruity Multiband Compressor (built as Three Band Compressor, approximate)
 - [ ] Fruity Mute 2
 - [ ] Fruity NoteBook
 - [ ] Fruity NoteBook 2
 - [~] Fruity PanOMatic (built, approximate)
-- [ ] Fruity Parametric EQ
+- [~] Fruity Parametric EQ (built as Seven Band EQ (classic), settings carried onto the newer unit)
 - [~] Fruity Parametric EQ 2 (built, approximate)
 - [ ] Fruity Peak Controller
 - [ ] Fruity Phase Inverter
 - [ ] Fruity Phaser
-- [ ] Fruity Reeverb
+- [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
 - [~] Fruity Reeverb 2 (built, approximate)
 - [ ] Fruity Scratcher
 - [ ] Fruity Send
@@ -111,7 +111,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Stereo Enhancer (built, approximate)
 - [~] Fruity Stereo Shaper (built, approximate)
 - [ ] Fruity Vocoder
-- [ ] Fruity WaveShaper
+- [~] Fruity WaveShaper (built as Curve Shaper; drawn line read, no editor for it yet)
 - [ ] Fruity Wrapper
 - [ ] Fruity X-Y Controller
 - [ ] Fruity X-Y-Z Controller
@@ -120,7 +120,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [ ] Hyper Chorus
 - [ ] Low Lifter
 - [ ] Luxeverb
-- [ ] Maximus
+- [~] Maximus (built as Band Maximiser; drawn lines read, no editor, look-ahead and second state not run)
 - [ ] Multiband Delay
 - [ ] Newtime
 - [ ] Newtone
@@ -176,6 +176,9 @@ close, not identical:
   modulation positions), Chorus wave selectors, Limiter time laws, Reverb character, Compressor knee types.
 - Harmonic Stack: which stored field is which control was inferred from value ranges and the public manual; every
   time, depth and frequency scale, the built-in timbre list and the menu orders are estimates to be measured.
+  Band Maximiser: the drawn line is read as linear level with its middle as full level; attack, release and
+  sustain time laws, the low cut scale, both saturation shapes and the separation direction are estimates.
+  Three Band Compressor: band order, cutoff scale, threshold, ratio and knee scales are estimates.
 - Six Op: modulation depth, envelope time unit, LFO speed scale, knob laws, filter type order (worked out from
   statistics over the user's presets), curve tension sense, shaper curve reading, the level against other
   instruments. The effects send column is treated as plain output until the effects section exists.
