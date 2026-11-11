@@ -331,6 +331,10 @@ impl App {
                     "mixer" => app.show_mixer = true,
                     "piano" => app.show_piano = true,
                     "channel" => app.show_chanset = true,
+                    "misc" => {
+                        app.show_chanset = true;
+                        app.chanset.show_misc();
+                    }
                     "events" => app.show_events = true,
                     x if x.starts_with("fx=") => {
                         let mut it = x[3..].split(':').filter_map(|v| v.parse::<usize>().ok());

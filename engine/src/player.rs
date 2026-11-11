@@ -73,6 +73,27 @@ struct Tap {
 const TAP_LEN: usize = 16_384;
 
 /// A key going down or up while recording, stamped with the play position.
+/// A note an arpeggiator holds: frames from now until it starts and ends (no end for a key still down).
+struct ArpHeld {
+    note: Note,
+    from: i64,
+    to: Option<i64>,
+    live: bool,
+    /// Already sounded whole, as a lone note under the holding chord choice.
+    sus: bool,
+}
+
+/// One arpeggiator run: all held notes of a channel, or one note spelling its own chord.
+struct ArpRun {
+    chan: u16,
+    key: Option<u8>,
+    own: bool,
+    held: Vec<ArpHeld>,
+    i: u32,
+    /// Frames until the next note.
+    wait: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Live {
     pub tick: f64,
@@ -318,6 +339,7 @@ pub fn new_player(mut song: Song, sample_rate: f32) -> (Handle, Player) {
         fx: vec![],
         driven: Vec::with_capacity(64),
         env_runs: Vec::new(),
+        arps: Vec::new(),
         seed: 0x2545_f491,
         ring: vec![],
         chan_fx: vec![],
@@ -759,6 +781,8 @@ pub struct Player {
     driven: Vec<(Target, f32)>,
     /// Envelope sender notes still running.
     env_runs: Vec<EnvRun>,
+    /// Arpeggiators at work: the notes each holds and where it is in its run.
+    arps: Vec<ArpRun>,
     seed: u32,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
@@ -810,8 +834,148 @@ impl Player {
         self.voices[slot] = v;
     }
 
-    /// Start one note. `len_frames` None means "no note-off" (a step, or a live key still held).
+    /// Start one note as the channel's time settings shape it: shifted late, cut at the gate, or handed to the
+    /// channel's arpeggiator. `len_frames` None means "no note-off" (a step, or a live key still held).
     fn note_on(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        let Some(ch) = song.channels.get(n.chan as usize) else { return };
+        let f = &ch.smp;
+        let step = song.step() as f64 / self.now_tpf(song);
+        let delay = if live { delay } else { delay + (f.shift as f64 * step) as u32 };
+        let mut len_frames = len_frames;
+        if !live && f.gate_steps < crate::song::GATE_OFF && !(n.porta && f.full_porta) && !n.slide {
+            let g = ((f.gate_steps as f64 * step) as u64).max(1);
+            len_frames = Some(len_frames.map_or(g, |l| l.min(g)));
+        }
+        if f.arp_dir != 0 && !n.slide && !n.muted && ch.enabled && !matches!(ch.kind, ChannelKind::Layer | ChannelKind::AutomationClip | ChannelKind::AudioClip) {
+            let own = f.arp_chord >= 0;
+            let from = delay as i64;
+            // a step has no length of its own: it holds for one step
+            let to = if live { None } else { Some(from + len_frames.unwrap_or(step as u64).max(1) as i64) };
+            let held = ArpHeld { note: n.clone(), from, to, live, sus: false };
+            match self.arps.iter_mut().find(|r| r.chan == n.chan && (!own || r.key == Some(n.key)) && r.own == own) {
+                Some(r) => {
+                    r.held.retain(|h| h.note.key != n.key || h.to.is_some() != to.is_some());
+                    r.held.push(held);
+                }
+                None => self.arps.push(ArpRun { chan: n.chan, key: own.then_some(n.key), own, held: vec![held], i: 0, wait: from as f64 }),
+            }
+            return;
+        }
+        self.note_on_plain(song, n, delay, len_frames, live);
+    }
+
+    /// Ticks per frame, whether or not the song is running.
+    fn now_tpf(&self, song: &Song) -> f64 {
+        if self.was_playing && self.tpf > 0.0 {
+            self.tpf
+        } else {
+            (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9)
+        }
+    }
+
+    /// Let every arpeggiator play the notes that fall in the next `n` frames.
+    fn run_arps(&mut self, song: &Song, n: usize) {
+        if self.arps.is_empty() {
+            return;
+        }
+        let step = song.step() as f64 / self.now_tpf(song);
+        let mut arps = std::mem::take(&mut self.arps);
+        let mut keys: Vec<u8> = Vec::with_capacity(32);
+        let mut seq: Vec<u8> = Vec::with_capacity(128);
+        for r in arps.iter_mut() {
+            let Some(ch) = song.channels.get(r.chan as usize) else {
+                r.held.clear();
+                continue;
+            };
+            let f = ch.smp;
+            if f.arp_dir == 0 {
+                r.held.clear();
+                continue;
+            }
+            let period = (f.arp_steps as f64 * step).max(self.sr as f64 * 0.004);
+            while r.wait < n as f64 {
+                let t = r.wait as i64;
+                let on = |h: &ArpHeld| h.from <= t && h.to.map_or(true, |e| t < e);
+                if !r.held.iter().any(on) {
+                    // nothing held right now: wait for the next note, and start the run over with it
+                    r.i = 0;
+                    match r.held.iter().filter(|h| h.from > t).map(|h| h.from).min() {
+                        Some(next) => {
+                            r.wait = next as f64;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                keys.clear();
+                if r.own {
+                    let root = r.key.unwrap_or(60);
+                    let shape: &[u8] = if f.arp_chord <= 0 { &[0] } else { crate::song::ARP_CHORDS[(f.arp_chord as usize - 1).min(crate::song::ARP_CHORDS.len() - 1)].1 };
+                    keys.extend(shape.iter().map(|&s| root.saturating_add(s)));
+                } else {
+                    keys.extend(r.held.iter().filter(|h| on(h)).map(|h| h.note.key));
+                    keys.sort_unstable();
+                    keys.dedup();
+                }
+                if f.arp_chord == -2 && keys.len() == 1 && f.arp_range <= 1 {
+                    // a lone note is left to sound as written
+                    for h in r.held.iter_mut().filter(|h| !h.sus && h.from <= t && h.to.map_or(true, |e| t < e)) {
+                        h.sus = true;
+                        let len = h.to.map(|e| (e - t).max(1) as u64);
+                        self.note_on_plain(song, &h.note, t.max(0) as u32, len, h.live);
+                    }
+                    r.wait += period;
+                    continue;
+                }
+                seq.clear();
+                for o in 0..f.arp_range.max(1) {
+                    for _ in 0..f.arp_repeat.max(1) {
+                        seq.extend(keys.iter().map(|&k| k as u32 + 12 * o as u32).filter(|&k| k <= 131).map(|k| k as u8));
+                    }
+                }
+                if seq.is_empty() {
+                    seq.push(keys[0]);
+                }
+                let len = seq.len() as u32;
+                let at = match f.arp_dir {
+                    2 => len - 1 - r.i % len,
+                    3 if len > 1 => {
+                        let k = r.i % (2 * len - 2);
+                        if k < len { k } else { 2 * len - 2 - k }
+                    }
+                    4 => {
+                        let k = r.i % (2 * len);
+                        if k < len { k } else { 2 * len - 1 - k }
+                    }
+                    5 => {
+                        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (self.seed >> 8) % len
+                    }
+                    _ => r.i % len,
+                };
+                // how hard, where and in which colour comes from the newest held note
+                let Some(tpl) = r.held.iter().filter(|h| on(h)).last().map(|h| h.note.clone()) else { break };
+                let note = Note { key: seq[at as usize], porta: tpl.porta || (f.arp_slide && r.i > 0), slide: false, ..tpl };
+                let hold = ((period * f.arp_gate.clamp(0.02, 1.0) as f64) as u64).max(1);
+                self.note_on_plain(song, &note, t.max(0) as u32, Some(hold), false);
+                r.i = r.i.wrapping_add(1);
+                r.wait += period;
+            }
+            r.wait -= n as f64;
+            for h in r.held.iter_mut() {
+                h.from -= n as i64;
+                if let Some(e) = h.to.as_mut() {
+                    *e -= n as i64;
+                }
+            }
+            r.held.retain(|h| h.to.map_or(true, |e| e > 0));
+        }
+        arps.retain(|r| !r.held.is_empty());
+        arps.append(&mut self.arps);
+        self.arps = arps;
+    }
+
+    fn note_on_plain(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
         let mark = self.born;
         // the note a portamento glides in from: the newest one still sounding on the channel
         let from = if n.porta {
@@ -1129,6 +1293,9 @@ impl Player {
     }
 
     fn note_off(&mut self, song: &Song, chan: u16, key: u8) {
+        for r in self.arps.iter_mut().filter(|r| r.chan == chan) {
+            r.held.retain(|h| !(h.live && h.note.key == key));
+        }
         for r in self.env_runs.iter_mut().filter(|r| r.chan == chan && r.key == key && r.rel.is_none()) {
             r.rel = Some(r.t);
         }
@@ -1148,6 +1315,7 @@ impl Player {
     }
 
     fn silence(&mut self, fast: bool) {
+        self.arps.clear();
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });
         for v in self.voices.iter_mut().filter(|v| v.active && !v.preview) {
             v.kill = true;
@@ -1197,6 +1365,7 @@ impl Player {
                     self.wheel[c] = octaves.clamp(-4.0, 4.0);
                 }
                 Cmd::Panic => {
+                    self.arps.clear();
                     for v in self.voices.iter_mut() {
                         v.active = false;
                         v.sample = None;
@@ -1864,6 +2033,7 @@ impl Player {
         while done < total {
             let want = (total - done).min(BLOCK);
             let n = self.advance(&song, want).clamp(1, want);
+            self.run_arps(&song, n);
             self.mix(&song, &mut out[done * channels..(done + n) * channels], channels);
             done += n;
         }
@@ -2070,6 +2240,63 @@ mod tests {
         for (g, w) in got.iter().zip(&want) {
             assert!(g.abs_diff(*w) <= 2, "onset at {g}, wanted {w}");
         }
+    }
+
+    fn run(s: Song, frames: usize) -> Vec<f32> {
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.transport.set_playing(true);
+        let mut buf = vec![0.0f32; frames * 2];
+        for block in buf.chunks_mut(2 * 333) {
+            p.render(block, 2);
+        }
+        buf
+    }
+
+    #[test]
+    fn the_arpeggiator_spells_held_notes_in_time() {
+        // one note four steps long; a step at 120 bpm is 6000 frames
+        let mut s = click_song();
+        s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 60, ..Default::default() });
+        s.channels[0].smp.arp_dir = 1;
+        s.channels[0].smp.arp_chord = 1;
+        let got = onsets(&run(s.clone(), 40_000), 200);
+        assert_eq!(got.len(), 4, "{got:?}");
+        for (i, g) in got.iter().enumerate() {
+            assert!(g.abs_diff(i * 6000) <= 2, "{got:?}");
+        }
+        // half the time: twice the notes; a quarter step late: all of them moved
+        s.channels[0].smp.arp_steps = 0.5;
+        s.channels[0].smp.shift = 0.25;
+        let got = onsets(&run(s.clone(), 40_000), 200);
+        assert_eq!(got.len(), 8, "{got:?}");
+        assert!(got[0].abs_diff(1500) <= 2 && got[1].abs_diff(4500) <= 2, "{got:?}");
+        // the gate cuts the held note to one step, leaving two notes
+        s.channels[0].smp.shift = 0.0;
+        s.channels[0].smp.gate_steps = 1.0;
+        assert_eq!(onsets(&run(s.clone(), 40_000), 200).len(), 2);
+        // two notes held together are walked up and back down; a lone one just sounds under the holding choice
+        let mut s = click_song();
+        s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 60, ..Default::default() });
+        s.channels[0].smp.arp_dir = 3;
+        s.channels[0].smp.arp_chord = -2;
+        assert_eq!(onsets(&run(s.clone(), 40_000), 200).len(), 1);
+        s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 72, ..Default::default() });
+        assert_eq!(onsets(&run(s, 40_000), 200).len(), 4);
+    }
+
+    #[test]
+    fn a_held_key_arpeggiates_until_it_is_let_go() {
+        let mut s = click_song();
+        s.channels[0].smp.arp_dir = 5;
+        s.channels[0].smp.arp_range = 2;
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        let mut buf = vec![0.0f32; 2 * 20_000];
+        p.render(&mut buf, 2);
+        assert_eq!(onsets(&buf, 200).len(), 4);
+        h.send(Cmd::NoteOff { chan: 0, key: 60 });
+        p.render(&mut buf, 2);
+        assert!(onsets(&buf[2 * 400..], 200).is_empty());
     }
 
     #[test]

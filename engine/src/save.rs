@@ -909,6 +909,32 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             put_u32(d, 16, time as u32);
         });
     }
+    if q(now.shift, 1024.0) != q(was.shift, 1024.0) {
+        put(ev, start, &mut end, Event::word(id::CHAN_TIME_SHIFT, q(now.shift, 1024.0) as u16));
+    }
+    let arp = |f: &Sampler| (f.arp_dir, f.arp_range, f.arp_chord, crate::song::steps_knob(f.arp_steps), q(f.arp_gate, 48.0), f.arp_slide, f.arp_repeat, if f.gate_steps >= crate::song::GATE_OFF { 1447 } else { crate::song::steps_knob(f.gate_steps) }, f.full_porta);
+    if arp(now) != arp(was) {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                if d.len() >= 96 {
+                    let (a, b) = (arp(now), arp(was));
+                    put_u32(d, 40, a.0 as u32);
+                    put_u32(d, 44, a.1 as u32);
+                    put_u32(d, 48, a.2 as i32 as u32);
+                    if a.3 != b.3 {
+                        put_u32(d, 52, a.3 as u32);
+                    }
+                    put_u32(d, 56, a.4 as u32);
+                    d[60] = a.5 as u8;
+                    put_u32(d, 92, a.6 as u32);
+                    if a.7 != b.7 {
+                        d[64..66].copy_from_slice(&(a.7 as u16).to_le_bytes());
+                    }
+                    d[62] = a.8 as u8;
+                }
+            }
+        }
+    }
     let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.keep_pitch);
     if par(now) != par(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
@@ -1802,6 +1828,16 @@ mod tests {
             f.pitch_env.decay = 0.3;
             f.cut_env.on = true;
             f.cut_env.amount = -0.5;
+            f.arp_dir = 3;
+            f.arp_range = 2;
+            f.arp_chord = 2;
+            f.arp_steps = 0.5;
+            f.arp_gate = 0.5;
+            f.arp_slide = true;
+            f.arp_repeat = 3;
+            f.gate_steps = 0.75;
+            f.shift = 0.25;
+            f.full_porta = false;
         }
         s.channels[1].env_on = true;
         s.prepare();
@@ -1811,13 +1847,15 @@ mod tests {
         assert!(r.channels[1].env_on);
         assert_eq!((b.reverse, b.swap_stereo, b.normalize, b.mono, b.porta, b.keep_pitch), (true, true, true, true, true, true));
         assert_eq!((b.cut, b.cut_by, b.filter, b.echoes), (3, 3, 3, 6));
+        assert_eq!((b.arp_dir, b.arp_range, b.arp_chord, b.arp_slide, b.arp_repeat, b.full_porta), (3, 2, 2, true, 3, false));
         let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
         for (x, y) in [
             (a.fade_in, b.fade_in), (a.fade_out, b.fade_out), (a.swing, b.swing), (a.cutoff, b.cutoff), (a.resonance, b.resonance), (a.slide, b.slide),
             (a.echo_feedback, b.echo_feedback), (a.echo_steps, b.echo_steps), (a.echo_cents, b.echo_cents), (a.stretch_beats, b.stretch_beats),
             (a.stretch_cents, b.stretch_cents), (a.vol_env.attack, b.vol_env.attack), (a.vol_env.sustain, b.vol_env.sustain), (a.vol_env.release, b.vol_env.release),
             (a.vol_env.tension[0], b.vol_env.tension[0]), (a.vol_env.tension[1], b.vol_env.tension[1]), (a.pitch_env.amount, b.pitch_env.amount),
-            (a.pitch_env.decay, b.pitch_env.decay), (a.cut_env.amount, b.cut_env.amount),
+            (a.pitch_env.decay, b.pitch_env.decay), (a.cut_env.amount, b.cut_env.amount), (a.arp_steps, b.arp_steps), (a.arp_gate, b.arp_gate),
+            (a.gate_steps, b.gate_steps), (a.shift, b.shift),
         ] {
             assert!(near(x, y), "{x} != {y}");
         }

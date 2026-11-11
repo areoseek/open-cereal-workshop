@@ -17,6 +17,13 @@ enum Tab {
     Misc,
 }
 
+impl State {
+    /// Open on the Miscellaneous page.
+    pub fn show_misc(&mut self) {
+        self.tab = Tab::Misc;
+    }
+}
+
 #[derive(Default)]
 pub struct State {
     tab: Tab,
@@ -531,6 +538,53 @@ impl App {
                         f.cut_by = g;
                         changed = true;
                     }
+                });
+                section(ui, "TIME");
+                ui.horizontal(|ui| {
+                    changed |= cap_knob(ui, "GATE", &mut f.gate_steps, 0.0, 2.0, 2.0, |v: f32| {
+                        if v >= cereal_engine::song::GATE_OFF { "Gate off".into() } else { format!("Gate {}:{:02}", v as u32, (v.fract() * 24.0) as u32) }
+                    });
+                    changed |= cap_knob(ui, "SHIFT", &mut f.shift, 0.0, 1.0, 0.0, |v: f32| format!("Shift 0:{:02}", (v * 24.0) as u32));
+                    changed |= ui.checkbox(&mut f.full_porta, "Full porta").on_hover_text("Portamento notes ignore the gate and play their whole length").changed();
+                });
+                section(ui, "ARPEGGIATOR");
+                ui.horizontal(|ui| {
+                    for (i, (face, tip)) in [("Off", "Off"), ("Up", "Up"), ("Down", "Down"), ("Up-Dn", "Up and down"), ("Up-Dn 2", "Up and down, lowest and highest twice"), ("Rnd", "Random")].iter().enumerate() {
+                        if ui.selectable_label(f.arp_dir == i as u8, *face).on_hover_text(*tip).clicked() {
+                            f.arp_dir = i as u8;
+                            changed = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    changed |= cap_knob(ui, "TIME", &mut f.arp_steps, 0.01, 2.0, 1.0, |v: f32| format!("Time {}:{:02}", v as u32, (v.fract() * 24.0) as u32));
+                    changed |= cap_knob(ui, "GATE", &mut f.arp_gate, 0.0, 1.0, 1.0, |v: f32| format!("Gate {:.0} %", v * 100.0));
+                    ui.vertical(|ui| {
+                        ui.set_width(50.0);
+                        changed |= ui.add(egui::DragValue::new(&mut f.arp_range).range(1..=10).speed(0.1)).on_hover_text("Range in octaves").changed();
+                        ui.label(RichText::new("RANGE").small().color(TEXT_DIM));
+                    });
+                    ui.vertical(|ui| {
+                        ui.set_width(50.0);
+                        changed |= ui.add(egui::DragValue::new(&mut f.arp_repeat).range(1..=16).speed(0.1)).on_hover_text("Times each octave plays before the next").changed();
+                        ui.label(RichText::new("REPEAT").small().color(TEXT_DIM));
+                    });
+                    changed |= ui.checkbox(&mut f.arp_slide, "Slide").changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Chord");
+                    let chords = &cereal_engine::song::ARP_CHORDS;
+                    let face = |c: i16| match c {
+                        -2 => "Auto (sustain)".to_string(),
+                        -1 => "Auto".to_string(),
+                        0 => "None".to_string(),
+                        n => chords[(n as usize - 1).min(chords.len() - 1)].0.to_string(),
+                    };
+                    egui::ComboBox::from_id_salt(("arp chord", ci)).selected_text(face(f.arp_chord)).show_ui(ui, |ui| {
+                        for c in [0i16, -1, -2].into_iter().chain(1..=chords.len() as i16) {
+                            changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
+                        }
+                    });
                 });
                 section(ui, "ECHO DELAY / FAT MODE");
                 ui.horizontal(|ui| {

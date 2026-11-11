@@ -151,6 +151,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 
 ## Core windows
 - [~] Channel rack (steps, channel strip, layers, add sampler or instrument)
+- [~] Channel settings, Miscellaneous page: level adjustment, root key, swing mix, polyphony and portamento, cut groups, note echoes, the time gate, shift and full porta, and the arpeggiator (six directions, time, gate, slide, range, repeat, chord: none, the held notes, the held notes with lone notes left alone, or a set chord) are read, played, edited and saved. The time knobs are taken as 1024 = one step on a square law up to two steps, and the set chord list is our own order: both to be measured. Velocity and key tracking, the key region, add-to-key, ping pong and fat mode are not done; a layer's children do not run their own arpeggiators.
 - [x] Piano roll (eight tools, slide and portamento notes, note colours, six control lanes, scale highlighting, helper tools: riff machine, quantise, chop, arpeggiate, strum, flam, claw, limit, flip, randomise, scale levels, LFO, articulate)
 - [x] Playlist (pattern, audio and automation clips; nine tools)
 - [~] Mixer (inserts, sends, routing, EQ, effect slots; docking and metering details still to do)

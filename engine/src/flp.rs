@@ -409,6 +409,14 @@ pub struct FlpChannel {
     /// (cut, cut by) groups; 0 = none.
     pub cut_group: (u16, u16),
     pub time_shift: u16,
+    /// Arpeggiator: direction (0 off, up, down, up-down, up-down with the ends twice, random), range in
+    /// octaves, chord (-1 from the held notes, -2 the same but lone notes hold, 0 none, then the chord list), time
+    /// (1024 = one step), gate (48 = full), repeat.
+    pub arp: [i32; 6],
+    pub arp_slide: bool,
+    /// Longest a note may last, on the same scale as the arpeggiator time; 1447 and up = no limit.
+    pub gate: u16,
+    pub full_porta: bool,
     /// How much of the project swing this channel takes, 0..=128.
     pub swing: u16,
     /// Echo: feedback (0..=12800), pan (centre 6400), pitch step in cents, count, time (48 = one step).
@@ -749,7 +757,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     scope = Scope::Arrangement;
@@ -902,6 +910,16 @@ impl Flp {
                         }
                         (id::CHAN_PARAMS, Value::Data(d)) if d.len() >= 20 => {
                             c.root_key = u32at(d, 16);
+                            if d.len() >= 66 {
+                                let i = |o: usize| u32at(d, o) as i32;
+                                c.arp = [i(40), i(44), i(48), i(52), i(56), c.arp[5]];
+                                c.arp_slide = d[60] != 0;
+                                c.full_porta = d[62] != 0;
+                                c.gate = u32at(d, 64) as u16;
+                            }
+                            if d.len() >= 96 {
+                                c.arp[5] = u32at(d, 92) as i32;
+                            }
                             if d.len() >= 84 {
                                 c.normalize = d[80] != 0;
                                 c.invert = d[81] != 0;

@@ -161,6 +161,56 @@ pub struct Sampler {
     pub keep_pitch: bool,
     /// Extra gain from the level adjustment.
     pub gain: f32,
+    /// Arpeggiator: direction (0 off, 1 up, 2 down, 3 up and down, 4 up and down with the ends twice,
+    /// 5 random), octaves covered, chord (-1 the held notes, -2 the same but a lone note just holds, 0 the
+    /// note alone, then [`ARP_CHORDS`]), steps between notes, share of that time each note lasts, glide
+    /// between notes, and how often each octave is played before the next.
+    pub arp_dir: u8,
+    pub arp_range: u8,
+    pub arp_chord: i16,
+    pub arp_steps: f32,
+    pub arp_gate: f32,
+    pub arp_slide: bool,
+    pub arp_repeat: u8,
+    /// Longest a note may last, in steps; [`GATE_OFF`] and up = no limit.
+    pub gate_steps: f32,
+    /// Notes start this many steps late, 0..=1.
+    pub shift: f32,
+    /// Portamento notes ignore the gate.
+    pub full_porta: bool,
+}
+
+/// The gate knob at its right end: notes keep their length.
+pub const GATE_OFF: f32 = 1.99;
+
+/// Chords the arpeggiator can spell from each note, after "the held notes" and "the note alone".
+pub const ARP_CHORDS: [(&str, &[u8]); 16] = [
+    ("Major", &[0, 4, 7]),
+    ("Minor", &[0, 3, 7]),
+    ("Sus 4", &[0, 5, 7]),
+    ("Sus 2", &[0, 2, 7]),
+    ("Major 7", &[0, 4, 7, 11]),
+    ("Minor 7", &[0, 3, 7, 10]),
+    ("Seventh", &[0, 4, 7, 10]),
+    ("Major 6", &[0, 4, 7, 9]),
+    ("Minor 6", &[0, 3, 7, 9]),
+    ("Ninth", &[0, 4, 7, 10, 14]),
+    ("Major 9", &[0, 4, 7, 11, 14]),
+    ("Minor 9", &[0, 3, 7, 10, 14]),
+    ("Diminished", &[0, 3, 6]),
+    ("Augmented", &[0, 4, 8]),
+    ("Fifth", &[0, 7]),
+    ("Octave", &[0, 12]),
+];
+
+/// Arpeggiator and gate times: the stored knob value against steps (1024 = one step, squared).
+pub fn knob_steps(raw: i32) -> f32 {
+    let x = raw.clamp(0, 1448) as f32 / 1024.0;
+    x * x
+}
+
+pub fn steps_knob(steps: f32) -> i32 {
+    ((steps.max(0.0).sqrt() * 1024.0).round() as i32).clamp(0, 1447)
 }
 
 impl Default for Sampler {
@@ -194,6 +244,16 @@ impl Default for Sampler {
             stretch_mul: 1.0,
             keep_pitch: false,
             gain: 1.0,
+            arp_dir: 0,
+            arp_range: 1,
+            arp_chord: -1,
+            arp_steps: 1.0,
+            arp_gate: 1.0,
+            arp_slide: false,
+            arp_repeat: 1,
+            gate_steps: 2.0,
+            shift: 0.0,
+            full_porta: true,
         }
     }
 }
@@ -230,6 +290,16 @@ impl Sampler {
             stretch_mul: (c.stretch.2 as f32 / 10000.0).exp2(),
             keep_pitch: c.stretch.3 != 0,
             gain: (c.adjust[1] as f32 / 12800.0).clamp(0.0, 4.0),
+            arp_dir: c.arp[0].clamp(0, 5) as u8,
+            arp_range: c.arp[1].clamp(1, 10) as u8,
+            arp_chord: c.arp[2].clamp(-2, ARP_CHORDS.len() as i32) as i16,
+            arp_steps: knob_steps(c.arp[3]),
+            arp_gate: (c.arp[4] as f32 / 48.0).clamp(0.0, 1.0),
+            arp_slide: c.arp_slide,
+            arp_repeat: c.arp[5].clamp(1, 16) as u8,
+            gate_steps: if c.gate >= 1447 { 2.0 } else { knob_steps(c.gate as i32) },
+            shift: (c.time_shift as f32 / 1024.0).clamp(0.0, 1.0),
+            full_porta: c.full_porta,
         }
     }
 
