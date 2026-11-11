@@ -67,6 +67,9 @@ pub enum Kind {
     Eq7,
     Mute,
     Flip,
+    Emph,
+    StonePhaser,
+    Amp,
 }
 
 pub struct Param {
@@ -783,6 +786,41 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Thru, ident: "Fruity LSD", title: "Bank Player", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Tuner", title: "Pitch Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Razer Chroma", title: "Key Lights", size: 0, fixed: &[], params: &[] },
+    Def {
+        kind: Kind::Emph,
+        ident: "Emphasizer",
+        title: "Loudener",
+        size: 29,
+        fixed: &[(0, 2), (25, 0x0100_0000), (24, 10000)],
+        params: &[p("Input gain", 4, 0, 10000, 0), p("Emphasis", 8, 0, 10000, 5013), p("Hard clip", 12, 0, 1, 0), p("Level match", 16, 0, 1, 0), p("Bypass", 20, 0, 1, 0)],
+    },
+    Def {
+        kind: Kind::StonePhaser,
+        ident: "Vintage Phaser",
+        title: "Stone Phaser",
+        size: 149,
+        fixed: &[(0, 3), (20, 125), (64, 3000), (68, 1), (80, 3200), (84, 2000), (88, 50), (108, 5000), (116, 2000), (128, 6000), (136, 1), (140, 5000)],
+        params: &[
+            p("Min", 4, 125, 2048000, 896070),
+            p("Max", 8, 125, 2048000, 1588996),
+            p("Feedback", 12, 0, 6000, 3000),
+            p("Sync", 24, 0, 1, 0),
+            p("Speed", 28, 0, 196608, 1),
+            p("L/R phase", 48, 0, 6000, 0),
+            p("Input HP", 112, 0, 2048000, 2000),
+            p("Rate low", 120, 1, 2048000, 25),
+            p("Rate high", 124, 1, 2048000, 150000),
+            p("Invert feedback", 144, 0, 1, 0),
+        ],
+    },
+    Def {
+        kind: Kind::Amp,
+        ident: "Hardcore",
+        title: "Pedal Board",
+        size: 468,
+        fixed: &[(0, 0x464c_5353), (4, 460), (8, 0x4843_5231), (60, 0x3f00_0000), (80, 0x3f00_0000), (84, 0x3f00_0000), (88, 0x3f00_0000), (92, 0x3f00_0000), (96, 0x3f00_0000), (100, 0x3f00_0000), (104, 0x3f00_0000), (108, 0x3f00_0000), (112, 0x3f00_0000), (116, 0x3f00_0000), (120, 0x3f00_0000), (124, 0x3f00_0000), (128, 0x3f00_0000), (132, 0x3f00_0000), (136, 0x3f00_0000), (140, 0x3f00_0000), (144, 0x3f00_0000), (148, 0x3f00_0000), (152, 0x3f00_0000), (156, 0x3f00_0000), (160, 0x3f00_0000), (164, 0x3f00_0000), (188, 0x3f00_0000), (208, 0x3f00_0000), (168, 0x3f80_0000), (184, 0x3f80_0000), (192, 0x3f80_0000)],
+        params: &[p("Input", 12, 0, 10000, 5000), p("Output", 16, 0, 10000, 5000), p("EQ on", 20, 0, 10000, 0), p("100 Hz", 24, 0, 10000, 5000), p("200 Hz", 28, 0, 10000, 5000), p("400 Hz", 32, 0, 10000, 5000), p("800 Hz", 36, 0, 10000, 5000), p("1.6 kHz", 40, 0, 10000, 5000), p("3.2 kHz", 44, 0, 10000, 5000), p("6.4 kHz", 48, 0, 10000, 5000), p("12.8 kHz", 52, 0, 10000, 5000), p("Cabinet", 56, 0, 200000, 0), p("Drive", 64, 0, 10000, 5000), p("Comb", 68, 0, 10000, 5000), p("Body", 72, 0, 10000, 5000), p("Glass", 76, 0, 10000, 5000), p("Chorus width", 80, 0, 10000, 5000), p("Chorus speed", 84, 0, 10000, 5000), p("Chorus mix", 88, 0, 10000, 5000), p("Pedal 1 on", 172, 0, 10000, 0), p("Pedal 2 on", 176, 0, 10000, 0), p("Pedal 3 on", 180, 0, 10000, 0), p("Pedal 1", 196, 0, 200000, 0), p("Pedal 2", 200, 0, 200000, 0), p("Pedal 3", 204, 0, 200000, 0)],
+    },
     Def { kind: Kind::BassBoost, ident: "Fruity Bass Boost", title: "Bass Lift", size: 12, fixed: &[(0, 1)], params: &[p("Frequency", 4, 0, 1024, 512), p("Amount", 8, 0, 1024, 768)] },
     Def {
         kind: Kind::Phaser,
@@ -1799,7 +1837,7 @@ const XY_FRESH: [u8; 71] = [1, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
 
 /// Units whose block holds 32-bit floats from 0 to 1; we carry those as 0 to 10000.
 fn floats(kind: Kind, off: usize) -> bool {
-    kind == Kind::Pad || (kind == Kind::Tuner && off < 144)
+    kind == Kind::Pad || kind == Kind::Amp || (kind == Kind::Tuner && off < 144)
 }
 
 /// What a unit needs to know about the moment it is running in.
@@ -2083,7 +2121,7 @@ impl Unit {
                 }
             }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
-            Kind::BucketChorus => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
+            Kind::BucketChorus | Kind::Amp => u.buf = vec![[0.0; 2]; (sr * 0.05) as usize + 8],
             // two bars at 40 beats a minute and up
             Kind::Warp => u.buf = vec![[0.0; 2]; (sr * 12.0) as usize + 8],
             Kind::Bank => u.bank = Some(Box::default()),
@@ -2207,7 +2245,8 @@ impl Unit {
                 let echoes = if fb < 0.01 { 1.0 } else { (0.001f32.ln() / fb.ln()).min(60.0) };
                 (time * (echoes + 1.0)) as usize
             }
-            Kind::Squeeze | Kind::Eq7 | Kind::DcBlock => (cx.sr * 0.25) as usize,
+            Kind::Squeeze | Kind::Eq7 | Kind::DcBlock | Kind::Emph | Kind::Amp => (cx.sr * 0.25) as usize,
+            Kind::StonePhaser => cx.sr as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
@@ -3114,6 +3153,163 @@ impl Unit {
                 if which > 0 {
                     for f in io.iter_mut() {
                         f[which as usize - 1] = -f[which as usize - 1];
+                    }
+                }
+            }
+            Kind::Emph => {
+                if p[4] < 0.5 {
+                    let g = db(p[0] / 10000.0 * 24.0);
+                    let e = (p[1] / 10000.0).clamp(0.0, 1.0);
+                    let ceil = db(e * 12.0);
+                    let out = if p[3] >= 0.5 { 1.0 / g } else { 1.0 };
+                    let rel = (-1.0 / (0.08 * sr)).exp();
+                    let hard = p[2] >= 0.5;
+                    for f in io.iter_mut() {
+                        let x = [f[0] * g, f[1] * g];
+                        let pk = x[0].abs().max(x[1].abs());
+                        z[0] = if pk > z[0] { pk } else { pk + (z[0] - pk) * rel };
+                        let lim = if z[0] > ceil { ceil / z[0] } else { 1.0 };
+                        for c in 0..2 {
+                            let y = x[c] * lim;
+                            let a = y.abs();
+                            let y = if hard || e <= 0.0 {
+                                y.clamp(-1.0, 1.0)
+                            } else if a > 0.75 {
+                                y.signum() * (0.75 + 0.25 * ((a - 0.75) / 0.25).tanh())
+                            } else {
+                                y
+                            };
+                            f[c] = y * out;
+                        }
+                    }
+                    if z[0] < 1e-20 {
+                        z[0] = 0.0;
+                    }
+                }
+            }
+            Kind::StonePhaser => {
+                let (lo, hi) = ((p[0] / 100.0).clamp(20.0, 20000.0), (p[1] / 100.0).clamp(20.0, 20000.0));
+                let t = (p[4] / 196608.0).clamp(0.0, 1.0);
+                let rate = if p[3] >= 0.5 {
+                    // tempo locked: from a sixteen bar sweep down to a fraction of a step
+                    1.0 / (cx.step * 4.0 * 64.0 * (-8.0 * t).exp2())
+                } else {
+                    let (a, b) = (p[7].max(1.0) / 100.0, p[8].max(1.0) / 100.0);
+                    a * (b / a).powf(t) / sr
+                };
+                let fb = p[2] / 6000.0 * 0.9 * if p[9] >= 0.5 { -1.0 } else { 1.0 };
+                let spread = p[5] / 6000.0;
+                let hp = 1.0 - (-TAU * (p[6] / 100.0).clamp(1.0, 2000.0) / sr).exp();
+                let mut co = [0.0f32; 2];
+                for (i, f) in io.iter_mut().enumerate() {
+                    if i % 16 == 0 {
+                        self.ph += rate * 16.0;
+                        self.ph -= self.ph.floor();
+                        for c in 0..2 {
+                            let l = 0.5 - 0.5 * ((self.ph + spread * c as f32) * TAU).cos();
+                            let w = (PI * lo * (hi / lo).powf(l) / sr).min(1.5).tan();
+                            co[c] = (w - 1.0) / (w + 1.0);
+                        }
+                    }
+                    for c in 0..2 {
+                        z[10 + c] += hp * (f[c] - z[10 + c]);
+                        let dry = f[c] - z[10 + c];
+                        let mut x = dry + fb * z[12 + c];
+                        for s in 0..4 {
+                            let k = c * 4 + s;
+                            let y = co[c] * x + z[k];
+                            z[k] = x - co[c] * y;
+                            x = y;
+                        }
+                        z[12 + c] = x.clamp(-4.0, 4.0);
+                        f[c] = 0.5 * (dry + x);
+                    }
+                }
+                for v in z[..14].iter_mut() {
+                    if !v.is_finite() || v.abs() < 1e-20 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            Kind::Amp => {
+                // p: 0 input, 1 output, 2 equaliser switch, 3..11 its bands, 11 cabinet, 12..16 drive pedal,
+                // 16..19 chorus pedal, 19..22 pedal switches, 22..25 what sits in the three pedal places
+                let gin = (p[0] / 5000.0).powi(2);
+                let gout = (p[1] / 5000.0).powi(2);
+                for f in io.iter_mut() {
+                    f[0] *= gin;
+                    f[1] *= gin;
+                }
+                for slot in 0..3 {
+                    if p[19 + slot] < 5000.0 {
+                        continue;
+                    }
+                    match (p[22 + slot] / 10000.0).round() as i32 {
+                        7 => {
+                            let drive = 1.0 + 60.0 * (p[12] / 10000.0).powi(2);
+                            let comp = 1.0 / drive.sqrt().max(1.0) * 1.6;
+                            let body = band_coeffs(6, 130.0, p[14] / 10000.0 * 12.0, 0.5, sr);
+                            let a = 1.0 - (-TAU * (1200.0 + 10000.0 * p[15] / 10000.0) / sr).exp();
+                            for f in io.iter_mut() {
+                                for c in 0..2 {
+                                    let x = biquad(&body, &mut z[c * 2..c * 2 + 2], f[c]);
+                                    let y = (x * drive).tanh() * comp;
+                                    z[4 + c] += a * (y - z[4 + c]);
+                                    f[c] = z[4 + c];
+                                }
+                            }
+                        }
+                        2 => {
+                            let n = self.buf.len();
+                            let depth = p[16] / 10000.0 * 0.004 * sr;
+                            let inc = (0.1 + 5.0 * p[17] / 10000.0) / sr;
+                            let mix = p[18] / 10000.0;
+                            for f in io.iter_mut() {
+                                self.buf[self.pos] = *f;
+                                self.ph += inc;
+                                self.ph -= self.ph.floor();
+                                for c in 0..2 {
+                                    let d = 0.008 * sr + depth * (1.0 + ((self.ph + 0.25 * c as f32) * TAU).sin());
+                                    let at = self.pos as f32 + n as f32 - d;
+                                    let i0 = at as usize;
+                                    let fr = at - i0 as f32;
+                                    let w = self.buf[i0 % n][c] * (1.0 - fr) + self.buf[(i0 + 1) % n][c] * fr;
+                                    f[c] += w * mix;
+                                }
+                                self.pos = (self.pos + 1) % n;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if p[2] >= 5000.0 {
+                    for b in 0..8 {
+                        let gain = (p[3 + b] / 5000.0 - 1.0) * 12.0;
+                        if gain.abs() < 0.05 {
+                            continue;
+                        }
+                        let co = band_coeffs(6, 100.0 * (b as f32).exp2(), gain, 0.5, sr);
+                        let st = &mut z[8 + b * 4..12 + b * 4];
+                        for f in io.iter_mut() {
+                            f[0] = biquad(&co, &mut st[0..2], f[0]);
+                            f[1] = biquad(&co, &mut st[2..4], f[1]);
+                        }
+                    }
+                }
+                // the speaker box: no deep lows, no fizz, a bump where a guitar speaker is loud
+                let model = (p[11] / 10000.0).round().clamp(0.0, 20.0);
+                let (gh, gl) = (svf_g(70.0 + 8.0 * model, sr), svf_g((3600.0 + 350.0 * model).min(sr * 0.45), sr));
+                let bump = band_coeffs(6, 2200.0 + 120.0 * model, 4.0, 0.5, sr);
+                for f in io.iter_mut() {
+                    for c in 0..2 {
+                        let x = svf(&mut z[40 + c * 2..42 + c * 2], f[c], gh, 1.4).2;
+                        let x = svf(&mut z[44 + c * 2..46 + c * 2], x, gl, 1.2).0;
+                        f[c] = biquad(&bump, &mut z[48 + c * 2..50 + c * 2], x) * gout;
+                    }
+                }
+                for v in z[..52].iter_mut() {
+                    if !v.is_finite() || v.abs() < 1e-20 {
+                        *v = 0.0;
                     }
                 }
             }
@@ -4185,7 +4381,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
