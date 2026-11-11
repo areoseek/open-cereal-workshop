@@ -27,6 +27,9 @@ pub enum Kind {
     Flanger,
     Chorus,
     Echo,
+    Spread,
+    Transient,
+    Swarm,
 }
 
 pub struct Param {
@@ -284,6 +287,51 @@ pub static DEFS: &[Def] = &[
             p("Dry", 104, 0, 6000, 6000),
         ],
     },
+    Def {
+        kind: Kind::Spread,
+        ident: "Spreader",
+        title: "Widener",
+        size: 30,
+        fixed: &[(0, 65539), (20, 1), (26, 0x0101_0000)],
+        params: &[p("Spread", 4, 0, 10000, 5000), p("Separation", 8, -10000, 10000, 0), p("Low bypass", 12, 1, 1_000_000, 1), p("Mono lows", 16, 0, 1, 0)],
+    },
+    Def {
+        kind: Kind::Transient,
+        ident: "Transient Processor",
+        title: "Transient Shaper",
+        size: 49,
+        fixed: &[(0, 1), (36, 1), (40, 5), (44, 12800)],
+        params: &[
+            p("Attack", 4, 0, 160, 80),
+            p("Drive", 8, 0, 160, 0),
+            p("Release", 12, 0, 160, 80),
+            p("Gain", 16, 0, 160, 80),
+            p("Attack shape", 20, 0, 2, 1),
+            p("Release shape", 24, 0, 2, 1),
+            p("Split balance", 28, 0, 160, 80),
+            p("Split frequency", 32, 0, 160, 80),
+        ],
+    },
+    Def {
+        kind: Kind::Swarm,
+        ident: "Hyper Chorus",
+        title: "Swarm Chorus",
+        size: 52,
+        fixed: &[(0, 2)],
+        params: &[
+            p("Delay", 4, 0, 1000, 500),
+            p("Feedback", 8, 0, 1000, 500),
+            p("Modulation", 12, 0, 1000, 500),
+            p("Mod rate", 16, 0, 1000, 500),
+            p("Movement", 20, 0, 1000, 500),
+            p("Move rate", 24, 0, 1000, 500),
+            p("Eight lines", 28, 0, 1, 0),
+            p("Low pass", 32, 20, 22000, 22000),
+            p("High pass", 36, 20, 22000, 120),
+            p("Phase spread", 40, 0, 1000, 500),
+            p("Mix", 44, 0, 1000, 500),
+        ],
+    },
 ];
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -523,6 +571,13 @@ impl Unit {
         match u.fx.kind {
             Kind::Delay | Kind::Echo => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            Kind::Spread => {
+                for ms in [7.3f32, 11.9, 17.1] {
+                    u.lines.push(vec![0.0; (ms * sr / 1000.0) as usize + 2]);
+                    u.lpos.push(0);
+                }
+            }
             Kind::Enhancer | Kind::Shaper => u.buf = vec![[0.0; 2]; (sr * 0.6) as usize + 8],
             Kind::Reverb => {
                 u.buf = vec![[0.0; 2]; (sr * 1.1) as usize + 8];
@@ -553,7 +608,8 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + 4096
             }
-            Kind::Flanger | Kind::Chorus => (cx.sr * 0.5) as usize,
+            Kind::Flanger | Kind::Chorus | Kind::Swarm => (cx.sr * 0.5) as usize,
+            Kind::Spread | Kind::Transient => (cx.sr * 0.25) as usize,
             Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
             Kind::Comp | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
@@ -1061,6 +1117,118 @@ impl Unit {
                     *f = [f[0] * dry + out[0] * wet + if cross && !wet_only { z[8] * 0.3 } else { 0.0 }, f[1] * dry + out[1] * wet + if cross && !wet_only { z[9] * 0.3 } else { 0.0 }];
                 }
             }
+            Kind::Spread => {
+                // a smeared copy of the middle goes in with opposite signs left and right, so the two still sum
+                // to exactly what came in
+                let k = p[0] / 10000.0 * 0.9;
+                let sep = (p[1] / 10000.0).clamp(-1.0, 1.0);
+                let hz = (10.0 * 1000f32.powf(p[2] / 1_000_000.0)).min(sr * 0.45);
+                let a = 1.0 - (-TAU * hz / sr).exp();
+                let mono = p[3] >= 0.5;
+                for f in io.iter_mut() {
+                    z[0] += a * (f[0] - z[0]);
+                    z[1] += a * (f[1] - z[1]);
+                    let (mut ll, mut lr) = (z[0], z[1]);
+                    let (hl, hr) = (f[0] - ll, f[1] - lr);
+                    if mono {
+                        ll = 0.5 * (ll + lr);
+                        lr = ll;
+                    }
+                    let mid = 0.5 * (hl + hr);
+                    let side = 0.5 * (hl - hr) * (1.0 + sep);
+                    let mut d = mid;
+                    for (line, at) in self.lines.iter_mut().zip(self.lpos.iter_mut()) {
+                        let old = line[*at];
+                        let v = d + 0.55 * old;
+                        line[*at] = v;
+                        *at = (*at + 1) % line.len();
+                        d = old - 0.55 * v;
+                    }
+                    *f = [ll + mid + side + k * d, lr + mid - side - k * d];
+                }
+            }
+            Kind::Transient => {
+                let att = (p[0] - 80.0) / 80.0;
+                let rel = (p[2] - 80.0) / 80.0;
+                let drive = p[1] / 160.0;
+                let gain = db((p[3] - 80.0) / 80.0 * 24.0);
+                let win = |s: f32| [0.008f32, 0.02, 0.05][(s as usize).min(2)];
+                let coef = |t: f32| 1.0 - (-1.0 / (t * sr)).exp();
+                let (a_fast, a_slow) = (coef(0.0005), coef(win(p[4])));
+                let (r_fast, r_slow) = (coef(win(p[5]) * 2.0), coef(win(p[5]) * 20.0));
+                let (dry, wet) = if p[6] <= 80.0 { (p[6] / 80.0, 1.0) } else { (1.0, (160.0 - p[6]) / 80.0) };
+                let x = (p[7] - 80.0) / 80.0;
+                let hz = if x >= 0.0 { 260.0 * (1000.0f32 / 260.0).powf(x) } else { 260.0 * (5.0f32 / 260.0).powf(-x) };
+                let a = 1.0 - (-TAU * hz / sr).exp();
+                let smooth = coef(0.002);
+                for f in io.iter_mut() {
+                    z[0] += a * (f[0] - z[0]);
+                    z[1] += a * (f[1] - z[1]);
+                    let (hl, hr) = (f[0] - z[0], f[1] - z[1]);
+                    let lv = hl.abs().max(hr.abs()) + 1e-6;
+                    // one peak follower; a slow riser against it finds onsets, a slow faller finds tails
+                    z[2] += if lv > z[2] { a_fast } else { r_fast } * (lv - z[2]);
+                    let e = z[2];
+                    z[3] = if e > z[3] { z[3] + a_slow * (e - z[3]) } else { e };
+                    z[5] = if e > z[5] { e } else { z[5] + r_slow * (e - z[5]) };
+                    let up = (20.0 * ((e + 1e-6) / (z[3] + 1e-6)).log10()).clamp(0.0, 24.0);
+                    let tail = (20.0 * ((z[5] + 1e-6) / (e + 1e-6)).log10()).clamp(0.0, 24.0);
+                    let want = (att * up + rel * tail).clamp(-36.0, 24.0);
+                    z[6] += smooth * (want - z[6]);
+                    let g = db(z[6]);
+                    let (mut wl, mut wr) = (hl * g, hr * g);
+                    if drive > 0.0 {
+                        let d = 1.0 + drive * 7.0;
+                        wl = (wl * d).tanh() / d * (1.0 + drive);
+                        wr = (wr * d).tanh() / d * (1.0 + drive);
+                    }
+                    *f = [(z[0] * dry + wl * wet) * gain, (z[1] * dry + wr * wet) * gain];
+                }
+            }
+            Kind::Swarm => {
+                let n = self.buf.len();
+                let voices = if p[6] >= 0.5 { 8 } else { 4 };
+                let base = (0.003 + p[0] / 1000.0 * 0.03) * sr;
+                let fb = p[1] / 1000.0 * 0.6;
+                let depth = p[2] / 1000.0 * 0.004 * sr;
+                let rate = 0.05 * 100f32.powf(p[3] / 1000.0) / sr;
+                let pan_amt = p[4] / 1000.0;
+                let mov = 0.02 * 100f32.powf(p[5] / 1000.0) / sr;
+                let lp = if p[7] >= 21999.0 { 1.0 } else { 1.0 - (-TAU * p[7].min(sr * 0.45) / sr).exp() };
+                let hp = 1.0 - (-TAU * p[8].min(sr * 0.45) / sr).exp();
+                let spread = p[9] / 1000.0;
+                let mix = p[10] / 1000.0;
+                let norm = 1.0 / (voices as f32).sqrt();
+                for f in io.iter_mut() {
+                    self.buf[self.pos] = [f[0] + z[10] * fb, f[1] + z[11] * fb];
+                    z[0] = (z[0] + rate).fract();
+                    z[1] = (z[1] + mov).fract();
+                    let mut out = [0.0f32; 2];
+                    for v in 0..voices {
+                        let t = v as f32 / voices as f32;
+                        let l = (TAU * (z[0] + t * spread)).sin();
+                        let d = base * (1.0 + 0.35 * t) + depth * (1.0 + l);
+                        let at = self.pos as f32 + n as f32 - d;
+                        let i = at as usize;
+                        let fr = at - i as f32;
+                        let c = v % 2;
+                        let s = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
+                        let pan = (if c == 0 { -0.5 } else { 0.5 } + 0.5 * pan_amt * (TAU * (z[1] + t)).sin()).clamp(-1.0, 1.0);
+                        out[0] += s * (0.5 - 0.5 * pan).sqrt();
+                        out[1] += s * (0.5 + 0.5 * pan).sqrt();
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    for c in 0..2 {
+                        let mut w = out[c] * norm * 1.4;
+                        z[2 + c] += lp * (w - z[2 + c]);
+                        w = z[2 + c];
+                        z[4 + c] += hp * (w - z[4 + c]);
+                        w -= z[4 + c];
+                        z[10 + c] = w;
+                        f[c] = f[c] * (1.0 - mix).min(0.5) * 2.0 + w * mix.min(0.5) * 2.0;
+                    }
+                }
+            }
             Kind::Echo => {
                 let n = self.buf.len();
                 let iv = p[0] / 6000.0;
@@ -1148,7 +1316,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo) {
+            if matches!(d.kind, Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -1187,7 +1355,7 @@ mod tests {
         assert!((near(t) - 1.0).abs() < 0.05, "{}", near(t));
         assert!((near(2 * t) - 0.5).abs() < 0.05, "{}", near(2 * t));
         assert!(out[t / 2][0].abs() < 1e-3);
-        for kind in [Kind::Flanger, Kind::Chorus, Kind::Echo] {
+        for kind in [Kind::Flanger, Kind::Chorus, Kind::Echo, Kind::Swarm, Kind::Spread, Kind::Transient] {
             let mut fx = Fx::new(kind);
             for (v, p) in fx.p.iter_mut().zip(def(kind).params) {
                 *v = p.max as f32;
@@ -1254,5 +1422,24 @@ mod tests {
         assert!(rms(&out[6000..16000]) > 1e-3);
         assert!(rms(&out[44100 * 5..]) < 1e-4);
         assert!(out.iter().all(|f| f[0].is_finite() && f[0].abs() < 4.0));
+    }
+
+    #[test]
+    fn the_widener_keeps_the_mono_sum_and_the_shaper_lifts_onsets() {
+        let out = run(Fx::new(Kind::Spread), sine, 8192);
+        let worst = out.iter().enumerate().skip(4096).map(|(i, f)| (0.5 * (f[0] + f[1]) - sine(i)[0]).abs()).fold(0.0, f32::max);
+        assert!(worst < 2e-3, "mono sum moved by {worst}");
+        assert!(out.iter().skip(4096).any(|f| (f[0] - f[1]).abs() > 0.02), "no width was added");
+        // bursts of tone: more attack makes the start of each burst louder than the plain signal
+        let burst = |i: usize| {
+            let v = if i % 8000 < 2000 { (i as f32 * 0.2).sin() * 0.3 } else { 0.0 };
+            [v, v]
+        };
+        let mut fx = Fx::new(Kind::Transient);
+        fx.p[0] = 160.0;
+        let out = run(fx, burst, 32000);
+        let peak = |a: usize, b: usize| out[a..b].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        assert!(peak(16000, 16300) > 0.45, "{}", peak(16000, 16300));
+        assert!(peak(17850, 18000) < 0.36, "{}", peak(17850, 18000));
     }
 }

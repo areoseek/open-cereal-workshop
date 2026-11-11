@@ -43,6 +43,21 @@ fn hint(kind: Kind, i: usize, name: &str, v: f32) -> String {
         (Kind::Chorus, "Wet only" | "Cross type") => format!("{name}: {}", if v >= 512.0 { "on" } else { "off" }),
         (Kind::Chorus, "Depth" | "Cross cutoff") => pct(v / 5000.0),
         (Kind::Chorus, _) => pct(v / 1024.0),
+        (Kind::Spread, "Low bypass") => format!("Low bypass: {:.0} Hz", 10.0 * 1000f32.powf(v / 1_000_000.0)),
+        (Kind::Spread, "Mono lows") => format!("Mono lows: {}", if v >= 0.5 { "on" } else { "off" }),
+        (Kind::Spread, "Separation") => format!("Separation: {:+.0} %", v / 100.0),
+        (Kind::Spread, _) => pct(v / 10000.0),
+        (Kind::Transient, n) if n.ends_with("shape") => format!("{name}: {}", ["sharp", "medium", "soft"][(v as usize).min(2)]),
+        (Kind::Transient, "Drive") => pct(v / 160.0),
+        (Kind::Transient, "Split balance") => format!("Split balance: {:.0} % dry / {:.0} % wet", (v / 80.0).min(1.0) * 100.0, ((160.0 - v) / 80.0).min(1.0) * 100.0),
+        (Kind::Transient, "Split frequency") => {
+            let x = (v - 80.0) / 80.0;
+            format!("Split frequency: {:.0} Hz", if x >= 0.0 { 260.0 * (1000.0f32 / 260.0).powf(x) } else { 260.0 * (5.0f32 / 260.0).powf(-x) })
+        }
+        (Kind::Transient, _) => format!("{name}: {:+.0} %", (v - 80.0) / 0.8),
+        (Kind::Swarm, "Low pass" | "High pass") => format!("{name}: {v:.0} Hz"),
+        (Kind::Swarm, "Eight lines") => format!("Delay lines: {}", if v >= 0.5 { 8 } else { 4 }),
+        (Kind::Swarm, _) => pct(v / 1000.0),
         (Kind::Delay, "Time") => format!("Time: {:.2} steps", v / 48.0),
         (Kind::Delay, "Mode") => format!("Mode: {}", ["normal", "inverted stereo", "ping pong"][(v as usize).min(2)]),
         (Kind::Delay, _) => pct(v / 128.0),
