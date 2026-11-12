@@ -496,8 +496,8 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
         }
         if now.name != was.name {
             // the display name is the first name event of the run (effect slots come much later in the file)
-            match find(ev, end, id::PLUGIN_NAME) {
-                Some(i) => ev[i] = text_event(id::PLUGIN_NAME, &now.name, unicode),
+            match find(ev, end, id::CHAN_NAME).or(find(ev, end, id::PLUGIN_NAME)) {
+                Some(i) => ev[i] = text_event(ev[i].id, &now.name, unicode),
                 None => {
                     let at = find(ev, end, id::NEW_PLUGIN).or(find(ev, end, id::PLUGIN_INTERNAL_NAME)).or(find(ev, end, id::CHAN_TYPE)).map(|i| i + 1).unwrap_or(start + 1);
                     ev.insert(at, text_event(id::PLUGIN_NAME, &now.name, unicode));

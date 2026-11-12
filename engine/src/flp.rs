@@ -60,6 +60,7 @@ pub mod id {
     pub const BUILD: u8 = 159;
     pub const SHORT3: u8 = 172;
     // text and data events
+    pub const CHAN_NAME: u8 = 192;
     pub const PATTERN_NAME: u8 = 193;
     pub const TITLE: u8 = 194;
     pub const COMMENT: u8 = 195;
@@ -825,6 +826,8 @@ impl Flp {
         let mut early_markers: Vec<Marker> = vec![];
         // patterns carry markers of their own, written with the same events
         let mut in_pattern = false;
+        // the channel whose name came from the early name event, which wins over a later plug-in name
+        let mut named_chan: Option<usize> = None;
 
         let old_mixer = old_mixer_span(&file.events);
         for (at, e) in file.events.iter().enumerate() {
@@ -1039,10 +1042,19 @@ impl Flp {
                     }
                     _ => {}
                 },
+                // up to version 11 a channel's display name is in this event
+                (id::CHAN_NAME, Value::Data(d)) if scope == Scope::Channel => {
+                    if let Some(c) = flp.channels.last_mut() {
+                        c.name = text(d);
+                        named_chan = Some(flp.channels.len() - 1);
+                    }
+                }
                 (id::PLUGIN_NAME, Value::Data(d)) => match scope {
                     Scope::Channel => {
-                        if let Some(c) = flp.channels.last_mut() {
-                            c.name = text(d);
+                        if named_chan != Some(flp.channels.len().wrapping_sub(1)) {
+                            if let Some(c) = flp.channels.last_mut() {
+                                c.name = text(d);
+                            }
                         }
                     }
                     Scope::Insert => slot.name = text(d),
@@ -1308,6 +1320,28 @@ mod tests {
         let mut d = v.as_bytes().to_vec();
         d.push(0);
         Event::data(id::VERSION, d)
+    }
+
+    #[test]
+    fn early_channel_names_are_read() {
+        let bytes = file(
+            2,
+            96,
+            vec![
+                version("11.5.0"),
+                Event::word(id::NEW_CHANNEL, 0),
+                Event::byte(id::CHAN_TYPE, 2),
+                Event::text(id::PLUGIN_INTERNAL_NAME, "Some Synth"),
+                Event::text(id::CHAN_NAME, "Lead"),
+                Event::text(id::PLUGIN_NAME, "Some Synth"),
+                Event::word(id::NEW_CHANNEL, 1),
+                Event::byte(id::CHAN_TYPE, 0),
+                Event::text(id::CHAN_NAME, "Kick"),
+            ],
+        );
+        let flp = parse(&bytes).unwrap();
+        assert_eq!(flp.channels[0].name, "Lead");
+        assert_eq!(flp.channels[1].name, "Kick");
     }
 
     #[test]

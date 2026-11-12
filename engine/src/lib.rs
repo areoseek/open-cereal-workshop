@@ -73,6 +73,10 @@ use std::path::Path;
 pub fn load_flp(path: &Path, lib: &mut Library) -> Result<(Song, flp::Flp), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let f = flp::parse(&bytes)?;
+    if f.file.events.iter().take(8).any(|e| e.id == 28 && e.value == flp::Value::Byte(0)) {
+        // a save made by the unregistered original: its contents are locked and are not read here
+        return Err("This project was saved by the trial version of FL Studio, which locks what it saves. Open it in a registered copy and save it again, then it opens here.".into());
+    }
     let song = Song::from_flp(&f, lib, path.parent());
     Ok((song, f))
 }
