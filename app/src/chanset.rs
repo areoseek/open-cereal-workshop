@@ -1449,6 +1449,14 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                 }
             });
         }
+        Kind::Poly => {
+            use cereal_engine::analog::{POLY_COUNT, POLY_GROUPS, POLY_PARAMS};
+            if g.p.len() < POLY_COUNT {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, &POLY_GROUPS, &POLY_PARAMS);
+        }
         Kind::Duo => {
             use cereal_engine::duo::{COUNT, GROUPS, PARAMS};
             if g.p.len() < COUNT {

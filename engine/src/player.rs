@@ -955,6 +955,23 @@ fn root_shift(ch: &crate::song::Chan) -> i32 {
     }
 }
 
+/// The channel's note settings, with the instrument's own arpeggio standing in when the channel's is off.
+fn own_arp(ch: &crate::song::Chan) -> crate::song::Sampler {
+    let mut f = ch.smp;
+    if f.arp_dir == 0 {
+        if let Some((way, range, steps)) = ch.gen.as_ref().filter(|g| g.kind == crate::synth::Kind::Poly).and_then(|g| crate::analog::poly_arp(&g.p)) {
+            f.arp_dir = way;
+            f.arp_range = range;
+            f.arp_chord = -1;
+            f.arp_steps = steps;
+            f.arp_gate = 0.6;
+            f.arp_repeat = 1;
+            f.arp_slide = false;
+        }
+    }
+    f
+}
+
 impl Player {
     pub fn sample_rate(&self) -> f32 {
         self.sr
@@ -987,7 +1004,8 @@ impl Player {
 
     fn note_on_at(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool, depth: u8) {
         let Some(ch) = song.channels.get(n.chan as usize) else { return };
-        let f = &ch.smp;
+        crate::analog::set_beat(60.0 / self.transport.tempo().max(1.0) as f32);
+        let f = &own_arp(ch);
         if ch.kind == ChannelKind::Layer {
             // a layer hands the note to its children, and each shapes it by its own time settings and arpeggiator
             if ch.enabled && !n.muted && depth < 4 && (f.key_lo..=f.key_hi).contains(&(n.key as u32)) {
@@ -1188,7 +1206,7 @@ impl Player {
                 r.held.clear();
                 continue;
             };
-            let f = ch.smp;
+            let f = own_arp(ch);
             if f.arp_dir == 0 {
                 r.held.clear();
                 continue;

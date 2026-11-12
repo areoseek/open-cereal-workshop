@@ -689,14 +689,120 @@ pub fn pocket(p: &[f32]) -> Set {
 
 /// The six-voice vintage poly's stored values (0 to 1, in file order) as a voice set. The arpeggiator, hold and
 /// tempo sync of the slow oscillator are not played.
+/// The length of a beat in seconds, as the player last knew it: tempo-locked rates are worked out from it.
+static BEAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f00_0000);
+
+pub fn set_beat(secs: f32) {
+    BEAT.store(secs.clamp(0.05, 6.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn beat() -> f32 {
+    f32::from_bits(BEAT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The lengths in beats a tempo-locked rate steps through, slowest first (our estimate of the steps).
+const LOCKED: [f32; 9] = [4.0, 2.0, 1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125];
+
+fn locked(v: f32) -> f32 {
+    LOCKED[((v.clamp(0.0, 1.0) * 8.0).round() as usize).min(8)]
+}
+
+pub const POLY_COUNT: usize = 34;
+pub const POLY_GROUPS: [&str; 6] = ["Arpeggio", "Slow oscillator", "Oscillator", "Filters", "Level and envelope", "Chorus and master"];
+
+const fn pk(name: &'static str, def: f32, group: u8) -> crate::duo::Info {
+    crate::duo::Info { name, ctl: crate::duo::Ctl::Knob, def, group }
+}
+const fn ps(name: &'static str, def: f32, group: u8) -> crate::duo::Info {
+    crate::duo::Info { name, ctl: crate::duo::Ctl::Switch, def, group }
+}
+const fn pp(name: &'static str, names: &'static [&'static str], def: f32, group: u8) -> crate::duo::Info {
+    crate::duo::Info { name, ctl: crate::duo::Ctl::Pick(names), def, group }
+}
+
+pub const POLY_PARAMS: [crate::duo::Info; POLY_COUNT] = [
+    ps("On", 0.0, 0),
+    pp("Way", &["Up", "Up and down", "Down"], 0.0, 0),
+    pp("Range", &["1 octave", "2 octaves", "3 octaves"], 0.0, 0),
+    pk("Rate", 0.0, 0),
+    ps("Tempo", 0.0, 0),
+    pk("Rate", 0.0, 1),
+    ps("Tempo", 0.0, 1),
+    pk("Delay", 0.0, 1),
+    ps("Phase", 0.0, 1),
+    pp("Trigger", &["Auto", "Manual"], 0.0, 1),
+    pk("Vibrato", 0.0, 2),
+    pk("Pulse width", 0.0, 2),
+    pp("Width from", &["Slow osc", "Manual", "Envelope"], 0.0, 2),
+    ps("Pulse", 0.0, 2),
+    ps("Saw", 1.0, 2),
+    ps("Sub", 0.0, 2),
+    pk("Sub level", 0.0, 2),
+    pk("Noise", 0.0, 2),
+    pk("Low cut", 0.0, 3),
+    pk("Cutoff", 1.0, 3),
+    pk("Resonance", 0.0, 3),
+    pp("Envelope way", &["Up", "Down"], 0.0, 3),
+    pk("Envelope", 0.0, 3),
+    pk("Slow osc", 0.0, 3),
+    pk("Key follow", 0.0, 3),
+    pp("Level by", &["Envelope", "Gate"], 0.0, 4),
+    pk("Attack", 0.0, 4),
+    pk("Decay", 0.5, 4),
+    pk("Sustain", 0.5, 4),
+    pk("Release", 0.0, 4),
+    pp("Chorus", &["Off", "I", "II", "I + II"], 0.0, 5),
+    ps("Hold", 0.0, 5),
+    pp("Octave", &["Low", "Middle", "High"], 0.5, 5),
+    pk("Volume", 0.5, 5),
+];
+
+pub fn poly_defaults() -> Vec<f32> {
+    POLY_PARAMS.iter().map(|i| i.def).collect()
+}
+
+/// A new block for the vintage poly, laid out as the stored ones are.
+pub fn poly_fresh() -> Vec<u8> {
+    let name = b"Kepler-1\0";
+    let mut v = Vec::with_capacity(178);
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    v.extend_from_slice(name);
+    v.extend_from_slice(&2u32.to_le_bytes());
+    v.extend_from_slice(&(POLY_COUNT as u32).to_le_bytes());
+    for i in &POLY_PARAMS {
+        v.extend_from_slice(&i.def.to_le_bytes());
+    }
+    v.extend_from_slice(&[0, 0, 0, 0x80, 0x3f, 0, 0, 0, 0x3f]);
+    let len = (v.len() - 12) as u32;
+    v[4..8].copy_from_slice(&len.to_le_bytes());
+    v
+}
+
+/// The vintage poly's own arpeggio, when it is on: the way (1 up, 2 down, 3 up and down), the octaves, and the
+/// length of a step in sixteenths.
+pub fn poly_arp(p: &[f32]) -> Option<(u8, u8, f32)> {
+    if p.len() < POLY_COUNT || p[0] < 0.5 {
+        return None;
+    }
+    let way = [1, 3, 2][crate::duo::pick(p[1], 3)];
+    let range = crate::duo::pick(p[2], 3) as u8 + 1;
+    let beats = if p[4] >= 0.5 { locked(p[3]) } else { 1.0 / (1.5 * 2f32.powf(p[3] * 4.5)) / beat() };
+    Some((way, range, (beats * 4.0).max(0.05)))
+}
+
 pub fn poly(p: &[f32]) -> Set {
-    const PLAIN: [f32; 34] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.5, 0.5];
-    let v = |i: usize| if p.len() >= 34 { p[i] } else { PLAIN[i] };
+    let plain = poly_defaults();
+    let v = |i: usize| if p.len() >= 34 { p[i] } else { plain[i] };
     let on = |i: usize| v(i) >= 0.5;
     let octave = (v(32) * 2.0).round() * 12.0 - 12.0;
-    let hz = 0.1 * 2f32.powf(v(5) * 8.2);
+    let hz = if on(6) { 1.0 / (locked(v(5)) * 4.0 * beat()) } else { 0.1 * 2f32.powf(v(5) * 8.2) };
     let delay = v(7) * 3.0;
-    let slow = |dest: Dest, amount: f32| Lfo { shape: Shape::Triangle, dest: if amount > 0.0 { dest } else { Dest::None }, amount, hz, reset: true, delay };
+    // set to manual, the slow oscillator waits for a hand on its button, which a stored song never has
+    let auto = !on(9);
+    let slow = |dest: Dest, amount: f32| Lfo { shape: Shape::Triangle, dest: if amount > 0.0 && auto { dest } else { Dest::None }, amount, hz, reset: true, delay };
     // where the pulse width comes from: the slow oscillator, the slider itself, or the envelope
     let source = (v(12) * 2.0).round() as u8;
     let env = Adsr { a: 0.0015 * 2f32.powf(v(26) * 11.0), d: 0.002 * 2f32.powf(v(27) * 12.5), s: v(28), r: 0.002 * 2f32.powf(v(29) * 12.5) };

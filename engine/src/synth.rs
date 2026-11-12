@@ -109,7 +109,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -784,6 +784,10 @@ impl Gen {
     pub fn new(kind: Kind) -> Self {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
         g.raw = g.encode(None);
+        if kind == Kind::Poly {
+            g.p = crate::analog::poly_defaults();
+            g.raw = crate::analog::poly_fresh();
+        }
         if kind == Kind::Duo {
             g.p = crate::duo::defaults();
             g.raw = crate::duo::fresh();
@@ -1040,7 +1044,7 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin | Kind::Kit) {
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin | Kind::Kit | Kind::Poly) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
@@ -1049,6 +1053,8 @@ impl Gen {
                 Kind::KickD => crate::kickd::FIRST,
                 Kind::Skin => crate::membrane::FIRST,
                 Kind::Kit => crate::drumkit::FIRST,
+                // past the name, its version and the count
+                Kind::Poly => out.get(12..16).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).filter(|&n| n < 64).map_or(usize::MAX / 8, |n| 24 + n),
                 _ => 12,
             };
             for (i, &v) in self.p.iter().enumerate() {
@@ -1518,6 +1524,26 @@ mod tests {
         let patch = tone.mini.as_ref().unwrap();
         let mut voice = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
         assert!((0..4000).map(|_| voice.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
+    }
+
+    #[test]
+    fn the_vintage_poly_is_made_new_and_written_back() {
+        let g = Gen::new(Kind::Poly);
+        assert_eq!(g.raw.len(), 178);
+        assert!(!def(Kind::Poly).arrives_only());
+        let mut back = Gen::decode("Kepler", &g.raw).unwrap();
+        assert_eq!(back.kind, Kind::Poly);
+        assert_eq!(back.p, crate::analog::poly_defaults());
+        assert_eq!(back.encode(None), g.raw);
+        back.p[19] = 0.25;
+        let out = back.encode(None);
+        let moved: Vec<usize> = (0..out.len()).filter(|&i| out[i] != g.raw[i]).collect();
+        assert!(!moved.is_empty() && moved.iter().all(|&i| (33 + 19 * 4..33 + 20 * 4).contains(&i)), "{moved:?}");
+        assert_eq!(Gen::decode("Kepler", &out).unwrap().p[19], 0.25);
+        // its own arpeggio: off as made, then up and down over two octaves, locked to the tempo
+        assert!(crate::analog::poly_arp(&back.p).is_none());
+        (back.p[0], back.p[1], back.p[2], back.p[3], back.p[4]) = (1.0, 0.5, 0.5, 0.75, 1.0);
+        assert_eq!(crate::analog::poly_arp(&back.p), Some((3, 2, 1.0)));
     }
 
     #[test]
