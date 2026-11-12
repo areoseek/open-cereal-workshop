@@ -190,3 +190,20 @@ pub fn unpack(installer: &Path, dest: &Path, progress: &Progress) -> Result<usiz
     }
     Ok(written)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trial against the user's own installer file: set CEREAL_INSTALLER to it and CEREAL_INSTALLER_OUT to
+    /// an empty folder, then run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn the_users_installer_unpacks() {
+        let (Some(src), Some(out)) = (std::env::var_os("CEREAL_INSTALLER"), std::env::var_os("CEREAL_INSTALLER_OUT")) else { return };
+        let p = Progress::default();
+        let n = unpack(Path::new(&src), Path::new(&out), &p).expect("unpack");
+        println!("{n} files written of {} listed", p.total.load(Ordering::Relaxed));
+        assert!(n > 100);
+    }
+}
