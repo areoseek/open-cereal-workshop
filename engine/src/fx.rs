@@ -2580,6 +2580,20 @@ fn echo_time(p: &[f32], cx: &Ctx) -> f32 {
     }
 }
 
+
+/// The tallest point of the three-part chorus sweep before it is scaled to 1.
+const CHORUS_PEAK: f32 = 4.0 / 3.0;
+/// One cycle of a chorus sweep, -1 to 1, phase 0 to 1. The round wave is built from parabolas.
+fn chorus_wave(ph: f32, shape: f32) -> f32 {
+    let arc = |ph: f32| {
+        let t = ph.fract() * 2.0;
+        if t < 1.0 { 4.0 * t * (1.0 - t) } else { -4.0 * (t - 1.0) * (2.0 - t) }
+    };
+    // four shapes: round, round cubed, a round wave with two faster ones riding on it, and that one cubed
+    let which = (shape * 4.0 / 1025.0) as i32;
+    let w = if which >= 2 { (arc(ph) + arc(ph * 2.0) / 3.0 + arc(ph * 3.0) / 3.0) / CHORUS_PEAK } else { arc(ph) };
+    if which == 1 || which >= 3 { w * w * w } else { w }
+}
 /// Echo time of the plain echo in frames: the song's steps, or steps of its own tempo.
 fn old_delay_time(p: &[f32], cx: &Ctx) -> f32 {
     let step = if p[3] < 1.0 { cx.step } else { 15.0 / (280.0 * p[3] / 1024.0).max(20.0) * cx.sr };
@@ -5317,44 +5331,44 @@ impl Unit {
                 }
             }
             Kind::Chorus => {
+                // three voices on one delay line, each swept by its own slow wave between the delay and the
+                // delay plus the depth; only one side of a gentle split feeds them
                 let n = self.buf.len();
-                let base = (0.004 + p[0] / 1024.0 * 0.026) * sr;
-                let depth = p[1] / 5000.0 * 0.006 * sr;
-                let stereo = p[2] / 1024.0 * 0.5;
+                let base = (0.00005 + p[0] / 1024.0 * 0.02995) * sr;
+                let depth = p[1] / 1000.0 * 0.001 * sr;
+                // the full turn of the stereo knob puts the right side half a cycle away
+                let stereo = p[2] / 2048.0;
                 let wet_only = p[11] >= 512.0;
-                // a high-pass on what feeds the voices, so the low end stays where it was
-                let cross = p[9] >= 512.0;
-                let a = 1.0 - (-TAU * (20.0 * 1000f32.powf(p[10] / 5000.0 * 0.5)) / sr).exp();
+                let low_side = p[9] >= 512.0;
+                let a = 1.0 - (-TAU * (7.1608 * 2000f32.powf(p[10] / 5000.0)).min(sr * 0.45) / sr).exp();
+                let dry = if wet_only { 0.0 } else { 0.7 };
                 for f in io.iter_mut() {
                     let mut x = *f;
-                    if cross {
-                        for c in 0..2 {
-                            z[8 + c] += a * (x[c] - z[8 + c]);
-                            x[c] -= z[8 + c];
-                        }
+                    for c in 0..2 {
+                        z[8 + c] += a * (x[c] - z[8 + c]);
+                        x[c] = if low_side { z[8 + c] } else { x[c] - z[8 + c] };
                     }
                     self.buf[self.pos] = x;
                     let mut out = [0.0f32; 2];
                     for v in 0..3 {
-                        z[v] += (p[3 + v] / 1000.0).max(0.01) / sr;
-                        if z[v] >= 1.0 {
-                            z[v] -= 1.0;
-                        }
-                        let tri = p[6 + v] >= 512.0;
+                        let shape = p[6 + v];
                         for c in 0..2 {
-                            let ph = (z[v] + stereo * c as f32 + v as f32 / 3.0).fract();
-                            let l = if tri { 1.0 - (2.0 * ph - 1.0).abs() } else { 0.5 - 0.5 * (ph * TAU).cos() };
+                            let ph = (z[v] + 0.0006 + stereo * c as f32).fract();
+                            let l = 0.5 + 0.5 * chorus_wave(ph, shape);
                             let d = base + depth * l;
                             let at = self.pos as f32 + n as f32 - d;
                             let i = at as usize;
                             let fr = at - i as f32;
                             out[c] += self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
                         }
+                        let r = p[3 + v] / 5000.0;
+                        z[v] += 5.0 * r * r / sr;
+                        if z[v] >= 1.0 {
+                            z[v] -= 1.0;
+                        }
                     }
                     self.pos = (self.pos + 1) % n;
-                    let dry = if wet_only { 0.0 } else { 0.7 };
-                    let wet = if wet_only { 1.0 / 3.0 } else { 0.7 / 3.0 };
-                    *f = [f[0] * dry + out[0] * wet + if cross && !wet_only { z[8] * 0.3 } else { 0.0 }, f[1] * dry + out[1] * wet + if cross && !wet_only { z[9] * 0.3 } else { 0.0 }];
+                    *f = [f[0] * dry + out[0] * 0.43, f[1] * dry + out[1] * 0.43];
                 }
             }
             Kind::Spread => {
@@ -5388,39 +5402,43 @@ impl Unit {
                 }
             }
             Kind::Transient => {
-                let att = (p[0] - 80.0) / 80.0;
-                let rel = (p[2] - 80.0) / 80.0;
-                let drive = p[1] / 160.0;
-                let gain = db((p[3] - 80.0) / 80.0 * 24.0);
-                let win = |s: f32| [0.008f32, 0.02, 0.05][(s as usize).min(2)];
+                // the part above the split is shaped: a fast level follower is held against a slower one to find
+                // onsets, and against a lingering one to find tails; each knob turns that distance into gain
+                let law = |v: f32, up: f32, down: f32| {
+                    let r = ((v - 80.0) / 80.0).clamp(-1.0, 1.0);
+                    if r >= 0.0 { r * r * up } else { -r * r * down }
+                };
+                let att = law(p[0], 0.58, 0.87);
+                let rel = law(p[2], 0.65, 1.0);
+                let drive = (p[1] / 160.0).clamp(0.0, 1.0);
+                let gain = db((p[3] - 80.0) / 80.0 * 9.0);
                 let coef = |t: f32| 1.0 - (-1.0 / (t * sr)).exp();
-                let (a_fast, a_slow) = (coef(0.0005), coef(win(p[4])));
-                let (r_fast, r_slow) = (coef(win(p[5]) * 2.0), coef(win(p[5]) * 20.0));
+                let rise = coef([0.004f32, 0.0066, 0.011][(p[4] as usize).min(2)]);
+                let fall = coef([0.026f32, 0.041, 0.065][(p[5] as usize).min(2)]);
+                let (a_fast, r_fast, linger) = (coef(0.0003), coef(0.004), coef(1.77));
                 let (dry, wet) = if p[6] <= 80.0 { (p[6] / 80.0, 1.0) } else { (1.0, (160.0 - p[6]) / 80.0) };
                 let x = (p[7] - 80.0) / 80.0;
                 let hz = if x >= 0.0 { 260.0 * (1000.0f32 / 260.0).powf(x) } else { 260.0 * (5.0f32 / 260.0).powf(-x) };
                 let a = 1.0 - (-TAU * hz / sr).exp();
-                let smooth = coef(0.002);
+                let d = 0.5 * 27f32.powf(drive);
                 for f in io.iter_mut() {
                     z[0] += a * (f[0] - z[0]);
                     z[1] += a * (f[1] - z[1]);
                     let (hl, hr) = (f[0] - z[0], f[1] - z[1]);
                     let lv = hl.abs().max(hr.abs()) + 1e-6;
-                    // one peak follower; a slow riser against it finds onsets, a slow faller finds tails
                     z[2] += if lv > z[2] { a_fast } else { r_fast } * (lv - z[2]);
                     let e = z[2];
-                    z[3] = if e > z[3] { z[3] + a_slow * (e - z[3]) } else { e };
-                    z[5] = if e > z[5] { e } else { z[5] + r_slow * (e - z[5]) };
-                    let up = (20.0 * ((e + 1e-6) / (z[3] + 1e-6)).log10()).clamp(0.0, 24.0);
-                    let tail = (20.0 * ((z[5] + 1e-6) / (e + 1e-6)).log10()).clamp(0.0, 24.0);
-                    let want = (att * up + rel * tail).clamp(-36.0, 24.0);
-                    z[6] += smooth * (want - z[6]);
-                    let g = db(z[6]);
+                    // the slow riser, the follower that falls at the release speed, and the one that lingers
+                    z[3] = if e > z[3] { z[3] + rise * (e - z[3]) } else { e };
+                    z[4] = e.max(z[4] * (1.0 - fall));
+                    z[5] = if e > z[5] { e } else { z[5] + linger * (e - z[5]) };
+                    let up = 20.0 * ((e + 1e-6) / (z[3] + 1e-6)).log10();
+                    let tail = 20.0 * ((z[5] + 1e-6) / (z[4] + 1e-6)).log10();
+                    let g = db(att * up + (rel * tail).clamp(-24.0, 18.0));
                     let (mut wl, mut wr) = (hl * g, hr * g);
                     if drive > 0.0 {
-                        let d = 1.0 + drive * 7.0;
-                        wl = (wl * d).tanh() / d * (1.0 + drive);
-                        wr = (wr * d).tanh() / d * (1.0 + drive);
+                        wl = (wl * d).tanh() / d;
+                        wr = (wr * d).tanh() / d;
                     }
                     *f = [(z[0] * dry + wl * wet) * gain, (z[1] * dry + wr * wet) * gain];
                 }
