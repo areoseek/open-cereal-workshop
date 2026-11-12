@@ -179,6 +179,9 @@ pub struct State {
     ghosts: bool,
     /// The key strip shows every note's name instead of a keyboard.
     names: bool,
+    /// The light rows that show the white keys or the scale, and the channel's sample drawn behind the notes.
+    rows: bool,
+    wave: bool,
     /// Selected notes, as indices into the pattern's note list.
     pub sel: BTreeSet<usize>,
     sel_for: (usize, u16),
@@ -217,6 +220,8 @@ impl Default for State {
             lane: Lane::Vel,
             ghosts: true,
             names: false,
+            rows: true,
+            wave: false,
             sel: BTreeSet::new(),
             sel_for: (usize::MAX, 0),
             clip: vec![],
@@ -973,6 +978,15 @@ impl App {
     }
 
     /// A key press while the piano roll has the focus. True when it was ours.
+    pub(crate) fn pr_tool_names() -> Vec<&'static str> {
+        TOOLS.iter().map(|t| t.2).collect()
+    }
+    pub(crate) fn pr_pick_tool(&mut self, i: usize) {
+        if let Some(t) = TOOLS.get(i) {
+            self.piano.tool = t.0;
+        }
+    }
+
     pub(crate) fn piano_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
         if m.command && !m.alt {
             match key {
@@ -1006,6 +1020,8 @@ impl App {
                 Key::C => self.pr_recolour(),
                 Key::V => self.piano.ghosts = !self.piano.ghosts,
                 Key::G if !repeat => self.pr_group(false),
+                Key::B if !repeat => self.piano.rows = !self.piano.rows,
+                Key::N if !repeat => self.piano.wave = !self.piano.wave,
                 k => match HELPERS.iter().position(|h| h.1 == k) {
                     Some(i) => self.pr_helper(i),
                     None => return false,
@@ -1298,7 +1314,8 @@ impl App {
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
 
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 0.0, GRID_DARK);
+        let (grid_dark, grid_light) = crate::widgets::grid_colours(self.settings.grid);
+        p.rect_filled(rect, 0.0, grid_dark);
 
         // rows
         let top_key = key_of(grid.top());
@@ -1309,10 +1326,29 @@ impl App {
             let row = Rect::from_min_max(Pos2::new(grid.left(), y), Pos2::new(grid.right(), y + KEY_H));
             // with a scale chosen its keys are the light rows, else the white keys are
             let lit = if self.piano.scale == 0 { !is_black(key) } else { prtools::in_scale(key as u8, self.piano.scale_root, self.piano.scale) };
-            if lit {
-                gp.rect_filled(row, 0.0, GRID_LIGHT);
+            if lit && self.piano.rows {
+                gp.rect_filled(row, 0.0, grid_light);
             }
             gp.line_segment([row.left_top(), row.right_top()], Stroke::new(1.0_f32, if key % 12 == 11 { LINE } else { LINE_SOFT }));
+        }
+        if self.piano.wave {
+            // the channel's sample behind the notes, laid out from the start of the pattern at the song tempo
+            if let Some(smp) = self.song.channels.get(chan as usize).and_then(|c| c.sample.as_ref()) {
+                let fpt = smp.rate as f32 * 60.0 / self.song.tempo.max(1.0) / ppq;
+                let (mid, half) = (grid.center().y, grid.height() * 0.4);
+                for x in grid.left() as i32..grid.right() as i32 {
+                    let t0 = tick_of(x as f32);
+                    let a = (t0 * fpt) as usize;
+                    let b = (((t0 + 1.0 / px) * fpt) as usize).min(smp.frames.len());
+                    if a >= b {
+                        break;
+                    }
+                    let stride = ((b - a) / 32).max(1);
+                    let peak = smp.frames[a..b].iter().step_by(stride).fold(0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+                    let h = (peak * half).max(0.5);
+                    gp.line_segment([Pos2::new(x as f32, mid - h), Pos2::new(x as f32, mid + h)], Stroke::new(1.0_f32, Color32::from_white_alpha(38)));
+                }
+            }
         }
         // columns (also through the lane)
         let last = tick_of(grid.right()) as u32 + line;

@@ -71,7 +71,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Esc | Close the window that has the keys | yes |
 | Enter | Let the playlist fill the work area, and back | yes |
 | Ctrl+Shift+H | Put the windows back where they start | yes |
-| F3 | Tool selector | no |
+| F3 | Tool selector (the tools of the focused window, at the pointer) | yes |
 
 ## Channel rack
 | Binding | Action | Done |
@@ -157,7 +157,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Double-click a note | Note properties | yes |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
 | M | Keyboard / note names view | yes |
-| Alt+B, Alt+N | Note helpers, waveform helper | no |
+| Alt+B, Alt+N | Note helpers (the light rows), waveform helper (the channel sample behind the notes) | yes |
 | Alt+G / Shift+G | Ungroup / group the selected notes; a group is picked, moved and copied as one | yes |
 | Ctrl+I | Write the lane's current value | no |
 | Ctrl+Enter | Select the time round the selection | yes |
@@ -202,7 +202,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |
 | Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selected clips into one audio clip (from the song start with Shift); the clips are muted under it | yes |
-| Ctrl+Alt+G | Grid colour | no |
+| Ctrl+Alt+G | Grid colour (kept in the settings; the piano roll takes it too) | yes |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Ctrl+F8, Alt+P | Project picker, picker panel | no |

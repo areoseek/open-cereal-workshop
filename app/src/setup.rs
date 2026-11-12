@@ -48,6 +48,8 @@ pub struct Settings {
     pub midi_sync: bool,
     /// Size of the whole interface; 0 = as the system says.
     pub scale: f32,
+    /// The colour of the playlist and piano roll grid, when it is not the usual one.
+    pub grid: Option<[u8; 3]>,
     /// Extra folders for the browser and the sound search.
     pub folders: Vec<PathBuf>,
     /// The projects opened or saved last, newest first.
@@ -135,6 +137,10 @@ impl Settings {
                 }
                 Some(("midi_sync", v)) => s.midi_sync = v.trim() == "1",
                 Some(("scale", v)) => s.scale = v.trim().parse().unwrap_or(0.0),
+                Some(("grid", v)) => {
+                    let c: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    s.grid = (c.len() == 3).then(|| [c[0], c[1], c[2]]);
+                }
                 _ => {}
             }
         }
@@ -181,6 +187,9 @@ impl Settings {
         }
         if self.scale > 0.0 {
             out += &format!("scale={}\n", self.scale);
+        }
+        if let Some([r, g, b]) = self.grid {
+            out += &format!("grid={r},{g},{b}\n");
         }
         std::fs::write(p, out)
     }

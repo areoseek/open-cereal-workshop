@@ -7,6 +7,13 @@ pub const PANEL: Color32 = Color32::from_rgb(63, 72, 78);
 pub const PANEL_DARK: Color32 = Color32::from_rgb(40, 47, 51);
 pub const GRID_DARK: Color32 = Color32::from_rgb(46, 54, 59);
 pub const GRID_LIGHT: Color32 = Color32::from_rgb(54, 63, 68);
+/// The dark and the light shade of the playlist and piano roll grid: the usual ones, or the user's colour.
+pub fn grid_colours(own: Option<[u8; 3]>) -> (Color32, Color32) {
+    match own {
+        Some([r, g, b]) => (Color32::from_rgb(r, g, b), Color32::from_rgb(r.saturating_add(8), g.saturating_add(9), b.saturating_add(9))),
+        None => (GRID_DARK, GRID_LIGHT),
+    }
+}
 pub const LINE: Color32 = Color32::from_rgb(33, 39, 43);
 pub const LINE_SOFT: Color32 = Color32::from_rgb(43, 50, 55);
 pub const TEXT: Color32 = Color32::from_rgb(205, 212, 216);

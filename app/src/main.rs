@@ -193,6 +193,9 @@ pub(crate) struct App {
     step_down: usize,
     rename_insert: Option<(usize, String)>,
     rename_marker: Option<(usize, String)>,
+    /// The tool list that F3 opens at the pointer (a zero position is filled in when it is first shown).
+    tool_menu: Option<egui::Pos2>,
+    pub(crate) grid_win: bool,
     pub(crate) setup: setup::State,
     pub(crate) settings: setup::Settings,
     sel_chan: usize,
@@ -347,6 +350,8 @@ impl App {
             step_down: 0,
             rename_insert: None,
             rename_marker: None,
+            tool_menu: None,
+            grid_win: false,
             setup: Default::default(),
             settings,
             sel_chan: 0,
@@ -1707,6 +1712,7 @@ impl App {
                 Key::F6 if !repeat => self.show_rack = !self.show_rack,
                 Key::F7 if !repeat => self.show_piano = !self.show_piano,
                 Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
+                Key::F3 if !repeat => self.tool_menu = if self.tool_menu.is_some() { None } else { Some(egui::Pos2::ZERO) },
                 Key::F4 if !repeat => {
                     self.new_pattern();
                     self.start_rename_pattern();
@@ -2262,6 +2268,50 @@ impl eframe::App for App {
             if keep {
                 self.rename_insert = Some((i, name));
             }
+        }
+        if let Some(at) = self.tool_menu {
+            // the tools of the window that has the focus, at the pointer
+            let at = if at == egui::Pos2::ZERO { ctx.pointer_latest_pos().unwrap_or(screen.center()) } else { at };
+            self.tool_menu = Some(at);
+            let piano = self.focus == Win::Piano;
+            let names = if piano { App::pr_tool_names() } else { App::pl_tool_names() };
+            let mut pick = None;
+            let shown = egui::Window::new("Tools").id(egui::Id::new("tool_menu")).title_bar(false).resizable(false).fixed_pos(at).show(ctx, |ui| {
+                ui.label(RichText::new(if piano { "Piano roll tool" } else { "Playlist tool" }).color(TEXT_DIM));
+                for (i, n) in names.iter().enumerate() {
+                    if ui.selectable_label(false, *n).clicked() {
+                        pick = Some(i);
+                    }
+                }
+            });
+            let outside = shown.map(|r| ctx.input(|x| x.pointer.any_pressed() && x.pointer.interact_pos().is_some_and(|p| !r.response.rect.contains(p)))).unwrap_or(false);
+            if let Some(i) = pick {
+                if piano {
+                    self.pr_pick_tool(i);
+                } else {
+                    self.pl_pick_tool(i);
+                }
+            }
+            if pick.is_some() || outside || ctx.input(|x| x.key_pressed(Key::Escape)) {
+                self.tool_menu = None;
+            }
+        }
+        if self.grid_win {
+            let mut open = true;
+            egui::Window::new("Grid colour").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+                let mut c = self.settings.grid.unwrap_or([GRID_DARK.r(), GRID_DARK.g(), GRID_DARK.b()]);
+                ui.horizontal(|ui| {
+                    if ui.color_edit_button_srgb(&mut c).changed() {
+                        self.settings.grid = Some(c);
+                        let _ = self.settings.save();
+                    }
+                    if ui.button("Default").clicked() {
+                        self.settings.grid = None;
+                        let _ = self.settings.save();
+                    }
+                });
+            });
+            self.grid_win = open;
         }
         if let Some((i, mut name)) = self.rename_marker.take() {
             let mut keep = i < self.song.markers.len();

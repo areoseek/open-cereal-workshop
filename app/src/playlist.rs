@@ -267,7 +267,8 @@ impl App {
         let track_of = |y: f32| (((y - grid.top() + sy) / th).floor().max(0.0) as usize).min(ntracks.saturating_sub(1));
 
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 0.0, GRID_DARK);
+        let (grid_dark, grid_light) = crate::widgets::grid_colours(self.settings.grid);
+        p.rect_filled(rect, 0.0, grid_dark);
         let first_track = track_of(grid.top());
         let last_track = track_of(grid.bottom());
 
@@ -280,7 +281,7 @@ impl App {
         for &(t, n, len) in &lines {
             let x = x_of(t as f32);
             if (n / 4) % 2 == 1 {
-                p.rect_filled(Rect::from_min_max(Pos2::new(x.max(grid.left()), grid.top()), Pos2::new((x + len as f32 * px).max(grid.left()), grid.bottom())), 0.0, GRID_LIGHT);
+                p.rect_filled(Rect::from_min_max(Pos2::new(x.max(grid.left()), grid.top()), Pos2::new((x + len as f32 * px).max(grid.left()), grid.bottom())), 0.0, grid_light);
             }
             if n % every == 0 && x >= grid.left() {
                 p.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
@@ -1211,11 +1212,21 @@ impl App {
         }
     }
 
+    pub(crate) fn pl_tool_names() -> Vec<&'static str> {
+        TOOLS.iter().map(|t| t.2).collect()
+    }
+    pub(crate) fn pl_pick_tool(&mut self, i: usize) {
+        if let Some(t) = TOOLS.get(i) {
+            self.playlist.tool = t.0;
+        }
+    }
+
     /// A key press while the playlist has the focus. True when it was ours.
     pub(crate) fn playlist_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
         if m.command && m.alt {
             match key {
                 Key::C if !repeat => self.pl_consolidate(m.shift),
+                Key::G if !repeat => self.grid_win = !self.grid_win,
                 _ => return false,
             }
             return true;
