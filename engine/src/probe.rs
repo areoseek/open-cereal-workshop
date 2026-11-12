@@ -13,6 +13,11 @@ fn probe_project() {
     for m in &song.markers {
         println!("marker at {} kind {} {:?}", m.pos, m.kind, m.name);
     }
+    if song.performance {
+        for (i, t) in song.tracks.iter().enumerate().filter(|(_, t)| t.perf != crate::song::Perf::default() || t.grouped) {
+            println!("track {} {:?} grouped {}", i, t.perf, t.grouped);
+        }
+    }
     for c in song.clips.iter().take(std::env::var("PROBE_CLIPS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)) {
         println!("clip at {} len {} track {} {:?} offset {} group {}", c.pos, c.len, c.track, c.src, c.offset, c.group);
     }

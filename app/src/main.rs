@@ -90,6 +90,23 @@ fn out_lag(info: &cpal::OutputCallbackInfo) {
 
 /// Open the sound card the settings name (or the system's default) and let the player `make` builds for
 /// its rate run on it.
+/// Tests run on a sound device that takes blocks as fast as they come; with CEREAL_PACE set the blocks are
+/// held back to the speed of the clock so that time in the song passes as it would be heard.
+fn pace(frames: usize, rate: f32) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FROM: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("CEREAL_PACE").is_some()) {
+        return;
+    }
+    let from = *FROM.get_or_init(std::time::Instant::now);
+    let done = DONE.fetch_add(frames as u64, std::sync::atomic::Ordering::Relaxed);
+    let due = std::time::Duration::from_secs_f64(done as f64 / rate.max(1.0) as f64);
+    if let Some(wait) = due.checked_sub(from.elapsed()) {
+        std::thread::sleep(wait.min(std::time::Duration::from_millis(200)));
+    }
+}
+
 fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Result<(cpal::Stream, String), String> {
     let host = cpal::default_host();
     let named = if prefs.audio_out.is_empty() { None } else { host.output_devices().ok().and_then(|mut l| l.find(|d| d.name().map(|n| n == prefs.audio_out).unwrap_or(false))) };
@@ -120,6 +137,7 @@ fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Res
     let stream = match format {
         cpal::SampleFormat::F32 => device.build_output_stream(&config, move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 out_lag(info);
+                pace(out.len() / channels.max(1), rate);
                 player.render(out, channels)
             },
             err,
@@ -131,6 +149,7 @@ fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Res
                 &config,
                 move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     out_lag(info);
+                    pace(out.len() / channels.max(1), rate);
                     let n = out.len().min(scratch.len());
                     player.render(&mut scratch[..n], channels);
                     for (o, s) in out.iter_mut().zip(&scratch[..n]) {

@@ -218,7 +218,7 @@ impl App {
     /// Play a scene: the first clip of every track between two places of the zone.
     fn perf_scene(&mut self, lo: u32, hi: u32, m: Modifiers) {
         let mut first: std::collections::BTreeMap<u16, u32> = Default::default();
-        for c in self.song.clips.iter().filter(|c| c.pos >= lo && c.pos < hi && !c.muted) {
+        for c in self.song.clips.iter().filter(|c| c.pos >= lo && c.pos < hi) {
             let e = first.entry(c.track).or_insert(c.pos);
             *e = (*e).min(c.pos);
         }
@@ -289,7 +289,7 @@ impl App {
             if to <= from {
                 continue;
             }
-            self.song.clips.push(Clip { pos: from, len: to - from, offset: c.offset + g.offset.round().max(0.0) as u32, group: 0, ..c });
+            self.song.clips.push(Clip { pos: from, len: to - from, offset: c.offset + g.offset.round().max(0.0) as u32, group: 0, muted: false, ..c });
             self.dirty = true;
         }
     }
@@ -537,7 +537,7 @@ impl App {
                 continue;
             }
             let (name, col) = self.clip_look(c);
-            let enabled = !c.muted && self.song.tracks.get(tr).map(|t| t.enabled).unwrap_or(true);
+            let enabled = (!c.muted || zone.is_some_and(|z| c.pos < z)) && self.song.tracks.get(tr).map(|t| t.enabled).unwrap_or(true);
             let col = if enabled { col } else { col.gamma_multiply(0.35) };
             gp.rect_filled(r, 2.0, col.gamma_multiply(0.55));
             let title = Rect::from_min_max(r.min, Pos2::new(r.right(), (r.top() + 12.0).min(r.bottom())));

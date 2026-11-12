@@ -2177,7 +2177,7 @@ impl Player {
                     if !down {
                         self.perf_release(song, track as usize);
                     } else if let Some(zone) = song.perf_start() {
-                        let at = song.clips.iter().filter(|c| c.track == track && c.pos < zone && !c.muted).nth(nth as usize).map(|c| c.pos);
+                        let at = song.clips.iter().filter(|c| c.track == track && c.pos < zone).nth(nth as usize).map(|c| c.pos);
                         if at.is_some() {
                             self.perf_trigger(song, track as usize, at, false, false);
                         }
@@ -2308,10 +2308,11 @@ impl Player {
     }
 
     /// A clip of the performance zone was pressed (or, with `None`, its track was told to stop).
-    /// The clip of the performance zone at a place on a track.
+    /// The clip of the performance zone at a place on a track. (The mute mark of a zone clip is not looked at:
+    /// files keep it on the clips that were not sounding when they were saved.)
     fn zone_clip(song: &Song, track: usize, pos: u32) -> Option<&crate::song::Clip> {
         let k = song.clips.partition_point(|c| c.pos < pos);
-        song.clips[k..].iter().take_while(|c| c.pos == pos).find(|c| c.track as usize == track && !c.muted)
+        song.clips[k..].iter().take_while(|c| c.pos == pos).find(|c| c.track as usize == track)
     }
 
     fn perf_trigger(&mut self, song: &Song, track: usize, clip: Option<u32>, now: bool, queue: bool) {
@@ -2401,7 +2402,7 @@ impl Player {
         // the scene the clip belongs to: from the marker at or before it to the next one
         let lo = song.markers.iter().filter(|m| m.pos <= at).map(|m| m.pos).max().unwrap_or(0);
         let hi = song.markers.iter().filter(|m| m.pos > at).map(|m| m.pos).min().unwrap_or(u32::MAX).min(zone as u32);
-        let mine = |c: &&crate::song::Clip| c.track as usize == track && c.pos >= lo && c.pos < hi && !c.muted;
+        let mine = |c: &&crate::song::Clip| c.track as usize == track && c.pos >= lo && c.pos < hi;
         let count = song.clips.iter().filter(mine).count();
         let nth = |k: usize| song.clips.iter().filter(mine).nth(k).map(|c| c.pos);
         let me = song.clips.iter().filter(mine).position(|c| c.pos == cur).unwrap_or(0);
