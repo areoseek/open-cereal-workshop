@@ -1069,8 +1069,16 @@ struct Comp {
     direct: Vec<Hold>,
     sends: Vec<Vec<(usize, Hold)>>,
     tmp: Vec<[f32; 2]>,
+    /// Instruments whose own sound comes out late: the channel, its track, the hold that lines it up with the
+    /// latest instrument on that track, and whether it ran this block.
+    inst: Vec<(usize, usize, Hold, bool)>,
+    /// Per track: what those instruments gave, joined to the track behind its own hold.
+    after: Vec<Vec<[f32; 2]>>,
+    after_dirty: Vec<bool>,
     #[cfg(test)]
     fake: Vec<(usize, usize)>,
+    #[cfg(test)]
+    fake_inst: Vec<(usize, usize)>,
 }
 
 impl Comp {
@@ -1084,6 +1092,22 @@ impl Comp {
         let cap = (rate * 2.0) as usize;
         let (mut into, mut out) = (vec![0usize; ni], vec![0usize; ni]);
         let mut any = false;
+        let mut late: Vec<(usize, usize, usize)> = Vec::new();
+        for (c, ch) in song.channels.iter().enumerate() {
+            #[allow(unused_mut)]
+            let mut own = ch.ext.as_ref().map_or(0, |h| h.0.latency() as usize);
+            #[cfg(test)]
+            {
+                own += self.fake_inst.iter().filter(|f| f.0 == c).map(|f| f.1).sum::<usize>();
+            }
+            if own > 0 && ni > 0 {
+                let t = if (ch.insert as usize) < ni { ch.insert as usize } else { 0 };
+                let own = own.min(cap);
+                into[t] = into[t].max(own);
+                late.push((c, t, own));
+                any = true;
+            }
+        }
         for &i in &song.mix_order {
             if i >= ni {
                 continue;
@@ -1109,7 +1133,25 @@ impl Comp {
                 self.direct.clear();
                 self.sends.clear();
             }
+            self.inst.clear();
+            self.after.clear();
             return;
+        }
+        self.inst.retain(|e| late.iter().any(|l| l.0 == e.0 && l.1 == e.1));
+        for l in &late {
+            if !self.inst.iter().any(|e| e.0 == l.0) {
+                self.inst.push((l.0, l.1, Hold::default(), false));
+            }
+        }
+        for e in self.inst.iter_mut() {
+            let own = late.iter().find(|l| l.0 == e.0).map_or(0, |l| l.2);
+            e.2.set(into[e.1].saturating_sub(own));
+        }
+        if late.is_empty() {
+            self.after.clear();
+        } else {
+            self.after.resize_with(ni, || vec![[0.0; 2]; BLOCK]);
+            self.after_dirty.resize(ni, false);
         }
         self.direct.resize_with(ni, Hold::default);
         self.sends.resize_with(ni, Vec::new);
@@ -1125,6 +1167,55 @@ impl Comp {
             }
             for l in list.iter_mut() {
                 l.1.set(into[l.0].saturating_sub(out[i]));
+            }
+        }
+    }
+}
+
+impl Comp {
+    /// The sound of a late instrument goes behind its track's hold. False: it is not one of them, and joins its
+    /// track the plain way.
+    fn take(&mut self, c: usize, buf: &mut [[f32; 2]], gain: [f32; 2], sound: bool) -> bool {
+        if !self.on {
+            return false;
+        }
+        let Some(e) = self.inst.iter_mut().find(|e| e.0 == c) else { return false };
+        let Some(dst) = self.after.get_mut(e.1) else { return false };
+        e.3 = true;
+        if e.2.run(buf, sound) {
+            for (o, f) in dst.iter_mut().zip(buf.iter()) {
+                o[0] += f[0] * gain[0];
+                o[1] += f[1] * gain[1];
+            }
+            self.after_dirty[e.1] = true;
+        }
+        true
+    }
+
+    /// Once the tracks' own holds have run: late instruments that gave nothing this block let out what they
+    /// still hold, and all of them join their tracks.
+    fn settle(&mut self, n: usize, buses: &mut [Vec<[f32; 2]>], dirty: &mut [bool]) {
+        for e in self.inst.iter_mut() {
+            if !std::mem::take(&mut e.3) && e.2.live > 0 && e.1 < self.after.len() {
+                self.tmp.clear();
+                self.tmp.resize(n, [0.0; 2]);
+                if e.2.run(&mut self.tmp, false) {
+                    for (o, f) in self.after[e.1].iter_mut().zip(self.tmp.iter()) {
+                        o[0] += f[0];
+                        o[1] += f[1];
+                    }
+                    self.after_dirty[e.1] = true;
+                }
+            }
+        }
+        for (i, held) in self.after.iter_mut().enumerate() {
+            if std::mem::take(&mut self.after_dirty[i]) && i < buses.len() {
+                for (o, f) in buses[i][..n].iter_mut().zip(held.iter_mut()) {
+                    o[0] += f[0];
+                    o[1] += f[1];
+                    *f = [0.0; 2];
+                }
+                dirty[i] = true;
             }
         }
     }
@@ -3102,11 +3193,16 @@ impl Player {
             }
             let buf = &mut self.host_buf[..n];
             buf.fill([0.0; 2]);
-            if !h.0.process(buf, &self.host_evs, &cx.clock, self.sr) || !ch.enabled {
-                continue;
+            let sounded = h.0.process(buf, &self.host_evs, &cx.clock, self.sr) && ch.enabled;
+            if !sounded {
+                buf.fill([0.0; 2]);
             }
             let g = law::channel_gain(self.ov.chan_volume(song, c));
             let (pl, pr) = law::pan(self.ov.chan_pan(song, c).clamp(-1.0, 1.0));
+            // one whose own sound comes late is lined up apart from the rest of its track
+            if self.comp.take(c, buf, [g * pl, g * pr], sounded) || !sounded {
+                continue;
+            }
             let i = if (ch.insert as usize) < ni { ch.insert as usize } else { 0 };
             for (o, f) in self.buses[i][..n].iter_mut().zip(buf.iter()) {
                 o[0] += f[0] * g * pl;
@@ -3202,6 +3298,9 @@ impl Player {
         if self.comp.on {
             for i in 0..ni.min(self.comp.direct.len()) {
                 self.dirty[i] = self.comp.direct[i].run(&mut self.buses[i][..n], self.dirty[i]);
+            }
+            if !self.comp.inst.is_empty() {
+                self.comp.settle(n, &mut self.buses, &mut self.dirty);
             }
         }
         for &i in &song.mix_order {
@@ -4433,6 +4532,25 @@ mod tests {
         let (c, d) = first_and_last(vec![(1, 100)]);
         assert_eq!(c, a);
         assert!((d as i64 - b as i64 - 100).abs() <= 1, "the other track waits 100 frames ({c}..{d})");
+        // an instrument whose own sound comes 100 frames late: what else plays into its track waits for it, and
+        // it is not held itself; a second one 40 frames late on the same track is held the 60 between them
+        let mut one = s.clone();
+        one.channels[1].insert = 1;
+        let mut comp = Comp { fake_inst: vec![(0, 100), (1, 40)], ..Default::default() };
+        comp.fit(&one, 1, 48_000.0);
+        assert!(comp.on);
+        assert_eq!(comp.direct[1].buf.len(), 100);
+        let ni = one.inserts.len();
+        let (mut buses, mut dirty) = (vec![vec![[0.0f32; 2]; 256]; ni], vec![false; ni]);
+        let mut click = vec![[0.0f32; 2]; 256];
+        click[0] = [1.0; 2];
+        assert!(comp.take(0, &mut click.clone(), [1.0; 2], true));
+        assert!(comp.take(1, &mut click, [0.5; 2], true));
+        assert!(!comp.take(2, &mut click, [1.0; 2], true), "a punctual instrument joins its track the plain way");
+        comp.settle(256, &mut buses, &mut dirty);
+        assert!(dirty[1]);
+        let hits: Vec<(usize, f32)> = buses[1].iter().enumerate().filter(|(_, f)| f[0] != 0.0).map(|(i, f)| (i, f[0])).collect();
+        assert_eq!(hits, vec![(0, 1.0), (60, 0.5)]);
     }
 
     fn tone_song(secs: f32) -> Song {
