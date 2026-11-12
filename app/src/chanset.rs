@@ -2364,6 +2364,23 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                         let mut v = g.p[idx];
                         let span = (p.max - p.min) as f32;
                         let label = p.name.to_uppercase();
+                        let names = (g.kind == Kind::Guitar).then(|| cereal_engine::guitar::CHOICES.iter().find(|c| c.0 == idx).map(|c| c.1)).flatten();
+                        if let Some(names) = names {
+                            // a choice, not an amount: a list of names
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(&label).small().color(TEXT_DIM));
+                                let cur = (v as usize).min(names.len() - 1);
+                                egui::ComboBox::from_id_salt(("guitar_choice", idx)).width(120.0).selected_text(names[cur]).show_ui(ui, |ui| {
+                                    for (k, n) in names.iter().enumerate() {
+                                        if ui.selectable_label(k == cur, *n).clicked() {
+                                            g.p[idx] = k as f32;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            });
+                            continue;
+                        }
                         if cap_knob_for(ui, &label, &mut v, p.min as f32, p.max as f32, p.def as f32, |v| if span > 1000.0 { format!("{:.0} %", (v - p.min as f32) / span * 100.0) } else { format!("{v:.0}") }, Some(cereal_engine::song::Target::ChanParam(ci, idx as u16))) {
                             g.p[idx] = v.round();
                             changed = true;

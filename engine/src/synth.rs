@@ -1166,6 +1166,7 @@ impl Gen {
             Kind::Triple => crate::triple::tail(&self.p),
             Kind::Hybrid => crate::hybrid::tail(&self.p),
             Kind::Morph => crate::morph::tail(&self.p),
+            Kind::Guitar => crate::guitar::tail(&self.p),
             _ => Default::default(),
         }
     }
