@@ -183,12 +183,12 @@ fn draw_env(ui: &mut Ui, e: &Env, on: bool) {
     p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
 }
 
-fn draw_wave(ui: &mut Ui, frames: &[[f32; 2]], color: Color32) {
+fn draw_wave(ui: &mut Ui, frames: &[[f32; 2]], color: Color32) -> egui::Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), 70.0), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, 2.0, PANEL_DARK);
     if frames.is_empty() {
-        return;
+        return rect;
     }
     let n = rect.width() as usize;
     let mid = rect.center().y;
@@ -206,6 +206,7 @@ fn draw_wave(ui: &mut Ui, frames: &[[f32; 2]], color: Color32) {
         let x = rect.left() + i as f32;
         p.line_segment([Pos2::new(x, mid - hi.min(1.0) * half), Pos2::new(x, mid - lo.max(-1.0) * half + 1.0)], Stroke::new(1.0_f32, color));
     }
+    rect
 }
 
 impl App {
@@ -395,7 +396,21 @@ impl App {
                     section(ui, "SLICES");
                     ui.label(RichText::new(format!("{}  ({} slices, {:.0} beats at {:.0} BPM)", sl.path.rsplit(['/', '\\']).next().unwrap_or(""), sl.cuts.len(), sl.beats, sl.bpm)).small().color(TEXT_DIM));
                     if let Some(s) = &c.sample {
-                        draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                        let r = draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                        // the cuts over the wave, each with its number; reversed slices are tinted
+                        let total = (s.frames.len() as f64 * sl.rate as f64 / s.rate.max(1) as f64).max(1.0);
+                        let p = ui.painter_at(r);
+                        for (i, cut) in sl.cuts.iter().enumerate() {
+                            let x = r.left() + (cut.pos as f64 / total) as f32 * r.width();
+                            if cut.reverse {
+                                let end = sl.cuts.iter().map(|c| c.pos).filter(|&p| p > cut.pos).min().map_or(r.right(), |e| r.left() + (e as f64 / total) as f32 * r.width());
+                                p.rect_filled(egui::Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(end, r.bottom())), 0.0, Color32::from_rgba_unmultiplied(255, 140, 60, 28));
+                            }
+                            p.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(1.0_f32, ACCENT));
+                            if sl.cuts.len() <= 48 {
+                                p.text(Pos2::new(x + 2.0, r.top() + 1.0), egui::Align2::LEFT_TOP, format!("{}", i + 1), egui::FontId::proportional(8.0), TEXT_DIM);
+                            }
+                        }
                     } else {
                         ui.label(RichText::new("The loop file was not found.").small().color(Color32::from_rgb(255, 120, 110)));
                     }
