@@ -186,6 +186,7 @@ pub(crate) struct App {
     step_at: Option<u32>,
     step_down: usize,
     rename_insert: Option<(usize, String)>,
+    rename_marker: Option<(usize, String)>,
     pub(crate) setup: setup::State,
     pub(crate) settings: setup::Settings,
     sel_chan: usize,
@@ -333,6 +334,7 @@ impl App {
             step_at: None,
             step_down: 0,
             rename_insert: None,
+            rename_marker: None,
             setup: Default::default(),
             settings,
             sel_chan: 0,
@@ -1551,7 +1553,11 @@ impl App {
                 }
                 // the star of the number pad has no key of its own here; it arrives as the character
                 egui::Event::Text(t) if !typing_text && t == "*" && !ctx.input(|i| i.modifiers.shift) => {
-                    self.jump_bar(1);
+                    if ctx.input(|i| i.modifiers.alt) {
+                        self.jump_marker(true);
+                    } else {
+                        self.jump_bar(1);
+                    }
                     continue;
                 }
                 _ => {}
@@ -1637,6 +1643,10 @@ impl App {
             if modifiers.alt {
                 if key == Key::F8 && !repeat {
                     self.show_browser = !self.show_browser;
+                } else if key == Key::Slash {
+                    self.jump_marker(false);
+                } else if key == Key::T && !repeat && !modifiers.shift && !modifiers.command && self.focus != Win::Piano {
+                    self.add_marker();
                 } else if let Some(d) = DIGITS.iter().position(|k| *k == key).filter(|_| !repeat) {
                     // the newest project is 1, the tenth is 0
                     if let Some(p) = self.settings.recent.get((d + 9) % 10).cloned() {
@@ -2217,6 +2227,33 @@ impl eframe::App for App {
             });
             if keep {
                 self.rename_insert = Some((i, name));
+            }
+        }
+        if let Some((i, mut name)) = self.rename_marker.take() {
+            let mut keep = i < self.song.markers.len();
+            egui::Window::new("Time marker").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.text_edit_singleline(&mut name).request_focus();
+                let enter = ui.input(|x| x.key_pressed(Key::Enter));
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() || enter {
+                        if let Some(m) = self.song.markers.get_mut(i) {
+                            m.name = name.clone();
+                        }
+                        self.dirty = true;
+                        keep = false;
+                    }
+                    if ui.button("Delete").clicked() && i < self.song.markers.len() {
+                        self.song.markers.remove(i);
+                        self.dirty = true;
+                        keep = false;
+                    }
+                });
+                if ui.input(|x| x.key_pressed(Key::Escape)) {
+                    keep = false;
+                }
+            });
+            if keep {
+                self.rename_marker = Some((i, name));
             }
         }
         let mut open = self.show_chanset;

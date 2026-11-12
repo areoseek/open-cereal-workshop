@@ -775,6 +775,16 @@ impl Default for Insert {
     }
 }
 
+/// A named point on the playlist's time line.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TimeMarker {
+    pub pos: u32,
+    pub name: String,
+    /// 0 is a plain marker, 8 a time signature change; other kinds are kept as they arrive.
+    pub kind: u8,
+    pub sig: (u8, u8),
+}
+
 #[derive(Debug, Clone)]
 pub struct Song {
     pub title: String,
@@ -792,6 +802,8 @@ pub struct Song {
     pub tracks: Vec<Track>,
     /// Kept sorted by position.
     pub clips: Vec<Clip>,
+    /// Kept sorted by position.
+    pub markers: Vec<TimeMarker>,
     /// inserts[0] is the master.
     pub inserts: Vec<Insert>,
     /// Order in which the mixer processes inserts so every sender runs before what it feeds.
@@ -875,6 +887,7 @@ impl Song {
             patterns: vec![Pattern::default()],
             tracks: vec![Track::default(); DEFAULT_TRACKS],
             clips: vec![],
+            markers: vec![],
             inserts,
             mixer_base: 448,
             mix_order: vec![],
@@ -900,6 +913,11 @@ impl Song {
         let bar = self.bar();
         let end = self.clips.iter().map(|c| c.pos + c.len).max().unwrap_or(0);
         end.div_ceil(bar).max(1) * bar
+    }
+    /// Where the song goes back to when it reaches its end: the loop marker if there is one, else the start marker.
+    pub fn loop_start(&self) -> u32 {
+        let of = |kind: u8| self.markers.iter().rev().find(|m| m.kind == kind).map(|m| m.pos);
+        of(4).or(of(5)).unwrap_or(0)
     }
     pub fn pattern_length(&self, p: usize) -> u32 {
         self.patterns.get(p).map(|p| p.length(self.bar())).unwrap_or(self.bar())
@@ -1465,6 +1483,11 @@ impl Song {
             patterns,
             tracks,
             clips,
+            markers: {
+                let mut m: Vec<TimeMarker> = f.arrangements.first().map(|a| a.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect()).unwrap_or_default();
+                m.sort_by_key(|m| m.pos);
+                m
+            },
             inserts,
             mix_order: vec![],
             auto_plan: vec![],

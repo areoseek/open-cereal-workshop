@@ -51,6 +51,7 @@ enum Drag {
     Paint,
     Slice { tick: u32 },
     Seek,
+    Marker(usize),
     /// A point of an automation clip: channel, point, clip, and where the clip's picture sits.
     AutoPt { chan: usize, idx: usize, clip: usize, left: f32, top: f32, bottom: f32, offset: u32 },
     /// The bend of the line arriving at a point.
@@ -414,6 +415,22 @@ impl App {
             }
             b += bar;
         }
+        // time markers sit on the ruler; their labels take clicks
+        let mut marker_tabs: Vec<(Rect, usize)> = vec![];
+        for (i, m) in self.song.markers.iter().enumerate() {
+            let x = x_of(m.pos as f32);
+            if x < grid.left() - 1.0 || x > grid.right() {
+                continue;
+            }
+            let colour = Color32::from_rgb(236, 150, 60);
+            p.line_segment([Pos2::new(x, ruler.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, colour.gamma_multiply(0.45)));
+            let label = if m.kind == 8 && m.name.is_empty() { format!("{}/{}", m.sig.0, m.sig.1) } else { m.name.clone() };
+            let galley = p.layout_no_wrap(label, FontId::proportional(10.5), Color32::BLACK);
+            let tab = Rect::from_min_size(Pos2::new(x, ruler.top() + 1.0), Vec2::new(galley.size().x + 8.0, ruler.height() - 2.0));
+            p.rect_filled(tab, 2.0, colour);
+            p.galley(Pos2::new(tab.left() + 4.0, tab.center().y - galley.size().y * 0.5), galley, Color32::BLACK);
+            marker_tabs.push((tab, i));
+        }
 
         // track heads
         p.rect_filled(Rect::from_min_max(rect.min, Pos2::new(grid.left(), grid.top())), 0.0, PANEL_DARK);
@@ -498,8 +515,15 @@ impl App {
             }
         }
         if let Some(pp) = over {
+            let tab = marker_tabs.iter().rev().find(|(r, _)| r.contains(pp)).map(|(_, i)| *i);
+            if let (Some(i), true, true) = (tab, sec_pressed, self.playlist.drag.is_none()) {
+                self.rename_marker = Some((i, self.song.markers[i].name.clone()));
+            }
             if pressed && self.playlist.drag.is_none() {
-                if ruler.contains(pp) {
+                if let Some(i) = tab {
+                    self.handle.transport.seek(self.song.markers[i].pos);
+                    self.playlist.drag = Some(Drag::Marker(i));
+                } else if ruler.contains(pp) {
                     self.playlist.drag = Some(Drag::Seek);
                 } else if grid.contains(pp) {
                     let track = track_of(pp.y);
@@ -741,6 +765,18 @@ impl App {
                         done = true;
                     }
                 }
+                Drag::Marker(i) => {
+                    if down {
+                        let to = snap(tick_of(pp.x));
+                        if let Some(m) = self.song.markers.get_mut(*i).filter(|m| m.pos != to && (pp.x - x_of(m.pos as f32)).abs() > 3.0) {
+                            m.pos = to;
+                            self.dirty = true;
+                        }
+                    } else {
+                        self.song.markers.sort_by_key(|m| m.pos);
+                        done = true;
+                    }
+                }
                 Drag::Seek => {
                     if down {
                         if !self.handle.transport.song_mode() {
@@ -932,6 +968,35 @@ impl App {
         self.dirty = true;
     }
 
+    /// A new time marker at the play position, named straight away.
+    pub(crate) fn add_marker(&mut self) {
+        let bar = self.song.bar().max(1);
+        let pos = if self.handle.transport.song_mode() { (self.handle.transport.tick().max(0.0) as u32 / bar) * bar } else { 0 };
+        let at = match self.song.markers.iter().position(|m| m.pos == pos && m.kind == 0) {
+            Some(i) => i,
+            None => {
+                let name = format!("Marker #{}", self.song.markers.len() + 1);
+                self.song.markers.push(cereal_engine::song::TimeMarker { pos, name, kind: 0, sig: (4, 4) });
+                self.song.markers.sort_by_key(|m| m.pos);
+                self.dirty = true;
+                self.song.markers.iter().position(|m| m.pos == pos && m.kind == 0).unwrap_or(0)
+            }
+        };
+        self.rename_marker = Some((at, self.song.markers[at].name.clone()));
+    }
+
+    /// Put the play position on the next or the previous time marker.
+    pub(crate) fn jump_marker(&mut self, forward: bool) {
+        let now = self.handle.transport.tick().max(0.0) as u32;
+        let to = if forward { self.song.markers.iter().map(|m| m.pos).find(|&p| p > now) } else { self.song.markers.iter().rev().map(|m| m.pos).find(|&p| p < now) };
+        if let Some(to) = to {
+            if !self.handle.transport.song_mode() {
+                self.handle.transport.set_song_mode(true);
+            }
+            self.handle.transport.seek(to);
+        }
+    }
+
     fn pl_mute(&mut self, muted: bool) {
         let t = self.pl_targets();
         for &i in &t {
@@ -991,6 +1056,8 @@ impl App {
         }
         if m.alt && !m.command {
             match key {
+                Key::T if !m.shift && !repeat => self.add_marker(),
+                Key::Slash => self.jump_marker(false),
                 Key::M => self.pl_mute(!m.shift),
                 _ => return false,
             }

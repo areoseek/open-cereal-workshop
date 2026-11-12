@@ -2183,9 +2183,10 @@ impl Player {
         let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
+        let loop_from = if song_mode { song.loop_start().min((loop_len as u32).saturating_sub(1)) as f64 } else { 0.0 };
         if self.pos >= loop_len {
             if tr.looping() {
-                self.pos = 0.0;
+                self.pos = loop_from;
                 self.chase = true;
             } else {
                 tr.set_playing(false);
@@ -2273,7 +2274,8 @@ impl Player {
 
         self.pos = t0 + n as f64 * tpf;
         if self.pos >= loop_len && tr.looping() {
-            self.pos = 0.0;
+            self.pos = loop_from;
+            self.chase |= loop_from > 0.0;
         }
         tr.tick.store(self.pos.min(loop_len).to_bits(), Relaxed);
         n

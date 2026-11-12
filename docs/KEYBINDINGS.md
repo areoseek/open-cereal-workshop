@@ -179,6 +179,9 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Shift+Q | Pull clip starts onto the grid | yes |
 | Alt+M / Shift+Alt+M | Mute / unmute | yes |
 | Home | Play position to the start | yes |
+| Alt+T | Add a time marker at the play position and name it | yes |
+| Alt+* / Alt+/ | Play position to the next / previous time marker | yes |
+| Click, drag, right-click a marker | Jump to it, move it, rename or delete it | part: no marker action menu yet |
 | PgUp / PgDn | Zoom in / out | yes |
 | 5, Shift+5 | Zoom on the selection | part: plain 5 with the typing keyboard off |
 | Shift+0 | Centre the view on the play position | yes |
@@ -192,7 +195,6 @@ keyboard is on, and the number pad meaning applies otherwise.
 | 6, Shift+6, Ctrl+P | Performance mode and its zoom | no |
 | 7 / 8, 9 | Transpose an audio clip down / up, reverse it | no |
 | Insert | Slice at the pointer | no |
-| Alt+T, Ctrl+T, Alt+* and Alt+/ | Add a time marker, next / previous marker | no |
 | Shift+Alt+T | Time signature change | no |
 | Shift+G / Alt+G | Group / ungroup | no |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |

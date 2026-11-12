@@ -33,6 +33,8 @@ pub mod id {
     // word events
     pub const NEW_CHANNEL: u8 = 64;
     pub const NEW_PATTERN: u8 = 65;
+    pub const MARKER_NUMERATOR: u8 = 33;
+    pub const MARKER_DENOMINATOR: u8 = 34;
     pub const TEMPO_WORD: u8 = 66;
     pub const CURRENT_PATTERN: u8 = 67;
     pub const MAIN_PITCH: u8 = 80;
@@ -542,6 +544,9 @@ pub struct FlpTrack {
 pub struct Marker {
     pub position: u32,
     pub name: String,
+    /// What the marker does when the play position reaches it (0 = nothing, 8 = time signature change).
+    pub kind: u8,
+    pub sig: (u8, u8),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -722,6 +727,8 @@ impl Flp {
         let mut next_insert_name: Option<String> = None;
         let mut next_insert_color: Option<u32> = None;
         let mut early_markers: Vec<Marker> = vec![];
+        // patterns carry markers of their own, written with the same events
+        let mut in_pattern = false;
 
         for e in &file.events {
             let text = |d: &[u8]| if unicode { utf16(d) } else { latin1(d) };
@@ -744,6 +751,7 @@ impl Flp {
 
                 // ---- patterns
                 (id::NEW_PATTERN, Value::Word(v)) => {
+                    in_pattern = true;
                     cur_pat = *v;
                     patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
                 }
@@ -768,10 +776,12 @@ impl Flp {
                     flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, key_range: (0, 256), ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
+                    in_pattern = false;
                     scope = Scope::Arrangement;
                     flp.arrangements.push(FlpArrangement { index: *v, ..Default::default() });
                 }
                 (id::PLAYLIST, Value::Data(d)) => {
+                    in_pattern = false;
                     if flp.arrangements.is_empty() {
                         // files from before arrangements existed have one unnamed playlist
                         flp.arrangements.push(FlpArrangement { name: "Arrangement".into(), ..Default::default() });
@@ -796,9 +806,23 @@ impl Flp {
                         t.name = text(d);
                     }
                 }
+                (id::MARKER_POSITION | id::MARKER_NAME | id::MARKER_NUMERATOR | id::MARKER_DENOMINATOR, _) if in_pattern => {}
+                (id::MARKER_NUMERATOR | id::MARKER_DENOMINATOR, Value::Byte(v)) => {
+                    let m = match flp.arrangements.last_mut() {
+                        Some(a) => a.markers.last_mut(),
+                        None => early_markers.last_mut(),
+                    };
+                    if let Some(m) = m {
+                        if e.id == id::MARKER_NUMERATOR {
+                            m.sig.0 = *v;
+                        } else {
+                            m.sig.1 = *v;
+                        }
+                    }
+                }
                 (id::MARKER_POSITION, Value::Int(v)) => {
                     // the top byte carries the marker kind; markers written ahead of the first arrangement wait for it
-                    let m = Marker { position: *v & 0x00ff_ffff, name: String::new() };
+                    let m = Marker { position: *v & 0x00ff_ffff, name: String::new(), kind: (*v >> 24) as u8, sig: (0, 0) };
                     match flp.arrangements.last_mut() {
                         Some(a) => a.markers.push(m),
                         None => early_markers.push(m),

@@ -1395,6 +1395,53 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
     }
 }
 
+/// The first arrangement's time markers, written again whenever any of them changed.
+fn patch_markers(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, with_sig: bool) {
+    if song.markers == base.markers {
+        return;
+    }
+    let (mut arrangements, mut in_pattern) = (0, false);
+    let (mut old, mut playlist, mut track): (Vec<usize>, Option<usize>, Option<usize>) = (vec![], None, None);
+    for (i, e) in ev.iter().enumerate() {
+        match e.id {
+            id::NEW_PATTERN => in_pattern = true,
+            id::NEW_ARRANGEMENT => {
+                in_pattern = false;
+                arrangements += 1;
+                if arrangements > 1 {
+                    break;
+                }
+            }
+            id::PLAYLIST => {
+                in_pattern = false;
+                playlist.get_or_insert(i);
+            }
+            id::TRACK => {
+                track.get_or_insert(i);
+            }
+            id::MARKER_POSITION | id::MARKER_NAME | id::MARKER_NUMERATOR | id::MARKER_DENOMINATOR if !in_pattern => old.push(i),
+            _ => {}
+        }
+    }
+    let Some(mut at) = old.first().copied().or(playlist.map(|i| i + 1)).or(track) else { return };
+    for &i in old.iter().rev() {
+        ev.remove(i);
+    }
+    for m in &song.markers {
+        let mut new = vec![Event::int(id::MARKER_POSITION, (m.kind as u32) << 24 | (m.pos & 0x00ff_ffff))];
+        if with_sig {
+            let (n, d) = if m.sig.0 == 0 || m.sig.1 == 0 { (4, 4) } else { m.sig };
+            new.push(Event::byte(id::MARKER_NUMERATOR, n));
+            new.push(Event::byte(id::MARKER_DENOMINATOR, d));
+        }
+        new.push(text_event(id::MARKER_NAME, &m.name, unicode));
+        for e in new {
+            ev.insert(at, e);
+            at += 1;
+        }
+    }
+}
+
 fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     // only the first arrangement is shown, so only its tracks are edited
     let mut arrangements = 0;
@@ -1703,6 +1750,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_mixer(&mut ev, song, &base, unicode, flp::mixer_base(ver));
     patch_tracks(&mut ev, song, &base, unicode);
     patch_playlist(&mut ev, song, &base, &flp);
+    patch_markers(&mut ev, song, &base, unicode, ver >= (20, 0, 0, 0));
     patch_patterns(&mut ev, song, &base, &flp, unicode);
     patch_channels(&mut ev, song, &base, unicode, word_insert);
     patch_auto(&mut ev, song, &base);
@@ -2078,6 +2126,23 @@ mod tests {
         let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
         let (r3, _) = reload(&bytes3);
         assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
+    }
+
+    #[test]
+    fn time_markers_are_saved_and_read_back() {
+        use crate::song::TimeMarker;
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        r.markers = vec![TimeMarker { pos: 0, name: "Intro".into(), kind: 0, sig: (4, 4) }, TimeMarker { pos: 384 * 8, name: "Drop".into(), kind: 0, sig: (4, 4) }];
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        assert_eq!(r2.markers, r.markers);
+        r2.markers.remove(0);
+        r2.markers[0].name = "Chorus".into();
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        assert_eq!(r3.markers, r2.markers);
+        assert_eq!(r3.patterns.len(), r2.patterns.len());
     }
 
     #[test]
