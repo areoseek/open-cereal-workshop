@@ -1443,7 +1443,7 @@ impl ToneState {
                 a * (1.0 + (o[2][c] - 1.0) * tone.mix3)
             } else {
                 a + (o[2][c] - a) * tone.mix3
-            } * 0.4;
+            } * 0.5;
         }
         out
     }
