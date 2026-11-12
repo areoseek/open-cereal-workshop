@@ -2269,6 +2269,8 @@ impl Player {
                 (None, Some(t), Some(ChanFx { tail: Some(have), .. })) => have.0 = t,
                 (None, Some(t), _) => *slot = Some(ChanFx { unit: None, tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
                 (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
+                // only settings were turned: the running units take them and keep their sound
+                (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| a.same_wiring(b)) => u.fx.sub = b.fx.sub.clone(),
                 (Some(b), _, _) => *slot = Some(ChanFx { unit: Some(fx::Unit::new(b.fx.clone(), self.sr)), tail: None, buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
             }
         }

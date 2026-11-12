@@ -979,10 +979,11 @@ pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
         ui.label(RichText::new("This board has no controls on it yet.").small().color(TEXT_DIM));
         return false;
     }
-    let (bw, bh) = surface::size(&raw);
-    // a board can hold controls beyond its stored size
-    let bw = controls.iter().fold(bw, |m, c| m.max(c.rect[0] + c.rect[2]));
-    let bh = controls.iter().fold(bh, |m, c| m.max(c.rect[1] + c.rect[3]));
+    // the part of the board the controls take up, with a little air round it
+    let x0 = controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[0])) - 8.0;
+    let y0 = controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[1])) - 8.0;
+    let bw = controls.iter().fold(64.0f32, |m, c| m.max(c.rect[0] + c.rect[2] - x0 + 8.0));
+    let bh = controls.iter().fold(32.0f32, |m, c| m.max(c.rect[1] + c.rect[3] - y0 + 8.0));
     let s = (max_w / bw).min(1.0);
     let (area, _) = ui.allocate_exact_size(Vec2::new(bw * s, bh * s), Sense::hover());
     let pt = ui.painter_at(area);
@@ -991,7 +992,7 @@ pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
     let mut changed = false;
     let base = ui.id().with(("board", std::sync::Arc::as_ptr(&raw) as usize));
     for (n, c) in controls.iter().enumerate() {
-        let r = egui::Rect::from_min_size(area.min + Vec2::new(c.rect[0] * s, c.rect[1] * s), Vec2::new(c.rect[2].max(1.0) * s, c.rect[3].max(1.0) * s));
+        let r = egui::Rect::from_min_size(area.min + Vec2::new((c.rect[0] - x0) * s, (c.rect[1] - y0) * s), Vec2::new(c.rect[2].max(1.0) * s, c.rect[3].max(1.0) * s));
         let get = |k: usize, p: &[f32]| c.outs.get(k).and_then(|&o| p.get(o as usize)).copied().unwrap_or(0.0);
         let mut put = |k: usize, v: f32, p: &mut Vec<f32>| {
             if let Some(slot) = c.outs.get(k).and_then(|&o| p.get_mut(o as usize)) {
@@ -1145,7 +1146,7 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     ui.set_max_width(520.0);
     // the boards first: they are what the bay is played from
     for i in 0..sub.nodes.len() {
-        if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface) {
+        if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface && !g.p.is_empty()) {
             let mut board = sub.nodes[i].fx.clone().unwrap();
             if surface_ui(ui, &mut board, 520.0) {
                 std::sync::Arc::make_mut(sub).nodes[i].fx = Some(board);

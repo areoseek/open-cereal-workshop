@@ -26,6 +26,19 @@ pub struct Node {
     pub fx: Option<Fx>,
 }
 
+impl Patch {
+    /// The same units cabled the same way, whatever their settings are.
+    pub fn same_wiring(&self, o: &Patch) -> bool {
+        self.nodes.len() == o.nodes.len()
+            && self.nodes.iter().zip(&o.nodes).all(|(a, b)| a.ident == b.ident && a.fx.as_ref().map(|f| (f.kind, f.p.len())) == b.fx.as_ref().map(|f| (f.kind, f.p.len())))
+            && self.cables == o.cables
+            && self.order == o.order
+            && self.feeds == o.feeds
+            && self.shape == o.shape
+            && self.sets == o.sets
+    }
+}
+
 impl Node {
     fn fx_before(&self, block: &[u8]) -> Option<Fx> {
         let known = if self.ident.eq_ignore_ascii_case("Fruity 7 Band Equalizer") { "Fruity 7 Band EQ" } else { &self.ident };

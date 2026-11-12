@@ -240,6 +240,22 @@ impl App {
             });
         });
         ui.separator();
+        // a bay is played from its boards: they come before the instrument inside
+        if self.song.channels[ci].bay().is_some() {
+            let mut moved = false;
+            if let Some(sub) = self.song.channels[ci].bay.as_mut().and_then(|b| b.fx.sub.as_mut()) {
+                for i in 0..sub.nodes.len() {
+                    let Some(mut board) = sub.nodes[i].fx.clone().filter(|g| g.kind == cereal_engine::fx::Kind::Surface && !g.p.is_empty()) else { continue };
+                    if crate::fxwin::surface_ui(ui, &mut board, 560.0) {
+                        std::sync::Arc::make_mut(sub).nodes[i].fx = Some(board);
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
+                self.dirty = true;
+            }
+        }
         let built_in = self.song.channels[ci].gen.is_some();
         if !built_in && !matches!(kind, ChannelKind::Sampler | ChannelKind::AudioClip) {
             let c = &self.song.channels[ci];

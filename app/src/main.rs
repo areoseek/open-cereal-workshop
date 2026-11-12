@@ -421,19 +421,10 @@ impl App {
                             }
                         }
                     }
-                    x if x.starts_with("fxpreset=") => {
-                        // put the unit of a state file on the master track's first slot and open it
-                        let unit = cereal_engine::preset::read(std::path::Path::new(&x[9..])).ok().and_then(|p| Some((p.ident.clone(), p.unit()?)));
-                        if let (Some((ident, cereal_engine::preset::Unit::Fx(f))), Some(ins)) = (unit, app.song.inserts.first_mut()) {
-                            ins.slots.retain(|s| s.index != 0);
-                            let mut s = cereal_engine::song::Slot::with_fx(0, f.kind);
-                            s.plugin = ident;
-                            s.fx = Some(f);
-                            ins.slots.insert(0, s);
-                            app.fx_open = Some((0, 0));
-                            app.sel_insert = 0;
-                            app.handle.publish(app.song.clone());
-                        }
+                    x if x.starts_with("preset=") => {
+                        // load a state file as if it had been picked from the browser
+                        app.load_preset(std::path::Path::new(&x[7..]), PresetTo::Auto);
+                        app.handle.publish(app.song.clone());
                     }
                     x if x.starts_with("gen=") => {
                         // put an instrument on the first channel and open its settings
@@ -1121,6 +1112,37 @@ impl App {
                 return;
             }
         };
+        // a patch bay can stand as an instrument or as an effect: where the file lives, or where it is dropped, says which
+        if pre.ident.eq_ignore_ascii_case(cereal_engine::song::BAY) {
+            let as_gen = match to {
+                PresetTo::Chan(_) => true,
+                PresetTo::Slot(..) => false,
+                PresetTo::Auto => path.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("Generators")),
+            };
+            if let Some((p, lead, g, layers)) = Some(()).filter(|_| as_gen).and_then(|_| cereal_engine::fxpatch::decode_gen(&pre.state)) {
+                let mut c = Chan::instrument(g.kind);
+                c.plugin = cereal_engine::song::BAY.into();
+                c.name = name.clone();
+                c.gen = Some(g);
+                c.bay = Some(cereal_engine::song::Bay { fx: cereal_engine::fx::Fx { kind: cereal_engine::fx::Kind::Patch, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None, ext: None }, lead, layers });
+                let ci = match to {
+                    PresetTo::Chan(ci) if ci < self.song.channels.len() => {
+                        c.insert = self.song.channels[ci].insert;
+                        self.song.channels[ci] = c;
+                        ci
+                    }
+                    _ => {
+                        self.song.channels.push(c);
+                        self.song.channels.len() - 1
+                    }
+                };
+                self.sel_chan = ci;
+                self.preset_name.insert(cereal_engine::song::BAY.to_string(), path.to_path_buf());
+                self.status = format!("Preset: {name}");
+                self.dirty = true;
+                return;
+            }
+        }
         match pre.unit() {
             None => self.status = format!("\"{}\" is a preset for {}, which has no built-in unit yet", name, pre.ident),
             Some(Unit::Fx(mut f)) => {
