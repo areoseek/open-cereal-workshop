@@ -251,6 +251,24 @@ impl App {
     }
 
     fn file_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Backup").strong());
+        ui.horizontal(|ui| {
+            ui.label("Autosave");
+            let names = ["Never (not recommended)", "Rarely (before a file is saved over only)", "Occasionally (every 15 minutes)", "Regularly (every 10 minutes)", "Frequently (every 5 minutes)"];
+            let mut cur = self.settings.autosave.unwrap_or(4).min(4);
+            egui::ComboBox::from_id_salt("autosave").width(280.0).selected_text(names[cur as usize]).show_ui(ui, |ui| {
+                for (k, n) in names.iter().enumerate() {
+                    if ui.selectable_value(&mut cur, k as u8, *n).changed() {
+                        self.settings.autosave = Some(cur);
+                        let _ = self.settings.save();
+                    }
+                }
+            });
+        });
+        if let Some(d) = crate::setup::backup_dir() {
+            ui.label(RichText::new(format!("Copies go to {} (the newest forty are kept). FILE > Revert to last backup opens the newest; the folder is in the browser once it holds something.", d.display())).color(TEXT_DIM).small());
+        }
+        ui.add_space(8.0);
         ui.label(RichText::new("Browser extra search folders").strong());
         ui.label(RichText::new("Shown in the browser, and searched by file name when a song's sound is not where it was stored.").color(TEXT_DIM).small());
         let mut drop = None;

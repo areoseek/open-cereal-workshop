@@ -62,6 +62,9 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     /// The browser files marked as favourites.
     pub starred: Vec<PathBuf>,
+    /// How often a copy of unsaved work is put in the backup folder: 0 never, 1 only before a file is overwritten,
+    /// 2 every 15 minutes, 3 every 10, 4 every 5. None = never chosen, which means 4.
+    pub autosave: Option<u8>,
     /// The plug-ins marked as favourites: 'g:' or 'f:' and the title.
     pub plugfav: Vec<String>,
     /// Tags given to browser files.
@@ -82,6 +85,11 @@ fn home() -> Option<PathBuf> {
 fn settings_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").or_else(|| std::env::var_os("APPDATA")).map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?;
     Some(base.join("breakfast-cereal").join("settings.txt"))
+}
+
+/// Where copies of unsaved work and of overwritten projects are kept.
+pub fn backup_dir() -> Option<PathBuf> {
+    Some(settings_path()?.parent()?.join("Backup"))
 }
 
 /// Where the note scripts the user has let run are kept, one text to a file.
@@ -141,6 +149,7 @@ impl Settings {
                 Some(("folder", v)) if !v.trim().is_empty() => s.folders.push(PathBuf::from(v.trim())),
                 Some(("recent", v)) if !v.trim().is_empty() => s.recent.push(PathBuf::from(v.trim())),
                 Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
+                Some(("autosave", v)) => s.autosave = v.trim().parse().ok(),
                 Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
                 Some(("tag", v)) => {
                     if let Some((tags, path)) = v.split_once('\t') {
@@ -223,6 +232,9 @@ impl Settings {
         }
         for f in &self.starred {
             out += &format!("star={}\n", f.display());
+        }
+        if let Some(a) = self.autosave {
+            out += &format!("autosave={a}\n");
         }
         for f in &self.plugfav {
             out += &format!("plugfav={f}\n");

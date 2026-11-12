@@ -240,6 +240,8 @@ pub(crate) struct App {
     time_secs: bool,
     /// When the tempo was last tapped.
     taps: Vec<std::time::Instant>,
+    /// When unsaved work was last put in the backup folder (or there was none to put).
+    auto_at: std::time::Instant,
     /// The notes this recording pass wrote, which a pass that does not blend must not wipe again.
     rec_new: Vec<(u32, u16, u8)>,
     /// Where step editing writes next, and how many keys are down.
@@ -377,6 +379,9 @@ impl App {
             browser.add_root("Music", home.join("Music"));
             browser.add_root("Documents", home.join("Documents"));
         }
+        if let Some(d) = setup::backup_dir() {
+            browser.add_root("Backup", d);
+        }
         let midi = midi::MidiIn::start(handle.sender());
         midi::start_out(handle.transport.clone());
         let mut app = Self {
@@ -420,6 +425,7 @@ impl App {
             rec_blend: true,
             time_secs: false,
             taps: Vec::new(),
+            auto_at: std::time::Instant::now(),
             rec_new: Vec::new(),
             step_at: None,
             step_down: 0,
@@ -870,6 +876,16 @@ impl App {
             }
         };
         let Some(path) = path else { return };
+        // the file about to be written over is kept in the backup folder first
+        if self.settings.autosave.unwrap_or(4) > 0 && path.is_file() {
+            if let Some(dir) = setup::backup_dir() {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&path, dir.join(format!("{stem} (overwritten at {}).flp", Self::clock_stamp()))));
+                Self::thin_backups(&dir);
+                self.browser.add_root("Backup", dir);
+            }
+        }
+        self.auto_at = std::time::Instant::now();
         let saved = cereal_engine::save::save(&mut self.song, self.flp.as_ref()).and_then(|(bytes, flp)| std::fs::write(&path, bytes).map(|_| flp).map_err(|e| e.to_string()));
         match saved {
             Ok(flp) => {
@@ -881,6 +897,87 @@ impl App {
             }
             Err(e) => self.status = format!("Save failed: {e}"),
         }
+    }
+
+    /// The date and time as text for a file name (UTC).
+    fn clock_stamp() -> String {
+        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+        let (days, rem) = (s.div_euclid(86_400), s.rem_euclid(86_400));
+        // days since 1970 to a calendar date
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+        format!("{y:04}-{m:02}-{d:02} {:02}h{:02}", rem / 3600, rem % 3600 / 60)
+    }
+
+    /// Keep the newest forty project copies in the backup folder; older ones of ours go.
+    fn thin_backups(dir: &Path) {
+        let mut ours: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        let name = p.file_name()?.to_string_lossy().to_string();
+                        let is_ours = name.ends_with(".flp") && (name.contains(" (overwritten at ") || name.contains(" (autosaved"));
+                        is_ours.then(|| e.metadata().and_then(|m| m.modified()).ok().map(|t| (t, p))).flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ours.sort();
+        while ours.len() > 40 {
+            let _ = std::fs::remove_file(ours.remove(0).1);
+        }
+    }
+
+    /// Put unsaved work in the backup folder when its time has come. Nothing is written while the song plays.
+    fn autosave_tick(&mut self, ctx: &egui::Context) {
+        let mins = match self.settings.autosave.unwrap_or(4) {
+            2 => 15,
+            3 => 10,
+            4 => 5,
+            _ => return,
+        };
+        if !self.unsaved {
+            self.auto_at = std::time::Instant::now();
+            return;
+        }
+        let due = std::time::Duration::from_secs(std::env::var("CEREAL_AUTOSAVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(mins * 60));
+        let waited = self.auto_at.elapsed();
+        if waited < due {
+            ctx.request_repaint_after(due - waited);
+            return;
+        }
+        if self.handle.transport.playing() {
+            return;
+        }
+        self.auto_at = std::time::Instant::now();
+        let Some(dir) = setup::backup_dir() else { return };
+        let stem = self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".into());
+        let stem = stem.split(" (autosaved").next().unwrap_or(&stem).split(" (overwritten at ").next().unwrap_or(&stem).to_string();
+        let mut copy = self.song.clone();
+        let made = cereal_engine::save::save(&mut copy, self.flp.as_ref()).and_then(|(bytes, _)| {
+            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(format!("{stem} (autosaved {}).flp", Self::clock_stamp())), bytes)).map_err(|e| e.to_string())
+        });
+        match made {
+            Ok(()) => {
+                Self::thin_backups(&dir);
+                self.browser.add_root("Backup", dir);
+            }
+            Err(e) => self.status = format!("Autosave failed: {e}"),
+        }
+    }
+
+    /// The newest project copy in the backup folder.
+    fn last_backup() -> Option<PathBuf> {
+        let dir = setup::backup_dir()?;
+        std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "flp")).filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).max().map(|t| t.1)
     }
 
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
@@ -2280,6 +2377,13 @@ impl App {
                             self.open(&p);
                         }
                     }
+                    let last = Self::last_backup();
+                    if ui.add_enabled(last.is_some(), egui::Button::new("Revert to last backup")).hint("Open the newest copy in the backup folder: unsaved work put there on a timer, or a project as it was before it was saved over").clicked() {
+                        ui.close_menu();
+                        if let Some(p) = last {
+                            self.open(&p);
+                        }
+                    }
                     ui.separator();
                     if ui.button("Export MIDI file...     Ctrl+Shift+M").clicked() {
                         ui.close_menu();
@@ -3384,6 +3488,7 @@ impl eframe::App for App {
 
         self.small_windows(ctx);
         self.run_actions();
+        self.autosave_tick(ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
         }
