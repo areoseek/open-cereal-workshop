@@ -10,7 +10,11 @@ use crate::App;
 
 #[derive(Default)]
 pub struct State {
-    rename: Option<(usize, String)>,
+    pub(crate) rename: Option<(usize, String)>,
+    /// What the rack's copy took: one channel's notes of a pattern.
+    pub(crate) clip: Vec<cereal_engine::song::Note>,
+    /// Leave out the mixer track boxes beside the channel names.
+    pub(crate) hide_selectors: bool,
 }
 
 const STEP_W: f32 = 15.0;
@@ -39,11 +43,7 @@ impl App {
                         self.dirty = true;
                     }
                     if r.secondary_clicked() {
-                        let solo = self.song.channels.iter().enumerate().all(|(k, c)| c.enabled == (k == ci));
-                        for (k, c) in self.song.channels.iter_mut().enumerate() {
-                            c.enabled = solo || k == ci;
-                        }
-                        self.dirty = true;
+                        self.solo_channel(ci);
                     }
                     let c = &mut self.song.channels[ci];
                     let r = knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).on_hover_text("Channel panning");
@@ -59,7 +59,7 @@ impl App {
                     let n_ins = self.song.inserts.len().saturating_sub(1);
                     let mut ins = c.insert;
                     let dv = egui::DragValue::new(&mut ins).range(0..=n_ins).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "---".into() } else { format!("{v:.0}") });
-                    if ui.add_sized([30.0, STEP_H - 4.0], dv).on_hover_text("Target mixer track").changed() {
+                    if !self.rack.hide_selectors && ui.add_sized([30.0, STEP_H - 4.0], dv).on_hover_text("Target mixer track").changed() {
                         c.insert = ins;
                         self.dirty = true;
                     }
@@ -272,14 +272,7 @@ impl App {
         });
 
         if let Some(ci) = clone {
-            let mut c = self.song.channels[ci].clone();
-            c.name = format!("{} #2", c.name);
-            c.ext = c.ext.as_ref().map(|h| h.fork());
-            if let Some(b) = c.bay.as_mut() {
-                b.fx.ext = b.fx.ext.as_ref().map(|h| h.fork());
-            }
-            self.song.channels.push(c);
-            self.dirty = true;
+            self.clone_channel(ci);
         }
         if let Some(ci) = delete {
             self.delete_channel(ci);

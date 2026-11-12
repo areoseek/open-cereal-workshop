@@ -50,6 +50,8 @@ pub struct Settings {
     pub scale: f32,
     /// Extra folders for the browser and the sound search.
     pub folders: Vec<PathBuf>,
+    /// The projects opened or saved last, newest first.
+    pub recent: Vec<PathBuf>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -116,6 +118,7 @@ impl Settings {
             match line.split_once('=') {
                 Some(("content", v)) if !v.trim().is_empty() => s.content.push(PathBuf::from(v.trim())),
                 Some(("folder", v)) if !v.trim().is_empty() => s.folders.push(PathBuf::from(v.trim())),
+                Some(("recent", v)) if !v.trim().is_empty() => s.recent.push(PathBuf::from(v.trim())),
                 Some(("content_prompt", v)) => s.never_ask = v.trim() == "never",
                 Some(("audio_out", v)) => s.audio_out = v.trim().to_string(),
                 Some(("audio_in", v)) => s.audio_in = v.trim().to_string(),
@@ -157,6 +160,9 @@ impl Settings {
         }
         for f in &self.folders {
             out += &format!("folder={}\n", f.display());
+        }
+        for f in &self.recent {
+            out += &format!("recent={}\n", f.display());
         }
         if self.rate != 0 {
             out += &format!("rate={}\n", self.rate);

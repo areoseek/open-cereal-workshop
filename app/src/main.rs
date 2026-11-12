@@ -18,11 +18,13 @@ mod waveed;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Win {
     None,
-    #[allow(dead_code)]
     Rack,
     Piano,
     Playlist,
+    Mixer,
 }
+mod keys;
+pub(crate) use keys::DIGITS;
 mod mixer;
 mod pianoroll;
 mod prtools;
@@ -168,6 +170,22 @@ pub(crate) struct App {
     rec_quantise: bool,
     /// The window key commands go to.
     pub(crate) focus: Win,
+    /// A window to bring in front of the others on the next frame.
+    raise: Option<Win>,
+    /// The playlist fills the whole work area.
+    pl_max: bool,
+    /// The window for picking an instrument to add (F8).
+    show_picker: bool,
+    /// Hold the song back until the first note is played, when play is pressed with recording armed.
+    wait_input: bool,
+    /// Keep the notes already there when recording over them.
+    rec_blend: bool,
+    /// The notes this recording pass wrote, which a pass that does not blend must not wipe again.
+    rec_new: Vec<(u32, u16, u8)>,
+    /// Where step editing writes next, and how many keys are down.
+    step_at: Option<u32>,
+    step_down: usize,
+    rename_insert: Option<(usize, String)>,
     pub(crate) setup: setup::State,
     pub(crate) settings: setup::Settings,
     sel_chan: usize,
@@ -306,6 +324,15 @@ impl App {
             typing_keys: true,
             rec_quantise: false,
             focus: Win::None,
+            raise: None,
+            pl_max: false,
+            show_picker: false,
+            wait_input: false,
+            rec_blend: true,
+            rec_new: Vec::new(),
+            step_at: None,
+            step_down: 0,
+            rename_insert: None,
             setup: Default::default(),
             settings,
             sel_chan: 0,
@@ -478,6 +505,8 @@ impl App {
     }
 
     fn stop(&mut self) {
+        self.handle.transport.set_waiting(false);
+        self.step_at = None;
         self.handle.transport.set_playing(false);
         self.record_notes(true);
         self.handle.transport.seek(0);
@@ -532,6 +561,13 @@ impl App {
     fn record_notes(&mut self, flush: bool) {
         let tr = self.handle.transport.clone();
         let mut evs = tr.take_live();
+        if tr.step_edit() && !tr.playing() {
+            return self.step_notes(evs);
+        }
+        self.step_down = 0;
+        if !tr.playing() || !tr.recording() {
+            self.rec_new.clear();
+        }
         if flush || !tr.playing() || !tr.recording() {
             let now = tr.tick();
             evs.extend(self.rec_held.iter().map(|&(chan, key, _, _)| cereal_engine::Live { tick: now, on: false, chan, key, vel: 0.0 }));
@@ -570,6 +606,14 @@ impl App {
                     len = (plen - start).max(1.0);
                 }
                 let note = cereal_engine::song::Note { pos: pos as u32, len: len.round().max(1.0) as u32, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
+                if !self.rec_blend {
+                    // a pass that does not blend takes the place of what was there before it
+                    let (a, b) = (note.pos, note.pos + note.len);
+                    let new = &self.rec_new;
+                    self.song.patterns[pat].notes.retain(|n| n.chan != chan || n.pos >= b || n.pos + n.len.max(1) <= a || new.contains(&(n.pos, n.chan, n.key)));
+                    self.rec_new.push((note.pos, chan, key));
+                    self.piano.sel.clear();
+                }
                 self.song.patterns[pat].notes.push(note);
                 self.song.patterns[pat].sort();
                 self.dirty = true;
@@ -606,6 +650,7 @@ impl App {
                 self.song = song;
                 self.flp = Some(f);
                 self.path = Some(path.to_path_buf());
+                self.remember(path);
                 self.sel_chan = 0;
                 self.sel_insert = 0;
                 self.dirty = true;
@@ -646,6 +691,7 @@ impl App {
             Ok(flp) => {
                 self.flp = Some(flp);
                 self.status = format!("Saved {}", path.display());
+                self.remember(&path);
                 self.path = Some(path);
                 self.unsaved = false;
             }
@@ -1437,6 +1483,43 @@ impl App {
         self.dirty = true;
     }
 
+    /// F8: the instruments there are, to pick one for a new channel.
+    fn picker_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_picker {
+            return;
+        }
+        let mut open = true;
+        let mut pick = None;
+        egui::Window::new("Plug-in picker").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label(RichText::new("Click an instrument to add it as a new channel.").color(TEXT_DIM).small());
+            egui::Grid::new("picker").num_columns(4).spacing([6.0, 6.0]).show(ui, |ui| {
+                for (k, d) in cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()).enumerate() {
+                    if ui.add_sized([150.0, 34.0], egui::Button::new(d.title)).clicked() {
+                        pick = Some(d.kind);
+                    }
+                    if k % 4 == 3 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+        if let Some(kind) = pick {
+            self.song.channels.push(Chan::instrument(kind));
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            open = false;
+        }
+        self.show_picker = open;
+    }
+
+    /// Move the play position on or back by whole bars.
+    fn jump_bar(&mut self, by: i32) {
+        let bar = self.song.bar().max(1) as i64;
+        let now = self.handle.transport.tick().max(0.0) as i64;
+        let to = if by > 0 { (now / bar + 1) * bar } else { ((now - 1).max(0) / bar) * bar };
+        self.handle.transport.seek(to.max(0) as u32);
+    }
+
     fn keys(&mut self, ctx: &egui::Context) {
         let typing_text = ctx.wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
@@ -1447,6 +1530,8 @@ impl App {
                     let cut = matches!(e, egui::Event::Cut);
                     if !cut && ctx.input(|i| i.modifiers.shift) {
                         self.clone_pattern();
+                    } else if self.focus == Win::Rack && self.show_rack {
+                        self.rack_copy(cut);
                     } else if self.focus == Win::Piano && self.show_piano {
                         self.pr_copy(ctx, cut);
                     } else if self.focus == Win::Playlist && self.show_playlist {
@@ -1455,11 +1540,18 @@ impl App {
                     continue;
                 }
                 egui::Event::Paste(_) if !typing_text => {
-                    if self.focus == Win::Piano && self.show_piano {
+                    if self.focus == Win::Rack && self.show_rack {
+                        self.rack_paste();
+                    } else if self.focus == Win::Piano && self.show_piano {
                         self.pr_paste();
                     } else if self.focus == Win::Playlist && self.show_playlist {
                         self.pl_paste();
                     }
+                    continue;
+                }
+                // the star of the number pad has no key of its own here; it arrives as the character
+                egui::Event::Text(t) if !typing_text && t == "*" && !ctx.input(|i| i.modifiers.shift) => {
+                    self.jump_bar(1);
                     continue;
                 }
                 _ => {}
@@ -1480,6 +1572,12 @@ impl App {
             if self.focus == Win::Playlist && self.show_playlist && self.playlist_key(key, modifiers, repeat) {
                 continue;
             }
+            if self.focus == Win::Rack && self.show_rack && self.rack_key(key, modifiers, repeat) {
+                continue;
+            }
+            if self.focus == Win::Mixer && self.show_mixer && self.mixer_key(key, modifiers, repeat) {
+                continue;
+            }
             if modifiers.command {
                 if repeat {
                     continue;
@@ -1487,10 +1585,32 @@ impl App {
                 match key {
                     Key::Z if modifiers.alt => self.undo(),
                     Key::Z => self.undo_toggle(),
-                    Key::N => self.new_project(),
+                    Key::N => self.save_new_version(),
                     Key::O => self.open_dialog(),
                     Key::S => self.save(modifiers.shift),
+                    Key::R if modifiers.shift => {
+                        self.export();
+                        if let Some(r) = self.render.as_mut() {
+                            r.lossy = 1;
+                        }
+                    }
                     Key::R => self.export(),
+                    Key::F4 => self.new_pattern(),
+                    Key::H if modifiers.shift => ctx.memory_mut(|m| m.reset_areas()),
+                    Key::B => {
+                        self.rec_blend = !self.rec_blend;
+                        self.status = format!("Blend recorded notes: {}", if self.rec_blend { "on" } else { "off" });
+                    }
+                    Key::E => {
+                        let tr = &self.handle.transport;
+                        tr.set_step_edit(!tr.step_edit());
+                        self.step_at = None;
+                        self.status = format!("Step editing: {}", if tr.step_edit() { "on" } else { "off" });
+                    }
+                    Key::I => {
+                        self.wait_input = !self.wait_input;
+                        self.status = format!("Wait for input to start playing: {}", if self.wait_input { "on" } else { "off" });
+                    }
                     Key::T => self.typing_keys = !self.typing_keys,
                     Key::M if modifiers.shift => self.export_midi(),
                     Key::M => {
@@ -1504,8 +1624,11 @@ impl App {
                     }
                     Key::C if modifiers.shift => self.clone_pattern(),
                     Key::Space => {
-                        let tr = &self.handle.transport;
-                        tr.set_playing(!tr.playing());
+                        if self.handle.transport.playing() {
+                            self.handle.transport.set_playing(false);
+                        } else {
+                            self.play();
+                        }
                     }
                     _ => {}
                 }
@@ -1514,23 +1637,51 @@ impl App {
             if modifiers.alt {
                 if key == Key::F8 && !repeat {
                     self.show_browser = !self.show_browser;
+                } else if let Some(d) = DIGITS.iter().position(|k| *k == key).filter(|_| !repeat) {
+                    // the newest project is 1, the tenth is 0
+                    if let Some(p) = self.settings.recent.get((d + 9) % 10).cloned() {
+                        self.actions.push(Action::Open(p));
+                    }
                 }
                 continue;
             }
             match key {
                 Key::Space if !repeat => {
-                    let tr = &self.handle.transport;
-                    if tr.playing() {
+                    if self.handle.transport.playing() || self.handle.transport.waiting() {
                         self.stop();
                     } else {
-                        tr.set_playing(true);
+                        self.play();
                     }
+                }
+                Key::Tab if !repeat => self.cycle_windows(modifiers.shift),
+                Key::Escape if !repeat && !ctx.memory(|m| m.any_popup_open()) => {
+                    if self.show_picker {
+                        self.show_picker = false;
+                    } else if self.pl_max {
+                        self.pl_max = false;
+                    } else {
+                        self.close_focused();
+                    }
+                }
+                Key::Enter if !repeat && self.show_playlist && matches!(self.focus, Win::Playlist | Win::None) => self.pl_max = !self.pl_max,
+                Key::F1 if !repeat => self.show_about = !self.show_about,
+                Key::F8 if !repeat => self.show_picker = !self.show_picker,
+                Key::Slash => self.jump_bar(-1),
+                Key::Num0 if !self.typing_keys => self.jump_bar(1),
+                k if !self.typing_keys && !repeat && !modifiers.shift && DIGITS[1..].contains(&k) => {
+                    let p = DIGITS.iter().position(|d| *d == k).unwrap_or(1) - 1;
+                    self.song.ensure_pattern(p);
+                    self.handle.transport.set_pattern(p);
+                    self.dirty = true;
                 }
                 Key::F5 if !repeat => self.show_playlist = !self.show_playlist,
                 Key::F6 if !repeat => self.show_rack = !self.show_rack,
                 Key::F7 if !repeat => self.show_piano = !self.show_piano,
                 Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
-                Key::F4 if !repeat => self.new_pattern(),
+                Key::F4 if !repeat => {
+                    self.new_pattern();
+                    self.start_rename_pattern();
+                }
                 Key::F2 if !repeat => self.start_rename_pattern(),
                 Key::F10 if !repeat => self.prefs_win.open = !self.prefs_win.open,
                 Key::F11 if !repeat => self.show_info = !self.show_info,
@@ -1563,7 +1714,7 @@ impl App {
         egui::TopBottomPanel::top("toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("FILE", |ui| {
-                    if ui.button("New                    Ctrl+N").clicked() {
+                    if ui.button("New").clicked() {
                         self.new_project();
                         ui.close_menu();
                     }
@@ -1579,6 +1730,22 @@ impl App {
                         ui.close_menu();
                         self.save(true);
                     }
+                    if ui.button("Save new version      Ctrl+N").clicked() {
+                        ui.close_menu();
+                        self.save_new_version();
+                    }
+                    ui.menu_button("Recent projects", |ui| {
+                        if self.settings.recent.is_empty() {
+                            ui.label(RichText::new("None yet").color(TEXT_DIM));
+                        }
+                        for (k, p) in self.settings.recent.clone().into_iter().enumerate() {
+                            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.button(format!("{name}     Alt+{}", (k + 1) % 10)).on_hover_text(p.display().to_string()).clicked() {
+                                self.actions.push(Action::Open(p));
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui.button("Export audio...   Ctrl+R").clicked() {
                         ui.close_menu();
@@ -1729,7 +1896,7 @@ impl App {
                     if playing {
                         tr.set_playing(false);
                     } else {
-                        tr.set_playing(true);
+                        self.play();
                     }
                 }
                 if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("[]").strong())).on_hover_text("Stop").clicked() {
@@ -1995,18 +2162,63 @@ impl eframe::App for App {
         let low_y = top + upper + 48.0;
         let low_h = (screen.height() - low_y - 56.0).max(160.0);
         let rack_w = 640.0f32.min(wide * 0.5);
+        // a press anywhere inside one of the four big windows gives it the keys
+        let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None });
+        let took = |r: &egui::Response| press.is_some_and(|p| r.rect.contains(p) && ctx.layer_id_at(p) == Some(r.layer_id));
+        self.raise_window(ctx);
         let mut open = self.show_playlist;
-        egui::Window::new("Playlist").open(&mut open).frame(frame).default_pos([left, top]).default_size([wide, upper]).show(ctx, |ui| self.playlist_ui(ui));
+        let shown = if self.pl_max && open {
+            // Enter lets the playlist fill the work area; its own window keeps its place for afterwards
+            let size = [(screen.width() - left - 8.0).max(200.0), (screen.height() - top - 44.0).max(120.0)];
+            egui::Window::new("Playlist").id(egui::Id::new("playlist_max")).open(&mut open).frame(frame).fixed_pos([left, top - 44.0]).fixed_size(size).show(ctx, |ui| {
+                ui.set_min_size(size.into());
+                self.playlist_ui(ui)
+            })
+        } else {
+            egui::Window::new("Playlist").open(&mut open).frame(frame).default_pos([left, top]).default_size([wide, upper]).show(ctx, |ui| self.playlist_ui(ui))
+        };
+        if shown.is_some_and(|r| took(&r.response)) {
+            self.focus = Win::Playlist;
+        }
         self.show_playlist = open;
         let mut open = self.show_rack;
-        egui::Window::new("Channel rack").open(&mut open).frame(frame).default_pos([left, low_y]).default_size([rack_w, low_h]).show(ctx, |ui| self.rack_ui(ui));
+        let shown = egui::Window::new("Channel rack").open(&mut open).frame(frame).default_pos([left, low_y]).default_size([rack_w, low_h]).show(ctx, |ui| self.rack_ui(ui));
+        if shown.is_some_and(|r| took(&r.response)) {
+            self.focus = Win::Rack;
+        }
         self.show_rack = open;
         let mut open = self.show_piano;
-        egui::Window::new("Piano roll").open(&mut open).frame(frame).default_pos([left + 24.0, top + 24.0]).default_size([wide - 24.0, upper + 60.0]).show(ctx, |ui| self.piano_ui(ui));
+        let shown = egui::Window::new("Piano roll").open(&mut open).frame(frame).default_pos([left + 24.0, top + 24.0]).default_size([wide - 24.0, upper + 60.0]).show(ctx, |ui| self.piano_ui(ui));
+        if shown.is_some_and(|r| took(&r.response)) {
+            self.focus = Win::Piano;
+        }
         self.show_piano = open;
         let mut open = self.show_mixer;
-        egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([left + rack_w + 28.0, low_y]).default_size([(screen.width() - left - rack_w - 44.0).max(400.0), low_h]).show(ctx, |ui| self.mixer_ui(ui));
+        let shown = egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([left + rack_w + 28.0, low_y]).default_size([(screen.width() - left - rack_w - 44.0).max(400.0), low_h]).show(ctx, |ui| self.mixer_ui(ui));
+        if shown.is_some_and(|r| took(&r.response)) {
+            self.focus = Win::Mixer;
+        }
         self.show_mixer = open;
+        self.picker_ui(ctx);
+        if let Some((i, mut name)) = self.rename_insert.take() {
+            let mut keep = true;
+            egui::Window::new("Rename mixer track").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.text_edit_singleline(&mut name).request_focus();
+                if ui.input(|x| x.key_pressed(Key::Enter)) {
+                    if let Some(ins) = self.song.inserts.get_mut(i) {
+                        ins.name = name.clone();
+                    }
+                    self.dirty = true;
+                    keep = false;
+                }
+                if ui.input(|x| x.key_pressed(Key::Escape)) {
+                    keep = false;
+                }
+            });
+            if keep {
+                self.rename_insert = Some((i, name));
+            }
+        }
         let mut open = self.show_chanset;
         let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
         egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));

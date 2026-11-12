@@ -46,6 +46,10 @@ pub struct Transport {
     metronome: AtomicBool,
     recording: AtomicBool,
     countdown: AtomicBool,
+    /// Notes played by hand are written down one grid step at a time while the song stands still.
+    step_edit: AtomicBool,
+    /// Play is pressed, and the song starts with the first note played by hand.
+    waiting: AtomicBool,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
     /// MIDI messages the sender channels made, for the window's sender thread to put on the wire.
@@ -158,6 +162,8 @@ impl Transport {
             metronome: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
+            step_edit: AtomicBool::new(false),
+            waiting: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
             midi: Mutex::new(Vec::with_capacity(256)),
             tap_want: AtomicU32::new(u32::MAX),
@@ -207,6 +213,19 @@ impl Transport {
     pub fn set_countdown(&self, on: bool) {
         self.countdown.store(on, Relaxed);
     }
+    pub fn step_edit(&self) -> bool {
+        self.step_edit.load(Relaxed)
+    }
+    pub fn set_step_edit(&self, on: bool) {
+        self.step_edit.store(on, Relaxed);
+    }
+    /// Whether the song is held back until the first note is played by hand.
+    pub fn waiting(&self) -> bool {
+        self.waiting.load(Relaxed)
+    }
+    pub fn set_waiting(&self, on: bool) {
+        self.waiting.store(on, Relaxed);
+    }
     /// Puts one message of the window's own in the queue (a reset button, say).
     pub fn send_midi(&self, m: crate::midiout::Msg) {
         if let Ok(mut q) = self.midi.lock() {
@@ -224,7 +243,12 @@ impl Transport {
         self.live.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
     }
     fn log(&self, c: &Cmd) {
-        if !(self.recording() && self.playing()) {
+        if self.waiting() && matches!(c, Cmd::NoteOn { .. }) {
+            self.set_waiting(false);
+            self.set_playing(true);
+        }
+        let stepping = self.step_edit() && !self.playing();
+        if !(self.recording() && self.playing()) && !stepping {
             return;
         }
         let ev = match *c {

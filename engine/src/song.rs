@@ -965,6 +965,120 @@ impl Song {
         }
     }
 
+    /// Swap two mixer tracks, and with them everything that refers to either by number. The master stays put.
+    pub fn swap_inserts(&mut self, a: usize, b: usize) {
+        let n = self.inserts.len();
+        if a == b || a == 0 || b == 0 || a >= n || b >= n {
+            return;
+        }
+        let f = |k: usize| if k == a { b } else if k == b { a } else { k };
+        let ft = |t: &mut Target| match t {
+            Target::InsertVolume(k) | Target::InsertPan(k) | Target::SlotMix(k, _) | Target::SlotOn(k, _) | Target::SlotParam(k, _, _) => *k = f(*k),
+            _ => {}
+        };
+        // recorded movements name their track by address: read each one, move it, write it back
+        let mut moved: Vec<(usize, usize, u16, u16)> = vec![];
+        for (pi, p) in self.patterns.iter().enumerate() {
+            for (ei, e) in p.events.iter().enumerate() {
+                let mut t = self.event_target(e.param, e.dest);
+                let was = t;
+                ft(&mut t);
+                if t != was {
+                    let (param, dest) = self.event_address(t);
+                    moved.push((pi, ei, param, dest));
+                }
+            }
+        }
+        for (pi, ei, param, dest) in moved {
+            let e = &mut self.patterns[pi].events[ei];
+            e.param = param;
+            e.dest = dest;
+        }
+        self.inserts.swap(a, b);
+        for ins in &mut self.inserts {
+            for d in &mut ins.sends {
+                *d = f(*d);
+            }
+            ins.sends.sort_unstable();
+            if ins.levels.len() <= a.max(b) && ins.levels.iter().any(|&v| v != 1.0) {
+                ins.levels.resize(a.max(b) + 1, 1.0);
+            }
+            if ins.levels.len() > a.max(b) {
+                ins.levels.swap(a, b);
+            }
+        }
+        for c in &mut self.channels {
+            c.insert = f(c.insert);
+            if let Some(au) = &c.auto {
+                if au.targets.iter().any(|t| { let mut u = *t; ft(&mut u); u != *t }) {
+                    let mut a2 = (**au).clone();
+                    a2.targets.iter_mut().for_each(ft);
+                    c.auto = Some(Arc::new(a2));
+                }
+            }
+        }
+        for l in &mut self.ctl_links {
+            if l.ins != CtlLink::CHAN {
+                l.ins = f(l.ins);
+            }
+            ft(&mut l.target);
+        }
+        for l in &mut self.midi_links {
+            ft(&mut l.target);
+        }
+    }
+
+    /// Swap two channels of the rack, and with them everything that refers to either by number.
+    pub fn swap_channels(&mut self, a: usize, b: usize) {
+        if a == b || a >= self.channels.len() || b >= self.channels.len() {
+            return;
+        }
+        let f = |k: usize| if k == a { b } else if k == b { a } else { k };
+        let ft = |t: &mut Target| match t {
+            Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) => *k = f(*k),
+            _ => {}
+        };
+        self.channels.swap(a, b);
+        for p in &mut self.patterns {
+            for n in &mut p.notes {
+                n.chan = f(n.chan as usize) as u16;
+            }
+            for e in &mut p.events {
+                if e.dest < 0x2000 {
+                    e.dest = f(e.dest as usize) as u16;
+                }
+            }
+            p.sort();
+        }
+        for c in &mut self.clips {
+            match &mut c.src {
+                ClipSrc::Audio(k) | ClipSrc::Automation(k) => *k = f(*k),
+                _ => {}
+            }
+        }
+        for l in &mut self.ctl_links {
+            if let Some(k) = l.chan() {
+                l.slot = f(k) as u16;
+            }
+            ft(&mut l.target);
+        }
+        for l in &mut self.midi_links {
+            ft(&mut l.target);
+        }
+        for ch in &mut self.channels {
+            for k in &mut ch.children {
+                *k = f(*k as usize) as _;
+            }
+            if let Some(au) = &ch.auto {
+                if au.targets.iter().any(|t| matches!(t, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k == a || *k == b)) {
+                    let mut a2 = (**au).clone();
+                    a2.targets.iter_mut().for_each(ft);
+                    ch.auto = Some(Arc::new(a2));
+                }
+            }
+        }
+    }
+
     /// Remove a channel and renumber everything that refers to the ones after it.
     pub fn remove_channel(&mut self, ci: usize) {
         if ci >= self.channels.len() {
@@ -1576,6 +1690,39 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swapping_channels_and_tracks_takes_what_refers_to_them_along() {
+        let mut s = Song::new();
+        s.channels = vec![Chan { name: "a".into(), insert: 3, ..Chan::default() }, Chan { name: "b".into(), insert: 5, ..Chan::default() }, Chan { name: "c".into(), ..Chan::default() }];
+        s.ensure_pattern(0);
+        s.patterns[0].set_step(0, 0, true);
+        s.patterns[0].set_step(2, 24, true);
+        let (param, dest) = s.event_address(Target::InsertVolume(3));
+        s.patterns[0].events.push(PatEvent { tick: 0, param, dest, raw: 100 });
+        s.midi_links.push(MidiLink { ctrl: 7, port: 0, target: Target::ChanVolume(0) });
+        s.inserts[3].sends = vec![5];
+        s.inserts[3].set_send_level(5, 0.5);
+
+        s.swap_channels(0, 2);
+        assert_eq!(s.channels[2].name, "a");
+        assert!(s.patterns[0].has_step(2, 0) && s.patterns[0].has_step(0, 24));
+        assert_eq!(s.midi_links[0].target, Target::ChanVolume(2));
+
+        s.swap_inserts(3, 4);
+        assert_eq!(s.channels[2].insert, 4);
+        assert_eq!(s.channels[1].insert, 5);
+        assert_eq!(s.inserts[4].sends, vec![5]);
+        assert_eq!(s.inserts[4].send_level(5), 0.5);
+        let e = s.patterns[0].events[0];
+        assert_eq!(s.event_target(e.param, e.dest), Target::InsertVolume(4));
+        s.swap_inserts(4, 5);
+        assert_eq!(s.inserts[5].sends, vec![4]);
+        assert_eq!(s.inserts[5].send_level(4), 0.5);
+        // the master never moves
+        s.swap_inserts(0, 5);
+        assert_eq!(s.channels[2].insert, 5);
+    }
 
     #[test]
     fn new_song_is_sane() {

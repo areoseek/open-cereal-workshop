@@ -182,6 +182,10 @@ pub struct State {
     grid_line: u32,
     left_tick: u32,
     lane_x: Option<f32>,
+    /// Width of the note grid on screen, for the zoom keys.
+    view_w: f32,
+    /// The snap choice the Backspace key goes back to.
+    snap_back: usize,
 }
 
 impl Default for State {
@@ -212,6 +216,8 @@ impl Default for State {
             grid_line: 24,
             left_tick: 0,
             lane_x: None,
+            view_w: 600.0,
+            snap_back: 0,
         }
     }
 }
@@ -342,6 +348,166 @@ impl App {
         if !t.is_empty() {
             self.pr_sort(pat);
             self.dirty = true;
+        }
+    }
+
+    /// Move the notes by a number of ticks, whatever the snap says.
+    fn pr_nudge_by(&mut self, by: i64) {
+        let pat = self.pr_pat();
+        let t = self.pr_targets(pat);
+        let notes = &mut self.song.patterns[pat].notes;
+        if t.is_empty() || t.iter().any(|&i| (notes[i].pos as i64 + by) < 0) {
+            return;
+        }
+        for &i in &t {
+            notes[i].pos = (notes[i].pos as i64 + by) as u32;
+        }
+        self.pr_sort(pat);
+        self.dirty = true;
+    }
+
+    /// Where the selection starts and ends in time, pulled out to the snap grid.
+    fn pr_span(&mut self) -> Option<(u32, u32)> {
+        let pat = self.pr_pat();
+        let g = self.pr_snap().max(1);
+        let notes = &self.song.patterns[pat].notes;
+        let sel: Vec<usize> = self.piano.sel.iter().copied().filter(|&i| i < notes.len()).collect();
+        let a = sel.iter().map(|&i| notes[i].pos).min()? / g * g;
+        let b = sel.iter().map(|&i| notes[i].pos + notes[i].len.max(1)).max()?.div_ceil(g) * g;
+        Some((a, b.max(a + g)))
+    }
+
+    /// Open a gap as long as the selection where it starts, or close the selection's time up.
+    /// With nothing selected it is one bar at the left of the view.
+    fn pr_space(&mut self, add: bool) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let bar = self.song.bar();
+        let (from, to) = self.pr_span().unwrap_or_else(|| {
+            let a = self.piano.left_tick.div_ceil(bar) * bar;
+            (a, a + bar)
+        });
+        let len = to - from;
+        let notes = &mut self.song.patterns[pat].notes;
+        if add {
+            for n in notes.iter_mut().filter(|n| n.chan == chan && n.pos >= from) {
+                n.pos += len;
+            }
+        } else {
+            let gone: BTreeSet<usize> = (0..notes.len()).filter(|&i| notes[i].chan == chan && notes[i].pos >= from && notes[i].pos < to).collect();
+            for n in notes.iter_mut().filter(|n| n.chan == chan && n.pos >= to) {
+                n.pos -= len;
+            }
+            self.pr_remove(pat, &gone);
+            self.piano.sel.clear();
+        }
+        self.pr_sort(pat);
+        self.dirty = true;
+    }
+
+    /// Select the notes in the stretch of time just before or just after the selection, of the same length.
+    fn pr_select_beside(&mut self, after: bool) {
+        let Some((a, b)) = self.pr_span() else { return };
+        let (lo, hi) = if after { (b, b + (b - a)) } else { (a.saturating_sub(b - a), a) };
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let notes = &self.song.patterns[pat].notes;
+        self.piano.sel = (0..notes.len()).filter(|&i| notes[i].chan == chan && notes[i].pos >= lo && notes[i].pos < hi).collect();
+    }
+
+    /// Every note of the colours the selection holds, or of the colour being drawn with.
+    fn pr_select_colour(&mut self) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let notes = &self.song.patterns[pat].notes;
+        let mut cols: Vec<u8> = self.piano.sel.iter().filter_map(|&i| notes.get(i)).map(|n| n.color).collect();
+        if cols.is_empty() {
+            cols.push(self.piano.color);
+        }
+        self.piano.sel = (0..notes.len()).filter(|&i| notes[i].chan == chan && cols.contains(&notes[i].color)).collect();
+    }
+
+    /// Roughly every other note, picked by chance.
+    fn pr_select_random(&mut self) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let notes = &self.song.patterns[pat].notes;
+        let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+        self.piano.sel = (0..notes.len())
+            .filter(|&i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                notes[i].chan == chan && seed & 0x100 != 0
+            })
+            .collect();
+    }
+
+    /// Turn the notes into plain steps, which last as long as their sound does.
+    fn pr_discard_lengths(&mut self) {
+        let pat = self.pr_pat();
+        let t = self.pr_targets(pat);
+        for &i in &t {
+            self.song.patterns[pat].notes[i].len = 0;
+        }
+        self.dirty |= !t.is_empty();
+    }
+
+    /// Give the notes the colour being drawn with.
+    fn pr_recolour(&mut self) {
+        let pat = self.pr_pat();
+        let t = self.pr_targets(pat);
+        for &i in &t {
+            self.song.patterns[pat].notes[i].color = self.piano.color;
+        }
+        self.dirty |= !t.is_empty();
+    }
+
+    /// Show the stretch from tick `a` to tick `b` across the whole width.
+    fn pr_show(&mut self, a: u32, b: u32) {
+        let ppq = self.song.ppq as f32;
+        let px = (self.piano.view_w.max(100.0) / (b.max(a + 1) - a) as f32).clamp(0.02 * 96.0 / ppq, 12.0 * 96.0 / ppq);
+        self.piano.zoom = px * ppq / 96.0;
+        self.piano.scroll_x = a as f32 * px;
+    }
+
+    /// The zoom keys: Shift and a digit.
+    fn pr_zoom_key(&mut self, d: usize) {
+        let pat = self.pr_pat();
+        let bar = self.song.bar();
+        let left = self.piano.left_tick;
+        match d {
+            0 => {
+                let px = self.piano.zoom * 96.0 / self.song.ppq as f32;
+                self.piano.scroll_x = (self.handle.transport.tick() as f32 * px - self.piano.view_w * 0.5).max(0.0);
+            }
+            1 => self.pr_show(left, left + bar),
+            2 => self.pr_show(left, left + bar * 4),
+            3 => self.pr_show(left, left + bar * 16),
+            4 => {
+                let end = self.song.pattern_length(pat);
+                self.pr_show(0, end.max(bar));
+            }
+            _ => {
+                if let Some((a, b)) = self.pr_span() {
+                    self.pr_show(a, b);
+                }
+            }
+        }
+    }
+
+    /// Step to the next channel up or down; `with_notes` passes over the ones with nothing in this pattern.
+    fn pr_step_channel(&mut self, by: i32, with_notes: bool) {
+        let pat = self.pr_pat();
+        let n = self.song.channels.len() as i32;
+        let mut c = self.sel_chan as i32 + by;
+        while (0..n).contains(&c) {
+            if !with_notes || self.song.patterns[pat].notes.iter().any(|x| x.chan as i32 == c) {
+                self.sel_chan = c as usize;
+                self.piano.sel.clear();
+                return;
+            }
+            c += by;
         }
     }
 
@@ -780,13 +946,21 @@ impl App {
                 Key::G => self.pr_glue(),
                 Key::ArrowUp => self.pr_transpose(12),
                 Key::ArrowDown => self.pr_transpose(-12),
+                Key::Insert => self.pr_space(true),
+                Key::Delete => self.pr_space(false),
+                Key::ArrowLeft => self.pr_select_beside(false),
+                Key::ArrowRight => self.pr_select_beside(true),
                 _ => return false,
             }
             return true;
         }
-        if m.alt {
+        if m.alt && !m.command {
             match key {
                 Key::M => self.pr_mute(!m.shift),
+                Key::ArrowLeft => self.pr_nudge_by(-1),
+                Key::ArrowRight => self.pr_nudge_by(1),
+                Key::C => self.pr_recolour(),
+                Key::V => self.piano.ghosts = !self.piano.ghosts,
                 k => match HELPERS.iter().position(|h| h.1 == k) {
                     Some(i) => self.pr_helper(i),
                     None => return false,
@@ -800,13 +974,48 @@ impl App {
                 Key::ArrowDown => self.pr_transpose(-1),
                 Key::ArrowLeft => self.pr_nudge(-1),
                 Key::ArrowRight => self.pr_nudge(1),
-                _ => return false,
+                Key::I => self.pr_invert_selection(),
+                Key::C => self.pr_select_colour(),
+                Key::R => self.pr_select_random(),
+                Key::D => self.pr_discard_lengths(),
+                Key::F => {
+                    let at = LANES.iter().position(|l| l.0 == self.piano.lane).unwrap_or(0);
+                    self.piano.lane = LANES[(at + LANES.len() - 1) % LANES.len()].0;
+                }
+                Key::H => self.pr_step_channel(-1, true),
+                Key::K => self.pr_step_channel(1, true),
+                k => match crate::DIGITS.iter().position(|d| *d == k) {
+                    Some(d) if d <= 5 => self.pr_zoom_key(d),
+                    _ => return false,
+                },
             }
             return true;
         }
         match key {
             Key::Delete => self.pr_delete_selected(),
+            Key::PageUp | Key::PageDown => {
+                let old = self.piano.zoom;
+                self.piano.zoom = (old * if key == Key::PageUp { 1.25 } else { 0.8 }).clamp(0.02, 12.0);
+                let off = self.piano.view_w * 0.5;
+                self.piano.scroll_x = ((self.piano.scroll_x + off) * self.piano.zoom / old - off).max(0.0);
+            }
+            Key::Backspace if !repeat => {
+                if self.piano.snap == 1 {
+                    self.piano.snap = self.piano.snap_back;
+                } else {
+                    self.piano.snap_back = self.piano.snap;
+                    self.piano.snap = 1;
+                }
+            }
             _ if self.typing_keys || repeat => return false,
+            Key::F => {
+                let at = LANES.iter().position(|l| l.0 == self.piano.lane).unwrap_or(0);
+                self.piano.lane = LANES[(at + 1) % LANES.len()].0;
+            }
+            Key::G => self.pr_step_channel(-1, false),
+            Key::K => self.pr_step_channel(1, false),
+            Key::H => self.pr_step_channel(-1, true),
+            Key::J => self.pr_step_channel(1, true),
             Key::P => self.piano.tool = Tool::Draw,
             Key::B => self.piano.tool = Tool::Paint,
             Key::D => self.piano.tool = Tool::Delete,
@@ -1031,6 +1240,7 @@ impl App {
         }
         self.piano.grid_line = line;
         self.piano.left_tick = tick_of(grid.left()) as u32;
+        self.piano.view_w = grid.width();
         let g = if mods.alt { 1 } else { self.pr_snap() };
         let snap_floor = |t: f32| ((t.max(0.0) as u32) / g) * g;
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;

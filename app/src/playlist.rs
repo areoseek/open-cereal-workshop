@@ -80,11 +80,13 @@ pub struct State {
     left_tick: u32,
     /// The open menu of an automation point: channel, point, and where it was opened.
     auto_menu: Option<(usize, usize, Pos2)>,
+    view_w: f32,
+    snap_back: usize,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -444,6 +446,7 @@ impl App {
         }
         self.playlist.grid_line = if bar_px >= 120.0 { beat } else { bar };
         self.playlist.left_tick = tick_of(grid.left()) as u32;
+        self.playlist.view_w = grid.width();
         let g = if mods.alt { 1 } else { self.pl_snap() };
         let snap = |t: f32| ((t.max(0.0) as u32) / g) * g;
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
@@ -816,6 +819,99 @@ impl App {
         self.dirty = true;
     }
 
+    /// Where the selection starts and ends in time, pulled out to whole bars.
+    fn pl_span(&self) -> Option<(u32, u32)> {
+        let bar = self.song.bar();
+        let clips = &self.song.clips;
+        let sel: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| i < clips.len()).collect();
+        let a = sel.iter().map(|&i| clips[i].pos).min()? / bar * bar;
+        let b = sel.iter().map(|&i| clips[i].pos + clips[i].len.max(1)).max()?.div_ceil(bar) * bar;
+        Some((a, b.max(a + bar)))
+    }
+
+    /// Open a gap as long as the selection where it starts, or close the selection's time up.
+    /// With nothing selected it is one bar at the left of the view.
+    fn pl_space(&mut self, add: bool) {
+        let bar = self.song.bar();
+        let (from, to) = self.pl_span().unwrap_or_else(|| {
+            let a = self.playlist.left_tick.div_ceil(bar) * bar;
+            (a, a + bar)
+        });
+        let len = to - from;
+        if add {
+            for c in self.song.clips.iter_mut().filter(|c| c.pos >= from) {
+                c.pos += len;
+            }
+        } else {
+            let gone: BTreeSet<usize> = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].pos >= from && self.song.clips[i].pos < to).collect();
+            for c in self.song.clips.iter_mut().filter(|c| c.pos >= to) {
+                c.pos -= len;
+            }
+            self.pl_remove(&gone);
+            self.playlist.sel.clear();
+        }
+        self.dirty = true;
+    }
+
+    /// Select the clips in the stretch of time just before or just after the selection, of the same length.
+    fn pl_select_beside(&mut self, after: bool) {
+        let Some((a, b)) = self.pl_span() else { return };
+        let (lo, hi) = if after { (b, b + (b - a)) } else { (a.saturating_sub(b - a), a) };
+        self.playlist.sel = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].pos >= lo && self.song.clips[i].pos < hi).collect();
+    }
+
+    /// Every clip that plays the same thing as one of the selected clips.
+    fn pl_select_same(&mut self) {
+        let clips = &self.song.clips;
+        let srcs: Vec<ClipSrc> = self.playlist.sel.iter().filter_map(|&i| clips.get(i)).map(|c| c.src).collect();
+        if !srcs.is_empty() {
+            self.playlist.sel = (0..clips.len()).filter(|&i| srcs.contains(&clips[i].src)).collect();
+        }
+    }
+
+    /// Pull clip starts onto the snap grid.
+    fn pl_quantise(&mut self) {
+        let g = self.pl_snap().max(1);
+        let t = self.pl_targets();
+        for &i in &t {
+            let c = &mut self.song.clips[i];
+            c.pos = (c.pos + g / 2) / g * g;
+        }
+        self.dirty |= !t.is_empty();
+    }
+
+    /// Show the stretch from tick `a` to tick `b` across the whole width.
+    fn pl_show(&mut self, a: u32, b: u32) {
+        let ppq = self.song.ppq as f32;
+        let px = (self.playlist.view_w.max(100.0) / (b.max(a + 1) - a) as f32).clamp(0.005 * 96.0 / ppq, 4.0 * 96.0 / ppq);
+        self.playlist.zoom = px * ppq / 96.0;
+        self.playlist.scroll_x = a as f32 * px;
+    }
+
+    /// The zoom keys: Shift and a digit, and the plain 5.
+    fn pl_zoom_key(&mut self, d: usize) {
+        let bar = self.song.bar();
+        let left = self.playlist.left_tick;
+        match d {
+            0 => {
+                let px = self.playlist.zoom * 96.0 / self.song.ppq as f32;
+                self.playlist.scroll_x = (self.handle.transport.tick() as f32 * px - self.playlist.view_w * 0.5).max(0.0);
+            }
+            1 => self.pl_show(left, left + bar * 4),
+            2 => self.pl_show(left, left + bar * 16),
+            3 => self.pl_show(left, left + bar * 64),
+            4 => {
+                let end = self.song.length();
+                self.pl_show(0, end.max(bar * 4));
+            }
+            _ => {
+                if let Some((a, b)) = self.pl_span() {
+                    self.pl_show(a, b);
+                }
+            }
+        }
+    }
+
     fn pl_duplicate(&mut self) {
         let t = self.pl_targets();
         if t.is_empty() {
@@ -885,11 +981,15 @@ impl App {
                 Key::A => self.playlist.sel = (0..self.song.clips.len()).collect(),
                 Key::D => self.playlist.sel.clear(),
                 Key::B => self.pl_duplicate(),
+                Key::Insert => self.pl_space(true),
+                Key::Delete => self.pl_space(false),
+                Key::ArrowLeft => self.pl_select_beside(false),
+                Key::ArrowRight => self.pl_select_beside(true),
                 _ => return false,
             }
             return true;
         }
-        if m.alt {
+        if m.alt && !m.command {
             match key {
                 Key::M => self.pl_mute(!m.shift),
                 _ => return false,
@@ -897,6 +997,26 @@ impl App {
             return true;
         }
         if m.shift {
+            match key {
+                Key::I => {
+                    self.playlist.sel = (0..self.song.clips.len()).filter(|i| !self.playlist.sel.contains(i)).collect();
+                    return true;
+                }
+                Key::C => {
+                    self.pl_select_same();
+                    return true;
+                }
+                Key::Q => {
+                    self.pl_quantise();
+                    return true;
+                }
+                k => {
+                    if let Some(d) = crate::DIGITS.iter().position(|d| *d == k).filter(|d| *d <= 5) {
+                        self.pl_zoom_key(d);
+                        return true;
+                    }
+                }
+            }
             if self.playlist.sel.is_empty() {
                 return false;
             }
@@ -911,7 +1031,23 @@ impl App {
         }
         match key {
             Key::Delete => self.pl_delete_selected(),
+            Key::PageUp | Key::PageDown => {
+                let old = self.playlist.zoom;
+                self.playlist.zoom = (old * if key == Key::PageUp { 1.25 } else { 0.8 }).clamp(0.005, 4.0);
+                let off = self.playlist.view_w * 0.5;
+                self.playlist.scroll_x = ((self.playlist.scroll_x + off) * self.playlist.zoom / old - off).max(0.0);
+            }
+            Key::Home => self.handle.transport.seek(0),
+            Key::Backspace if !repeat => {
+                if self.playlist.snap == 1 {
+                    self.playlist.snap = self.playlist.snap_back;
+                } else {
+                    self.playlist.snap_back = self.playlist.snap;
+                    self.playlist.snap = 1;
+                }
+            }
             _ if self.typing_keys || repeat => return false,
+            Key::Num5 => self.pl_zoom_key(5),
             Key::P => self.playlist.tool = Tool::Draw,
             Key::B => self.playlist.tool = Tool::Paint,
             Key::D => self.playlist.tool = Tool::Delete,
