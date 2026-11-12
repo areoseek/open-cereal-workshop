@@ -2040,7 +2040,7 @@ impl Player {
                 continue;
             }
             let raw = ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]);
-            let mix = [(ch.volume * 127.0).round() as i32, ((ch.pan * 0.5 + 0.5) * 127.0).round() as i32, (self.wheel.get(i).copied().unwrap_or(0.0) * 12.0 / 2.0 * 8192.0) as i32];
+            let mix = [(ch.volume * 127.0).round() as i32, ((ch.pan * 0.5 + 0.5) * 127.0).round() as i32, ((self.wheel.get(i).copied().unwrap_or(0.0) + song.main_pitch as f32 / 1200.0) * 12.0 / 2.0 * 8192.0) as i32];
             let at = match self.midi_seen.iter().position(|s| s.chan == i as u16) {
                 Some(at) => at,
                 None => {
@@ -2851,10 +2851,11 @@ impl Player {
         }
         let mut live = 0;
         let follow = self.ov.any_chan;
+        let main = song.main_pitch as f32 / 1200.0;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             live += 1;
             if !v.preview {
-                v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0);
+                v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0) + main;
             }
             if follow && v.follow {
                 if let Some(&(vol, pan)) = self.ov.chan.get(v.chan as usize) {

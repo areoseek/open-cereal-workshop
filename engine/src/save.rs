@@ -407,6 +407,9 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
             ev.insert(after_version, Event::int(id::TEMPO, milli(song.tempo)));
         }
     }
+    if song.main_pitch != base.main_pitch {
+        set_or_insert(ev, 0..head_end, Event::word(id::MAIN_PITCH, song.main_pitch as u16), after_version);
+    }
     if song.performance != base.performance {
         set_or_insert(ev, 0..head_end, Event::byte(id::PERFORMANCE, song.performance as u8), after_version);
     }
@@ -2321,11 +2324,13 @@ mod tests {
         let (mut r, f) = reload(&bytes);
         assert!(!r.performance);
         r.performance = true;
+        r.main_pitch = -350;
         r.tracks[2].perf = crate::song::Perf { press: 3, motion: 5, sync: 2, pos_sync: 4, queue: true, tolerant: false };
         r.tracks[3].grouped = true;
         let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
         let (r2, _) = reload(&bytes2);
         assert!(r2.performance);
+        assert_eq!(r2.main_pitch, -350);
         assert_eq!(r2.tracks[2].perf, r.tracks[2].perf);
         assert_eq!(r2.tracks[1].perf, crate::song::Perf::default());
         assert!(r2.tracks[3].grouped && !r2.tracks[2].grouped);

@@ -92,6 +92,18 @@ fn out_lag(info: &cpal::OutputCallbackInfo) {
 /// its rate run on it.
 /// Tests run on a sound device that takes blocks as fast as they come; with CEREAL_PACE set the blocks are
 /// held back to the speed of the clock so that time in the song passes as it would be heard.
+/// How much of each block's time the sound engine used, in thousandths, smoothed.
+static CPU_LOAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn cpu_load(took: std::time::Duration, frames: usize, rate: f32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = took.as_secs_f32() / (frames.max(1) as f32 / rate.max(1.0)) * 1000.0;
+    let was = CPU_LOAD.load(Relaxed) as f32;
+    // quick to rise, slow to fall, like a meter
+    let next = if now > was { now } else { was + (now - was) * 0.05 };
+    CPU_LOAD.store(next.clamp(0.0, 9999.0) as u32, Relaxed);
+}
+
 fn pace(frames: usize, rate: f32) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static FROM: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -138,7 +150,9 @@ fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Res
         cpal::SampleFormat::F32 => device.build_output_stream(&config, move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 out_lag(info);
                 pace(out.len() / channels.max(1), rate);
-                player.render(out, channels)
+                let t0 = std::time::Instant::now();
+                player.render(out, channels);
+                cpu_load(t0.elapsed(), out.len() / channels.max(1), rate)
             },
             err,
             None,
@@ -151,7 +165,9 @@ fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Res
                     out_lag(info);
                     pace(out.len() / channels.max(1), rate);
                     let n = out.len().min(scratch.len());
+                    let t0 = std::time::Instant::now();
                     player.render(&mut scratch[..n], channels);
+                    cpu_load(t0.elapsed(), n / channels.max(1), rate);
                     for (o, s) in out.iter_mut().zip(&scratch[..n]) {
                         *o = (s * 32767.0) as i16;
                     }
@@ -207,6 +223,10 @@ pub(crate) struct App {
     wheel_over: Option<keys::WheelMove>,
     /// Keep the notes already there when recording over them.
     rec_blend: bool,
+    /// The time display counts minutes and seconds, not bars.
+    time_secs: bool,
+    /// When the tempo was last tapped.
+    taps: Vec<std::time::Instant>,
     /// The notes this recording pass wrote, which a pass that does not blend must not wipe again.
     rec_new: Vec<(u32, u16, u8)>,
     /// Where step editing writes next, and how many keys are down.
@@ -371,6 +391,8 @@ impl App {
             wheel_move: None,
             wheel_over: None,
             rec_blend: true,
+            time_secs: false,
+            taps: Vec::new(),
             rec_new: Vec::new(),
             step_at: None,
             step_down: 0,
@@ -2036,21 +2058,66 @@ impl App {
                 ui.separator();
                 let live = tr.tempo();
                 let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
-                if ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).on_hover_text("Tempo").changed() {
+                let tempo_box = ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).on_hover_text("Tempo (right-click for more)");
+                if tempo_box.changed() {
                     self.song.tempo = tempo;
+                    self.dirty = true;
+                }
+                let mut set_tempo = None;
+                tempo_box.context_menu(|ui| {
+                    if ui.button("Tap").on_hover_text("Click in time, four times or more").clicked() {
+                        let now = std::time::Instant::now();
+                        if self.taps.last().is_some_and(|t| now.duration_since(*t).as_secs_f32() > 2.5) {
+                            self.taps.clear();
+                        }
+                        self.taps.push(now);
+                        if self.taps.len() > 8 {
+                            self.taps.remove(0);
+                        }
+                        if self.taps.len() >= 4 {
+                            let span = now.duration_since(self.taps[0]).as_secs_f32();
+                            set_tempo = Some((60.0 * (self.taps.len() - 1) as f32 / span.max(0.01)).round());
+                        }
+                    }
+                    ui.separator();
+                    for (label, t) in [("Half", self.song.tempo / 2.0), ("Double", self.song.tempo * 2.0)] {
+                        if ui.button(label).clicked() {
+                            set_tempo = Some(t);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    for t in [80.0, 90.0, 100.0, 110.0, 120.0, 128.0, 130.0, 140.0, 150.0, 160.0, 174.0] {
+                        if ui.button(format!("{t:.0}")).clicked() {
+                            set_tempo = Some(t);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if let Some(t) = set_tempo {
+                    self.song.tempo = t.clamp(10.0, 522.0);
                     self.dirty = true;
                 }
                 ui.separator();
                 // pattern picker
                 let pat = tr.pattern();
                 self.song.ensure_pattern(pat);
-                egui::ComboBox::from_id_salt("pattern").width(150.0).selected_text(self.song.pattern_name(pat)).show_ui(ui, |ui| {
+                let picker = egui::ComboBox::from_id_salt("pattern").width(150.0).selected_text(self.song.pattern_name(pat)).show_ui(ui, |ui| {
                     for i in 0..self.song.patterns.len() {
                         if ui.selectable_label(i == pat, self.song.pattern_name(i)).clicked() {
                             tr.set_pattern(i);
                         }
                     }
                 });
+                if picker.response.hovered() {
+                    // the wheel over the picker steps through the patterns
+                    let turn = ui.input(|i| i.raw_scroll_delta.y);
+                    if turn > 0.0 && pat > 0 {
+                        tr.set_pattern(pat - 1);
+                    } else if turn < 0.0 && pat + 1 < self.song.patterns.len() {
+                        tr.set_pattern(pat + 1);
+                    }
+                }
                 if ui.button("+").on_hover_text("New pattern (F4)").clicked() {
                     self.new_pattern();
                 }
@@ -2058,6 +2125,20 @@ impl App {
                 if ui.toggle_value(&mut met, "Metro").on_hover_text("Metronome (Ctrl+M)").changed() {
                     tr.set_metronome(met);
                 }
+                let mut wait = tr.waiting();
+                if ui.toggle_value(&mut wait, "Wait").on_hover_text("Wait for input before the song starts (Ctrl+I)").changed() {
+                    tr.set_waiting(wait);
+                }
+                let mut count = tr.countdown();
+                if ui.toggle_value(&mut count, "3 2 1").on_hover_text("Count one bar in before recording (Ctrl+P)").changed() {
+                    tr.set_countdown(count);
+                }
+                ui.toggle_value(&mut self.rec_blend, "Blend").on_hover_text("Recorded notes are added to the ones already there (Ctrl+B)");
+                let mut step_edit = tr.step_edit();
+                if ui.toggle_value(&mut step_edit, "Step").on_hover_text("Step editing: played notes are written one grid step after another (Ctrl+E)").changed() {
+                    tr.set_step_edit(step_edit);
+                }
+                ui.toggle_value(&mut self.typing_keys, "Keys").on_hover_text("Typing keyboard to piano (Ctrl+T)");
                 ui.separator();
                 // time
                 let tick = tr.tick() as u32;
@@ -2066,12 +2147,33 @@ impl App {
                 let (from, first, sig) = if tr.song_mode() { self.song.sig_at(tick) } else { (0, 0, self.song.time_sig) };
                 let bar = (self.song.ppq * 4 * sig.0.max(1) as u32 / sig.1.max(1) as u32).max(1);
                 let tick = tick - from;
-                ui.label(RichText::new(format!("{:03}:{:02}:{:02}", first + tick / bar + 1, (tick % bar) / step + 1, tick % step)).monospace().size(18.0).color(GREEN));
+                let shown = if self.time_secs {
+                    let secs = tr.tick() * 60.0 / (self.song.tempo.max(1.0) as f64 * self.song.ppq as f64);
+                    format!("{:03}:{:02}:{:02}", (secs / 60.0) as u32, secs as u32 % 60, (secs.fract() * 100.0) as u32)
+                } else {
+                    format!("{:03}:{:02}:{:02}", first + tick / bar + 1, (tick % bar) / step + 1, tick % step)
+                };
+                let clock = ui.add(egui::Label::new(RichText::new(shown).monospace().size(18.0).color(GREEN)).sense(egui::Sense::click()));
+                if clock.on_hover_text(if self.time_secs { "Minutes : seconds : hundredths (click for bars)" } else { "Bar : step : tick (click for minutes and seconds)" }).clicked() {
+                    self.time_secs = !self.time_secs;
+                }
+                // where the song stands, as a slider to drag
+                let total = if tr.song_mode() { self.song.length() } else { self.song.patterns.get(pat).map(|p| p.length(self.song.ppq * 4)).unwrap_or(0) }.max(1);
+                let mut at = (tr.tick() as f32 / total as f32).clamp(0.0, 1.0);
+                ui.spacing_mut().slider_width = 110.0;
+                if ui.add(egui::Slider::new(&mut at, 0.0..=1.0).show_value(false)).on_hover_text("Song position").changed() {
+                    tr.seek((at * total as f32) as u32);
+                }
                 ui.separator();
                 let mut master = tr.master();
                 ui.label(RichText::new("Master").color(TEXT_DIM));
-                if knob(ui, &mut master, 0.0, 1.25, 1.0, 22.0).changed() {
+                if knob(ui, &mut master, 0.0, 1.25, 1.0, 22.0).on_hover_text("Main volume").changed() {
                     tr.set_master(master);
+                }
+                let mut pitch = self.song.main_pitch as f32;
+                if knob(ui, &mut pitch, -1200.0, 1200.0, 0.0, 22.0).on_hover_text(format!("Main pitch: {:+} cents", self.song.main_pitch)).changed() {
+                    self.song.main_pitch = pitch.round() as i16;
+                    self.dirty = true;
                 }
                 ui.separator();
                 for (flag, label, tip) in [
@@ -2086,7 +2188,9 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                     ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
+                    ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).on_hover_text("Share of each block's time the sound engine needs");
                 });
             });
             ui.add_space(2.0);

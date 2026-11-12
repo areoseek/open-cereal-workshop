@@ -835,6 +835,8 @@ pub struct Song {
     pub time_sig: (u8, u8),
     /// The playlist's clips ahead of the start marker are played by hand.
     pub performance: bool,
+    /// Main pitch: every instrument is moved by this many cents.
+    pub main_pitch: i16,
     /// Project swing, 0..=1.
     pub swing: f32,
     pub channels: Vec<Chan>,
@@ -953,6 +955,7 @@ impl Song {
             tempo: 130.0,
             time_sig: (4, 4),
             performance: false,
+            main_pitch: 0,
             swing: 0.0,
             channels: names.iter().map(|n| Chan { name: n.to_string(), ..Default::default() }).collect(),
             patterns: vec![Pattern::default()],
@@ -1775,6 +1778,7 @@ impl Song {
             tempo: if f.tempo > 0.0 { f.tempo } else { 130.0 },
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
             performance: f.performance,
+            main_pitch: f.main_pitch,
             swing: (f.shuffle as f32 / 128.0).min(1.0),
             channels,
             patterns,
