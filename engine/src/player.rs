@@ -627,6 +627,7 @@ impl Handle {
             fx: vec![],
             driven: Vec::with_capacity(64),
             env_runs: Vec::new(),
+            key_glides: Vec::new(),
             arps: Vec::new(),
             scripts: Vec::new(),
             script_emit: None,
@@ -764,6 +765,20 @@ impl Overrides {
 }
 
 /// A slot's switch and mix for the block being run, after automation.
+/// A key sender channel whose value glides or falls back when its keys are let go.
+struct KeyGlide {
+    chan: u16,
+    /// What was last sent; nothing yet before the first note.
+    cur: Option<f32>,
+    goal: f32,
+    /// Seconds a move across the whole range takes; none is at once.
+    time: f32,
+    /// Keys held: the key and the frames a note from the song has left.
+    notes: Vec<(u8, Option<u64>)>,
+    release: f32,
+    off: Option<f32>,
+}
+
 /// A note of an envelope sender channel that is still sending.
 struct EnvRun {
     chan: u16,
@@ -1350,6 +1365,8 @@ pub struct Player {
     driven: Vec<(Target, f32)>,
     /// Envelope sender notes still running.
     env_runs: Vec<EnvRun>,
+    /// Key senders with smoothing or a note-off value.
+    key_glides: Vec<KeyGlide>,
     /// Arpeggiators at work: the notes each holds and where it is in its run.
     arps: Vec<ArpRun>,
     /// Note scripts at work.
@@ -1895,9 +1912,35 @@ impl Player {
         }
         if ch.plugin.eq_ignore_ascii_case(crate::synth::KEY_SENDER) {
             // the key sender makes no sound: the key and how hard it was hit go to whatever is linked to it
-            let outs = [crate::synth::key_sender_value(ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]), n.key), n.vel.clamp(0.0, 1.0)];
+            let raw = ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]);
+            let outs = [crate::synth::key_sender_value(raw, n.key), n.vel.clamp(0.0, 1.0)];
+            let (attack, release, off) = crate::synth::key_sender_extra(raw);
+            let glides = attack > 0.0 || off.is_some();
+            if glides {
+                // the note value travels there in its own time and falls back when the keys are let go
+                let left = match len_frames {
+                    Some(f) => Some(f.max(1) + delay as u64),
+                    None if live => None,
+                    None => Some(delay as u64 + (self.sr * 0.25) as u64),
+                };
+                let at = match self.key_glides.iter().position(|g| g.chan == n.chan) {
+                    Some(i) => i,
+                    None => {
+                        self.key_glides.push(KeyGlide { chan: n.chan, cur: None, goal: 0.0, time: 0.0, notes: Vec::new(), release: 0.0, off: None });
+                        self.key_glides.len() - 1
+                    }
+                };
+                let g = &mut self.key_glides[at];
+                g.goal = outs[0];
+                g.time = attack;
+                g.release = release;
+                g.off = off;
+                g.notes.push((n.key, left));
+            } else {
+                self.key_glides.retain(|g| g.chan != n.chan);
+            }
             let mut fitted = false;
-            for l in song.ctl_links.iter().filter(|l| l.chan() == Some(n.chan as usize)) {
+            for l in song.ctl_links.iter().filter(|l| l.chan() == Some(n.chan as usize) && !(glides && l.out == 0)) {
                 if let Some(&v) = outs.get(l.out as usize) {
                     if !fitted {
                         self.ov.fit(song);
@@ -2294,6 +2337,11 @@ impl Player {
         }
         for r in self.env_runs.iter_mut().filter(|r| r.chan == chan && r.key == key && r.rel.is_none()) {
             r.rel = Some(r.t);
+        }
+        for g in self.key_glides.iter_mut().filter(|g| g.chan == chan) {
+            if let Some(i) = g.notes.iter().position(|h| h.0 == key && h.1.is_none()) {
+                g.notes[i].1 = Some(0);
+            }
         }
         for h in self.scripts.iter_mut().filter(|r| r.chan == chan).flat_map(|r| r.held.iter_mut()).filter(|h| h.live && h.key == key) {
             h.live = false;
@@ -3360,6 +3408,43 @@ impl Player {
             }
             // a note is done once it is let go and every one of its lines has run out
             self.env_runs.retain(|r| r.rel.is_none_or(|rel| r.t - rel <= (0..r.set.arts.len()).map(|a| r.set.tail(a, rel)).fold(0.0, f32::max) + dt));
+        }
+
+        // key senders that glide: let finished notes go, move the value on and hand it to what is linked
+        if !self.key_glides.is_empty() {
+            let dt = n as f32 / self.sr;
+            let mut fitted = false;
+            for g in self.key_glides.iter_mut() {
+                let held = g.notes.len();
+                g.notes.retain_mut(|h| match h.1.as_mut() {
+                    Some(left) if *left <= n as u64 => false,
+                    Some(left) => {
+                        *left -= n as u64;
+                        true
+                    }
+                    None => true,
+                });
+                if held > 0 && g.notes.is_empty() {
+                    if let Some(off) = g.off {
+                        g.goal = off;
+                        g.time = g.release;
+                    }
+                }
+                let now = match g.cur {
+                    Some(c) if g.time > 0.0 => c + (g.goal - c).clamp(-dt / g.time, dt / g.time),
+                    _ => g.goal,
+                };
+                if g.cur != Some(now) {
+                    g.cur = Some(now);
+                    for l in song.ctl_links.iter().filter(|l| l.out == 0 && l.chan() == Some(g.chan as usize)) {
+                        if !fitted {
+                            self.ov.fit(song);
+                            fitted = true;
+                        }
+                        self.ov.set(l.target, now);
+                    }
+                }
+            }
         }
 
         let master = self.transport.master();
@@ -4529,6 +4614,43 @@ mod tests {
         assert_eq!(crate::synth::key_sender_value(&raw, 110), 0.0);
         assert!((crate::synth::key_sender_value(&raw, 60) - 60.0 / 119.0).abs() < 1e-6);
         assert_eq!(crate::synth::key_sender_range(&raw), (0, 119));
+    }
+
+    #[test]
+    fn a_key_sender_glides_and_falls_back_when_the_key_is_let_go() {
+        let mut s = click_song();
+        let mut c = crate::song::Chan { name: "Keys".into(), kind: ChannelKind::Plugin, plugin: crate::synth::KEY_SENDER.into(), ..Default::default() };
+        let mut raw = vec![];
+        // a tenth of a second up, at once back to nothing
+        crate::synth::key_sender_set_extra(&mut raw, 0.05, 0.0, Some(0.0));
+        assert_eq!(crate::synth::key_sender_extra(&raw), (0.1, 0.0, Some(0.0)));
+        c.gen = Some(crate::synth::Gen { raw, ..crate::synth::Gen::new(crate::synth::Kind::Quiet) });
+        s.channels.push(c);
+        let k = s.channels.len() - 1;
+        s.ctl_links.push(crate::song::CtlLink::from_chan(k, 0, Target::InsertVolume(0)));
+        let (h, mut p) = new_player(s, 48_000.0);
+        let loud = |p: &mut Player, key: Option<(u8, bool)>| {
+            if let Some((key, on)) = key {
+                h.send(if on { Cmd::NoteOn { chan: k as u16, key, vel: 1.0 } } else { Cmd::NoteOff { chan: k as u16, key } });
+            }
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            let mut buf = vec![0.0f32; 2048];
+            p.render(&mut buf, 2);
+            buf.iter().fold(0.0f32, |a, x| a.max(x.abs()))
+        };
+        // the first note lands at once: the bottom key shuts the master fader
+        assert!(loud(&mut p, Some((0, true))) < 1e-6);
+        // the top key opens it over several blocks, not in one
+        let a = loud(&mut p, Some((119, true)));
+        let mut b = a;
+        for _ in 0..8 {
+            b = loud(&mut p, None);
+        }
+        assert!(a < b * 0.6 && b > 0.01, "{a} {b}");
+        // letting both keys go sends the note-off value
+        loud(&mut p, Some((0, false)));
+        loud(&mut p, Some((119, false)));
+        assert!(loud(&mut p, None) < 1e-6);
     }
 
     #[test]

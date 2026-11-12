@@ -1276,6 +1276,36 @@ fn key_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
         }
     });
     ui.horizontal(|ui| {
+        use cereal_engine::synth::{key_sender_extra, key_sender_set_extra};
+        let (a, r, off) = key_sender_extra(raw);
+        let (mut a, mut r) = (a / 2.0, r / 2.0);
+        let mut on = off.is_some();
+        let mut v = if raw.len() >= 500 { f32::from_le_bytes([raw[496], raw[497], raw[498], raw[499]]).clamp(0.0, 1.0) * 100.0 } else { 0.0 };
+        let mut hit = ui.checkbox(&mut on, "Note off value").hint("Send a value of its own when the last key is let go").changed();
+        hit |= ui.add_enabled(on, egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %")).changed();
+        ui.separator();
+        ui.label("Smoothing");
+        let link_id = ui.id().with("keysmooth_link");
+        let mut link: bool = ui.data(|d| d.get_temp(link_id)).unwrap_or(false);
+        let ha = ui.add(egui::Slider::new(&mut a, 0.0..=1.0).text("attack").custom_formatter(|x, _| format!("{:.0} ms", x * 2000.0))).hint("Time the value takes to reach a pressed key's value").changed();
+        let hr = ui.add(egui::Slider::new(&mut r, 0.0..=1.0).text("release").custom_formatter(|x, _| format!("{:.0} ms", x * 2000.0))).hint("Time the value takes to reach the note-off value").changed();
+        if ui.selectable_label(link, "Link").hint("Move attack and release together").clicked() {
+            link = !link;
+            ui.data_mut(|d| d.insert_temp(link_id, link));
+        }
+        if link && ha {
+            r = a;
+        } else if link && hr {
+            a = r;
+        }
+        if hit || ha || hr {
+            key_sender_set_extra(raw, a, r, None);
+            raw[496..500].copy_from_slice(&(v / 100.0).to_le_bytes());
+            raw[500] = on as u8;
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
         ui.label("Key range");
         let mut range_changed = false;
         range_changed |= ui.add(egui::DragValue::new(&mut lo).range(0..=119).custom_formatter(|v, _| format!("{}{}", NAMES[v as usize % 12], v as usize / 12))).changed();

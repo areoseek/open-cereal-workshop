@@ -736,6 +736,32 @@ pub fn key_sender_set(raw: &mut Vec<u8>, key: u8, v: f32) {
     }
 }
 
+/// The key sender's smoothing and note-off value: (seconds to reach a pressed key's value, seconds to reach
+/// the note-off value, the note-off value when its switch is on). No stored example sets any of these, so
+/// their places are our guess: the two leading words as the times, a value and a switch byte at the end.
+pub fn key_sender_extra(raw: &[u8]) -> (f32, f32, Option<f32>) {
+    if raw.len() < 501 {
+        return (0.0, 0.0, None);
+    }
+    let f = |o: usize| {
+        let v = f32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+        if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    };
+    // the knobs run to two seconds
+    (f(0) * 2.0, f(4) * 2.0, (raw[500] != 0).then(|| f(496)))
+}
+
+/// Writes the smoothing times (as knob positions 0..1) and the note-off value with its switch.
+pub fn key_sender_set_extra(raw: &mut Vec<u8>, attack: f32, release: f32, off: Option<f32>) {
+    key_sender_set(raw, 255, 0.0);
+    raw[0..4].copy_from_slice(&attack.clamp(0.0, 1.0).to_le_bytes());
+    raw[4..8].copy_from_slice(&release.clamp(0.0, 1.0).to_le_bytes());
+    if let Some(v) = off {
+        raw[496..500].copy_from_slice(&v.clamp(0.0, 1.0).to_le_bytes());
+    }
+    raw[500] = off.is_some() as u8;
+}
+
 /// The key range the key sender's automatic mappings work over.
 pub fn key_sender_range(raw: &[u8]) -> (u8, u8) {
     if raw.len() < 496 {
