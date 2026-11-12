@@ -1123,6 +1123,7 @@ impl Gen {
     pub fn tail(&self) -> crate::tailfx::Set {
         match self.kind {
             Kind::Duo => crate::duo::tail(&self.p),
+            Kind::Additive => crate::additive::tail(&self.p),
             Kind::SawSyn => crate::analog::saw_tail(&self.p),
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),

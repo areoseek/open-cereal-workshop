@@ -60,6 +60,13 @@ pub mod ix {
     pub const LFO_SHAPE: usize = 82;
     pub const LFO_ATTACK: usize = 84;
     pub const LFO_SPEED: usize = 85;
+    pub const CHORUS_TYPE: usize = 86;
+    pub const CHORUS_MIX: usize = 87;
+    pub const DELAY_VOL: usize = 89;
+    pub const DELAY_FB: usize = 90;
+    pub const DELAY_TIME: usize = 91;
+    pub const REVERB_TYPE: usize = 92;
+    pub const REVERB_VOL: usize = 93;
     pub const FILTER_TYPE: usize = 98;
     pub const TIMBRE: usize = 99;
     pub const COUNT: usize = 100;
@@ -68,6 +75,27 @@ pub mod ix {
 pub const TIMBRES: [&str; 12] = ["Saw", "Square", "Soft saw", "Triangle", "Pulse", "Even", "Stairs", "Bell", "Felt", "Organ", "Drawbars", "Custom"];
 pub const LFO_SHAPES: [&str; 14] =
     ["Sine", "Triangle", "Saw up", "Saw down", "Square", "Random", "Smooth random", "Half sine", "Filter envelope", "Filter frequency", "Voice random", "Velocity", "Key", "Pitch"];
+
+/// The chorus, echo and room after the voices. They have no switch: a knob at nothing takes one out. The
+/// chorus styles and room sizes are our own (the reference names none); the echo time is stored in ticks of
+/// a 96-tick beat.
+pub fn tail(p: &[f32]) -> crate::tailfx::Set {
+    use crate::tailfx::{Chorus, Delay, Reverb, Set};
+    if p.len() < ix::COUNT {
+        return Set::default();
+    }
+    let u = |i: usize| (p[i] / 1000.0).clamp(0.0, 1.0);
+    const STYLES: [(f32, f32); 10] = [(0.5, 0.6), (0.3, 0.3), (0.7, 0.4), (0.4, 1.2), (0.8, 0.8), (0.2, 2.5), (0.6, 0.15), (0.9, 0.25), (0.35, 4.0), (1.0, 0.5)];
+    const ROOMS: [f32; 7] = [0.5, 0.9, 1.4, 2.0, 2.8, 4.0, 6.0];
+    let style = STYLES[(p[ix::CHORUS_TYPE].max(0.0) as usize).min(9)];
+    let steps = p[ix::DELAY_TIME].clamp(1.0, 384.0) / 24.0;
+    Set {
+        chorus: (u(ix::CHORUS_MIX) > 0.0).then(|| Chorus { depth: style.0, hz: style.1, wet: u(ix::CHORUS_MIX) }),
+        delay: (u(ix::DELAY_VOL) > 0.0).then(|| Delay { left: steps, right: steps, fb: u(ix::DELAY_FB) * 0.95, high_hz: 6000.0, wet: u(ix::DELAY_VOL) * u(ix::DELAY_VOL), ..Default::default() }),
+        reverb: (u(ix::REVERB_VOL) > 0.0).then(|| Reverb { secs: ROOMS[(p[ix::REVERB_TYPE].max(0.0) as usize).min(6)], high_hz: 6000.0, wet: u(ix::REVERB_VOL) * u(ix::REVERB_VOL) }),
+        ..Default::default()
+    }
+}
 
 /// Level of harmonic `k` (1 is the note itself) for the built-in timbres.
 fn timbre(kind: u8, k: usize) -> f32 {
@@ -519,6 +547,19 @@ mod tests {
     fn patch() -> Patch {
         let g = crate::synth::Gen::new(crate::synth::Kind::Additive);
         Patch::new(&g.p, &g.raw)
+    }
+
+    #[test]
+    fn the_effects_follow_their_knobs() {
+        let mut g = crate::synth::Gen::new(crate::synth::Kind::Additive);
+        let t = g.tail();
+        // the echo of a fresh one is a beat and a half long
+        assert_eq!(t.delay.unwrap().left, 6.0);
+        assert!(t.chorus.is_some() && t.reverb.is_some());
+        for i in [ix::CHORUS_MIX, ix::DELAY_VOL, ix::REVERB_VOL] {
+            g.p[i] = 0.0;
+        }
+        assert!(!g.tail().any());
     }
 
     fn render(p: &Patch, hz: f32, frames: usize) -> Vec<f32> {
