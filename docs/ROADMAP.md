@@ -18,5 +18,5 @@ Done
 Left, roughly in order
 - Measuring every item marked as an estimate in docs/PARITY.md against the reference and correcting it.
 - The "Not done" notes in docs/PARITY.md, unit by unit.
-- Free, properly licensed starter sounds (docs/CONTENT-SOURCES.md).
+- More free, properly licensed sounds beyond the small starter kit the program makes itself (docs/CONTENT-SOURCES.md).
 - Packages: an AppImage or Flatpak for Linux, an installer for Windows.

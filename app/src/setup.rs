@@ -95,6 +95,20 @@ pub fn backup_dir() -> Option<PathBuf> {
     Some(settings_path()?.parent()?.join("Backup"))
 }
 
+/// The folder of sounds this program makes itself, written the first time it is wanted.
+pub fn starter_dir() -> Option<PathBuf> {
+    let dir = settings_path()?.parent()?.join("Starter sounds");
+    if !dir.join("Kick.wav").is_file() {
+        std::fs::create_dir_all(&dir).ok()?;
+        for (name, v) in cereal_engine::starter::sounds() {
+            let mut bytes = Vec::new();
+            cereal_engine::wav::write(&mut bytes, &v, cereal_engine::starter::SAMPLE_RATE, 1, 16).ok()?;
+            std::fs::write(dir.join(format!("{name}.wav")), bytes).ok()?;
+        }
+    }
+    Some(dir)
+}
+
 /// Where the note scripts the user has let run are kept, one text to a file.
 fn scripts_dir() -> Option<PathBuf> {
     Some(settings_path()?.parent()?.join("scripts-allowed"))

@@ -36,6 +36,7 @@ pub mod fm;
 pub mod formula;
 pub mod scope;
 pub mod waveed;
+pub mod starter;
 pub mod minis;
 pub mod midifile;
 pub mod midiout;

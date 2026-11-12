@@ -385,6 +385,9 @@ impl App {
         if let Some(d) = setup::backup_dir() {
             browser.add_root("Backup", d);
         }
+        if let Some(d) = setup::starter_dir() {
+            browser.add_root("Starter sounds", d);
+        }
         let midi = midi::MidiIn::start(handle.sender());
         midi::start_out(handle.transport.clone());
         handle.transport.set_click_kind(settings.click_kind);
@@ -496,6 +499,8 @@ impl App {
             app.add_content_root(r);
         }
         // first run (and later runs until the user settles it): offer to read sounds from their own copy
+        app.starter_kit();
+        app.unsaved = false;
         app.setup.open = roots.is_empty() && !app.settings.never_ask && std::env::var_os("CEREAL_NO_SETUP").is_none();
         if let Some(p) = open {
             app.open(&p);
@@ -753,10 +758,24 @@ impl App {
         self.handle.transport.set_song_mode(false);
         self.sel_chan = 0;
         self.sel_insert = 0;
+        self.starter_kit();
         self.dirty = true;
         self.fresh = true;
         self.unsaved = false;
         self.status = "New project".into();
+    }
+
+    /// Put our own drum sounds on the four channels an empty project starts with, so it makes sound at once.
+    fn starter_kit(&mut self) {
+        let Some(dir) = setup::starter_dir() else { return };
+        for (i, name) in ["Kick", "Clap", "Hat", "Snare"].iter().enumerate() {
+            let empty = self.song.channels.get(i).is_some_and(|c| c.kind == ChannelKind::Sampler && c.sample_path.is_empty());
+            let path = dir.join(format!("{name}.wav"));
+            if empty && path.is_file() {
+                self.load_sample(&path, Some(i));
+            }
+        }
+        self.sel_chan = 0;
     }
 
     /// FILE > Export > Zipped loop package: the project and the sounds it uses in one archive.
