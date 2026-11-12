@@ -14,6 +14,7 @@ mod midi;
 mod record;
 mod settings;
 mod setup;
+mod stems;
 mod unpack;
 mod waveed;
 
@@ -257,6 +258,7 @@ pub(crate) struct App {
     rename_marker: Option<(usize, String)>,
     /// The tool list that F3 opens at the pointer (a zero position is filled in when it is first shown).
     tool_menu: Option<egui::Pos2>,
+    pub(crate) stems: stems::State,
     pub(crate) grid_win: bool,
     pub(crate) setup: setup::State,
     pub(crate) settings: setup::Settings,
@@ -446,6 +448,7 @@ impl App {
             rename_insert: None,
             rename_marker: None,
             tool_menu: None,
+            stems: Default::default(),
             grid_win: false,
             setup: Default::default(),
             settings,
@@ -507,7 +510,14 @@ impl App {
         app.unsaved = false;
         app.setup.open = roots.is_empty() && !app.settings.never_ask && std::env::var_os("CEREAL_NO_SETUP").is_none();
         if let Some(p) = open {
-            app.open(&p);
+            // a sound handed over on its own lands on the playlist of a new project
+            let sound = p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"].iter().any(|k| e.eq_ignore_ascii_case(k)));
+            if sound {
+                app.add_audio_clip(&p, 0, None);
+                app.dirty = false;
+            } else {
+                app.open(&p);
+            }
         }
         // presets to load at start, for screenshots and tests
         if let Ok(v) = std::env::var("CEREAL_PRESET") {
@@ -3543,6 +3553,7 @@ impl eframe::App for App {
                 self.rename_insert = Some((i, name));
             }
         }
+        self.stems_ui(ctx);
         if let Some(at) = self.tool_menu {
             // the tools of the window that has the focus, at the pointer
             let at = if at == egui::Pos2::ZERO { ctx.pointer_latest_pos().unwrap_or(screen.center()) } else { at };

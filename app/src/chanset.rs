@@ -542,6 +542,7 @@ impl App {
             }
             Tab::Sample => {
                 let mut pick = false;
+                let mut stems = false;
                 {
                     let c = &mut self.song.channels[ci];
                     ui.horizontal(|ui| {
@@ -553,7 +554,13 @@ impl App {
                         ui.label(RichText::new(if file.is_empty() { "(no sample)".to_string() } else { file }).color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })).hint(c.sample_path.clone());
                     });
                     if let Some(s) = &c.sample {
-                        draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                        let r = draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
+                        ui.interact(r, ui.id().with(("wave menu", ci)), Sense::click()).context_menu(|ui| {
+                            if ui.button("Extract stems from sample").clicked() {
+                                stems = true;
+                                ui.close_menu();
+                            }
+                        });
                         let len = s.frames.len() as f32 / s.rate.max(1) as f32;
                         ui.label(RichText::new(format!("{} Hz, {}, {}", s.rate, if s.mono { "mono" } else { "stereo" }, secs(len))).small().color(TEXT_DIM));
                     }
@@ -590,6 +597,9 @@ impl App {
                             ui.label(RichText::new("MODE").small().color(TEXT_DIM));
                         });
                     });
+                }
+                if stems {
+                    self.ask_stems(ci);
                 }
                 if pick {
                     if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {

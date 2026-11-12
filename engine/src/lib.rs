@@ -61,6 +61,7 @@ pub mod sample;
 pub mod save;
 pub mod score;
 pub mod song;
+pub mod stems;
 pub mod wav;
 
 pub use player::{new_player, Cmd, CmdSender, Handle, Live, PerfSeg, Player, Transport};

@@ -109,3 +109,35 @@ dependency under the ISC License; the licence text ships inside the crate.
 The `x11rb` crate by Uli Schlachter and contributors makes the X11 window a VST3 plug-in's editor is shown
 in. It is used unmodified as a dependency under the MIT License or the Apache License 2.0, at our choice;
 the licence texts ship inside the crate.
+
+## Open-Unmix (stem separation, `engine/src/stems.rs`)
+
+Extract stems from sample runs the Open-Unmix networks by Fabian-Robert Stöter, Stefan Uhlich, Antoine Liutkus
+and Yuki Mitsufuji ("Open-Unmix - A Reference Implementation for Music Source Separation", Journal of Open
+Source Software, 2019). The code that reads the weight files and runs the networks is our own, written from
+the published description. The UMX-HQ weight files (trained on MUSDB18-HQ) are not part of this repository
+or of any release: the program downloads them from their publication record on zenodo.org (record 3370489)
+the first time stems are asked for, and keeps them in its data folder. The weights are published under the
+MIT License:
+
+    MIT License
+
+    Copyright (c) 2019 Inria (Fabian-Robert Stöter, Antoine Liutkus)
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.

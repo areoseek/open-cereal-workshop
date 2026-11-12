@@ -97,6 +97,8 @@ pub struct State {
     auto_menu: Option<(usize, usize, Pos2)>,
     /// The open menu of a track: the track and where it was opened.
     track_menu: Option<(usize, Pos2)>,
+    /// The clip whose menu is open (its top left corner was clicked), and where.
+    clip_menu: Option<(usize, Pos2)>,
     /// Performance mode: the tracks whose clips the mouse button is holding, and the keys holding tracks.
     perf_press: Vec<u16>,
     pub(crate) perf_held: std::collections::HashMap<Key, u16>,
@@ -106,7 +108,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -166,6 +168,66 @@ impl App {
     }
 
     /// The menu of a playlist track: its name and how it behaves in performance mode.
+    /// The menu behind a clip's top left corner.
+    fn clip_menu(&mut self, ctx: &egui::Context) {
+        let Some((i, at)) = self.playlist.clip_menu else { return };
+        let Some(clip) = self.song.clips.get(i).cloned() else {
+            self.playlist.clip_menu = None;
+            return;
+        };
+        let audio = self.clip_sample_chan(i);
+        let mut close = false;
+        let area = egui::Area::new(egui::Id::new("pl_clip_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(190.0);
+                if ui.button("Select all similar clips").clicked() {
+                    self.playlist.sel = (0..self.song.clips.len()).filter(|&k| self.song.clips[k].src == clip.src).collect();
+                    close = true;
+                }
+                if ui.button(if clip.muted { "Unmute" } else { "Mute" }).clicked() {
+                    self.song.clips[i].muted = !clip.muted;
+                    self.dirty = true;
+                    close = true;
+                }
+                if ui.button("Make unique").hint("Give this clip a copy of its own to change").clicked() {
+                    match clip.src {
+                        ClipSrc::Pattern(p) => {
+                            let n = self.song.clone_pattern(p);
+                            self.song.clips[i].src = ClipSrc::Pattern(n);
+                            self.handle.transport.set_pattern(n);
+                        }
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                            if let Some(copy) = self.song.channels.get(c).cloned() {
+                                self.song.channels.push(copy);
+                                let n = self.song.channels.len() - 1;
+                                self.song.clips[i].src = if matches!(clip.src, ClipSrc::Audio(_)) { ClipSrc::Audio(n) } else { ClipSrc::Automation(n) };
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                    close = true;
+                }
+                if ui.button("Delete").clicked() {
+                    self.song.clips.remove(i);
+                    self.playlist.sel.clear();
+                    self.dirty = true;
+                    close = true;
+                }
+                if let Some(ch) = audio {
+                    ui.separator();
+                    if ui.button("Extract stems from sample").hint("Split the sound into drums, bass, instruments and vocals on new tracks").clicked() {
+                        self.ask_stems(ch);
+                        close = true;
+                    }
+                }
+            });
+        });
+        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
+        if close || (outside && !ctx.input(|i| i.pointer.primary_down() && i.pointer.press_origin() == Some(at))) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.playlist.clip_menu = None;
+        }
+    }
+
     fn track_menu(&mut self, ctx: &egui::Context) {
         let Some((tr, at)) = self.playlist.track_menu else { return };
         if tr >= self.song.tracks.len() {
@@ -536,6 +598,7 @@ impl App {
         let now_tick = self.handle.transport.tick() as f32;
         let blink = ui.input(|i| i.time).fract() < 0.5;
         let mut hit: Option<(usize, i8)> = None;
+        let mut hit_corner = false;
         // the automation clip whose picture the pointer is over: clip, channel, picture, left edge, offset
         let mut auto_under: Option<(usize, usize, Rect, f32, u32)> = None;
         let gp = ui.painter_at(grid);
@@ -665,6 +728,7 @@ impl App {
                 if r.contains(pp) && grid.contains(pp) {
                     let edge = if r.width() < 12.0 { 0 } else if pp.x > r.right() - 5.0 { 1 } else if pp.x < r.left() + 4.0 { -1 } else { 0 };
                     hit = Some((i, edge));
+                    hit_corner = r.width() >= 24.0 && pp.x >= r.left() + 4.0 && pp.x < r.left() + 16.0 && pp.y < r.top() + 12.0;
                 }
             }
         }
@@ -853,6 +917,10 @@ impl App {
                     match tool {
                         Tool::Draw | Tool::Paint | Tool::Slip if mods.command => self.playlist.drag = Some(Drag::Rect { from: pp, add: mods.shift, zoom: false }),
                         Tool::Draw | Tool::Paint | Tool::Slip => match hit {
+                            Some((i, _)) if hit_corner => {
+                                self.playlist.clip_menu = Some((i, pp));
+                                self.playlist.drag = Some(Drag::Spent);
+                            }
                             Some((i, edge)) => {
                                 let c = self.song.clips[i].clone();
                                 self.playlist.brush = Some((c.src, c.len, c.offset));
@@ -1152,6 +1220,7 @@ impl App {
         }
         self.auto_point_menu(ui.ctx());
         self.track_menu(ui.ctx());
+        self.clip_menu(ui.ctx());
     }
 
     fn pl_snap(&self) -> u32 {
