@@ -54,6 +54,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Number pad + / - | Next / previous pattern | yes |
 | F4 | Next empty pattern, and name it | yes |
 | Ctrl+F4 | Next empty pattern | yes |
+| Shift+Ctrl+Up / Down | Move the current pattern up / down the list (outside the piano roll and playlist) | yes |
 | F2 | Rename the pattern | part: repeated presses do not walk the colours |
 | Ctrl+Shift+C | Clone the pattern | yes |
 

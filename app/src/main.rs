@@ -285,6 +285,8 @@ pub(crate) struct App {
     wave_eds: std::collections::HashMap<(usize, u16), waveed::WaveEd>,
     /// Preset files per plugin, found in the user's own content.
     preset_lists: std::collections::HashMap<String, std::rc::Rc<Vec<PathBuf>>>,
+    /// The template projects found in the user's content, once looked for.
+    templates: Option<Vec<(String, PathBuf)>>,
     /// The preset last loaded per plugin, for the previous / next buttons.
     preset_name: std::collections::HashMap<String, PathBuf>,
     chanset: chanset::State,
@@ -436,6 +438,7 @@ impl App {
             fx_open: None,
             wave_eds: Default::default(),
             preset_lists: Default::default(),
+            templates: None,
             preset_name: Default::default(),
             chanset: Default::default(),
             rename_pattern: None,
@@ -1544,6 +1547,57 @@ impl App {
         self.handle.publish(self.song.clone());
     }
 
+    /// Mark the channels nothing plays. Returns how many.
+    fn select_unused_channels(&mut self) -> usize {
+        let mut used = vec![false; self.song.channels.len()];
+        for n in self.song.patterns.iter().flat_map(|p| &p.notes) {
+            if let Some(u) = used.get_mut(n.chan as usize) {
+                *u = true;
+            }
+        }
+        for c in &self.song.clips {
+            if let cereal_engine::song::ClipSrc::Audio(ch) | cereal_engine::song::ClipSrc::Automation(ch) = c.src {
+                if let Some(u) = used.get_mut(ch) {
+                    *u = true;
+                }
+            }
+        }
+        // a layer's children sound through it
+        for (i, c) in self.song.channels.iter().enumerate() {
+            if used[i] {
+                for &k in &c.children {
+                    if let Some(u) = used.get_mut(k as usize) {
+                        *u = true;
+                    }
+                }
+            }
+        }
+        let idle: Vec<usize> = (0..used.len()).filter(|i| !used[*i]).collect();
+        self.rack.sel = idle.iter().copied().collect();
+        idle.len()
+    }
+
+    /// Drop the nameless patterns that hold nothing and lie nowhere, except the one on show.
+    fn purge_patterns(&mut self) -> usize {
+        let cur = self.handle.transport.pattern();
+        let mut cur_now = cur;
+        let mut n = 0;
+        for i in (0..self.song.patterns.len()).rev() {
+            let p = &self.song.patterns[i];
+            let placed = self.song.clips.iter().any(|c| c.src == cereal_engine::song::ClipSrc::Pattern(i));
+            if i != cur && p.notes.is_empty() && p.events.is_empty() && p.name.is_empty() && !placed && self.song.patterns.len() > 1 {
+                self.song.remove_pattern(i);
+                if i < cur_now {
+                    cur_now -= 1;
+                }
+                n += 1;
+            }
+        }
+        self.handle.transport.set_pattern(cur_now);
+        self.dirty |= n > 0;
+        n
+    }
+
     fn new_pattern(&mut self) {
         let p = self.song.next_empty_pattern();
         self.handle.transport.set_pattern(p);
@@ -1732,6 +1786,13 @@ impl App {
                     }
                     Key::R => self.export(),
                     Key::F4 => self.new_pattern(),
+                    Key::ArrowUp | Key::ArrowDown if modifiers.shift && !matches!(self.focus, Win::Piano | Win::Playlist) => {
+                        let p = self.handle.transport.pattern();
+                        self.song.ensure_pattern(p);
+                        let to = self.song.move_pattern(p, key == Key::ArrowUp);
+                        self.handle.transport.set_pattern(to);
+                        self.dirty = true;
+                    }
                     Key::H if modifiers.shift => ctx.memory_mut(|m| m.reset_areas()),
                     Key::B => {
                         self.rec_blend = !self.rec_blend;
@@ -1863,6 +1924,42 @@ impl App {
                         self.new_project();
                         ui.close_menu();
                     }
+                    ui.menu_button("New from template", |ui| {
+                        if self.templates.is_none() {
+                            let mut found = Vec::new();
+                            for root in &self.lib.factory_roots {
+                                let mut todo = vec![(root.join("Data/Templates"), 0)];
+                                while let Some((dir, depth)) = todo.pop() {
+                                    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                                        let p = e.path();
+                                        if p.is_dir() && depth < 4 {
+                                            todo.push((p, depth + 1));
+                                        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("flp")) {
+                                            let kind = p.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                            found.push((format!("{kind} / {}", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), p));
+                                        }
+                                    }
+                                }
+                            }
+                            found.sort();
+                            self.templates = Some(found);
+                        }
+                        let list = self.templates.clone().unwrap_or_default();
+                        if list.is_empty() {
+                            ui.label(RichText::new("Templates come with the sounds and presets from your own copy (OPTIONS menu).").color(TEXT_DIM));
+                        }
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            for (name, path) in list {
+                                if ui.button(name).clicked() {
+                                    ui.close_menu();
+                                    self.open(&path);
+                                    // a template is a start, not the file being worked on
+                                    self.path = None;
+                                    self.status = "New project from a template".into();
+                                }
+                            }
+                        });
+                    });
                     if ui.button("Open...               Ctrl+O").clicked() {
                         ui.close_menu();
                         self.open_dialog();
@@ -1896,6 +1993,13 @@ impl App {
                         ui.close_menu();
                         self.export();
                     }
+                    if ui.add_enabled(self.path.is_some(), egui::Button::new("Revert to last saved")).clicked() {
+                        ui.close_menu();
+                        if let Some(p) = self.path.clone() {
+                            self.open(&p);
+                        }
+                    }
+                    ui.separator();
                     if ui.button("Export MIDI file...     Ctrl+Shift+M").clicked() {
                         ui.close_menu();
                         self.export_midi();
@@ -1934,8 +2038,14 @@ impl App {
                         self.dirty = true;
                         ui.close_menu();
                     }
+                    ui.menu_button("Instrument", |ui| self.instrument_menu(ui));
+                    ui.separator();
                     if ui.button("Pattern                F4").clicked() {
                         self.new_pattern();
+                        ui.close_menu();
+                    }
+                    if ui.button("Time marker         Alt+T").clicked() {
+                        self.add_marker();
                         ui.close_menu();
                     }
                 });
@@ -1954,6 +2064,28 @@ impl App {
                     }
                     if ui.button("Delete").clicked() {
                         self.delete_pattern();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Open in piano roll              F7").clicked() {
+                        self.show_piano = true;
+                        ui.close_menu();
+                    }
+                    for (label, up) in [("Move up                           Shift+Ctrl+Up", true), ("Move down                      Shift+Ctrl+Down", false)] {
+                        if ui.button(label).clicked() {
+                            let p = self.handle.transport.pattern();
+                            self.song.ensure_pattern(p);
+                            let to = self.song.move_pattern(p, up);
+                            self.handle.transport.set_pattern(to);
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button("Split by channel").hint("Every channel playing in this pattern gets a pattern of its own").clicked() {
+                        let p = self.handle.transport.pattern();
+                        let made = self.song.split_pattern(p);
+                        self.status = if made.is_empty() { "Only one channel plays in this pattern".into() } else { format!("Split into {} patterns", made.len() + 1) };
+                        self.dirty |= !made.is_empty();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -2015,6 +2147,38 @@ impl App {
                     }
                     ui.separator();
                     ui.label(RichText::new(&self.audio).color(TEXT_DIM));
+                });
+                ui.menu_button("TOOLS", |ui| {
+                    if ui.button("Find in the browser              Ctrl+F").clicked() {
+                        self.show_browser = true;
+                        self.focus = Win::Browser;
+                        self.browser_key(egui::Key::F, egui::Modifiers::COMMAND);
+                        ui.close_menu();
+                    }
+                    if ui.button("Project picker                       Ctrl+F8").clicked() {
+                        self.show_project = true;
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Macros", |ui| {
+                        if ui.button("Prepare for performance mode").clicked() {
+                            self.prepare_performance();
+                            ui.close_menu();
+                        }
+                        if ui.button("Select unused channels").hint("Channels with no notes in any pattern and no clip on the playlist").clicked() {
+                            let n = self.select_unused_channels();
+                            self.status = format!("{n} unused channels selected");
+                            ui.close_menu();
+                        }
+                        if ui.button("Delete empty patterns").hint("Patterns with no notes or events that lie nowhere on the playlist; named ones are kept").clicked() {
+                            let n = self.purge_patterns();
+                            self.status = format!("{n} empty patterns removed");
+                            ui.close_menu();
+                        }
+                        if ui.button("Stop all sound                Ctrl+H").clicked() {
+                            self.handle.send(Cmd::Panic);
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.menu_button("HELP", |ui| {
                     if ui.button("About").clicked() {

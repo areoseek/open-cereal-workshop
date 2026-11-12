@@ -1243,6 +1243,58 @@ impl Song {
         }
     }
 
+    /// Swap a pattern with the one above or below it; the clips follow. Returns where it now sits.
+    pub fn move_pattern(&mut self, pi: usize, up: bool) -> usize {
+        let to = if up { pi.checked_sub(1) } else { Some(pi + 1) };
+        let Some(to) = to.filter(|t| pi < self.patterns.len() && *t < self.patterns.len()) else { return pi };
+        self.patterns.swap(pi, to);
+        for c in &mut self.clips {
+            if let ClipSrc::Pattern(k) = &mut c.src {
+                if *k == pi {
+                    *k = to;
+                } else if *k == to {
+                    *k = pi;
+                }
+            }
+        }
+        to
+    }
+
+    /// Give every channel playing in a pattern a pattern of its own: the first keeps the pattern, the others
+    /// move to new ones, placed on the playlist wherever the pattern is. Returns the new patterns.
+    pub fn split_pattern(&mut self, pi: usize) -> Vec<usize> {
+        let Some(p) = self.patterns.get(pi) else { return vec![] };
+        let mut chans: Vec<u16> = p.notes.iter().map(|n| n.chan).collect();
+        chans.sort_unstable();
+        chans.dedup();
+        if chans.len() < 2 {
+            return vec![];
+        }
+        let base = self.pattern_name(pi);
+        let name = |s: &Self, c: u16| format!("{base} - {}", s.channels.get(c as usize).map(|c| c.name.as_str()).unwrap_or("?"));
+        let len = self.pattern_length(pi);
+        let all = std::mem::take(&mut self.patterns[pi].notes);
+        let placed: Vec<Clip> = self.clips.iter().filter(|c| c.src == ClipSrc::Pattern(pi)).cloned().collect();
+        let mut made = Vec::new();
+        for (k, &ch) in chans.iter().enumerate() {
+            let notes: Vec<Note> = all.iter().filter(|n| n.chan == ch).cloned().collect();
+            let at = if k == 0 {
+                pi
+            } else {
+                self.patterns.push(Pattern { color: self.patterns[pi].color, ..Default::default() });
+                made.push(self.patterns.len() - 1);
+                self.patterns.len() - 1
+            };
+            self.patterns[at].notes = notes;
+            self.patterns[at].name = name(self, ch);
+            if k > 0 {
+                // the song sounds as before: the new pattern lies wherever the old one does
+                self.clips.extend(placed.iter().map(|c| Clip { src: ClipSrc::Pattern(at), len: if c.len == 0 { len } else { c.len }, group: 0, ..c.clone() }));
+            }
+        }
+        made
+    }
+
     /// Copy a pattern to the end of the list; returns the copy's index.
     pub fn clone_pattern(&mut self, pi: usize) -> usize {
         self.ensure_pattern(pi);
@@ -2065,6 +2117,25 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patterns_move_and_split_without_changing_the_song() {
+        let mut s = Song::new();
+        s.channels.push(Chan::default());
+        s.ensure_pattern(1);
+        s.patterns[0].notes.push(Note { pos: 0, chan: 0, ..Default::default() });
+        s.patterns[0].notes.push(Note { pos: 96, chan: 1, ..Default::default() });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        assert_eq!(s.move_pattern(0, true), 0);
+        assert_eq!(s.move_pattern(0, false), 1);
+        assert_eq!(s.clips[0].src, ClipSrc::Pattern(1));
+        assert_eq!(s.patterns[1].notes.len(), 2);
+        let made = s.split_pattern(1);
+        assert_eq!(made.len(), 1);
+        assert!(s.patterns[1].notes.iter().all(|n| n.chan == 0) && s.patterns[made[0]].notes.iter().all(|n| n.chan == 1));
+        assert_eq!(s.clips.iter().filter(|c| c.src == ClipSrc::Pattern(made[0]) && c.pos == 0).count(), 1);
+        assert!(s.split_pattern(1).is_empty());
+    }
 
     #[test]
     fn swapping_channels_and_tracks_takes_what_refers_to_them_along() {
