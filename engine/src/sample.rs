@@ -12,6 +12,48 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+static QUALITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// The names of the ways a sample is read between its frames, cheapest first.
+pub const QUALITIES: [&str; 4] = ["Linear", "4-point Hermite", "16-point sinc", "64-point sinc"];
+
+/// Choose how samples are read between their frames (an index into `QUALITIES`), for everything that plays.
+pub fn set_quality(q: u8) {
+    QUALITY.store(q.min(3), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn quality() -> u8 {
+    QUALITY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+const SINC_PHASES: usize = 512;
+
+/// Windowed sinc weights: one row of `taps` for each of `SINC_PHASES` + 1 places between two frames.
+fn sinc_table(taps: usize) -> &'static [f32] {
+    static T16: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    static T64: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let make = move || {
+        let half = taps as f64 / 2.0;
+        let mut t = Vec::with_capacity((SINC_PHASES + 1) * taps);
+        for k in 0..=SINC_PHASES {
+            let frac = k as f64 / SINC_PHASES as f64;
+            let row: Vec<f64> = (0..taps)
+                .map(|j| {
+                    let x = j as f64 - (half - 1.0) - frac;
+                    let s = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                    let w = (x / half).clamp(-1.0, 1.0);
+                    // Blackman window
+                    s * (0.42 + 0.5 * (std::f64::consts::PI * w).cos() + 0.08 * (2.0 * std::f64::consts::PI * w).cos())
+                })
+                .collect();
+            let sum: f64 = row.iter().sum();
+            t.extend(row.iter().map(|v| (v / sum) as f32));
+        }
+        t
+    };
+    if taps == 16 { T16.get_or_init(make) } else { T64.get_or_init(make) }
+}
+
 /// A decoded sample, always held as stereo frames (mono files are doubled).
 #[derive(Debug, Default)]
 pub struct Sample {
@@ -30,9 +72,16 @@ impl Sample {
         self.frames.len() as f32 / self.rate.max(1) as f32
     }
 
-    /// Four-point Hermite interpolation at a fractional frame position.
+    /// The sound at a fractional frame position, read between the frames the way `set_quality` chose
+    /// (four-point Hermite unless told otherwise).
     #[inline]
     pub fn at(&self, pos: f64) -> [f32; 2] {
+        self.at_with(pos, QUALITY.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The same, with the way of reading (an index into `QUALITIES`) given.
+    #[inline]
+    pub fn at_with(&self, pos: f64, quality: u8) -> [f32; 2] {
         let i = pos as usize;
         let f = &self.frames;
         let n = f.len();
@@ -41,6 +90,33 @@ impl Sample {
         }
         let t = (pos - i as f64) as f32;
         let p1 = f[i];
+        match quality {
+            1 => {}
+            0 => {
+                let p2 = if i + 1 < n { f[i + 1] } else { [0.0, 0.0] };
+                return [p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t];
+            }
+            q => {
+                let taps = if q == 2 { 16 } else { 64 };
+                let table = sinc_table(taps);
+                let ph = t * SINC_PHASES as f32;
+                let k = (ph as usize).min(SINC_PHASES - 1);
+                let fr = ph - k as f32;
+                let (ra, rb) = (&table[k * taps..(k + 1) * taps], &table[(k + 1) * taps..(k + 2) * taps]);
+                let first = i as isize - (taps as isize / 2 - 1);
+                let mut out = [0.0f32; 2];
+                for j in 0..taps {
+                    let at = first + j as isize;
+                    if at >= 0 && (at as usize) < n {
+                        let w = ra[j] + (rb[j] - ra[j]) * fr;
+                        let s = f[at as usize];
+                        out[0] += s[0] * w;
+                        out[1] += s[1] * w;
+                    }
+                }
+                return out;
+            }
+        }
         let p0 = if i > 0 { f[i - 1] } else { p1 };
         let p2 = if i + 1 < n { f[i + 1] } else { [0.0, 0.0] };
         let p3 = if i + 2 < n { f[i + 2] } else { [0.0, 0.0] };
@@ -339,5 +415,28 @@ mod tests {
         assert!(lib.load_stored("%FLStudioFactoryData%\\Data\\Nope.wav", None).is_none());
         assert_eq!(lib.missing.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    #[test]
+    fn sinc_reads_a_sine_between_frames_better_than_a_straight_line() {
+        // a tone a fifth of the way to the top of the band, read at odd places between the frames
+        let hz = 0.1f64;
+        let data: Vec<f32> = (0..2000).map(|i| (i as f64 * hz * std::f64::consts::TAU).sin() as f32).collect();
+        let s = Sample::from_mono("t", 44_100, &data);
+        let mut err = [0.0f64; 4];
+        for (q, e) in err.iter_mut().enumerate() {
+            for k in 0..500 {
+                let pos = 200.0 + k as f64 * 1.37;
+                let want = (pos * hz * std::f64::consts::TAU).sin();
+                *e = e.max((s.at_with(pos, q as u8)[0] as f64 - want).abs());
+            }
+        }
+        assert!(err[0] > err[1] && err[1] > err[2] && err[2] > err[3], "{err:?}");
+        assert!(err[3] < 1e-4, "{err:?}");
     }
 }

@@ -392,6 +392,7 @@ impl App {
         midi::start_out(handle.transport.clone());
         handle.transport.set_click_kind(settings.click_kind);
         handle.transport.set_count_bars(settings.count_bars.max(1));
+        cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -1077,7 +1078,7 @@ impl App {
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
         if self.render.is_none() {
-            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false, tempo_info: false, no_inserts: false, no_master: false });
+            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false, tempo_info: false, no_inserts: false, no_master: false, resample: 3 });
         }
     }
 
@@ -1098,7 +1099,10 @@ impl App {
             self.piano.time_sel
         };
         let job = cereal_engine::RenderJob { rate: o.rate as f32, song_mode: o.song, pattern: self.handle.transport.pattern(), tail: if o.tail_mode == 0 { 0.0 } else { o.tail }, range, stems: o.split, stem: None, no_inserts: o.no_inserts, no_master: o.no_master };
+        let live = cereal_engine::sample::quality();
+        cereal_engine::sample::set_quality(o.resample);
         let mut done = cereal_engine::render_job(&self.song, &job);
+        cereal_engine::sample::set_quality(live);
         if o.tail_mode == 2 {
             done.wrap();
         }
@@ -1400,6 +1404,13 @@ impl App {
                         if o.lossy == 0 || r <= 48_000 {
                             ui.selectable_value(&mut o.rate, r, format!("{r}"));
                         }
+                    }
+                });
+                ui.end_row();
+                ui.label("Resampling");
+                egui::ComboBox::from_id_salt("render_resample").width(140.0).selected_text(cereal_engine::sample::QUALITIES[o.resample.min(3) as usize]).show_ui(ui, |ui| {
+                    for (k, n) in cereal_engine::sample::QUALITIES.iter().enumerate() {
+                        ui.selectable_value(&mut o.resample, k as u8, *n);
                     }
                 });
                 ui.end_row();
@@ -3323,6 +3334,8 @@ struct RenderOpts {
     tempo_info: bool,
     no_inserts: bool,
     no_master: bool,
+    /// How samples are read between their frames for this render.
+    resample: u8,
 }
 
 impl eframe::App for App {

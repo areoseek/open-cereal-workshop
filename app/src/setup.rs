@@ -68,6 +68,8 @@ pub struct Settings {
     /// The metronome's sound and the bars counted in before recording (0 = one).
     pub click_kind: u8,
     pub count_bars: u8,
+    /// How samples are read between their frames while playing (None = 4-point Hermite).
+    pub resample: Option<u8>,
     /// The plug-ins marked as favourites: 'g:' or 'f:' and the title.
     pub plugfav: Vec<String>,
     /// Tags given to browser files.
@@ -167,6 +169,7 @@ impl Settings {
                 Some(("recent", v)) if !v.trim().is_empty() => s.recent.push(PathBuf::from(v.trim())),
                 Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
                 Some(("click", v)) => s.click_kind = v.trim().parse().unwrap_or(0),
+                Some(("resample", v)) => s.resample = v.trim().parse().ok(),
                 Some(("count_bars", v)) => s.count_bars = v.trim().parse().unwrap_or(0),
                 Some(("autosave", v)) => s.autosave = v.trim().parse().ok(),
                 Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
@@ -254,6 +257,9 @@ impl Settings {
         }
         if self.click_kind != 0 {
             out += &format!("click={}\n", self.click_kind);
+        }
+        if let Some(r) = self.resample {
+            out += &format!("resample={r}\n");
         }
         if self.count_bars > 1 {
             out += &format!("count_bars={}\n", self.count_bars);
