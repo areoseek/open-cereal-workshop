@@ -48,6 +48,48 @@ pub(crate) fn bend(t: f32, tension: f32) -> f32 {
     }
 }
 
+/// Where things sit inside an operator's settings. The layout changed twice: the first blocks hold 48
+/// overtones and no phases, the next ones 256 overtones, the current ones phases as well.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpLay {
+    pub len: usize,
+    pub noise: usize,
+    pub mags: usize,
+    pub harmonics: usize,
+    /// Shape, tension, skew, sine shaper and brightness, four bytes each.
+    pub tail: usize,
+    /// The half wave switch; fold up sits two bytes on.
+    pub flags: usize,
+    pub centre: Option<usize>,
+    pub pluck: Option<usize>,
+    /// The first layout: filters hold no type and keep the shaper switch in one byte.
+    pub first: bool,
+}
+
+impl OpLay {
+    pub const NEW: OpLay = OpLay { len: 2128, noise: 48, mags: 52, harmonics: 256, tail: 2100, flags: 2120, centre: Some(2123), pluck: Some(2126), first: false };
+    pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 256, tail: 1076, flags: 1096, centre: Some(1099), pluck: Some(1102), first: false };
+    /// Which of the first layout's last switches are centre and plucked is not known, so they read as off.
+    pub const FIRST: OpLay = OpLay { len: 271, noise: 260, mags: 48, harmonics: 48, tail: 240, flags: 264, centre: None, pluck: None, first: true };
+
+    /// The settings as the current layout holds them.
+    fn widen(&self, h: &[u8]) -> Vec<u8> {
+        let mut w = vec![0u8; 2128];
+        w[..48].copy_from_slice(&h[..48]);
+        w[48..52].copy_from_slice(&h[self.noise..self.noise + 4]);
+        w[52..52 + self.harmonics * 4].copy_from_slice(&h[self.mags..self.mags + self.harmonics * 4]);
+        w[2100..2120].copy_from_slice(&h[self.tail..self.tail + 20]);
+        w[2120..2123].copy_from_slice(&h[self.flags..self.flags + 3]);
+        if let Some(c) = self.centre {
+            w[2123] = h[c];
+        }
+        if let Some(c) = self.pluck {
+            w[2126] = h[c];
+        }
+        w
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pt {
     /// Distance from the point before, in seconds for envelopes.
@@ -86,6 +128,10 @@ impl Curve {
         if b > raw.len() || b < a + 32 {
             return false;
         }
+        if at(raw, a + 4) < 2 {
+            // a record with the old point layout is rewritten as a current one
+            return Self::replace_at(raw, a, self);
+        }
         let n = at(raw, a + 8);
         if n < 0 || a + 12 + 24 * n as usize + 20 != b {
             return false;
@@ -123,7 +169,7 @@ impl Curve {
     /// Read the line whose record starts at `head` of a block, whatever it is used for there. Only the current
     /// point layout is read.
     pub fn read_at(raw: &[u8], head: usize) -> Option<Curve> {
-        if raw.len() < head + 12 || at(raw, head + 4) < 2 {
+        if raw.len() < head + 12 {
             return None;
         }
         let mut r = R { d: raw, p: head, lfo_rest: 0 };
@@ -368,6 +414,8 @@ pub struct Patch {
     /// Where each operator's and filter's own settings start in the unpacked block.
     pub op_at: [usize; 6],
     pub filt_at: [usize; 3],
+    /// How an operator's own settings are laid out in this block.
+    pub lay: OpLay,
     used: [bool; 6],
     fused: [bool; 3],
     any_moving: bool,
@@ -396,19 +444,24 @@ impl<'a> R<'a> {
         if self.i()? != kind {
             return None;
         }
-        self.i()?;
+        let sub = self.i()?;
         let n = self.i()?;
-        if !(0..=8192).contains(&n) {
+        if !(0..=8192).contains(&n) || !(0..=3).contains(&sub) {
             return None;
         }
         let mut pts = Vec::with_capacity(n as usize);
+        let fin = |v: f64| if v.is_finite() { v as f32 } else { 0.0 };
         for _ in 0..n {
-            let b = self.bytes(24)?;
-            let x = f64::from_le_bytes(b[0..8].try_into().ok()?);
-            let y = f64::from_le_bytes(b[8..16].try_into().ok()?);
-            let tension = f32::from_le_bytes(b[16..20].try_into().ok()?);
-            let fin = |v: f64| if v.is_finite() { v as f32 } else { 0.0 };
-            pts.push(Pt { x: fin(x).clamp(0.0, 1e5), y: fin(y).clamp(0.0, 1.0), tension: if tension.is_finite() { tension } else { 0.0 }, mode: b[20] });
+            // older records hold single-precision points, the oldest without the bend's kind
+            let (x, y, tension, mode) = if sub >= 2 {
+                let b = self.bytes(24)?;
+                (f64::from_le_bytes(b[0..8].try_into().ok()?), f64::from_le_bytes(b[8..16].try_into().ok()?), f32::from_le_bytes(b[16..20].try_into().ok()?), b[20])
+            } else {
+                let b = self.bytes(if sub == 1 { 16 } else { 12 })?;
+                let f = |o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                (f(0) as f64, f(4) as f64, f(8), if sub == 1 { b[12] } else { 0 })
+            };
+            pts.push(Pt { x: fin(x).clamp(0.0, 1e5), y: fin(y).clamp(0.0, 1.0), tension: if tension.is_finite() { tension } else { 0.0 }, mode });
         }
         let flags = self.i()?;
         self.i()?;
@@ -604,7 +657,14 @@ fn shape(sh: f32, tn: f32, sk: f32, sn: f32, ph: f32) -> f32 {
     y
 }
 
-fn op_from(h: &[u8]) -> Op {
+fn op_from(h: &[u8], lay: &OpLay) -> Op {
+    let wide;
+    let h = if lay.len != 2128 {
+        wide = lay.widen(h);
+        &wide[..]
+    } else {
+        h
+    };
     let i = |o: usize| at(h, o);
     let f = |o: usize| f32::from_le_bytes(h[o..o + 4].try_into().unwrap());
     let (sh, tn, sk, sn) = (i(2100).clamp(0, 512) as f32 / 256.0, i(2104).clamp(-128, 128) as f32 / 128.0, i(2108).clamp(0, 128) as f32 / 128.0, i(2112).clamp(0, 128) as f32 / 128.0);
@@ -695,7 +755,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -718,7 +778,7 @@ impl Patch {
         // newer blocks keep the layout number in the upper half
         let ver = u32::from_le_bytes(state[0..4].try_into().ok()?);
         let ver = if ver > 0xffff { ver >> 16 } else { ver };
-        if !(17..=25).contains(&ver) {
+        if !matches!(ver, 5..=7 | 12..=25) {
             return None;
         }
         let d = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&state[4..], 1 << 24).ok()?;
@@ -853,7 +913,13 @@ impl Patch {
         // the patch notes: where they start moved between layouts. Newer blocks hold a one-byte length and two
         // bytes per letter, older ones a four-byte length and one byte per letter
         let at_text = match ver {
-            17 => 1133,
+            5 => 1075,
+            6 => 1076,
+            7 => 1077,
+            12 => 1115,
+            13 => 1116,
+            14 => 1129,
+            15 | 17 => 1133,
             18 => 1136,
             _ => 1137,
         };
@@ -869,6 +935,13 @@ impl Patch {
             r.bytes(usize::try_from(n).ok()?)?;
         }
         let start = r.p;
+        p.lay = if ver < 12 {
+            OpLay::FIRST
+        } else if ver < 17 {
+            OpLay::MID
+        } else {
+            OpLay::NEW
+        };
         for lfo_rest in [16, 12] {
             let mut q = p.clone();
             if q.modules(R { d, p: start, lfo_rest }, gv, gf).is_some() {
@@ -885,7 +958,7 @@ impl Patch {
         p.arts.clear();
         for k in 0..6 {
             p.op_at[k] = r.p;
-            p.ops[k] = op_from(r.bytes(2128)?);
+            p.ops[k] = op_from(r.bytes(p.lay.len)?, &p.lay);
             for a in 0..6 {
                 let g = if a == 1 { gv } else { one };
                 p.arts.push(r.art(bipolar_at(a), g)?);
@@ -893,11 +966,12 @@ impl Patch {
         }
         for k in 0..3 {
             p.filt_at[k] = r.p;
-            let h = r.bytes(88)?;
+            let first = p.lay.first;
+            let h = r.bytes(if first { 81 } else { 88 })?;
             let i = |o: usize| at(h, o);
             let mut ws = r.curve(3)?;
             ws.prepare(one);
-            let bip = *r.bytes(1)?.first()? != 0;
+            let bip = if first { false } else { *r.bytes(1)?.first()? != 0 };
             let f = &mut p.filts[k];
             *f = Filt {
                 slope: i(0).clamp(0, 5),
@@ -908,8 +982,8 @@ impl Patch {
                 ws_gain: ((i(28).clamp(0, 256) - 128) as f32 / 32.0).exp2(),
                 ws_mix: i(32).clamp(0, 128) as f32 / 128.0,
                 next: i(36).clamp(-256, 256) as f32 / 256.0,
-                ws_on: i(80) != 0,
-                kind: i(84).clamp(0, 12),
+                ws_on: if first { h[80] != 0 } else { i(80) != 0 },
+                kind: if first { 0 } else { i(84).clamp(0, 12) },
                 lift: 10f32.powf((i(16).clamp(0, 128) - 64) as f32 / 64.0 * 18.0 / 20.0) - 1.0,
                 drive: i(16).clamp(0, 128) as f32 / 128.0,
                 ws_bipolar: bip,
@@ -1537,6 +1611,50 @@ pub(crate) mod tests {
         let o = run(&p, 96, 20000, 30000);
         assert!(o.iter().all(|f| f[0].is_finite() && f[0].abs() < 20.0));
         assert!(o[2000..9000].iter().any(|f| (f[0] - f[1]).abs() > 1e-4), "unison voices sit apart");
+    }
+
+    /// The older point layouts read, and a line changed in one is written back in the current layout.
+    #[test]
+    fn old_lines_read_and_come_back_current() {
+        for (sub, size) in [(0i32, 12usize), (1, 16)] {
+            let mut raw = vec![9u8; 5];
+            for v in [3i32, sub, 2] {
+                raw.extend_from_slice(&v.to_le_bytes());
+            }
+            for (x, y, t) in [(0.0f32, 0.25f32, 0.0f32), (1.5, 1.0, 0.5)] {
+                let mut pt = vec![];
+                for f in [x, y, t] {
+                    pt.extend_from_slice(&f.to_le_bytes());
+                }
+                pt.resize(size, 0);
+                raw.extend_from_slice(&pt);
+            }
+            for v in [0i32, 7, -1, -1, -1] {
+                raw.extend_from_slice(&v.to_le_bytes());
+            }
+            raw.extend_from_slice(&[8, 8]);
+            let mut c = Curve::read_at(&raw, 5).unwrap();
+            assert_eq!(c.pts.len(), 2);
+            assert_eq!((c.pts[1].x, c.pts[1].y, c.pts[1].tension), (1.5, 1.0, 0.5));
+            c.pts[0].y = 0.5;
+            assert!(c.store(&mut raw));
+            assert_eq!(at(&raw, 9), 3);
+            let again = Curve::read_at(&raw, 5).unwrap();
+            assert_eq!(again.pts, c.pts);
+            // the number we do not read and what follows the record stay
+            assert_eq!(at(&raw, again.span.1 - 16), 7);
+            assert_eq!(&raw[again.span.1..], &[8, 8]);
+        }
+        // the first layout's operator settings land where the current reader looks
+        let mut h = vec![0u8; 271];
+        h[40..44].copy_from_slice(&20000i32.to_le_bytes());
+        h[48..52].copy_from_slice(&1.0f32.to_le_bytes());
+        h[240..244].copy_from_slice(&256i32.to_le_bytes());
+        h[260..264].copy_from_slice(&64i32.to_le_bytes());
+        h[264] = 1;
+        let w = OpLay::FIRST.widen(&h);
+        assert_eq!((at(&w, 40), at(&w, 48), at(&w, 2100), w[2120]), (20000, 64, 256, 1));
+        assert_eq!(f32::from_le_bytes(w[52..56].try_into().unwrap()), 1.0);
     }
 
     /// With the user's own content at hand: every preset of a layout we read must sound, stay bounded and end.

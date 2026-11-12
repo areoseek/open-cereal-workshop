@@ -1912,6 +1912,8 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
         }
         k @ 1..=6 => {
             let at = p.op_at[k - 1];
+            let lay = p.lay;
+            let tail = lay.tail;
             ui.horizontal(|ui| {
                 num(ui, &mut sets, at + 40, 0, 640_000, 1.0 / 20000.0, 4, "Ratio", "");
                 num(ui, &mut sets, at + 44, -2_000_000, 2_000_000, 0.01, 2, "Offset", " Hz");
@@ -1920,22 +1922,25 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             });
             ui.horizontal(|ui| {
                 num(ui, &mut sets, at + 8, 0, 9600, 1.0, 0, "Pitch range", " cents");
-                num(ui, &mut sets, at + 48, 0, 128, 100.0 / 128.0, 0, "Noise", " %");
-                let mut pluck = d.get(at + 2126).copied().unwrap_or(0) != 0;
-                if ui.checkbox(&mut pluck, "Plucked string").changed() {
-                    bytes.push((at + 2126, pluck as u8));
+                num(ui, &mut sets, at + lay.noise, 0, 128, 100.0 / 128.0, 0, "Noise", " %");
+                if let Some(o) = lay.pluck {
+                    let mut pluck = d.get(at + o).copied().unwrap_or(0) != 0;
+                    if ui.checkbox(&mut pluck, "Plucked string").changed() {
+                        bytes.push((at + o, pluck as u8));
+                    }
                 }
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Wave").color(TEXT_DIM));
-                num(ui, &mut sets, at + 2100, 0, 512, 100.0 / 256.0, 0, "Shape", " %");
-                num(ui, &mut sets, at + 2104, -128, 128, 100.0 / 128.0, 0, "Tension", " %");
-                num(ui, &mut sets, at + 2108, 0, 128, 100.0 / 128.0, 0, "Skew", " %");
-                num(ui, &mut sets, at + 2112, 0, 128, 100.0 / 128.0, 0, "Sine shaper", " %");
-                num(ui, &mut sets, at + 2116, 0, 128, 100.0 / 128.0, 0, "Brightness", " %");
+                num(ui, &mut sets, at + tail + 0, 0, 512, 100.0 / 256.0, 0, "Shape", " %");
+                num(ui, &mut sets, at + tail + 4, -128, 128, 100.0 / 128.0, 0, "Tension", " %");
+                num(ui, &mut sets, at + tail + 8, 0, 128, 100.0 / 128.0, 0, "Skew", " %");
+                num(ui, &mut sets, at + tail + 12, 0, 128, 100.0 / 128.0, 0, "Sine shaper", " %");
+                num(ui, &mut sets, at + tail + 16, 0, 128, 100.0 / 128.0, 0, "Brightness", " %");
             });
             ui.horizontal(|ui| {
-                for (o, name) in [(2120usize, "Half wave"), (2122, "Fold up"), (2123, "Centre")] {
+                for (o, name) in [(Some(lay.flags), "Half wave"), (Some(lay.flags + 2), "Fold up"), (lay.centre, "Centre")] {
+                    let Some(o) = o else { continue };
                     let mut on = d.get(at + o).copied().unwrap_or(0) != 0;
                     if ui.checkbox(&mut on, name).changed() {
                         bytes.push((at + o, on as u8));
@@ -1944,37 +1949,37 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             });
             // the wave itself, then the overtones it is built from
             let fl = |o: usize| d.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).unwrap_or(0.0);
-            const SHOWN: usize = 64;
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(SHOWN as f32 * 7.0, 70.0), Sense::click_and_drag());
+            let shown = lay.harmonics.min(64);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(shown as f32 * 7.0, 70.0), Sense::click_and_drag());
             let pt = ui.painter_at(rect);
             pt.rect_filled(rect, 2.0, PANEL_DARK);
-            for h in 0..SHOWN {
-                let m = fl(at + 52 + h * 4).clamp(0.0, 1.0);
+            for h in 0..shown {
+                let m = fl(at + lay.mags + h * 4).clamp(0.0, 1.0);
                 let x = rect.left() + h as f32 * 7.0;
                 pt.rect_filled(egui::Rect::from_min_max(Pos2::new(x + 1.0, rect.bottom() - m * rect.height()), Pos2::new(x + 6.0, rect.bottom())), 0.0, if h % 2 == 0 { ACCENT } else { ACCENT.gamma_multiply(0.75) });
             }
             if resp.dragged() || resp.clicked() {
                 if let Some(pos) = resp.interact_pointer_pos() {
-                    let h = (((pos.x - rect.left()) / 7.0) as usize).min(SHOWN - 1);
+                    let h = (((pos.x - rect.left()) / 7.0) as usize).min(shown - 1);
                     let m = if ui.input(|i| i.pointer.secondary_down()) { 0.0 } else { ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0) };
-                    floats.push((at + 52 + h * 4, m));
+                    floats.push((at + lay.mags + h * 4, m));
                 }
             }
-            ui.label(RichText::new("Overtones 1 to 64: drag to set how strong each is, drag with the right button to silence.").small().color(TEXT_DIM));
+            ui.label(RichText::new("Overtones, the first on the left: drag to set how strong each is, drag with the right button to silence.").small().color(TEXT_DIM));
         }
         k => {
             let at = p.filt_at[k - 7];
             const KINDS: [&str; 13] = ["Low / band / high mix", "Low-pass 1", "Low-pass 2", "Low-pass 3", "Band-pass", "Notch", "High-pass", "All-pass", "Low shelf", "Peak", "High shelf", "Driven low-pass", "Phaser"];
             const SLOPES: [&str; 6] = ["Off", "1 stage", "2 stages", "3 stages", "2 stages, alternative", "3 stages, alternative"];
             ui.horizontal(|ui| {
-                let mut kind = int(at + 84).clamp(0, 12) as usize;
-                egui::ComboBox::from_id_salt("fmfkind").selected_text(KINDS[kind]).show_ui(ui, |ui| {
+                let mut kind = if p.lay.first { 0 } else { int(at + 84).clamp(0, 12) as usize };
+                ui.add_enabled_ui(!p.lay.first, |ui| egui::ComboBox::from_id_salt("fmfkind").selected_text(KINDS[kind]).show_ui(ui, |ui| {
                     for (i, n) in KINDS.iter().enumerate() {
                         if ui.selectable_value(&mut kind, i, *n).clicked() {
                             sets.push((at + 84, i as i32));
                         }
                     }
-                });
+                }));
                 let mut slope = int(at).clamp(0, 5) as usize;
                 egui::ComboBox::from_id_salt("fmfslope").selected_text(SLOPES[slope]).show_ui(ui, |ui| {
                     for (i, n) in SLOPES.iter().enumerate() {
@@ -1996,9 +2001,13 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                 num(ui, &mut sets, at + 24, 0, 128, 100.0 / 128.0, 0, "High", " %");
             });
             ui.horizontal(|ui| {
-                let mut on = int(at + 80) != 0;
+                let mut on = if p.lay.first { d.get(at + 80).copied().unwrap_or(0) != 0 } else { int(at + 80) != 0 };
                 if ui.checkbox(&mut on, "Shaper").changed() {
-                    sets.push((at + 80, on as i32));
+                    if p.lay.first {
+                        bytes.push((at + 80, on as u8));
+                    } else {
+                        sets.push((at + 80, on as i32));
+                    }
                 }
                 num(ui, &mut sets, at + 28, 0, 256, 1.0, 0, "drive", "");
                 num(ui, &mut sets, at + 32, 0, 128, 100.0 / 128.0, 0, "mix", " %");
