@@ -881,7 +881,7 @@ impl App {
             Ok((song, f)) => {
                 let missing = self.lib.missing.len();
                 self.handle.transport.set_pattern((f.current_pattern as usize).saturating_sub(1).min(song.patterns.len().saturating_sub(1)));
-                self.handle.transport.set_song_mode(!song.clips.is_empty());
+                self.handle.transport.set_song_mode(song.song_mode);
                 self.status = format!("Opened {} (made with {}){}", path.display(), f.version, if missing > 0 { format!(", {missing} samples not found") } else { String::new() });
                 self.song = song;
                 self.flp = Some(f);
@@ -932,6 +932,7 @@ impl App {
             }
         }
         self.auto_at = std::time::Instant::now();
+        self.song.song_mode = self.handle.transport.song_mode();
         let saved = cereal_engine::save::save(&mut self.song, self.flp.as_ref()).and_then(|(bytes, flp)| std::fs::write(&path, bytes).map(|_| flp).map_err(|e| e.to_string()));
         match saved {
             Ok(flp) => {

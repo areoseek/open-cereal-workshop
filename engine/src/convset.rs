@@ -230,7 +230,7 @@ pub fn shape(ir: &Sample, extra: &[f32], tail: Option<&Tail>) -> Sample {
     if lead > 0 {
         h.splice(0..0, std::iter::repeat_n([0.0; 2], lead));
     }
-    Sample { name: ir.name.clone(), rate: rate.round().max(1.0) as u32, mono: ir.mono, frames: h }
+    Sample { name: ir.name.clone(), rate: rate.round().max(1.0) as u32, mono: ir.mono, frames: h, loop_pts: None }
 }
 
 #[cfg(test)]

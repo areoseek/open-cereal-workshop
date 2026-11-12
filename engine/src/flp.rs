@@ -714,6 +714,8 @@ pub struct Flp {
     pub groups: Vec<String>,
     pub cur_group: i32,
     pub main_pitch: i16,
+    /// The transport was left on the whole song, not on one pattern.
+    pub song_mode: bool,
     pub shuffle: u8,
     pub current_pattern: u16,
     pub channels: Vec<FlpChannel>,
@@ -913,6 +915,7 @@ impl Flp {
                 (id::PERFORMANCE, Value::Byte(v)) => flp.performance = *v != 0,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
                 (id::MAIN_PITCH, Value::Word(v)) => flp.main_pitch = *v as i16,
+                (id::LOOP_ACTIVE, Value::Byte(v)) => flp.song_mode = *v != 0,
                 (id::SHUFFLE, Value::Byte(v)) => flp.shuffle = *v,
                 (id::CURRENT_PATTERN, Value::Word(v)) => flp.current_pattern = *v,
 

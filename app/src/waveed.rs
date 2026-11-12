@@ -237,7 +237,7 @@ impl WaveEd {
                 let (a, b) = self.range();
                 let (a, b) = if self.sel.1 == self.sel.0 && self.sel.0 < self.frames.len() { (self.sel.0, self.frames.len()) } else { (a, b) };
                 if b > a {
-                    handle.send(Cmd::Preview(Arc::new(Sample { name: self.name.clone(), rate: self.rate, mono: false, frames: self.frames[a..b].to_vec() })));
+                    handle.send(Cmd::Preview(Arc::new(Sample { name: self.name.clone(), rate: self.rate, mono: false, frames: self.frames[a..b].to_vec(), loop_pts: None })));
                 }
             }
             if ui.button("Stop").clicked() {

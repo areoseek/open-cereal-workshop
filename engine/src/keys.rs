@@ -141,22 +141,6 @@ fn ini(text: &str) -> HashMap<String, HashMap<String, String>> {
 }
 
 /// The repeat points a wave file carries, as (start, end) frames.
-fn wave_loop(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut at = 12;
-    while at + 8 <= bytes.len() {
-        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().ok()?) as usize;
-        if &bytes[at..at + 4] == b"smpl" && len >= 60 && at + 8 + 60 <= bytes.len() {
-            let b = at + 8;
-            let int = |o: usize| u32::from_le_bytes(bytes[b + o..b + o + 4].try_into().unwrap()) as usize;
-            if int(28) >= 1 {
-                return Some((int(44), int(48)));
-            }
-        }
-        at += 8 + len + (len & 1);
-    }
-    None
-}
-
 fn read_set(wti: &Path) -> Option<KeySet> {
     let text = String::from_utf8_lossy(&std::fs::read(wti).ok()?).into_owned();
     let secs = ini(&text);
@@ -213,7 +197,7 @@ fn read_set(wti: &Path) -> Option<KeySet> {
             if name != last_name || last.is_none() {
                 let path = child_ci(&base, &name)?;
                 let bytes = std::fs::read(&path).ok()?;
-                let lp = wave_loop(&bytes);
+                let lp = crate::sample::wave_loop(&bytes);
                 let s = Sample::load(&path).ok()?;
                 last = Some((Arc::new(s), lp));
                 last_name = name;

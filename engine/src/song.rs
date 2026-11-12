@@ -144,6 +144,8 @@ pub struct Sampler {
     pub swap_stereo: bool,
     pub normalize: bool,
     pub invert: bool,
+    /// Play the loop stored in the sample for as long as the note is held.
+    pub use_loop: bool,
     /// A note here silences sounding notes of channels whose `cut_by` matches. 0 = none.
     pub cut: u16,
     pub cut_by: u16,
@@ -246,6 +248,7 @@ impl Default for Sampler {
             swap_stereo: false,
             normalize: false,
             invert: false,
+            use_loop: false,
             cut: 0,
             cut_by: 0,
             mono: false,
@@ -306,6 +309,7 @@ impl Sampler {
             swap_stereo: c.fx_flags & 256 != 0,
             normalize: c.normalize,
             invert: c.invert,
+            use_loop: c.sample_flags & 8 != 0,
             cut: c.cut_group.0,
             cut_by: c.cut_group.1,
             mono: c.poly.2 & 1 != 0,
@@ -419,7 +423,7 @@ impl Chan {
                 s[1] = -s[1];
             }
         }
-        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo, frames }));
+        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo, frames, loop_pts: if f.reverse { None } else { raw.loop_pts } }));
     }
 }
 
@@ -857,6 +861,8 @@ pub struct Song {
     pub performance: bool,
     /// Main pitch: every instrument is moved by this many cents.
     pub main_pitch: i16,
+    /// The transport plays the whole song, not one pattern: stored with the project.
+    pub song_mode: bool,
     /// Project swing, 0..=1.
     pub swing: f32,
     pub channels: Vec<Chan>,
@@ -964,7 +970,9 @@ impl Song {
     /// A new, empty project: four empty sampler channels, one pattern, the default mixer.
     pub fn new() -> Self {
         let names = ["Kick", "Clap", "Hat", "Snare"];
-        let mut inserts: Vec<Insert> = (0..DEFAULT_INSERTS).map(|i| Insert { sends: if i == 0 { vec![] } else { vec![0] }, dock: (i != 0) as u8, ..Default::default() }).collect();
+        // the last track is the "current" one: it hears whatever is selected, so it must not feed the master as well
+        let plain = |i: usize| i != 0 && i != DEFAULT_INSERTS - 1;
+        let mut inserts: Vec<Insert> = (0..DEFAULT_INSERTS).map(|i| Insert { sends: if plain(i) { vec![0] } else { vec![] }, dock: plain(i) as u8, ..Default::default() }).collect();
         inserts[0].name = "Master".into();
         let mut s = Self {
             title: String::new(),
@@ -976,6 +984,7 @@ impl Song {
             time_sig: (4, 4),
             performance: false,
             main_pitch: 0,
+            song_mode: false,
             swing: 0.0,
             channels: names.iter().map(|n| Chan { name: n.to_string(), ..Default::default() }).collect(),
             patterns: vec![Pattern::default()],
@@ -1893,6 +1902,7 @@ impl Song {
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
             performance: f.performance,
             main_pitch: f.main_pitch,
+            song_mode: f.song_mode,
             swing: (f.shuffle as f32 / 128.0).min(1.0),
             channels,
             patterns,

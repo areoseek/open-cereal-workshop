@@ -631,12 +631,12 @@ pub fn split(sample: &Sample, nets: &[Net; 4], done: &AtomicUsize, total: &Atomi
         let frames: Vec<[f32; 2]> = if sample.rate == RATE {
             body.to_vec()
         } else {
-            let at44 = Sample { name: String::new(), rate: RATE, mono: false, frames: body.to_vec() };
+            let at44 = Sample { name: String::new(), rate: RATE, mono: false, frames: body.to_vec(), loop_pts: None };
             let step = RATE as f64 / sample.rate as f64;
             (0..sample.frames.len()).map(|i| at44.at_with(i as f64 * step, 2)).collect()
         };
         let stem = sample.name.rsplit_once('.').map_or(sample.name.as_str(), |(s, _)| s);
-        Sample { name: format!("{stem} - {}.wav", PARTS[j]), rate: sample.rate, mono: false, frames }
+        Sample { name: format!("{stem} - {}.wav", PARTS[j]), rate: sample.rate, mono: false, frames, loop_pts: None }
     });
     Some([it.next()?, it.next()?, it.next()?, it.next()?])
 }
@@ -688,7 +688,7 @@ mod tests {
                 [tone, tone]
             })
             .collect();
-        let s = Sample { name: "x.wav".into(), rate: RATE, mono: false, frames };
+        let s = Sample { name: "x.wav".into(), rate: RATE, mono: false, frames, loop_pts: None };
         let (done, total, stop) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicBool::new(false));
         let parts = split(&s, &nets, &done, &total, &stop).unwrap();
         assert_eq!(done.load(Ordering::Relaxed), total.load(Ordering::Relaxed));

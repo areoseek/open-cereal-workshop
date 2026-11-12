@@ -579,6 +579,9 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
         st.ms.copy_from_slice(io);
     } else if msel > 0 && st.side_on[0] && st.side[0].len() >= n {
         st.ms.copy_from_slice(&st.side[0][..n]);
+    } else if msel > 0 {
+        // nothing is routed to that input: the insert's own sound stands in
+        st.ms.copy_from_slice(io);
     }
     for (m, f) in st.m.iter_mut().zip(&st.ms) {
         *m = (f[0] + f[1]) * 0.5;
@@ -594,6 +597,8 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
         if st.side_on[1] && st.side[1].len() >= n {
             let (c, side) = (&mut st.c, &st.side[1]);
             c.copy_from_slice(&side[..n]);
+        } else {
+            st.c.copy_from_slice(io);
         }
     } else {
         carrier(p, st, n, sr);
@@ -659,7 +664,7 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     let rms = p[RMS] >= 0.5;
     let nb = st.bands.len().max(1) as f32;
     // narrow bands carry little of a wide carrier: bring the sum back up
-    let makeup = wet * 0.85 * nb.sqrt() * [0.66, 1.0, 4.7, 5.4][st.order.clamp(1, 4) - 1];
+    let makeup = wet * 4.1 * nb.sqrt() * [0.66, 1.0, 4.7, 5.4][st.order.clamp(1, 4) - 1];
     let (order, stages) = (st.order, st.stages);
     let State { bands, m, c, out, lv, curve, .. } = st;
     for band in bands.iter_mut() {
@@ -1005,14 +1010,14 @@ mod tests {
         let (lo2, hi2) = run(&mut st2, &p, 6000.0, 40);
         assert!(lo1 > hi1 * 2.0, "{lo1} {hi1}");
         assert!(hi2 > lo2 * 2.0, "{lo2} {hi2}");
-        // no modulator, nothing out
+        // nothing routed in as the modulator: the track's own sound stands in for it, as measured
         let mut st3 = State::default();
         let mut io = vec![[0.2f32, -0.2]; n];
         for _ in 0..40 {
             io = (0..n).map(|s| [((s * 37 % 101) as f32 / 50.0 - 1.0) * 0.3; 2]).collect();
             process(&p, &mut st3, &mut io, &cx);
         }
-        assert!(io.iter().all(|f| f[0].abs() < 1e-4));
+        assert!(io.iter().any(|f| f[0].abs() > 1e-3));
         // the built-in carrier sounds when nothing else is picked
         p[CAR_SEL] = -1.0;
         let mut st4 = State::default();

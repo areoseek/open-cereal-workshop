@@ -2047,7 +2047,9 @@ impl Player {
                 let step = smp.rate as f64 / sr as f64 * 2f64.powf(cents as f64 / 1200.0);
                 let venv = Env { on: ch.env_on, ..f.vol_env };
                 // without a volume envelope a sampler plays its sample out whatever the note length
-                let remaining = if ch.env_on || live { len_frames } else { None };
+                // a sample set to play its stored loop goes round it until the note ends
+                let loop_pts = if f.use_loop { smp.loop_pts.map(|l| (l.0 as f64, l.1 as f64)) } else { None };
+                let remaining = if ch.env_on || live || loop_pts.is_some() { len_frames } else { None };
                 // a note in a cut group, or on a one-voice channel, stops what it replaces at the moment it starts
                 let fade = ms(4.0);
                 let mut glided = false;
@@ -2072,12 +2074,13 @@ impl Player {
                 }
                 let filter_on = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
                 {
-                    let note_gain = law::velocity_gain(n.vel) * f.gain;
+                    let note_gain = law::sampler_velocity(n.vel) * f.gain;
                     let note_pan = n.pan.clamp(-1.0, 1.0);
                     let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
                     self.start(Voice {
                         sample: Some(smp.clone()),
+                        loop_pts,
                         step,
                         level: 1.0,
                         attack: 1.0,
@@ -2739,7 +2742,9 @@ impl Player {
                 let into = begin - pos0 + offset;
                 let secs = into / song.beat_ticks() as f64 * 60.0 / tempo as f64;
                 let f = &ch.smp;
-                let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * f.gain;
+                // an audio clip at the default channel volume plays the recording as it is
+                let clip_gain = f.gain * law::clip_gain(1.0);
+                let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * clip_gain;
                 let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
                 // the pitch the clip sounds at, and how fast the read point crosses the sample
                 let step = smp.rate as f64 / self.sr as f64 * 2f64.powf((ch.pitch_cents + f.stretch_cents) as f64 / 1200.0);
@@ -2756,7 +2761,7 @@ impl Player {
                 let pos = secs * self.sr as f64 * rate;
                 let remaining = Some(((end - begin) / tpf) as u64);
                 let rel = 1.0 / (self.sr * 0.005);
-                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: f.gain, follow: true, ptrack: tag, ..Default::default() });
+                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: clip_gain, follow: true, ptrack: tag, ..Default::default() });
             }
             ClipSrc::Automation(_) => {}
         }
@@ -4626,7 +4631,7 @@ mod tests {
             p.render(block, 2);
         }
         let at = |sec: f32| buf[(sec * 48_000.0) as usize * 2].abs();
-        assert!(at(0.05) > 0.4, "{}", at(0.05));
+        assert!(at(0.05) > 0.3, "{}", at(0.05));
         assert!(at(1.0) < at(0.05) * 0.5 && at(1.0) > 0.001, "{}", at(1.0));
         assert!(at(1.9) < 0.01, "{}", at(1.9));
 
@@ -4993,7 +4998,7 @@ mod tests {
         assert!(loud(&buf, 0.52, 1.5) < 1e-3, "the slice ends at the next cut");
         // a reversed slice plays its end first
         let old = s.channels[0].sample.clone().unwrap();
-        let mut smp = Sample { name: old.name.clone(), rate: old.rate, mono: old.mono, frames: old.frames.clone() };
+        let mut smp = Sample { name: old.name.clone(), rate: old.rate, mono: old.mono, frames: old.frames.clone(), loop_pts: old.loop_pts };
         for f in &mut smp.frames[24_000..36_000] {
             *f = [0.0; 2];
         }

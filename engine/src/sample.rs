@@ -61,11 +61,13 @@ pub struct Sample {
     pub rate: u32,
     pub mono: bool,
     pub frames: Vec<[f32; 2]>,
+    /// Loop stored in the file: first frame and one past the last.
+    pub loop_pts: Option<(u32, u32)>,
 }
 
 impl Sample {
     pub fn from_mono(name: &str, rate: u32, data: &[f32]) -> Self {
-        Self { name: name.into(), rate, mono: true, frames: data.iter().map(|&s| [s, s]).collect() }
+        Self { name: name.into(), rate, mono: true, frames: data.iter().map(|&s| [s, s]).collect(), loop_pts: None }
     }
 
     pub fn seconds(&self) -> f32 {
@@ -143,13 +145,15 @@ impl Sample {
         let odd = odd_wav(&bytes);
         let (bytes, ext) = match odd {
             Some(Odd::Plain(s)) => {
-                return Ok(Self { name, ..s });
+                return Ok(Self { name, loop_pts: wave_loop(&bytes).map(|(a, b)| (a as u32, b as u32 + 1)), ..s });
             }
             Some(Odd::Mp3(range)) => (bytes[range].to_vec(), "mp3".to_string()),
             None => (bytes, ext),
         };
+        let lp = if bytes.starts_with(b"RIFF") { wave_loop(&bytes) } else { None };
         let mut s = Self::decode(bytes, &ext).map_err(|e| format!("{}: {e}", path.display()))?;
         s.name = name;
+        s.loop_pts = lp.map(|(a, b)| (a as u32, b as u32 + 1)).filter(|l| l.1 > l.0 && l.1 as usize <= s.frames.len());
         Ok(s)
     }
 
@@ -164,7 +168,7 @@ impl Sample {
             } else {
                 d.samples.chunks_exact(2).map(|f| [val(f[0]), val(f[1])]).collect()
             };
-            return Ok(Self { name: String::new(), rate: d.rate, mono: d.channels == 1, frames });
+            return Ok(Self { name: String::new(), rate: d.rate, mono: d.channels == 1, frames, loop_pts: None });
         }
         let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
         let mut hint = Hint::new();
@@ -213,7 +217,7 @@ impl Sample {
         if frames.is_empty() {
             return Err("no audio decoded".into());
         }
-        Ok(Self { name: String::new(), rate, mono, frames })
+        Ok(Self { name: String::new(), rate, mono, frames, loop_pts: None })
     }
 }
 
@@ -324,7 +328,7 @@ fn odd_wav(bytes: &[u8]) -> Option<Odd> {
                 if frames.is_empty() {
                     return None;
                 }
-                return Some(Odd::Plain(Sample { name: String::new(), rate, mono: ch == 1, frames }));
+                return Some(Odd::Plain(Sample { name: String::new(), rate, mono: ch == 1, frames, loop_pts: None }));
             }
             _ => {}
         }
@@ -605,4 +609,21 @@ mod quality_tests {
         assert!(err[0] > err[1] && err[1] > err[2] && err[2] > err[3], "{err:?}");
         assert!(err[3] < 1e-4, "{err:?}");
     }
+}
+
+/// The first loop of a wave file's sampler chunk: start frame and last frame (inclusive).
+pub fn wave_loop(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().ok()?) as usize;
+        if &bytes[at..at + 4] == b"smpl" && len >= 60 && at + 8 + 60 <= bytes.len() {
+            let b = at + 8;
+            let int = |o: usize| u32::from_le_bytes(bytes[b + o..b + o + 4].try_into().unwrap()) as usize;
+            if int(28) >= 1 {
+                return Some((int(44), int(48)));
+            }
+        }
+        at += 8 + len + (len & 1);
+    }
+    None
 }

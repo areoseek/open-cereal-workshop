@@ -114,13 +114,36 @@ fn blank_channel(index: u16, unicode: bool, word_insert: bool) -> Vec<Event> {
         text_event(id::PLUGIN_NAME, "Sampler", unicode),
         Event::int(id::COLOR, 0x006a_655c),
         Event::byte(id::CHAN_ENABLED, 1),
+        // the run of older per-channel settings a project made by the original always carries
+        Event::data(id::CHAN_ECHO, hex("0000000000190000000000000400000090000000")),
+        Event::int(138, 0x0080_0080),
+        Event::int(139, 0x0001_0000),
+        Event::word(id::CHAN_TIME_SHIFT, 0),
+        Event::word(id::CHAN_SWING, 0x80),
+        Event::word(69, 0x80),
+        Event::word(86, 0x100),
+        Event::word(71, 0x400),
+        Event::word(83, 0),
+        Event::word(id::CHAN_PREAMP, 0),
+        Event::word(id::CHAN_FADE_OUT, 0),
+        Event::word(id::CHAN_FADE_IN, 0),
+        Event::word(85, 0x800),
+        Event::int(131, 0x0080_0000),
+        Event::word(id::CHAN_FX_FLAGS, 0),
         if word_insert { Event::word(id::CHAN_TARGET_INSERT_WORD, 0) } else { Event::byte(id::CHAN_TARGET_INSERT, 0) },
         Event::data(id::CHAN_LEVELS, hex("001900001027000000000000000100000000000000000000")),
+        Event::data(id::CHAN_ADJUST, hex("0000000000320000000000000000000000000000")),
         Event::data(
             id::CHAN_PARAMS,
             hex("ffffffff0000000001000001ffffffff3c0000000000803f0000803f0000803f0000803f0000803f0000000001000000ffffffff000400003000000000000100a7050000000000000001000000000000000000000000000000000000010000000000000000000000000000000000000002000000feffffffffffffff000000000000000000000000000000000000f03f0000000000000000ffffffff01"),
         ),
     ];
+    ev.push(Event::int(id::CHAN_CUT_GROUP, 0));
+    ev.push(Event::int(144, 0));
+    ev.push(Event::int(id::CHAN_GROUP, 0));
+    ev.push(Event::byte(32, 0));
+    ev.push(Event::data(id::CHAN_TRACKING, hex("64000000000000000000000000000000")));
+    ev.push(Event::data(id::CHAN_TRACKING, hex("3c000000000000000000000000000000")));
     for i in 0..5 {
         let mut d = hex("000000000000000064000000204e0000204e00003075000032000000204e00000000000064000000204e000000000000b680000000000000000000000000000000000000");
         if i == 1 {
@@ -141,7 +164,7 @@ fn skeleton(song: &Song) -> Flp {
         Event::int(id::BUILD, 2576),
         Event::int(id::TEMPO, 140_000),
         Event::word(id::CURRENT_PATTERN, 1),
-        Event::byte(id::LOOP_ACTIVE, 0),
+        Event::byte(id::LOOP_ACTIVE, song.song_mode as u8),
         Event::byte(id::SHUFFLE, 0),
         Event::word(id::MAIN_PITCH, 0),
         Event::byte(id::TIMESIG_NUM, 4),
@@ -177,13 +200,41 @@ fn skeleton(song: &Song) -> Flp {
             ev.push(Event::word(id::SLOT_INDEX, s));
         }
         let mut routes = vec![0u8; n_ins];
-        if i != 0 {
+        // every track feeds the master except the master itself and the last one of a full mixer (the "current" track)
+        if i != 0 && !(n_ins == 127 && i == 126) {
             routes[0] = 1;
         }
         ev.push(Event::data(id::INSERT_ROUTING, routes));
         ev.push(Event::int(id::INSERT_INPUT, u32::MAX));
         ev.push(Event::int(id::INSERT_OUTPUT, if i == 0 { 0 } else { u32::MAX }));
     }
+    // every mixer control at its resting value; a file without these records plays about 6 dB hot in the reference
+    let mut params: Vec<u8> = vec![];
+    let mut rec = |pid: u8, kind: u8, cd: usize, value: i32| {
+        params.extend_from_slice(&0u32.to_le_bytes());
+        params.push(pid);
+        params.push(kind);
+        params.extend_from_slice(&(cd as u16).to_le_bytes());
+        params.extend_from_slice(&value.to_le_bytes());
+    };
+    rec(0, 0, (128 + 128) << 6, 12800);
+    for i in 0..n_ins.min(127) {
+        let at = (128 + i) << 6;
+        for s in 0..10 {
+            rec(0, 0x1f, at | s, 1);
+            rec(1, 0x1f, at | s, 12800);
+        }
+        for (pid, v) in [(192u8, 12800), (193, 0), (194, 0), (208, 0), (209, 0), (210, 0), (216, 5777), (217, 33145), (218, 55825), (224, 17500), (225, 17500), (226, 17500)] {
+            rec(pid, 0x1f, at, v);
+        }
+        if i < 100 {
+            for pid in 164..=167u8 {
+                rec(pid, 0x1f, at, 0);
+            }
+        }
+        rec(190, 0x1f, at, 0);
+    }
+    ev.push(Event::data(id::MIXER_PARAMS, params));
     Flp::from_file(FlpFile { header: Header { format: 0, channels: song.channels.len() as u16, ppq: song.ppq.clamp(24, 960) as u16 }, events: ev, trailer: vec![] })
 }
 
@@ -409,6 +460,9 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     }
     if song.main_pitch != base.main_pitch {
         set_or_insert(ev, 0..head_end, Event::word(id::MAIN_PITCH, song.main_pitch as u16), after_version);
+    }
+    if song.song_mode != base.song_mode {
+        set_or_insert(ev, 0..head_end, Event::byte(id::LOOP_ACTIVE, song.song_mode as u8), after_version);
     }
     if song.performance != base.performance {
         set_or_insert(ev, 0..head_end, Event::byte(id::PERFORMANCE, song.performance as u8), after_version);
@@ -1147,6 +1201,13 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
                         put_u32(d, 108, if a.5 { -1i32 as u32 } else { 0 });
                     }
                 }
+            }
+        }
+    }
+    if now.use_loop != was.use_loop {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::SAMPLE_FLAGS) {
+            if let Value::Int(v) = &mut ev[i].value {
+                *v = (*v & !8) | if now.use_loop { 8 } else { 0 };
             }
         }
     }
