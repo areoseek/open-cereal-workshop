@@ -204,6 +204,8 @@ pub(crate) struct App {
     show_browser: bool,
     /// The toolbar's output picture: the wave, or the level of each frequency.
     scope_bars: bool,
+    /// Minutes of hand-played keys the score log hands over.
+    score_minutes: u32,
     scope_buf: Vec<f32>,
     typing_keys: bool,
     /// Snap hand-played notes to the piano roll's grid as they are recorded.
@@ -383,6 +385,7 @@ impl App {
             show_mixer: false,
             show_browser: true,
             scope_bars: false,
+            score_minutes: 2,
             scope_buf: Vec::new(),
             typing_keys: true,
             rec_quantise: false,
@@ -1667,6 +1670,24 @@ impl App {
         idle.len()
     }
 
+    /// Write the last minutes of hand-played keys into the pattern on show. Gives the number of notes.
+    fn dump_score_log(&mut self) -> usize {
+        let tr = self.handle.transport.clone();
+        let evs = tr.score_log(self.score_minutes as f64 * 60.0);
+        let per_sec = self.song.tempo as f64 / 60.0 * self.song.ppq.max(1) as f64;
+        let notes = cereal_engine::player::score_notes(&evs, tr.score_now(), per_sec);
+        if notes.is_empty() {
+            return 0;
+        }
+        let pat = tr.pattern();
+        self.song.ensure_pattern(pat);
+        let n = notes.len();
+        self.song.patterns[pat].notes.extend(notes);
+        self.song.patterns[pat].sort();
+        self.dirty = true;
+        n
+    }
+
     /// Drop the nameless patterns that hold nothing and lie nowhere, except the one on show.
     fn purge_patterns(&mut self) -> usize {
         let cur = self.handle.transport.pattern();
@@ -2259,6 +2280,25 @@ impl App {
                         self.show_project = true;
                         ui.close_menu();
                     }
+                    ui.menu_button("Score logger", |ui| {
+                        if ui.button("Dump score log to selected pattern").hint("Every key played by hand is remembered, recording or not; this writes the last minutes of it into the pattern on show").clicked() {
+                            let n = self.dump_score_log();
+                            self.status = if n == 0 { "Nothing was played in that time".into() } else { format!("{n} played notes written to the pattern") };
+                            ui.close_menu();
+                        }
+                        ui.menu_button("Time", |ui| {
+                            for m in [2u32, 5, 10, 20, 30] {
+                                if ui.radio(self.score_minutes == m, format!("{m} minutes")).clicked() {
+                                    self.score_minutes = m;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if ui.button("Clear log").clicked() {
+                            self.handle.transport.clear_score_log();
+                            ui.close_menu();
+                        }
+                    });
                     ui.menu_button("Macros", |ui| {
                         if ui.button("Prepare for performance mode").clicked() {
                             self.prepare_performance();
@@ -2284,6 +2324,35 @@ impl App {
                                 }
                             }
                             self.status = format!("{n} unused audio clips removed");
+                            ui.close_menu();
+                        }
+                        if ui.button("Reset empty playlist tracks").hint("Tracks with no clip on them get their plain name and colour back").clicked() {
+                            let mut n = 0;
+                            let plain = cereal_engine::song::Track::default();
+                            for (t, tr) in self.song.tracks.iter_mut().enumerate() {
+                                let used = self.song.clips.iter().any(|c| c.track as usize == t);
+                                if !used && (tr.name != plain.name || tr.color != plain.color) {
+                                    tr.name = plain.name.clone();
+                                    tr.color = plain.color;
+                                    n += 1;
+                                }
+                            }
+                            self.dirty |= n > 0;
+                            self.status = format!("{n} empty tracks reset");
+                            ui.close_menu();
+                        }
+                        if ui.button("Remove all Wave Recorder instances").hint("Takes every Wave Recorder out of the mixer's effect slots").clicked() {
+                            let mut n = 0;
+                            for ins in self.song.inserts.iter_mut() {
+                                let before = ins.slots.len();
+                                ins.slots.retain(|s| !s.plugin.eq_ignore_ascii_case("Edison"));
+                                n += before - ins.slots.len();
+                            }
+                            if n > 0 {
+                                self.fx_open = None;
+                                self.dirty = true;
+                            }
+                            self.status = format!("{n} Wave Recorders removed");
                             ui.close_menu();
                         }
                         if ui.button("Close all plugin windows").clicked() {

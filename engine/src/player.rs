@@ -107,6 +107,9 @@ pub struct Transport {
     range: AtomicU64,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
+    /// Every key played by hand in the last half hour, whether or not anything was recording.
+    score: Mutex<std::collections::VecDeque<Played>>,
+    born: std::time::Instant,
     /// Performance mode, per playlist track: the clip sounding (-1 none), the tick it began at, and the
     /// clip waiting for its grid line (-1 none, -2 a stop).
     perf_live: Vec<AtomicI32>,
@@ -208,6 +211,44 @@ pub struct Live {
     pub vel: f32,
 }
 
+/// A key pressed or let go by hand, with the seconds since the program started.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Played {
+    pub secs: f64,
+    pub on: bool,
+    pub chan: u16,
+    pub key: u8,
+    pub vel: f32,
+}
+
+/// How long the log of hand-played keys reaches back.
+pub const SCORE_LOG_SECS: f64 = 1800.0;
+
+/// Notes from a stretch of the log: the first key lands on tick 0, keys still held end at `now`.
+pub fn score_notes(evs: &[Played], now: f64, ticks_per_sec: f64) -> Vec<crate::song::Note> {
+    let Some(start) = evs.iter().find(|e| e.on).map(|e| e.secs) else { return Vec::new() };
+    let mut held: Vec<Played> = Vec::new();
+    let mut out = Vec::new();
+    let mut close = |h: Played, end: f64| {
+        let pos = ((h.secs - start) * ticks_per_sec).round().max(0.0) as u32;
+        let len = ((end - h.secs) * ticks_per_sec).round().max(1.0) as u32;
+        out.push(crate::song::Note { pos, len, chan: h.chan, key: h.key, vel: h.vel, ..Default::default() });
+    };
+    for e in evs.iter().filter(|e| e.secs >= start) {
+        if let Some(i) = held.iter().position(|h| (h.chan, h.key) == (e.chan, e.key)) {
+            close(held.remove(i), e.secs);
+        }
+        if e.on {
+            held.push(*e);
+        }
+    }
+    for h in held {
+        close(h, now.max(h.secs));
+    }
+    out.sort_by_key(|n| (n.pos, n.key));
+    out
+}
+
 impl Transport {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -228,6 +269,8 @@ impl Transport {
             range: AtomicU64::new(0),
             waiting: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
+            score: Mutex::new(std::collections::VecDeque::new()),
+            born: std::time::Instant::now(),
             perf_live: (0..PERF_TRACKS).map(|_| AtomicI32::new(-1)).collect(),
             perf_from: (0..PERF_TRACKS).map(|_| AtomicU32::new(0)).collect(),
             perf_next: (0..PERF_TRACKS).map(|_| AtomicI32::new(-1)).collect(),
@@ -342,7 +385,31 @@ impl Transport {
     pub fn take_live(&self) -> Vec<Live> {
         self.live.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
     }
+    /// Seconds since the program started, the clock of the log of hand-played keys.
+    pub fn score_now(&self) -> f64 {
+        self.born.elapsed().as_secs_f64()
+    }
+    /// The hand-played keys of the last `back` seconds, oldest first.
+    pub fn score_log(&self, back: f64) -> Vec<Played> {
+        let from = self.score_now() - back;
+        self.score.lock().map(|l| l.iter().filter(|e| e.secs >= from).copied().collect()).unwrap_or_default()
+    }
+    pub fn clear_score_log(&self) {
+        if let Ok(mut l) = self.score.lock() {
+            l.clear();
+        }
+    }
     fn log(&self, c: &Cmd) {
+        if let Cmd::NoteOn { chan, key, .. } | Cmd::NoteOff { chan, key } = *c {
+            let (on, vel) = if let Cmd::NoteOn { vel, .. } = *c { (true, vel) } else { (false, 0.0) };
+            let secs = self.score_now();
+            if let Ok(mut l) = self.score.lock() {
+                while l.front().is_some_and(|e| e.secs < secs - SCORE_LOG_SECS) || l.len() > 200_000 {
+                    l.pop_front();
+                }
+                l.push_back(Played { secs, on, chan, key, vel });
+            }
+        }
         if self.waiting() && matches!(c, Cmd::NoteOn { .. }) {
             self.set_waiting(false);
             self.set_playing(true);
@@ -4527,6 +4594,24 @@ mod tests {
         assert!(buf.iter().any(|x| x.abs() > 0.1));
         assert!(h.transport.take_peak(3).0 > 0.1);
         assert!(h.transport.take_peak(0).0 > 0.1);
+    }
+
+    #[test]
+    fn the_log_of_played_keys_becomes_notes() {
+        let ev = |secs: f64, on: bool, key: u8| Played { secs, on, chan: 2, key, vel: 0.7 };
+        let log = [ev(9.5, false, 50), ev(10.0, true, 60), ev(10.5, true, 64), ev(11.0, false, 60), ev(12.0, true, 67)];
+        // 96 ticks to the beat at 120 beats a minute: 192 ticks a second
+        let notes = score_notes(&log, 13.0, 192.0);
+        let got: Vec<(u32, u32, u8)> = notes.iter().map(|n| (n.pos, n.len, n.key)).collect();
+        assert_eq!(got, vec![(0, 192, 60), (96, 480, 64), (384, 192, 67)]);
+        assert!(notes.iter().all(|n| n.chan == 2 && n.vel == 0.7));
+        assert!(score_notes(&log[..1], 13.0, 192.0).is_empty());
+        let (h, _p) = new_player(Song::new(), 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        h.send(Cmd::NoteOff { chan: 0, key: 60 });
+        assert_eq!(h.transport.score_log(60.0).len(), 2, "keys are logged without recording");
+        h.transport.clear_score_log();
+        assert!(h.transport.score_log(60.0).is_empty());
     }
 
     #[test]
