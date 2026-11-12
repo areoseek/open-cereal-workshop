@@ -25,7 +25,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Envelope Controller (Envelope Sender: notes run the stored envelope, slow oscillator and mappings of each output into linked controls, old 4-output and new 8-output blocks; knobs, mode, key range, line lengths and speed editable; every line can be drawn by hand in the line editor)
 - [~] Fruity Granulizer (opens as Grain Player and plays the channel's sample as grains: hold, fade, grain spacing, wave spacing incl. backwards; scales are estimates; pan and depth effects, random, start by key, transients and editing are not done)
 - [~] Fruity Keyboard Controller (Key Controller: notes send their key value and velocity to linked controls, per-key table editor, key range, auto mapping; note-off value and smoothing not worked)
-- [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. The pitch and time stretch sliders, reversed slices and the slice view are not done.
+- [~] Fruity Slicer: the loop and its cuts are read and each key plays its slice at the channel pitch. Reversed slices play backwards. The pitch and time stretch sliders (no stored example to place them from) and the slice view are not done.
 - [~] Fruity Slicer 2 (opens as Loop Slicer 2 and keeps its block; silent, slicing not built)
 - [~] Fruity Video Player (opens as Video Player and keeps its block; no video is shown or heard)
 - [~] Fruity Voltage Controller (opens as Voltage Sender, block kept, correctly silent; sending to hardware is not done)

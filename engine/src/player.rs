@@ -1627,16 +1627,19 @@ impl Player {
                 let (Some(sl), Some(smp)) = (&ch.slices, ch.sample.clone()) else { return };
                 let scale = smp.rate as f64 / sl.rate.max(1) as f64;
                 let total = (smp.frames.len() as f64 / scale) as usize;
-                let Some((start, len, _reverse)) = sl.for_key(n.key, total) else { return };
+                let Some((start, len, reverse)) = sl.for_key(n.key, total) else { return };
                 let step = smp.rate as f64 / sr as f64 * 2f64.powf((ch.pitch_cents + n.fine_cents) as f64 / 1200.0);
+                // a reversed slice is read from its end back to its start
+                let (first, dir) = if reverse { (((start + len) as f64 * scale - 1.0).max(0.0), -1.0) } else { (start as f64 * scale, 1.0) };
                 let note_gain = law::velocity_gain(n.vel);
                 let note_pan = n.pan;
                 let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                 let gain = chan_vol * note_gain;
                 let frames = (len as f64 * scale / step) as u64;
+                let step = step * dir;
                 self.start(Voice {
                     sample: Some(smp),
-                    pos: start as f64 * scale,
+                    pos: first,
                     step,
                     step_to: step,
                     step_now: step,
@@ -3774,6 +3777,21 @@ mod tests {
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.05, 0.45) > 0.2);
         assert!(loud(&buf, 0.52, 1.5) < 1e-3, "the slice ends at the next cut");
+        // a reversed slice plays its end first
+        let old = s.channels[0].sample.clone().unwrap();
+        let mut smp = Sample { name: old.name.clone(), rate: old.rate, mono: old.mono, frames: old.frames.clone() };
+        for f in &mut smp.frames[24_000..36_000] {
+            *f = [0.0; 2];
+        }
+        s.channels[0].sample = Some(Arc::new(smp));
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.02, 0.2) < 1e-3 && loud(&buf, 0.3, 0.45) > 0.2);
+        let mut sl = (**s.channels[0].slices.as_ref().unwrap()).clone();
+        sl.cuts[1].reverse = true;
+        s.channels[0].slices = Some(Arc::new(sl));
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.02, 0.2) > 0.2 && loud(&buf, 0.3, 0.45) < 1e-3);
+        assert!(loud(&buf, 0.52, 1.5) < 1e-3);
         // a key past the last slice is silent
         s.patterns[0].notes[0].key = 70;
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
