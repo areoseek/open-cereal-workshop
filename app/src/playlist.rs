@@ -154,6 +154,17 @@ impl App {
         }
     }
 
+    /// What a click on an empty spot of a track puts down: the picked clip source, or on a track locked
+    /// to its content the clip that already lies on it.
+    fn brush_on(&self, track: usize, pat: usize) -> (ClipSrc, u32, u32) {
+        if self.song.tracks.get(track).map(|t| t.lock_content).unwrap_or(false) {
+            if let Some(c) = self.song.clips.iter().filter(|c| c.track as usize == track).min_by_key(|c| c.pos) {
+                return (c.src, c.len, c.offset);
+            }
+        }
+        self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0))
+    }
+
     /// The menu of a playlist track: its name and how it behaves in performance mode.
     fn track_menu(&mut self, ctx: &egui::Context) {
         let Some((tr, at)) = self.playlist.track_menu else { return };
@@ -177,6 +188,7 @@ impl App {
                 if tr > 0 {
                     changed |= ui.checkbox(&mut t.grouped, "Group with above track").changed();
                 }
+                changed |= ui.checkbox(&mut t.lock_content, "Lock to content").on_hover_text("Drawing on this track puts down the clip that already lies on it").changed();
                 ui.separator();
                 ui.label(RichText::new("Performance settings").color(TEXT_DIM).small());
                 let row = |ui: &mut Ui, title: &str, names: &[&str], v: &mut u8| {
@@ -879,7 +891,7 @@ impl App {
                             }
                             None if tool == Tool::Slip => {}
                             None => {
-                                let (src, len, offset) = self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0));
+                                let (src, len, offset) = self.brush_on(track, pat);
                                 let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false, group: 0 };
                                 self.song.clips.push(c.clone());
                                 self.playlist.sel.clear();
@@ -1035,10 +1047,10 @@ impl App {
                 }
                 Drag::Paint => {
                     if down && grid.contains(pp) {
-                        let (src, len, offset) = self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0));
+                        let track = track_of(pp.y) as u16;
+                        let (src, len, offset) = self.brush_on(track as usize, pat);
                         let unit = len.max(g).max(1);
                         let pos = snap(tick_of(pp.x)) / unit * unit;
-                        let track = track_of(pp.y) as u16;
                         if !self.song.clips.iter().any(|c| c.track == track && c.pos < pos + len && pos < c.pos + c.len) {
                             self.song.clips.push(Clip { pos, len, track, src, offset, muted: false, group: 0 });
                             self.dirty = true;

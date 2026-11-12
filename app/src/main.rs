@@ -2364,6 +2364,43 @@ impl App {
                             self.status = format!("{n} empty tracks reset");
                             ui.close_menu();
                         }
+                        if ui.button("Prepare for MIDI export").hint("Every sampler and instrument channel becomes a MIDI Sender on its own MIDI channel; the sounds themselves are given up").clicked() {
+                            let n = self.song.prepare_midi_export();
+                            if n > 0 {
+                                self.dirty = true;
+                            }
+                            self.status = format!("{n} channels turned into MIDI Senders");
+                            ui.close_menu();
+                        }
+                        for (keep, label) in [(true, "Switch all audio clips to stretch"), (false, "Switch all audio clips to resample")] {
+                            if ui.button(label).hint(if keep { "Every audio clip keeps its pitch when its length is changed" } else { "Every audio clip changes pitch with its speed" }).clicked() {
+                                let mut n = 0;
+                                for ch in self.song.channels.iter_mut().filter(|c| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
+                                    if ch.smp.keep_pitch != keep {
+                                        ch.smp.keep_pitch = keep;
+                                        n += 1;
+                                    }
+                                }
+                                self.dirty |= n > 0;
+                                self.status = format!("{n} audio clips switched");
+                                ui.close_menu();
+                            }
+                        }
+                        for (on, label) in [(true, "Lock all playlist tracks to content"), (false, "Unlock all playlist tracks from content")] {
+                            if ui.button(label).clicked() {
+                                let mut n = 0;
+                                for (t, tr) in self.song.tracks.iter_mut().enumerate() {
+                                    let used = !on || self.song.clips.iter().any(|c| c.track as usize == t);
+                                    if used && tr.lock_content != on {
+                                        tr.lock_content = on;
+                                        n += 1;
+                                    }
+                                }
+                                self.dirty |= n > 0;
+                                self.status = format!("{n} tracks {}", if on { "locked to their content" } else { "unlocked" });
+                                ui.close_menu();
+                            }
+                        }
                         if ui.button("Remove all Wave Recorder instances").hint("Takes every Wave Recorder out of the mixer's effect slots").clicked() {
                             let mut n = 0;
                             for ins in self.song.inserts.iter_mut() {

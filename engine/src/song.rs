@@ -666,11 +666,13 @@ pub struct Track {
     pub perf: Perf,
     /// Joined to the track above it (they are muted and triggered as one).
     pub grouped: bool,
+    /// Locked to its content: drawing on the track puts down the clip that already lies on it.
+    pub lock_content: bool,
 }
 
 impl Default for Track {
     fn default() -> Self {
-        Self { name: String::new(), color: [72, 81, 86], enabled: true, perf: Perf::default(), grouped: false }
+        Self { name: String::new(), color: [72, 81, 86], enabled: true, perf: Perf::default(), grouped: false, lock_content: false }
     }
 }
 
@@ -1214,6 +1216,31 @@ impl Song {
         }
         best
     }
+    /// Every sampler and instrument channel becomes a MIDI sender on port 0, each on the next MIDI channel
+    /// (the drum channel is passed over), so the song can be written as a MIDI file or played on outside
+    /// gear. Names, colours, levels and notes stay. Returns how many channels were changed.
+    pub fn prepare_midi_export(&mut self) -> usize {
+        let mut n = 0;
+        for c in self.channels.iter_mut() {
+            let is_sender = c.plugin.eq_ignore_ascii_case(crate::midiout::IDENT);
+            if !matches!(c.kind, ChannelKind::Sampler | ChannelKind::Plugin) || is_sender {
+                continue;
+            }
+            let mut m = Chan::instrument(crate::synth::Kind::Quiet);
+            m.plugin = crate::midiout::IDENT.into();
+            let mut set = crate::midiout::Set::fresh();
+            set.chan = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15][n % 15];
+            if let Some(g) = m.gen.as_mut() {
+                g.raw = set.write();
+            }
+            m.name = std::mem::take(&mut c.name);
+            (m.color, m.enabled, m.volume, m.pan, m.group, m.insert) = (c.color, c.enabled, c.volume, c.pan, c.group, c.insert);
+            *c = m;
+            n += 1;
+        }
+        n
+    }
+
     pub fn pattern_length(&self, p: usize) -> u32 {
         self.patterns.get(p).map(|p| p.length(self.bar())).unwrap_or(self.bar())
     }
@@ -1771,7 +1798,7 @@ impl Song {
         let mut clips = vec![];
         if let Some(a) = f.arrangements.first() {
             if !a.tracks.is_empty() {
-                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped }).collect();
+                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped, lock_content: t.content_locked }).collect();
             }
             for it in &a.items {
                 let (src, offset) = match it.source {

@@ -550,6 +550,8 @@ pub struct FlpTrack {
     pub color: u32,
     pub enabled: bool,
     pub height: f32,
+    /// Only the clip already on the track is drawn on it.
+    pub content_locked: bool,
     /// Performance settings: what the track does after a clip (0 stay, 1 one shot, 2 march and wrap,
     /// 3 march and stay, 4 march and stop, 5 random, 6 random without repeats), how a press acts
     /// (0 retrigger, 1 hold and stop, 2 hold and motion, 3 latch), the trigger and position grids
@@ -865,6 +867,7 @@ impl Flp {
                         color: u32at(d, 4),
                         enabled: d.get(12).copied().unwrap_or(1) != 0,
                         height: f32at(d, 13),
+                        content_locked: d.get(21).copied().unwrap_or(0) != 0,
                         motion: word(22),
                         press: word(26),
                         trigger_sync: if perf { u32at(d, 30) } else { 5 },

@@ -606,6 +606,8 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
             // written): the channel becomes (or stays) a generator channel carrying its settings
             let ident = match g {
                 Ok(_) => crate::song::WRAPPER,
+                // the silent kinds are many units told apart by the channel's own plug-in name
+                Err(g) if g.kind == crate::synth::Kind::Quiet && !now.plugin.is_empty() => now.plugin.as_str(),
                 Err(g) => crate::synth::def(g.kind).ident,
             };
             let encode = |base: Option<&[u8]>| match g {
@@ -1585,6 +1587,9 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
             if now.enabled != was.enabled && d.len() > 12 {
                 d[12] = now.enabled as u8;
             }
+            if now.lock_content != was.lock_content && d.len() > 21 {
+                d[21] = now.lock_content as u8;
+            }
             if (now.perf != was.perf || now.grouped != was.grouped) && d.len() >= 47 {
                 put_u32(d, 22, now.perf.motion as u32);
                 put_u32(d, 26, now.perf.press as u32);
@@ -2319,6 +2324,27 @@ mod tests {
     }
 
     #[test]
+    fn channels_made_midi_senders_are_saved_as_such() {
+        let mut s = Song::new();
+        s.channels.push(crate::song::Chan::instrument(crate::synth::Kind::Fm));
+        let bytes = to_bytes(&s, None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        let n = r.channels.len();
+        let names: Vec<String> = r.channels.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(r.prepare_midi_export(), n);
+        assert_eq!(r.prepare_midi_export(), 0);
+        let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
+        let (r2, _) = reload(&bytes2);
+        assert_eq!(r2.channels.len(), n);
+        for (i, c) in r2.channels.iter().enumerate() {
+            assert!(c.plugin.eq_ignore_ascii_case(crate::midiout::IDENT), "{i}: {}", c.plugin);
+            assert_eq!(c.name, names[i]);
+            let set = crate::midiout::Set::parse(&c.gen.as_ref().unwrap().raw).unwrap();
+            assert_eq!(set.chan as usize, i);
+        }
+    }
+
+    #[test]
     fn performance_settings_are_saved_and_read_back() {
         let bytes = to_bytes(&Song::new(), None).unwrap();
         let (mut r, f) = reload(&bytes);
@@ -2327,6 +2353,7 @@ mod tests {
         r.main_pitch = -350;
         r.tracks[2].perf = crate::song::Perf { press: 3, motion: 5, sync: 2, pos_sync: 4, queue: true, tolerant: false };
         r.tracks[3].grouped = true;
+        r.tracks[4].lock_content = true;
         let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
         let (r2, _) = reload(&bytes2);
         assert!(r2.performance);
@@ -2334,6 +2361,7 @@ mod tests {
         assert_eq!(r2.tracks[2].perf, r.tracks[2].perf);
         assert_eq!(r2.tracks[1].perf, crate::song::Perf::default());
         assert!(r2.tracks[3].grouped && !r2.tracks[2].grouped);
+        assert!(r2.tracks[4].lock_content && !r2.tracks[3].lock_content);
     }
 
     #[test]
