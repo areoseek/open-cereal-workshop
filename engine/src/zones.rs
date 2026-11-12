@@ -64,6 +64,8 @@ pub struct Map {
     pub bank: Option<crate::sf2::Info>,
     /// The pad machine's own block behind the zones, when they come from one.
     pub kit: Option<Vec<u8>>,
+    /// Effects the instrument runs on the sum of its voices.
+    pub tail: crate::tailfx::Set,
 }
 
 impl Map {
@@ -171,7 +173,7 @@ fn pads(state: &[u8]) -> Option<Map> {
             });
         }
     }
-    Some(Map { zones, bank: None, kit: Some(state.to_vec()) })
+    Some(Map { zones, bank: None, kit: Some(state.to_vec()), tail: Default::default() })
 }
 
 type Parts = Vec<(u32, Vec<u8>)>;
@@ -412,9 +414,15 @@ impl Kit {
 /// highest velocity, one byte each), its name (501), the file's stored path (502) and the recording's facts
 /// (503: frames, a spare, channels, a number, rate as a float, loop kind, loop start, loop end). The first
 /// program that has zones is the one that plays.
+///
+/// The rest of a zone is knobs stored 0 to 1: the level envelope (509: attack, decay, sustain, release), two
+/// filters (507: kind, cutoff, emphasis, shape), two free envelopes (514), two slow wobbles (515) and sixteen
+/// links (516: source, target, amount with 0.5 as none). Which numbers the sources and targets carry is
+/// placed from the links every stored program starts with, and the knob-to-seconds law is our estimate.
 fn programs(state: &[u8]) -> Option<Map> {
     let top = pieces(state.get(4..)?)?;
     let mut zones = vec![];
+    let mut tail = crate::tailfx::Set::default();
     for (id, prog) in top {
         if id != 1 {
             continue;
@@ -433,6 +441,54 @@ fn programs(state: &[u8]) -> Option<Map> {
             let facts = find(503).unwrap_or(&[]);
             let int = |at: usize| facts.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).unwrap_or(0);
             let looped = (int(20) != 0 && int(28) > int(24)).then(|| (int(24), int(28)));
+            let all = |n: u32| inner.iter().filter(move |p| p.0 == n).map(|p| p.1);
+            let knobs = |b: &[u8], from: usize| -> Vec<f32> { b.get(from..).unwrap_or(&[]).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()).clamp(0.0, 1.0)).collect() };
+            let secs = |k: f32| 10.0 * k * k * k;
+            let adsr = |b: &[u8], amount: f32| {
+                let k = knobs(b, 0);
+                (k.len() >= 4).then(|| crate::song::Env { on: true, attack: secs(k[0]), decay: secs(k[1]), sustain: k[2], release: secs(k[3]).max(0.005), amount, tension: [0.0, -1.0, -1.0], ..Default::default() })
+            };
+            let env = find(509).and_then(|b| adsr(b, 0.0));
+            // links: velocity (2) to level (2), the free envelopes (9, 10) to pitch (1) or the first cutoff (7)
+            let mut vel_scale = all(516).next().is_none();
+            let (mut penv, mut cenv) = (None, None);
+            let free: Vec<&[u8]> = all(514).collect();
+            for l in all(516) {
+                if l.len() < 8 {
+                    continue;
+                }
+                let (src, dst) = (u16::from_le_bytes([l[0], l[1]]), u16::from_le_bytes([l[2], l[3]]));
+                let amount = (f32::from_le_bytes(l[4..8].try_into().unwrap()).clamp(0.0, 1.0) - 0.5) * 2.0;
+                if amount == 0.0 {
+                    continue;
+                }
+                match (src, dst) {
+                    (2, 2) => vel_scale = amount > 0.0,
+                    (9 | 10, 1) => penv = free.get(src as usize - 9).and_then(|b| adsr(b, amount * 1200.0)),
+                    (9 | 10, 7) => cenv = free.get(src as usize - 9).and_then(|b| adsr(b, amount)),
+                    _ => {}
+                }
+            }
+            // only the low-pass kind (1) is run; emphasis 0.5 is the knob's rest
+            let filter = all(507).next().filter(|b| b.len() >= 12 && b[0] == 1).map(|b| {
+                let k = knobs(b, 4);
+                (k[0], ((k[1] - 0.5) * 2.0).clamp(0.0, 1.0))
+            });
+            let pick = find(505).and_then(|b| b.get(1).copied()).filter(|&t| t <= 3).unwrap_or(0);
+            // the program's echo, chorus and room, each fed by the zone's send knob (half way is a quarter
+            // of the level); they run once for the instrument, so the first zone's sends stand for all
+            if zones.is_empty() {
+                use crate::tailfx::{Chorus, Delay, Reverb};
+                let sends = find(506).map(|b| knobs(b, 0)).filter(|k| k.len() >= 3).unwrap_or(vec![0.0; 3]);
+                let unit = |n: u32, lead: usize| parts.iter().find(|p| p.0 == n).map(|p| p.1).filter(|b| b.first() == Some(&1)).map(|b| knobs(b, lead)).filter(|k| k.len() >= 4);
+                let wet = |i: usize| sends[i] * sends[i];
+                tail = crate::tailfx::Set {
+                    delay: unit(105, 2).filter(|_| sends[0] > 0.0).map(|k| Delay { free: 0.02 * 50f32.powf(k[0]), fb: k[1] * 0.95, low_hz: 20.0 * 100f32.powf(k[2]), high_hz: 200.0 * 100f32.powf(k[3]), wet: wet(0), ..Default::default() }),
+                    chorus: unit(107, 1).filter(|_| sends[1] > 0.0).map(|k| Chorus { depth: k[1], hz: 0.05 * 100f32.powf(k[2]), wet: wet(1) }),
+                    reverb: unit(106, 1).filter(|_| sends[2] > 0.0).map(|k| Reverb { secs: 0.2 + 20.0 * k[3] * k[3], high_hz: 1000.0 * 20f32.powf(k[1]), wet: wet(2) }),
+                    ..Default::default()
+                };
+            }
             zones.push(Zone {
                 name: find(501).map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
                 key_lo: keys[1].min(127),
@@ -442,8 +498,13 @@ fn programs(state: &[u8]) -> Option<Map> {
                 root: keys[0] as i32,
                 path: String::from_utf8_lossy(path).trim_end_matches('\0').to_string(),
                 looped,
-                // the zone envelopes are not read yet: a quick start and a short fade stand in
-                release: 0.25,
+                release: env.map_or(0.25, |e| e.release),
+                env,
+                vel_scale,
+                penv,
+                cenv,
+                filter,
+                pick,
                 ..Default::default()
             });
         }
@@ -451,7 +512,7 @@ fn programs(state: &[u8]) -> Option<Map> {
             break;
         }
     }
-    Some(Map { zones, bank: None, kit: None })
+    Some(Map { zones, bank: None, kit: None, tail })
 }
 
 #[cfg(test)]
@@ -508,7 +569,25 @@ pub(crate) mod tests {
         zone.extend(piece(501, b"Tone"));
         zone.extend(piece(502, b"%FLStudioFactoryData%\\Data\\tone.wav"));
         zone.extend(piece(503, &facts));
+        let floats = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        let mut low = vec![1, 0, 0, 0];
+        low.extend(floats(&[0.4, 0.75, 0.0, 0.0]));
+        zone.extend(piece(507, &low));
+        zone.extend(piece(509, &floats(&[0.0, 0.5, 0.8, 0.5])));
+        zone.extend(piece(514, &floats(&[0.2, 1.0, 0.5, 0.25])));
+        zone.extend(piece(514, &floats(&[0.0, 0.5, 0.5, 0.25])));
+        for (src, dst, amount) in [(2u16, 2u16, 1.0f32), (3, 34, 0.75), (12, 1, 0.5), (9, 7, 0.75)] {
+            let mut l = src.to_le_bytes().to_vec();
+            l.extend(dst.to_le_bytes());
+            l.extend(amount.to_le_bytes());
+            zone.extend(piece(516, &l));
+        }
+        zone.extend(piece(506, &floats(&[0.5, 0.0, 0.5, 1.0])));
         let mut prog = piece(100, &[0; 30]);
+        let unit = |on: &[u8], k: &[f32]| on.iter().copied().chain(floats(k)).collect::<Vec<u8>>();
+        prog.extend(piece(105, &unit(&[0, 0], &[0.75, 0.75, 0.5, 0.75])));
+        prog.extend(piece(106, &unit(&[1], &[0.25, 0.5, 0.75, 0.25])));
+        prog.extend(piece(107, &unit(&[1], &[0.25, 0.5, 0.25, 0.0])));
         prog.extend(piece(3, &zone));
         let mut b = vec![37, 0, 0, 0];
         b.extend(piece(6, &[0; 16]));
@@ -521,6 +600,16 @@ pub(crate) mod tests {
         assert_eq!(z.looped, Some((1000, 48_000)));
         assert!(z.path.ends_with("tone.wav"));
         assert!(m.hit(72, 100).next().is_none());
+        let e = z.env.unwrap();
+        assert!((e.sustain - 0.8).abs() < 1e-6 && (e.release - 1.25).abs() < 1e-4 && e.attack == 0.0);
+        assert_eq!(z.filter, Some((0.4, 0.5)));
+        assert!(z.vel_scale && z.penv.is_none());
+        let c = z.cenv.unwrap();
+        assert!((c.amount - 0.5).abs() < 1e-6 && (c.attack - 0.08).abs() < 1e-4);
+        // the room is on and fed; the echo is switched off and the chorus gets nothing
+        let r = m.tail.reverb.unwrap();
+        assert!((r.wet - 0.25).abs() < 1e-6 && (r.secs - 1.45).abs() < 1e-4);
+        assert!(m.tail.delay.is_none() && m.tail.chorus.is_none());
     }
 
     #[test]
@@ -588,5 +677,37 @@ pub(crate) mod tests {
             }
         }
         assert!(seen > 10, "only {seen} kits were found");
+    }
+
+    /// With the user's own content at hand: every zone program file gives zones with a level envelope, and
+    /// its recordings are found.
+    #[test]
+    fn stored_zone_programs_are_read() {
+        let (Ok(root), Ok(factory)) = (std::env::var("CEREAL_FLP_CORPUS"), std::env::var("CEREAL_FACTORY_DATA")) else { return };
+        let mut lib = Library::default();
+        lib.factory_roots.push(factory.into());
+        let (mut seen, mut found, mut zones) = (0, 0, 0);
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dwp")) {
+                    let pre = crate::preset::read(&p).unwrap();
+                    let mut m = Map::parse(&pre.ident, &pre.state).unwrap_or_else(|| panic!("{} is not read", p.display()));
+                    assert!(!m.zones.is_empty(), "{}", p.display());
+                    assert!(m.zones.iter().all(|z| z.env.is_some_and(|e| e.release > 0.0 && e.release < 2.0) && z.vel_scale), "{}", p.display());
+                    if seen % 8 == 0 {
+                        m.load(&mut lib, p.parent());
+                        found += m.zones.iter().filter(|z| z.sample.is_some()).count();
+                        zones += m.zones.len();
+                    }
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 10, "only {seen} programs were found");
+        eprintln!("zone programs: {seen}, recordings found {found} of {zones}");
     }
 }

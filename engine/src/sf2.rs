@@ -358,8 +358,8 @@ pub fn open(ident: &str, state: &[u8], lib: Option<&mut Library>, project_dir: O
     let bank = lib.filter(|_| !setting.path.is_empty()).and_then(|l| l.resolve(&setting.path, project_dir)).and_then(|p| std::fs::read(p).ok()).and_then(Bank::parse);
     let block = if state.len() > PATH_AT { state.to_vec() } else { with(state, &setting) };
     Some(match bank {
-        Some(b) => Map { zones: b.zones(setting.bank, setting.patch), bank: Some(Info { setting, found: true, presets: b.presets(), block }), kit: None },
-        None => Map { zones: vec![], bank: Some(Info { setting, found: false, presets: vec![], block }), kit: None },
+        Some(b) => Map { zones: b.zones(setting.bank, setting.patch), bank: Some(Info { setting, found: true, presets: b.presets(), block }), kit: None, tail: Default::default() },
+        None => Map { zones: vec![], bank: Some(Info { setting, found: false, presets: vec![], block }), kit: None, tail: Default::default() },
     })
 }
 

@@ -2976,7 +2976,7 @@ impl Player {
         }
         for (ch, slot) in song.channels.iter().zip(self.chan_fx.iter_mut()) {
             let bay = ch.bay();
-            let tail = if bay.is_none() && ch.kind == ChannelKind::Plugin { ch.gen.as_ref().map(|g| g.tail()).filter(|t| t.any()) } else { None };
+            let tail = if bay.is_none() && ch.kind == ChannelKind::Plugin { ch.gen.as_ref().map(|g| g.tail()).filter(|t| t.any()).or_else(|| ch.zones.as_ref().map(|m| m.tail).filter(|t| t.any())) } else { None };
             match (bay, tail, slot.as_mut()) {
                 (None, None, None) => {}
                 (None, None, Some(_)) => *slot = None,
@@ -4504,7 +4504,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = |key: u8, lo: u8, hi: u8, cut: i32| crate::zones::Zone { key_lo: key, key_hi: key, vel_lo: lo, vel_hi: hi, root: key as i32, track: false, sample: Some(tone.clone()), one_shot: true, cut, cut_by: cut, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None, kit: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None, kit: None, tail: Default::default() }));
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].key = 36;
         // a short note still plays the whole recording
@@ -4540,7 +4540,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = crate::zones::Zone { key_lo: 48, key_hi: 48, root: 48, track: false, sample: Some(tone), one_shot: true, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad], bank: None, kit: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad], bank: None, kit: None, tail: Default::default() }));
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
         s.channels[0].root_key = 72;
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
@@ -4642,11 +4642,11 @@ mod tests {
             n.key = 36;
         }
         // together: the loud layer is heard from the first note
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 0), layer(1.0, 0)], bank: None, kit: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 0), layer(1.0, 0)], bank: None, kit: None, tail: Default::default() }));
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 0.3) > 0.1);
         // in turn: the first note plays the silent layer, the second the loud one
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 1), layer(1.0, 1)], bank: None, kit: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 1), layer(1.0, 1)], bank: None, kit: None, tail: Default::default() }));
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 0.9) < 1e-6);
         assert!(loud(&buf, 1.1, 1.8) > 0.1);
@@ -4680,12 +4680,18 @@ mod tests {
         s.channels[0].kind = ChannelKind::Plugin;
         let env = crate::song::Env { on: true, decay: 0.3, sustain: 0.0, release: 0.01, ..Default::default() };
         let zone = crate::zones::Zone { root: 60, sample: Some(tone), one_shot: true, env: Some(env), ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None, kit: None }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None, kit: None, tail: Default::default() }));
         s.patterns[0].toggle_step(0, 0);
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         // loud at the start, gone once the decay has run to its silent sustain
         assert!(loud(&buf, 0.0, 0.1) > 0.1);
         assert!(loud(&buf, 0.5, 1.5) < 1e-4);
+        // with a room of its own the instrument rings on after the voice has ended
+        let mut m = (**s.channels[0].zones.as_ref().unwrap()).clone();
+        m.tail.reverb = Some(crate::tailfx::Reverb { secs: 2.0, high_hz: 6000.0, wet: 0.5 });
+        s.channels[0].zones = Some(Arc::new(m));
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        assert!(loud(&buf, 0.5, 1.0) > 1e-3);
     }
 
     #[test]

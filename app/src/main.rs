@@ -1329,7 +1329,7 @@ impl App {
             }
             Holds::Plugin => {}
         }
-        let pre = match preset::parse(&bytes) {
+        let pre = match preset::read(path) {
             Ok(p) => p,
             Err(e) => {
                 self.status = e;
@@ -1429,7 +1429,17 @@ impl App {
                         self.song.channels.len() - 1
                     }
                 };
-                self.song.channels[ci].gen = Some(g);
+                // instruments made of recordings: the sounds the block names are found and loaded now
+                let bank = cereal_engine::sf2::open(ident, &pre.state, Some(&mut self.lib), path.parent()).map(std::sync::Arc::new);
+                let zones = bank.is_none().then(|| cereal_engine::zones::Map::parse(ident, &pre.state)).flatten().map(|mut m| {
+                    m.load(&mut self.lib, path.parent());
+                    std::sync::Arc::new(m)
+                });
+                let c = &mut self.song.channels[ci];
+                c.gen = Some(g);
+                if bank.is_some() || zones.is_some() {
+                    c.zones = bank.or(zones);
+                }
                 self.sel_chan = ci;
                 self.preset_name.insert(ident.to_string(), path.to_path_buf());
                 self.status = format!("Preset: {name}");

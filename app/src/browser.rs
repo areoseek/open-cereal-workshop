@@ -34,7 +34,7 @@ enum Tab {
     Plugins,
 }
 
-const SHOWN: [&str; 7] = ["flp", "fst", "fsc", "mid", "gmsynth", "tbio", "mrp"];
+const SHOWN: [&str; 8] = ["flp", "fst", "fsc", "mid", "gmsynth", "tbio", "mrp", "dwp"];
 
 /// Every file under the folders whose name holds all the words asked for (a few hundred at most).
 fn search(roots: &[(String, PathBuf)], query: &str) -> Vec<PathBuf> {

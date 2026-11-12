@@ -60,11 +60,18 @@ pub fn read(path: &std::path::Path) -> Result<Preset, String> {
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("mrp")) {
         return Ok(Preset { ident: "Morphine".into(), state: crate::morph::wrap(&bytes) });
     }
+    // a zone program file is the settings block behind a four-letter mark
+    if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("dwp")) {
+        return match bytes.strip_prefix(b"DwPr") {
+            Some(rest) if rest.len() > 4 => Ok(Preset { ident: "DirectWave".into(), state: rest.to_vec() }),
+            _ => Err("not a zone program file".into()),
+        };
+    }
     parse(&bytes)
 }
 
 /// File endings that hold the settings of one plugin.
-pub const EXTS: [&str; 4] = ["fst", "gmsynth", "tbio", "mrp"];
+pub const EXTS: [&str; 5] = ["fst", "gmsynth", "tbio", "mrp", "dwp"];
 
 pub fn is_file(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|x| EXTS.iter().any(|e| x.eq_ignore_ascii_case(e)))

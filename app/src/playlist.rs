@@ -747,7 +747,7 @@ impl App {
         if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
             if let Some(pp) = pointer.filter(|pp| grid.contains(*pp)) {
                 let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                if !["fst", "fsc", "mid", "flp", "gmsynth", "tbio", "mrp"].contains(&ext.as_str()) {
+                if !["fst", "fsc", "mid", "flp", "gmsynth", "tbio", "mrp", "dwp"].contains(&ext.as_str()) {
                     self.add_audio_clip(&path, snap(tick_of(pp.x)), Some(track_of(pp.y) as u16));
                 }
             }
