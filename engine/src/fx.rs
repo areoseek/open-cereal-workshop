@@ -263,7 +263,7 @@ pub static DEFS: &[Def] = &[
         ident: "Fruity Limiter",
         title: "Limiter",
         size: 76,
-        fixed: &[(0, 7), (20, 3), (28, 3), (56, 1)],
+        fixed: &[(0, 7)],
         params: &[
             p("Gain", 4, 0, 2000, 1000),
             p("Saturation", 8, 0, 1000, 1000),
@@ -272,14 +272,17 @@ pub static DEFS: &[Def] = &[
             p("Release", 24, 0, 10000, 5000),
             p("Sustain", 32, 0, 10000, 2882),
             p("Comp threshold", 36, 0, 1000, 1000),
-            p("Comp knee", 40, 0, 1000, 0),
-            p("Comp ratio", 44, 0, 1000, 0),
+            p("Comp ratio", 40, 0, 1000, 0),
+            p("Comp knee", 44, 0, 1000, 0),
             p("Comp attack", 48, 0, 10000, 0),
             p("Comp release", 52, 0, 10000, 6666),
             p("Comp sustain", 60, 0, 10000, 650),
             p("Gate gain", 64, 0, 1000, 1000),
             p("Gate threshold", 68, 0, 1000, 0),
             p("Gate release", 72, 0, 10000, 4187),
+            p("Attack curve", 20, 1, 8, 3),
+            p("Release curve", 28, 1, 8, 3),
+            p("Comp curve", 56, 1, 8, 1),
         ],
     },
     Def {
@@ -5129,50 +5132,157 @@ impl Unit {
             }
             Kind::Limiter => {
                 // gain, then a compressor stage, then the limiter against the ceiling
-                let gain = (p[0] / 1000.0).powi(2);
-                let ceil = (p[2] / 1000.0).max(0.001);
-                let att = (-1.0 / ((0.0002 + (p[3] / 10000.0).powi(2) * 0.25) * sr)).exp();
-                let rel = (-1.0 / ((0.005 + (p[4] / 10000.0).powi(2) * 4.0) * sr)).exp();
-                let c_thr = 20.0 * (p[6] / 1000.0).max(0.001).powi(2).log10();
-                let c_ratio = 1.0 + (p[8] / 1000.0).powi(2) * 29.0;
-                let c_knee = p[7] / 1000.0 * 24.0;
-                let c_att = (-1.0 / ((0.0002 + (p[9] / 10000.0).powi(2) * 0.25) * sr)).exp();
-                let c_rel = (-1.0 / ((0.005 + (p[10] / 10000.0).powi(2) * 4.0) * sr)).exp();
-                let comp_on = p[8] > 0.0 && p[6] < 1000.0;
-                let sat = p[1] / 1000.0;
+                let gain = (7f32.powf(p[0] / 1000.0) - 1.0) / 6.0;
+                let ceil = ((3f32.powf(p[2] / 1000.0) - 1.0) / 2.0 * 0.9749).max(1e-4);
+                // the three time knobs share one law, 0 to 1000 ms
+                let time = |v: f32| 2.0 * (501f32.powf(v / 10000.0) - 1.0) * 0.001 * sr;
+                let t_att = time(p[3]);
+                let t_rel = time(p[4]);
+                // the sustain time widens the window the loudest level is taken from
+                let win = (time(p[5]).max(t_att).round() as usize).min(sr as usize);
+                let n_att = (p[15].round() as usize).clamp(1, 8);
+                let n_rel = (p[16].round() as usize).clamp(1, 8);
+                // the curve setting is the number of smoothing stages in a row
+                let ka = if t_att < 0.5 { 1.0 } else { 1.0 - (-(n_att as f32).sqrt() * 5.756 / t_att).exp() };
+                let kr = if t_rel < 0.5 { 1.0 } else { 1.0 - (-(n_rel as f32).sqrt() * std::f32::consts::LN_10 / t_rel).exp() };
+                let lag = (t_att.round() as usize).min(sr as usize);
+                if self.buf.len() != sr as usize + 8 {
+                    self.buf = vec![[0.0; 2]; sr as usize + 8];
+                    self.pos = 0;
+                }
+                let nb = self.buf.len();
+                // the loudest level inside the look-ahead window, kept as a queue of falling candidates
+                let cap = sr as usize + 8;
+                if self.lines.len() != 3 || self.lines[0].len() != cap {
+                    self.lines = vec![vec![0.0; cap]; 3];
+                    self.lpos = vec![0; 5];
+                }
+                const WRAP: usize = 1 << 22;
+                // the compressor: threshold, ratio 1:1 to 20:1, and a knee that bends the curve as a logarithm
+                let c_thr = ((7f32.powf(p[6] / 1000.0) - 1.0) / 6.0).max(0.001);
+                let c_ratio = 1.0 + 19.0 * (51f32.powf(p[7] / 1000.0) - 1.0) / 50.0;
+                let c_base = 1.0 + (201f32.powf(p[8] / 1000.0) - 1.0) / 200.0;
+                let c_ln = c_base.ln();
+                let n_cmp = (p[17].round() as usize).clamp(1, 8);
+                let c_time = |v: f32, n: usize| {
+                    let t = 4.0 * (501f32.powf(v / 10000.0) - 1.0) * 0.001 * sr;
+                    if t < 0.5 { 1.0 } else { 1.0 - (-(n as f32).sqrt() * 100f32.ln() / t).exp() }
+                };
+                let c_att = {
+                    let t = time(p[9]);
+                    if t < 0.5 { 1.0 } else { 1.0 - (-(n_cmp as f32).sqrt() * 100f32.ln() / t).exp() }
+                };
+                let c_rel = c_time(p[10], n_cmp);
+                let c_win = (time(p[11]).round() as usize).min(sr as usize);
+                let comp_on = c_ratio > 1.0 || p[8] > 0.0;
+                // the gate
+                let g_thr = (7f32.powf(p[13] / 1000.0) - 1.0) / 6.0;
+                let g_gain = ((7f32.powf(p[12] / 1000.0) - 1.0) / 6.0).min(1.0);
+                let g_rel = c_time(p[14], 1);
+                let gate_on = p[12] < 1000.0 && p[13] > 0.0;
+                let sat = (3f32.powf(p[1] / 1000.0) - 1.0) / 2.0;
+                let soft = |x: f32| {
+                    let a = x.abs();
+                    if a <= sat { x } else { (sat + (1.0 - sat) * (1.0 - (-(a - sat) / (1.0 - sat)).exp())).copysign(x) }
+                };
                 for f in io.iter_mut() {
-                    let mut l = f[0] * gain;
-                    let mut r = f[1] * gain;
+                    let l = f[0] * gain;
+                    let r = f[1] * gain;
+                    let mut cg = 1.0;
                     if comp_on {
-                        let lv = 20.0 * l.abs().max(r.abs()).max(1e-9).log10();
-                        let over = lv - c_thr;
-                        let red = if c_knee > 0.0 && over.abs() < c_knee / 2.0 {
-                            (1.0 / c_ratio - 1.0) * (over + c_knee / 2.0).powi(2) / (2.0 * c_knee)
-                        } else if over > 0.0 {
-                            (1.0 / c_ratio - 1.0) * over
+                        // the level is the power of both sides, averaged over the window when one is set
+                        let pw = (f[0] * f[0] + f[1] * f[1]) * 0.5;
+                        let mut lv = if c_win == 0 {
+                            pw.sqrt()
                         } else {
-                            0.0
+                            let at = self.lpos[3] % c_win.max(1);
+                            if self.lpos[4] != c_win {
+                                // the window changed: start it over
+                                self.lines[2][..c_win].fill(0.0);
+                                self.lpos[4] = c_win;
+                                z[30] = 0.0;
+                            }
+                            z[30] += pw - self.lines[2][at];
+                            self.lines[2][at] = pw;
+                            self.lpos[3] = (at + 1) % c_win;
+                            if at == 0 {
+                                // the running sum is taken afresh once a turn so that rounding cannot build up
+                                z[30] = self.lines[2][..c_win].iter().sum::<f32>();
+                            }
+                            (z[30].max(0.0) / c_win as f32).sqrt()
                         };
-                        let c = if red < z[1] { c_att } else { c_rel };
-                        z[1] = red + (z[1] - red) * c;
-                        let g = db(z[1]);
-                        l *= g;
-                        r *= g;
+                        for k in 0..n_cmp {
+                            let c = if lv > z[20 + k] { c_att } else { c_rel };
+                            z[20 + k] += (lv - z[20 + k]) * c;
+                            lv = z[20 + k];
+                        }
+                        let over = (20.0 * (lv.max(1e-9) / c_thr).log10()).clamp(0.0, 40.0);
+                        let bent = if c_ln > 1e-6 { (1.0 + over * (c_base - 1.0) / c_base).ln() / c_ln } else { over };
+                        cg = db(-(over - bent / c_ratio));
                     }
-                    if sat < 1.0 {
-                        let t = sat.max(0.05);
-                        l = t * (l / t).tanh();
-                        r = t * (r / t).tanh();
+                    // that level is followed straight up, and down through the release stages
+                    let now = l.abs().max(r.abs());
+                    let peak = if win == 0 {
+                        now
+                    } else {
+                        let (head, len, clock) = (self.lpos[0], self.lpos[1], self.lpos[2]);
+                        let mut len = len;
+                        let mut head = head;
+                        while len > 0 && self.lines[0][(head + len - 1) % cap] <= now {
+                            len -= 1;
+                        }
+                        self.lines[0][(head + len) % cap] = now;
+                        self.lines[1][(head + len) % cap] = clock as f32;
+                        len += 1;
+                        while (clock + WRAP - self.lines[1][head] as usize) % WRAP >= win {
+                            head = (head + 1) % cap;
+                            len -= 1;
+                        }
+                        self.lpos[0] = head;
+                        self.lpos[1] = len;
+                        self.lpos[2] = (clock + 1) % WRAP;
+                        self.lines[0][head]
+                    };
+                    if peak >= z[3] {
+                        z[3] = peak;
+                        for k in 0..n_rel {
+                            z[4 + k] = peak;
+                        }
+                    } else {
+                        let mut to = peak;
+                        for k in 0..n_rel {
+                            z[4 + k] += (to - z[4 + k]) * kr;
+                            to = z[4 + k];
+                        }
+                        z[3] = to.max(peak);
                     }
-                    let peak = l.abs().max(r.abs());
-                    let want = if peak > ceil { ceil / peak } else { 1.0 };
-                    // z[0] holds 1 - gain so that silence is the resting state
-                    let cur = 1.0 - z[0];
-                    let c = if want < cur { att } else { rel };
-                    let g = want + (cur - want) * c;
-                    z[0] = 1.0 - g;
-                    f[0] = (l * g).clamp(-ceil, ceil);
-                    f[1] = (r * g).clamp(-ceil, ceil);
+                    // whichever of the two asks for less wins
+                    let mut want = if z[3] * cg > ceil { ceil / z[3] } else { cg };
+                    if gate_on {
+                        // below its threshold (set against the level before the gain knob) the gate falls to its gain over the release time, and opens at once
+                        let to = if z[3] < g_thr * gain { g_gain } else { 1.0 };
+                        z[2] = if to >= 1.0 { 0.0 } else { z[2] + (1.0 - to - z[2]) * g_rel };
+                        want *= 1.0 - z[2];
+                    }
+                    // the gain is smoothed over the look-ahead time; the stages hold 1 - gain so that silence is the resting state
+                    let mut to = 1.0 - want;
+                    for k in 0..n_att {
+                        z[12 + k] += (to - z[12 + k]) * ka;
+                        to = z[12 + k];
+                    }
+                    z[0] = to;
+                    let g = 1.0 - to;
+                    self.buf[self.pos] = [l, r];
+                    let at = (self.pos + nb - lag) % nb;
+                    self.pos = (self.pos + 1) % nb;
+                    let d = self.buf[at];
+                    if p[1] < 1000.0 {
+                        f[0] = soft(d[0] * g);
+                        f[1] = soft(d[1] * g);
+                    } else {
+                        f[0] = d[0] * g;
+                        f[1] = d[1] * g;
+                    }
                 }
             }
             Kind::Flanger => {
@@ -5491,10 +5601,11 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if d.kind == Kind::Comp {
-                // 64 samples late by design, otherwise untouched
+            if matches!(d.kind, Kind::Comp | Kind::Limiter) {
+                // late by the look-ahead by design (64 samples, and the limiter's 2 ms attack), otherwise untouched
+                let late = if d.kind == Kind::Comp { 64 } else { 88 };
                 let out = run(Fx::new(d.kind), sine, 8192);
-                let worst = out.iter().enumerate().skip(4096).map(|(i, f)| (f[0] - sine(i - 64)[0]).abs()).fold(0.0, f32::max);
+                let worst = out.iter().enumerate().skip(4096).map(|(i, f)| (f[0] - sine(i - late)[0]).abs()).fold(0.0, f32::max);
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
