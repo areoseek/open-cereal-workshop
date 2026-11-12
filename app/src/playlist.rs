@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
-use cereal_engine::song::{Clip, ClipSrc, Target};
+use cereal_engine::song::{Clip, ClipSrc, Target, PERF_MOTION, PERF_PRESS, PERF_SYNC};
+use cereal_engine::{Cmd, PerfSeg};
 
 use crate::pianoroll::SNAPS;
 use crate::widgets::*;
@@ -93,13 +94,18 @@ pub struct State {
     left_tick: u32,
     /// The open menu of an automation point: channel, point, and where it was opened.
     auto_menu: Option<(usize, usize, Pos2)>,
+    /// The open menu of a track: the track and where it was opened.
+    track_menu: Option<(usize, Pos2)>,
+    /// Performance mode: the tracks whose clips the mouse button is holding, and the keys holding tracks.
+    perf_press: Vec<u16>,
+    pub(crate) perf_held: std::collections::HashMap<Key, u16>,
     view_w: f32,
     snap_back: usize,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -145,6 +151,162 @@ impl App {
         if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.playlist.auto_menu = None;
         }
+    }
+
+    /// The menu of a playlist track: its name and how it behaves in performance mode.
+    fn track_menu(&mut self, ctx: &egui::Context) {
+        let Some((tr, at)) = self.playlist.track_menu else { return };
+        if tr >= self.song.tracks.len() {
+            self.playlist.track_menu = None;
+            return;
+        }
+        let mut close = false;
+        let mut changed = false;
+        let area = egui::Area::new(egui::Id::new("pl_track_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(380.0);
+                let t = &mut self.song.tracks[tr];
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    let r = ui.add(egui::TextEdit::singleline(&mut t.name).hint_text(format!("Track {}", tr + 1)).desired_width(180.0));
+                    changed |= r.changed();
+                    close |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                });
+                changed |= ui.checkbox(&mut t.enabled, "On").changed();
+                if tr > 0 {
+                    changed |= ui.checkbox(&mut t.grouped, "Group with above track").changed();
+                }
+                ui.separator();
+                ui.label(RichText::new("Performance settings").color(TEXT_DIM).small());
+                let row = |ui: &mut Ui, title: &str, names: &[&str], v: &mut u8| {
+                    let mut changed = false;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(title).small().color(TEXT_DIM));
+                        for (i, n) in names.iter().enumerate() {
+                            if ui.selectable_label(*v as usize == i, RichText::new(*n).small()).clicked() {
+                                *v = i as u8;
+                                changed = true;
+                            }
+                        }
+                    });
+                    changed
+                };
+                changed |= row(ui, "Press", &PERF_PRESS, &mut t.perf.press);
+                changed |= row(ui, "Motion", &PERF_MOTION, &mut t.perf.motion);
+                changed |= row(ui, "Trigger sync", &PERF_SYNC, &mut t.perf.sync);
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut t.perf.queue, "Queue").on_hover_text("A new clip waits for the playing one to end").changed();
+                    changed |= ui.checkbox(&mut t.perf.tolerant, "Tolerant").on_hover_text("A press that is a little late starts at once, inside the clip").changed();
+                });
+                changed |= row(ui, "Position sync", &PERF_SYNC, &mut t.perf.pos_sync);
+            });
+        });
+        self.dirty |= changed;
+        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
+        if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.playlist.track_menu = None;
+        }
+    }
+
+    /// The scene a place of the performance zone belongs to: from the marker at or before it to the next one.
+    fn perf_region(&self, at: u32, zone: u32) -> (u32, u32) {
+        let lo = self.song.markers.iter().filter(|m| m.pos <= at).map(|m| m.pos).max().unwrap_or(0);
+        let hi = self.song.markers.iter().filter(|m| m.pos > at).map(|m| m.pos).min().unwrap_or(zone).min(zone);
+        (lo, hi)
+    }
+
+    /// Play a scene: the first clip of every track between two places of the zone.
+    fn perf_scene(&mut self, lo: u32, hi: u32, m: Modifiers) {
+        let mut first: std::collections::BTreeMap<u16, u32> = Default::default();
+        for c in self.song.clips.iter().filter(|c| c.pos >= lo && c.pos < hi && !c.muted) {
+            let e = first.entry(c.track).or_insert(c.pos);
+            *e = (*e).min(c.pos);
+        }
+        for (track, pos) in first {
+            self.handle.send(Cmd::Perf { track, clip: Some(pos), now: m.alt, queue: m.shift });
+            self.playlist.perf_press.push(track);
+        }
+    }
+
+    /// A press on a clip of the performance zone: the clip plays; with Ctrl its whole scene or group does.
+    fn perf_click(&mut self, i: usize, m: Modifiers) {
+        let Some(zone) = self.song.perf_start() else { return };
+        let c = self.song.clips[i].clone();
+        if !self.handle.transport.song_mode() {
+            self.handle.transport.set_song_mode(true);
+        }
+        if m.command && c.group != 0 {
+            let mine: Vec<(u16, u32)> = self.song.clips.iter().filter(|k| k.group == c.group && k.pos < zone).map(|k| (k.track, k.pos)).collect();
+            for (track, pos) in mine {
+                self.handle.send(Cmd::Perf { track, clip: Some(pos), now: m.alt, queue: m.shift });
+                self.playlist.perf_press.push(track);
+            }
+        } else if m.command {
+            let (lo, hi) = self.perf_region(c.pos, zone);
+            self.perf_scene(lo, hi, m);
+        } else {
+            self.handle.send(Cmd::Perf { track: c.track, clip: Some(c.pos), now: m.alt, queue: m.shift });
+            self.playlist.perf_press.push(c.track);
+        }
+    }
+
+    /// Switch performance mode. Turning it on in a song that has no start marker lays the zone out first.
+    pub(crate) fn toggle_performance(&mut self) {
+        self.song.performance = !self.song.performance;
+        if self.song.performance {
+            if !self.song.markers.iter().any(|m| m.kind == 5 && m.pos > 0) {
+                self.prepare_performance();
+            }
+            self.handle.transport.set_song_mode(true);
+        }
+        self.dirty = true;
+    }
+
+    /// Lay a song out for performing: sixteen bars of zone with a marker on each, then the start marker.
+    /// Clips already in the playlist stay where they are and become the zone's clips.
+    pub(crate) fn prepare_performance(&mut self) {
+        let bar = self.song.bar().max(1);
+        let used = self.song.clips.iter().map(|c| c.pos + c.len).max().unwrap_or(0).div_ceil(bar);
+        let bars = used.max(16);
+        self.song.markers.retain(|m| m.kind != 5);
+        for b in 0..bars {
+            if !self.song.markers.iter().any(|m| m.pos == b * bar) {
+                self.song.markers.push(cereal_engine::song::TimeMarker { pos: b * bar, name: format!("{}", b + 1), kind: 0, sig: (4, 4) });
+            }
+        }
+        self.song.markers.push(cereal_engine::song::TimeMarker { pos: bars * bar, name: "Start".into(), kind: 5, sig: (4, 4) });
+        self.song.markers.sort_by_key(|m| m.pos);
+        self.song.performance = true;
+        self.handle.transport.set_song_mode(true);
+        self.dirty = true;
+    }
+
+    /// Write the clips played by hand while recording into the playlist, where they sounded.
+    pub(crate) fn write_performance(&mut self, segs: Vec<PerfSeg>) {
+        for g in segs {
+            let Some(c) = self.song.clips.iter().find(|c| c.track == g.track && c.pos == g.clip).cloned() else { continue };
+            let (from, to) = (g.from.round().max(0.0) as u32, g.to.round().max(0.0) as u32);
+            if to <= from {
+                continue;
+            }
+            self.song.clips.push(Clip { pos: from, len: to - from, offset: c.offset + g.offset.round().max(0.0) as u32, group: 0, ..c });
+            self.dirty = true;
+        }
+    }
+
+    /// The typing keyboard as a clip grid: five clips on each of the first eight tracks.
+    pub(crate) fn perf_typing(key: Key) -> Option<(u16, u8)> {
+        const ROWS: [[Key; 5]; 8] = [
+            [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5],
+            [Key::Q, Key::W, Key::E, Key::R, Key::T],
+            [Key::A, Key::S, Key::D, Key::F, Key::G],
+            [Key::Z, Key::X, Key::C, Key::V, Key::B],
+            [Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0],
+            [Key::Y, Key::U, Key::I, Key::O, Key::P],
+            [Key::H, Key::J, Key::K, Key::L, Key::Semicolon],
+            [Key::N, Key::M, Key::Comma, Key::Period, Key::Slash],
+        ];
+        ROWS.iter().enumerate().find_map(|(t, row)| row.iter().position(|k| *k == key).map(|n| (t as u16, n as u8)))
     }
 
     /// How far along its travel a control stands in the song, 0..=1.
@@ -277,6 +439,8 @@ impl App {
         let ruler = Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(rect.right(), grid.top()));
         let th = self.playlist.track_h;
         let ntracks = self.song.tracks.len();
+        // performance mode: the clips ahead of the start marker are played by hand
+        let zone = self.song.perf_start();
 
         if resp.hovered() {
             // Shift and the wheel over a track name moves the track; with Alt as well, over a clip, it nudges the clip
@@ -347,8 +511,17 @@ impl App {
             p.line_segment([Pos2::new(grid.left(), y), Pos2::new(grid.right(), y)], Stroke::new(1.0_f32, LINE_SOFT));
         }
 
+        if let Some(z) = zone {
+            let (xa, xb) = (x_of(0.0).max(grid.left()), x_of(z as f32).min(grid.right()));
+            if xb > xa {
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa, grid.top()), Pos2::new(xb, grid.bottom())), 0.0, Color32::from_rgb(236, 150, 60).gamma_multiply(0.07));
+            }
+        }
+
         // clips
         let pointer = ui.input(|i| i.pointer.hover_pos());
+        let now_tick = self.handle.transport.tick() as f32;
+        let blink = ui.input(|i| i.time).fract() < 0.5;
         let mut hit: Option<(usize, i8)> = None;
         // the automation clip whose picture the pointer is over: clip, channel, picture, left edge, offset
         let mut auto_under: Option<(usize, usize, Rect, f32, u32)> = None;
@@ -371,6 +544,23 @@ impl App {
             gp.rect_filled(title, 2.0, col);
             let selected = self.playlist.sel.contains(&i);
             gp.rect_stroke(r, 2.0, Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, if selected { Color32::from_rgb(235, 96, 88) } else { LINE }), egui::StrokeKind::Inside);
+            if zone.is_some_and(|z| c.pos < z) {
+                // what the track is playing by hand, and what waits for its grid line
+                let (live, next) = self.handle.transport.perf_state(tr);
+                if let Some((_, from)) = live.filter(|l| l.0 == c.pos) {
+                    let part = ((now_tick - from) / c.len.max(1) as f32).clamp(0.0, 1.0);
+                    let done = Rect::from_min_max(r.min, Pos2::new(r.left() + r.width() * part, r.bottom()));
+                    gp.rect_filled(done, 2.0, Color32::from_white_alpha(46));
+                    gp.rect_stroke(r, 2.0, Stroke::new(2.0_f32, GREEN), egui::StrokeKind::Inside);
+                    ui.ctx().request_repaint();
+                }
+                if next == Some(Some(c.pos)) || (next == Some(None) && live.is_some_and(|l| l.0 == c.pos)) {
+                    if blink {
+                        gp.rect_stroke(r, 2.0, Stroke::new(2.0_f32, Color32::from_rgb(236, 150, 60)), egui::StrokeKind::Inside);
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
             if r.width() > 16.0 {
                 gp.with_clip_rect(r.intersect(grid)).text(title.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &name, font.clone(), Color32::from_gray(245));
             }
@@ -523,8 +713,17 @@ impl App {
             let dot = Pos2::new(r.right() - 9.0, r.center().y);
             hp.circle_filled(dot, 4.0, if t.enabled { GREEN } else { PANEL_DARK });
             hp.circle_stroke(dot, 4.0, Stroke::new(1.0_f32, LINE));
-            if clicked && pointer.map(|pp| r.contains(pp)).unwrap_or(false) {
-                toggle = Some(tr);
+            if let Some(pp) = pointer.filter(|pp| r.contains(*pp) && resp.hovered()) {
+                if clicked && zone.is_some() && pp.x < r.right() - 18.0 {
+                    // in performance mode a click on the name stops the track (with Alt, at once)
+                    let now = ui.input(|i| i.modifiers.alt);
+                    self.handle.send(Cmd::Perf { track: tr as u16, clip: None, now, queue: false });
+                } else if clicked {
+                    toggle = Some(tr);
+                }
+                if resp.secondary_clicked() {
+                    self.playlist.track_menu = Some((tr, pp));
+                }
             }
         }
         if let Some(tr) = toggle {
@@ -554,6 +753,38 @@ impl App {
         }
         let tool = self.playlist.tool;
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
+        // performance mode: presses in the zone play clips; nothing there is edited while the mode is on
+        let mut over = over;
+        if !down && !self.playlist.perf_press.is_empty() {
+            for t in std::mem::take(&mut self.playlist.perf_press) {
+                self.handle.send(Cmd::PerfRelease { track: t });
+            }
+        }
+        if let (Some(z), Some(pp)) = (zone, over) {
+            let in_zone = grid.contains(pp) && tick_of(pp.x) < z as f32;
+            let tab = marker_tabs.iter().rev().find(|(r, _)| r.contains(pp)).map(|(_, i)| *i).filter(|&i| self.song.markers[i].pos < z);
+            if in_zone {
+                auto_under = None;
+            }
+            if self.playlist.drag.is_none() && in_zone && (pressed || sec_pressed) {
+                let track = track_of(pp.y) as u16;
+                if sec_pressed {
+                    self.handle.send(Cmd::Perf { track, clip: None, now: mods.alt, queue: false });
+                } else if let Some((i, _)) = hit {
+                    self.perf_click(i, mods);
+                }
+                self.playlist.drag = Some(Drag::Spent);
+                over = None;
+            } else if let (Some(i), true, true) = (tab, pressed, self.playlist.drag.is_none()) {
+                // a marker of the zone plays its scene: the first clip under it on every track
+                let (lo, hi) = self.perf_region(self.song.markers[i].pos, z);
+                self.perf_scene(lo, hi, mods);
+                self.playlist.drag = Some(Drag::Spent);
+                over = None;
+            } else if in_zone {
+                over = None;
+            }
+        }
         // the points of an automation clip come before the clip itself
         if let (Some(pp), Some((clip, chan, body, left, offset))) = (over, auto_under) {
             if self.playlist.drag.is_none() && matches!(tool, Tool::Draw | Tool::Paint) && (pressed || sec_pressed) {
@@ -907,6 +1138,7 @@ impl App {
             self.playlist.drag = None;
         }
         self.auto_point_menu(ui.ctx());
+        self.track_menu(ui.ctx());
     }
 
     fn pl_snap(&self) -> u32 {
@@ -1298,6 +1530,20 @@ impl App {
 
     /// A key press while the playlist has the focus. True when it was ours.
     pub(crate) fn playlist_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
+        if m.command && !m.alt && !m.shift && key == Key::P {
+            if !repeat {
+                self.toggle_performance();
+            }
+            return true;
+        }
+        if m.shift && !m.command && !m.alt && key == Key::Num6 {
+            // fit the performance zone to the window
+            if let Some(z) = self.song.perf_start() {
+                self.playlist.zoom = (self.playlist.view_w.max(100.0) / (z as f32 * 96.0 / self.song.ppq.max(1) as f32)).clamp(0.005, 4.0);
+                self.playlist.scroll_x = 0.0;
+            }
+            return true;
+        }
         if m.command && m.alt {
             match key {
                 Key::C if !repeat => self.pl_consolidate(m.shift),
@@ -1464,6 +1710,16 @@ impl App {
                 }
                 if let Some(f) = act {
                     f(self);
+                }
+                ui.separator();
+                let mut on = self.song.performance;
+                if ui.checkbox(&mut on, RichText::new("Performance mode            Ctrl+P").monospace().size(11.0)).changed() {
+                    self.toggle_performance();
+                    ui.close_menu();
+                }
+                if ui.button(RichText::new("Prepare for performance mode").monospace().size(11.0)).clicked() {
+                    self.prepare_performance();
+                    ui.close_menu();
                 }
             });
             for (t, label, hint) in TOOLS {

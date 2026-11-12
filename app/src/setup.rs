@@ -46,6 +46,8 @@ pub struct Settings {
     pub midi_out: Vec<(String, u8)>,
     /// Send the clock and start/stop to the outputs that have a port number.
     pub midi_sync: bool,
+    /// The MIDI channel whose notes play the clips of a performance (1..=16), 0 for none.
+    pub midi_perf: u8,
     /// Size of the whole interface; 0 = as the system says.
     pub scale: f32,
     /// The colour of the playlist and piano roll grid, when it is not the usual one.
@@ -136,6 +138,7 @@ impl Settings {
                     }
                 }
                 Some(("midi_sync", v)) => s.midi_sync = v.trim() == "1",
+                Some(("midi_perf", v)) => s.midi_perf = v.trim().parse::<u8>().unwrap_or(0).min(16),
                 Some(("scale", v)) => s.scale = v.trim().parse().unwrap_or(0.0),
                 Some(("grid", v)) => {
                     let c: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -184,6 +187,9 @@ impl Settings {
         }
         if self.midi_sync {
             out += "midi_sync=1\n";
+        }
+        if self.midi_perf > 0 {
+            out += &format!("midi_perf={}\n", self.midi_perf);
         }
         if self.scale > 0.0 {
             out += &format!("scale={}\n", self.scale);

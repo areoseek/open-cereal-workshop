@@ -295,6 +295,7 @@ impl App {
         setup::load_trusted_scripts(&settings.content);
         record::set_input(&settings.audio_in);
         midi::set_prefs(midi::Prefs { off: settings.midi_off.clone(), out: settings.midi_out.clone(), sync: settings.midi_sync });
+        midi::PERF_CHAN.store(settings.midi_perf as usize, std::sync::atomic::Ordering::Relaxed);
         let mut made = None;
         let started = start_audio(&settings, |rate| {
             let (h, p) = new_player(Song::new(), rate);
@@ -588,6 +589,10 @@ impl App {
     /// Write hand-played notes into the current pattern while recording runs. `flush` ends keys still held.
     fn record_notes(&mut self, flush: bool) {
         let tr = self.handle.transport.clone();
+        let played = tr.take_perf();
+        if !played.is_empty() {
+            self.write_performance(played);
+        }
         let mut evs = tr.take_live();
         if tr.step_edit() && !tr.playing() {
             return self.step_notes(evs);
@@ -1633,6 +1638,9 @@ impl App {
             }
             let egui::Event::Key { key, pressed, repeat, modifiers, .. } = e else { continue };
             if !pressed {
+                if let Some(track) = self.playlist.perf_held.remove(&key) {
+                    self.handle.send(Cmd::PerfRelease { track });
+                }
                 if let Some((chan, k)) = self.held.remove(&key) {
                     self.handle.send(Cmd::NoteOff { chan, key: k });
                 }
@@ -1640,6 +1648,16 @@ impl App {
             }
             if typing_text {
                 continue;
+            }
+            if self.typing_keys && modifiers.is_none() && self.handle.transport.performing() {
+                // while a performance runs the typing keyboard plays the clips of the zone
+                if let Some((track, nth)) = App::perf_typing(key) {
+                    if !repeat {
+                        self.handle.send(Cmd::PerfKey { track, nth, down: true });
+                        self.playlist.perf_held.insert(key, track);
+                    }
+                    continue;
+                }
             }
             if self.focus == Win::Piano && self.show_piano && self.piano_key(key, modifiers, repeat) {
                 continue;

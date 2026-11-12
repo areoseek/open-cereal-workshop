@@ -26,6 +26,19 @@ static INPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new())
 static OUTPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// Ticks per quarter note of the open song, for the clock.
 pub static PPQ: AtomicUsize = AtomicUsize::new(96);
+/// The MIDI channel (1..=16) whose notes play the clips of a performance; 0 for none.
+pub static PERF_CHAN: AtomicUsize = AtomicUsize::new(0);
+
+/// A note on the performance channel while a performance runs plays a clip: each octave is a track, each
+/// key of it a clip of the zone. True when the note was taken.
+fn perf_note(to: &CmdSender, midi_chan: u8, key: u8, down: bool) -> bool {
+    let want = PERF_CHAN.load(Ordering::Relaxed);
+    if want == 0 || want != midi_chan as usize + 1 || !to.performing() {
+        return false;
+    }
+    to.send(cereal_engine::Cmd::PerfKey { track: (key / 12) as u16, nth: key % 12, down });
+    true
+}
 
 pub fn set_prefs(p: Prefs) {
     if let Ok(mut g) = PREFS.lock() {
@@ -233,7 +246,8 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
         match ev.get_type() {
             EventType::Noteon => {
                 if let Some(n) = ev.get_data::<EvNote>() {
-                    if n.velocity == 0 {
+                    if perf_note(&to, n.channel, n.note, n.velocity > 0) {
+                    } else if n.velocity == 0 {
                         held.off(&to, n.note);
                     } else {
                         held.on(&to, c, n.note, n.velocity);
@@ -242,7 +256,9 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
             }
             EventType::Noteoff => {
                 if let Some(n) = ev.get_data::<EvNote>() {
-                    held.off(&to, n.note);
+                    if !perf_note(&to, n.channel, n.note, false) {
+                        held.off(&to, n.note);
+                    }
                 }
             }
             EventType::Pitchbend => {
@@ -281,6 +297,9 @@ impl Held {
     /// One raw three-byte message, as the Windows driver hands them over.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     fn message(&mut self, to: &CmdSender, chan: u16, status: u8, d1: u8, d2: u8) {
+        if matches!(status & 0xf0, 0x80 | 0x90) && perf_note(to, status & 15, d1 & 127, status & 0xf0 == 0x90 && d2 > 0) {
+            return;
+        }
         match status & 0xf0 {
             0x90 if d2 > 0 => self.on(to, chan, d1 & 127, d2 & 127),
             0x80 | 0x90 => self.off(to, d1 & 127),

@@ -32,6 +32,7 @@ impl App {
     fn midi_prefs_changed(&mut self) {
         let s = &self.settings;
         midi::set_prefs(midi::Prefs { off: s.midi_off.clone(), out: s.midi_out.clone(), sync: s.midi_sync });
+        midi::PERF_CHAN.store(s.midi_perf as usize, std::sync::atomic::Ordering::Relaxed);
         let _ = self.settings.save();
     }
 
@@ -114,6 +115,17 @@ impl App {
                 ui.end_row();
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Performance mode MIDI channel");
+            let name = |c: u8| if c == 0 { "---".to_string() } else { format!("{c}") };
+            egui::ComboBox::from_id_salt("midi_perf").width(60.0).selected_text(name(self.settings.midi_perf)).show_ui(ui, |ui| {
+                for c in 0..=16u8 {
+                    changed |= ui.selectable_value(&mut self.settings.midi_perf, c, name(c)).changed();
+                }
+            });
+        })
+        .response
+        .on_hover_text("Notes on this channel play the clips of the performance zone: each octave is a track, each key a clip");
         changed |= ui.checkbox(&mut self.settings.midi_sync, "Send master sync").on_hover_text("The clock, start and stop go to every output that has a port number").changed();
         if cfg!(target_os = "linux") {
             ui.label(RichText::new("Each port in use is also a port of \"Breakfast Cereal Out\" that other programs can connect to.").color(TEXT_DIM).small());

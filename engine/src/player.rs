@@ -3,7 +3,7 @@
 //! The UI owns a `Handle`; the audio callback owns the `Player`. They share the song through an atomic pointer
 //! swap, the transport through atomics, and live notes through a queue the audio thread only ever try-locks.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -29,6 +29,56 @@ pub enum Cmd {
     StopPreview,
     /// Silence everything now.
     Panic,
+    /// Performance mode: play the clip of the zone that sits at tick `clip` of a track (`None` stops the
+    /// track). `now` skips the track's trigger grid, `queue` waits for the playing clip to end.
+    Perf { track: u16, clip: Option<u32>, now: bool, queue: bool },
+    /// The key or button that triggered a track's clip was let go.
+    PerfRelease { track: u16 },
+    /// A key of a controller laid out as a clip grid: clip number `nth` of the zone on a track, down or up.
+    PerfKey { track: u16, nth: u8, down: bool },
+}
+
+/// A stretch of a clip that was played by hand while recording, for the window to write into the playlist.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerfSeg {
+    pub track: u16,
+    /// Where in the zone the clip sits.
+    pub clip: u32,
+    /// Song ticks the stretch sounded over, and how far into the clip it began.
+    pub from: f64,
+    pub to: f64,
+    pub offset: f64,
+}
+
+/// The most playlist tracks whose hand-played clips the window can follow.
+pub const PERF_TRACKS: usize = 500;
+
+#[derive(Debug, Clone, Copy)]
+struct LiveClip {
+    /// Where in the zone the clip sits (clips are known by track and place, which outlive edits).
+    clip: u32,
+    /// Song tick the clip began at, and how far into itself it began.
+    start: f64,
+    offset: f64,
+    /// Held down (the hold modes): it goes round until let go.
+    held: bool,
+    /// Begun a little late: the first stretch picks the sound up mid-way.
+    fresh: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NextClip {
+    clip: Option<u32>,
+    at: f64,
+    start: f64,
+    offset: f64,
+    held: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PerfTrack {
+    live: Option<LiveClip>,
+    next: Option<NextClip>,
 }
 
 /// Play state both threads can see.
@@ -54,6 +104,13 @@ pub struct Transport {
     range: AtomicU64,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
+    /// Performance mode, per playlist track: the clip sounding (-1 none), the tick it began at, and the
+    /// clip waiting for its grid line (-1 none, -2 a stop).
+    perf_live: Vec<AtomicI32>,
+    perf_from: Vec<AtomicU32>,
+    perf_next: Vec<AtomicI32>,
+    perf_log: Mutex<Vec<PerfSeg>>,
+    perf_on: AtomicBool,
     /// MIDI messages the sender channels made, for the window's sender thread to put on the wire.
     midi: Mutex<Vec<crate::midiout::Msg>>,
     /// The effect slot whose sound the window wants to look at (insert * 64 + slot), or all ones for none.
@@ -168,6 +225,11 @@ impl Transport {
             range: AtomicU64::new(0),
             waiting: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
+            perf_live: (0..PERF_TRACKS).map(|_| AtomicI32::new(-1)).collect(),
+            perf_from: (0..PERF_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+            perf_next: (0..PERF_TRACKS).map(|_| AtomicI32::new(-1)).collect(),
+            perf_log: Mutex::new(Vec::new()),
+            perf_on: AtomicBool::new(false),
             midi: Mutex::new(Vec::with_capacity(256)),
             tap_want: AtomicU32::new(u32::MAX),
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
@@ -252,6 +314,26 @@ impl Transport {
         }
     }
     /// The hand-played notes logged since the last call.
+    /// Performance mode: the clip a track is playing with the tick it began at, and what waits for its grid
+    /// line (`Some(None)` is a stop).
+    pub fn perf_state(&self, track: usize) -> (Option<(u32, f32)>, Option<Option<u32>>) {
+        let Some(l) = self.perf_live.get(track) else { return (None, None) };
+        let l = l.load(Relaxed);
+        let n = self.perf_next[track].load(Relaxed);
+        ((l >= 0).then(|| (l as u32, f32::from_bits(self.perf_from[track].load(Relaxed)))), match n {
+            -1 => None,
+            -2 => Some(None),
+            c => Some(Some(c as u32)),
+        })
+    }
+    /// The song has a performance zone and clips are being played by hand.
+    pub fn performing(&self) -> bool {
+        self.perf_on.load(Relaxed)
+    }
+    /// The clips played by hand since the last call, while recording.
+    pub fn take_perf(&self) -> Vec<PerfSeg> {
+        self.perf_log.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
+    }
     pub fn take_live(&self) -> Vec<Live> {
         self.live.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
     }
@@ -400,6 +482,9 @@ impl Handle {
 pub struct CmdSender(Arc<Mutex<Vec<Cmd>>>, Arc<Transport>);
 
 impl CmdSender {
+    pub fn performing(&self) -> bool {
+        self.1.performing()
+    }
     pub fn send(&self, c: Cmd) {
         self.1.log(&c);
         if let Ok(mut q) = self.0.lock() {
@@ -468,6 +553,9 @@ impl Handle {
             pos: 0.0,
             was_playing: false,
             chase: false,
+            perf: Vec::new(),
+            perf_out: Vec::new(),
+            perf_rng: 0x9e37_79b9,
             count_in: 0.0,
             born: 0,
             ov: Overrides::default(),
@@ -650,6 +738,8 @@ struct Voice {
     note_gain: f32,
     note_pan: f32,
     follow: bool,
+    /// One more than the playlist track whose hand-played clip this is, else 0.
+    ptrack: u16,
     /// For a channel that is a patch bay: 0 for its own instrument, else one more than the layer played.
     feed: u8,
     /// Octaves the channel's pitch automation has moved the note by.
@@ -978,6 +1068,10 @@ pub struct Player {
     was_playing: bool,
     /// Set after a start or a seek: clips already under the play head must be picked up mid-way.
     chase: bool,
+    /// Performance mode: what each playlist track is playing by hand.
+    perf: Vec<PerfTrack>,
+    perf_out: Vec<PerfSeg>,
+    perf_rng: u32,
     /// Ticks of the count-in bar still to click through before the song moves.
     count_in: f64,
     born: u64,
@@ -2077,6 +2171,18 @@ impl Player {
                     }
                     self.wheel[c] = octaves.clamp(-4.0, 4.0);
                 }
+                Cmd::Perf { track, clip, now, queue } => self.perf_trigger(song, track as usize, clip, now, queue),
+                Cmd::PerfRelease { track } => self.perf_release(song, track as usize),
+                Cmd::PerfKey { track, nth, down } => {
+                    if !down {
+                        self.perf_release(song, track as usize);
+                    } else if let Some(zone) = song.perf_start() {
+                        let at = song.clips.iter().filter(|c| c.track == track && c.pos < zone && !c.muted).nth(nth as usize).map(|c| c.pos);
+                        if at.is_some() {
+                            self.perf_trigger(song, track as usize, at, false, false);
+                        }
+                    }
+                }
                 Cmd::Panic => {
                     self.arps.clear();
                     self.hush_scripts();
@@ -2134,6 +2240,286 @@ impl Player {
         }
     }
 
+    /// Sound the part of one playlist clip that falls in [a, b) of song time. The clip sits at `pos0` for `len`
+    /// ticks and starts `offset` ticks into its source; `t0` is where the block began. Voices carry `tag` (one
+    /// more than the track of a clip played by hand) so that the track can cut them short.
+    #[allow(clippy::too_many_arguments)]
+    fn play_clip(&mut self, song: &Song, src: ClipSrc, pos0: f64, len: f64, offset: f64, a: f64, b: f64, t0: f64, tpf: f64, tempo: f32, chase: bool, tag: u16) {
+        let end = pos0 + len;
+        if end <= a || pos0 >= b {
+            return;
+        }
+        match src {
+            ClipSrc::Pattern(p) => {
+                let shift = pos0 - offset;
+                self.fire_pattern(song, p, a.max(pos0) - shift, b.min(end) - shift, shift, t0, tpf, Some((len + offset) as u32));
+            }
+            ClipSrc::Audio(chi) => {
+                let starts_here = pos0 >= a;
+                if !starts_here && !chase {
+                    return;
+                }
+                let Some(ch) = song.channels.get(chi) else { return };
+                let Some(smp) = ch.sample.clone() else { return };
+                if !ch.enabled {
+                    return;
+                }
+                let begin = a.max(pos0);
+                let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+                // ticks into the audio at which we begin
+                let into = begin - pos0 + offset;
+                let secs = into / song.ppq as f64 * 60.0 / tempo as f64;
+                let f = &ch.smp;
+                let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * f.gain;
+                let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
+                // the pitch the clip sounds at, and how fast the read point crosses the sample
+                let step = smp.rate as f64 / self.sr as f64 * 2f64.powf((ch.pitch_cents + f.stretch_cents) as f64 / 1200.0);
+                let rate = if f.stretch_beats > 0.0 {
+                    let want = f.stretch_beats as f64 * 60.0 / tempo as f64 * f.stretch_mul as f64;
+                    smp.frames.len() as f64 / (want * self.sr as f64).max(1.0)
+                } else if f.keep_pitch {
+                    smp.rate as f64 / self.sr as f64 / f.stretch_mul as f64
+                } else {
+                    step / f.stretch_mul as f64
+                };
+                let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
+                let step = if f.keep_pitch { step } else { rate };
+                let pos = secs * self.sr as f64 * rate;
+                let remaining = Some(((end - begin) / tpf) as u64);
+                let rel = 1.0 / (self.sr * 0.005);
+                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: f.gain, follow: true, ptrack: tag, ..Default::default() });
+            }
+            ClipSrc::Automation(_) => {}
+        }
+    }
+
+    /// The trigger grid of a track in ticks (0 = none) for a clip of `len` ticks.
+    fn perf_grid(song: &Song, sync: u8, len: f64) -> f64 {
+        let beat = song.ppq as f64;
+        match sync {
+            1 => beat / 4.0,
+            2 => beat / 2.0,
+            3 => beat,
+            4 => beat * 2.0,
+            5 => beat * 4.0,
+            6 => len.clamp(beat / 4.0, beat * 4.0),
+            _ => 0.0,
+        }
+    }
+
+    /// A clip of the performance zone was pressed (or, with `None`, its track was told to stop).
+    /// The clip of the performance zone at a place on a track.
+    fn zone_clip(song: &Song, track: usize, pos: u32) -> Option<&crate::song::Clip> {
+        let k = song.clips.partition_point(|c| c.pos < pos);
+        song.clips[k..].iter().take_while(|c| c.pos == pos).find(|c| c.track as usize == track && !c.muted)
+    }
+
+    fn perf_trigger(&mut self, song: &Song, track: usize, clip: Option<u32>, now: bool, queue: bool) {
+        let Some(zone) = song.perf_start().map(|p| p as f64) else { return };
+        if track >= PERF_TRACKS || clip.is_some_and(|c| c as f64 >= zone || Self::zone_clip(song, track, c).is_none()) {
+            return;
+        }
+        if self.perf.len() <= track {
+            self.perf.resize(track + 1, PerfTrack::default());
+        }
+        let set = song.tracks.get(track).map(|t| t.perf).unwrap_or_default();
+        let st = self.perf[track];
+        // a latching track lets its clip go when the same clip is pressed again
+        let waiting = st.next.map(|n| n.clip).unwrap_or(st.live.map(|l| l.clip));
+        let clip = if set.press == 3 && clip.is_some() && waiting == clip { None } else { clip };
+        let held = matches!(set.press, 1 | 2) && clip.is_some();
+        let playing = self.transport.playing() && self.was_playing;
+        if !playing {
+            // armed: it starts with the song
+            self.perf[track].next = clip.map(|c| NextClip { clip: Some(c), at: zone, start: zone, offset: 0.0, held });
+            self.perf[track].live = None;
+            return;
+        }
+        let pos = self.pos.max(zone);
+        let len = clip.or(st.live.map(|l| l.clip)).and_then(|c| Self::zone_clip(song, track, c)).map(|c| c.len.max(1) as f64).unwrap_or(song.ppq as f64 * 4.0);
+        let grid = if now { 0.0 } else { Self::perf_grid(song, set.sync, len) };
+        let (mut at, mut start) = (pos, pos);
+        if (queue || set.queue) && !now && st.live.is_some() {
+            let l = st.live.unwrap();
+            let live_len = Self::zone_clip(song, track, l.clip).map(|c| c.len.max(1) as f64).unwrap_or(1.0) - l.offset;
+            at = (l.start + live_len).max(pos);
+            start = at;
+        } else if grid > 0.0 {
+            let late = (pos - zone) % grid;
+            if late < 1e-6 {
+                // on the line
+            } else if set.tolerant && late <= (grid / 4.0).min(song.ppq as f64 / 4.0) {
+                // a little late: it starts now, as far into the clip as it is late
+                start = pos - late;
+            } else {
+                at = pos - late + grid;
+                start = at;
+            }
+        }
+        // where in the clip it begins: its start, or in step with the song
+        let mut offset = 0.0;
+        if clip.is_some() && set.pos_sync > 0 {
+            let phase = (start - zone) % len;
+            let g = Self::perf_grid(song, set.pos_sync, len);
+            offset = if set.pos_sync == 6 || g <= 0.0 { phase } else { (phase / g).floor() * g };
+        }
+        self.perf[track].next = Some(NextClip { clip, at, start, offset, held });
+    }
+
+    fn perf_release(&mut self, song: &Song, track: usize) {
+        let Some(st) = self.perf.get(track).copied() else { return };
+        let set = song.tracks.get(track).map(|t| t.perf).unwrap_or_default();
+        let pos = self.pos;
+        match set.press {
+            1 => {
+                if st.next.is_some_and(|n| n.held) {
+                    // let go before it began
+                    self.perf[track].next = None;
+                }
+                if st.live.is_some_and(|l| l.held) {
+                    self.perf[track].next = Some(NextClip { clip: None, at: pos, start: pos, offset: 0.0, held: false });
+                }
+            }
+            2 => {
+                if let Some(n) = self.perf[track].next.as_mut() {
+                    n.held = false;
+                }
+                if let Some(l) = self.perf[track].live.as_mut().filter(|l| l.held) {
+                    // from here on the track's motion decides what follows
+                    l.held = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The clip that follows `cur` on its track when it has played through, by the track's motion.
+    fn perf_follow(&mut self, song: &Song, track: usize, cur: u32) -> Option<u32> {
+        let zone = song.perf_start()? as f64;
+        let motion = song.tracks.get(track).map(|t| t.perf.motion).unwrap_or(0);
+        let at = cur;
+        // the scene the clip belongs to: from the marker at or before it to the next one
+        let lo = song.markers.iter().filter(|m| m.pos <= at).map(|m| m.pos).max().unwrap_or(0);
+        let hi = song.markers.iter().filter(|m| m.pos > at).map(|m| m.pos).min().unwrap_or(u32::MAX).min(zone as u32);
+        let mine = |c: &&crate::song::Clip| c.track as usize == track && c.pos >= lo && c.pos < hi && !c.muted;
+        let count = song.clips.iter().filter(mine).count();
+        let nth = |k: usize| song.clips.iter().filter(mine).nth(k).map(|c| c.pos);
+        let me = song.clips.iter().filter(mine).position(|c| c.pos == cur).unwrap_or(0);
+        let mut rnd = |n: usize| {
+            self.perf_rng ^= self.perf_rng << 13;
+            self.perf_rng ^= self.perf_rng >> 17;
+            self.perf_rng ^= self.perf_rng << 5;
+            (self.perf_rng as usize) % n.max(1)
+        };
+        match motion {
+            1 => None,
+            2 => nth((me + 1) % count.max(1)),
+            3 => nth((me + 1).min(count.saturating_sub(1))),
+            4 => (me + 1 < count).then(|| nth(me + 1)).flatten(),
+            5 => nth(rnd(count)),
+            6 => {
+                if count < 2 {
+                    Some(cur)
+                } else {
+                    let k = rnd(count - 1);
+                    nth(if k >= me { k + 1 } else { k })
+                }
+            }
+            _ => Some(cur),
+        }
+    }
+
+    /// Cut the sound of a track's hand-played clip at `frames` from the start of the block.
+    fn perf_cut(&mut self, track: usize, frames: u64) {
+        let tag = track as u16 + 1;
+        for v in self.voices.iter_mut().filter(|v| v.active && v.ptrack == tag && !v.releasing) {
+            v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(frames));
+        }
+    }
+
+    /// Play the hand-triggered clips over [t0, t1), changing clips where a trigger falls due or a clip ends.
+    fn perform(&mut self, song: &Song, t0: f64, t1: f64, tpf: f64, tempo: f32, record: bool) {
+        for k in 0..self.perf.len() {
+            let mut from = t0;
+            let enabled = song.tracks.get(k).map(|t| t.enabled).unwrap_or(true);
+            for _ in 0..64 {
+                let st = self.perf[k];
+                let live = st.live.and_then(|l| Self::zone_clip(song, k, l.clip).map(|c| (l, c)));
+                let end = live.map(|(l, c)| l.start + (c.len.max(1) as f64 - l.offset).max(1.0)).unwrap_or(f64::MAX);
+                let due = st.next.map(|n| n.at).unwrap_or(f64::MAX);
+                let stop = t1.min(end).min(due).max(from);
+                if let Some((l, c)) = live {
+                    if stop > from && enabled {
+                        self.play_clip(song, c.src, l.start, end - l.start, c.offset as f64 + l.offset, from, stop, t0, tpf, tempo, l.fresh, k as u16 + 1);
+                    }
+                    if let Some(l) = self.perf[k].live.as_mut() {
+                        l.fresh = false;
+                    }
+                }
+                if stop >= t1 && due > stop && end > stop {
+                    break;
+                }
+                let frames = (((stop - t0) / tpf).ceil().max(0.0)) as u64;
+                if due <= end && due <= stop {
+                    // a trigger falls due
+                    let n = st.next.unwrap();
+                    if let Some((l, _)) = live {
+                        self.perf_cut(k, frames);
+                        if record {
+                            self.perf_out.push(PerfSeg { track: k as u16, clip: l.clip, from: l.start, to: stop, offset: l.offset });
+                        }
+                    }
+                    self.perf[k].live = n.clip.map(|c| LiveClip { clip: c, start: n.start, offset: n.offset, held: n.held, fresh: n.start < stop - 1e-9 });
+                    self.perf[k].next = None;
+                } else if st.live.is_some() && live.is_none() {
+                    // the clip was taken away while it played
+                    self.perf[k].live = None;
+                    break;
+                } else if let Some((l, _)) = live {
+                    // the clip has played through
+                    if record {
+                        self.perf_out.push(PerfSeg { track: k as u16, clip: l.clip, from: l.start, to: end, offset: l.offset });
+                    }
+                    let follow = if l.held { Some(l.clip) } else { self.perf_follow(song, k, l.clip) };
+                    self.perf[k].live = follow.map(|c| LiveClip { clip: c, start: end, offset: 0.0, held: l.held, fresh: false });
+                } else {
+                    break;
+                }
+                from = stop;
+                if from >= t1 {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The song stopped: every hand-played clip ends here.
+    fn perf_stop_all(&mut self, record: bool) {
+        let pos = self.pos;
+        for k in 0..self.perf.len() {
+            if let Some(l) = self.perf[k].live.take() {
+                if record && pos > l.start {
+                    self.perf_out.push(PerfSeg { track: k as u16, clip: l.clip, from: l.start, to: pos, offset: l.offset });
+                }
+            }
+            self.perf[k].next = None;
+        }
+    }
+
+    /// Tell the window what the tracks are playing.
+    fn perf_publish(&mut self, tr: &Transport) {
+        for (k, t) in self.perf.iter().enumerate().take(PERF_TRACKS) {
+            tr.perf_live[k].store(t.live.map(|l| l.clip as i32).unwrap_or(-1), Relaxed);
+            tr.perf_from[k].store((t.live.map(|l| l.start).unwrap_or(0.0) as f32).to_bits(), Relaxed);
+            tr.perf_next[k].store(t.next.map(|n| n.clip.map(|c| c as i32).unwrap_or(-2)).unwrap_or(-1), Relaxed);
+        }
+        if !self.perf_out.is_empty() {
+            if let Ok(mut l) = tr.perf_log.try_lock() {
+                l.append(&mut self.perf_out);
+            }
+        }
+    }
+
     /// Start whatever begins in the next `n` frames; returns how many frames to render before calling again.
     fn advance(&mut self, song: &Song, n: usize) -> usize {
         let tr = self.transport.clone();
@@ -2152,13 +2538,29 @@ impl Player {
                     self.pos = a as f64;
                 }
             }
+            if let Some(ps) = song.perf_start().filter(|_| tr.song_mode() && tr.range().is_none()) {
+                if self.pos < ps as f64 {
+                    self.pos = ps as f64;
+                }
+                // clips armed while the song stood still begin with it
+                let at = self.pos;
+                for t in self.perf.iter_mut() {
+                    if let Some(n) = t.next.as_mut() {
+                        n.at = at;
+                        n.start = at;
+                    }
+                }
+            }
             self.chase = true;
             self.ov.clear();
             self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 } else { 0.0 };
         }
         if !playing && self.was_playing {
             self.silence(false);
+            self.perf_stop_all(tr.recording());
         }
+        tr.perf_on.store(playing && tr.song_mode() && song.perf_start().is_some(), Relaxed);
+        self.perf_publish(&tr);
         self.was_playing = playing;
         if !playing {
             return n;
@@ -2187,6 +2589,7 @@ impl Player {
         let song_mode = tr.song_mode();
         let pat = tr.pattern();
         self.ov.fit(song);
+        let zone = song.perf_start().filter(|_| song_mode && tr.range().is_none()).map(|p| p as f64);
         if song_mode {
             for plan in &song.auto_plan {
                 let Some(auto) = song.channels.get(plan.chan).and_then(|c| c.auto.as_ref()) else { continue };
@@ -2196,8 +2599,24 @@ impl Player {
                     continue;
                 }
                 let (pos, len, offset) = plan.clips[k - 1];
+                if zone.is_some_and(|z| (pos as f64) < z) {
+                    // a clip of the performance zone only moves things while it is played by hand
+                    continue;
+                }
                 let local = (self.pos - pos as f64).min(len as f64) + offset as f64;
                 let v = auto.value_at(local);
+                for &t in &auto.targets {
+                    self.ov.set(t, song.mapped(t, v));
+                }
+            }
+        }
+        if zone.is_some() {
+            for k in 0..self.perf.len() {
+                let Some(l) = self.perf[k].live else { continue };
+                let Some(c) = Self::zone_clip(song, k, l.clip) else { continue };
+                let ClipSrc::Automation(chi) = c.src else { continue };
+                let Some(auto) = song.channels.get(chi).and_then(|c| c.auto.as_ref()) else { continue };
+                let v = auto.value_at((self.pos - l.start).clamp(0.0, c.len as f64) + l.offset + c.offset as f64);
                 for &t in &auto.targets {
                     self.ov.set(t, song.mapped(t, v));
                 }
@@ -2209,6 +2628,8 @@ impl Player {
         let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
+        // a performance has no end of its own: the song runs on until it is stopped
+        let loop_len = if zone.is_some() && tr.looping() { f64::MAX } else { loop_len };
         let loop_from = if song_mode { song.loop_start().min((loop_len as u32).saturating_sub(1)) as f64 } else { 0.0 };
         let (loop_from, loop_len) = tr.range().map(|(a, b)| (a as f64, b as f64)).unwrap_or((loop_from, loop_len));
         if self.pos >= loop_len {
@@ -2242,6 +2663,9 @@ impl Player {
                     break;
                 }
                 let end = (c.pos + c.len) as f64;
+                if zone.is_some_and(|z| (c.pos as f64) < z) {
+                    continue;
+                }
                 if end <= t0 || c.muted || !song.tracks.get(c.track as usize).map(|t| t.enabled).unwrap_or(true) {
                     continue;
                 }
@@ -2253,43 +2677,12 @@ impl Player {
                         let b = t1.min(end) - shift;
                         self.fire_pattern(song, p, a, b, shift, t0, tpf, Some(c.len + c.offset));
                     }
-                    ClipSrc::Audio(chi) => {
-                        let starts_here = c.pos as f64 >= t0;
-                        if !starts_here && !chase {
-                            continue;
-                        }
-                        let Some(ch) = song.channels.get(chi) else { continue };
-                        let Some(smp) = ch.sample.clone() else { continue };
-                        if !ch.enabled {
-                            continue;
-                        }
-                        let begin = t0.max(c.pos as f64);
-                        let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                        // ticks into the audio at which we begin
-                        let into = begin - c.pos as f64 + c.offset as f64;
-                        let secs = into / song.ppq as f64 * 60.0 / tempo as f64;
-                        let f = &ch.smp;
-                        let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * f.gain;
-                        let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
-                        // the pitch the clip sounds at, and how fast the read point crosses the sample
-                        let step = smp.rate as f64 / self.sr as f64 * 2f64.powf((ch.pitch_cents + f.stretch_cents) as f64 / 1200.0);
-                        let rate = if f.stretch_beats > 0.0 {
-                            let want = f.stretch_beats as f64 * 60.0 / tempo as f64 * f.stretch_mul as f64;
-                            smp.frames.len() as f64 / (want * self.sr as f64).max(1.0)
-                        } else if f.keep_pitch {
-                            smp.rate as f64 / self.sr as f64 / f.stretch_mul as f64
-                        } else {
-                            step / f.stretch_mul as f64
-                        };
-                        let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
-                        let step = if f.keep_pitch { step } else { rate };
-                        let pos = secs * self.sr as f64 * rate;
-                        let remaining = Some(((end - begin) / tpf) as u64);
-                        let rel = 1.0 / (self.sr * 0.005);
-                        self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: f.gain, follow: true, ..Default::default() });
-                    }
+                    ClipSrc::Audio(_) => self.play_clip(song, c.src, c.pos as f64, c.len as f64, c.offset as f64, t0, t1, t0, tpf, tempo, chase, 0),
                     ClipSrc::Automation(_) => {}
                 }
+            }
+            if zone.is_some() {
+                self.perform(song, t0, t1, tpf, tempo, tr.recording());
             }
         } else {
             self.fire_pattern(song, pat, t0, t1, 0.0, t0, tpf, None);
@@ -3521,6 +3914,54 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got[0] == 0 && got[1].abs_diff(192_000) <= 1, "{got:?}");
         assert!(!h.transport.playing());
+    }
+
+    #[test]
+    fn performance_clips_wait_for_their_grid_and_follow_the_motion() {
+        use crate::song::TimeMarker;
+        let mut s = click_song();
+        s.patterns[0].toggle_step(0, 0);
+        s.performance = true;
+        s.markers.push(TimeMarker { pos: 768, kind: 5, name: "Start".into(), ..Default::default() });
+        // two one-bar clips in the zone on track 0, one on track 1
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 384, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.tracks[0].perf.motion = 1;
+        s.tracks[1].perf.sync = 3;
+        s.tracks[1].perf.tolerant = false;
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_recording(true);
+        // armed while stopped: it starts with the song, at the start marker, and plays once
+        h.send(Cmd::Perf { track: 0, clip: Some(0), now: false, queue: false });
+        let mut buf = vec![0.0f32; 48_000 * 5 * 2];
+        let mut blocks = buf.chunks_mut(2 * 512);
+        p.render(blocks.next().unwrap(), 2);
+        h.transport.set_playing(true);
+        let mut done = 512;
+        for block in blocks.by_ref() {
+            p.render(block, 2);
+            done += 512;
+            if done == 512 * 20 {
+                // a little after the start: track 1 waits for the next beat (0.5 s at 120)
+                h.send(Cmd::Perf { track: 1, clip: Some(0), now: false, queue: false });
+            }
+        }
+        assert!(h.transport.playing(), "a performance runs on past the end of the clips");
+        assert!(h.transport.tick() >= 768.0 && h.transport.tick() < 1740.0, "{}", h.transport.tick());
+        let got = onsets(&buf, 200);
+        // the one shot at the start, then track 1 on the beat and again every bar (2 s)
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert!(got[0].abs_diff(512) <= 2 && got[1].abs_diff(512 + 24_000) <= 2 && got[2].abs_diff(512 + 24_000 + 96_000) <= 2, "{got:?}");
+        assert_eq!(h.transport.perf_state(0).0, None);
+        assert_eq!(h.transport.perf_state(1).0.map(|l| l.0), Some(0));
+        h.transport.set_playing(false);
+        let mut tail = vec![0.0f32; 2048];
+        p.render(&mut tail, 2);
+        let log = h.transport.take_perf();
+        assert!(log.iter().any(|g| g.track == 0 && g.clip == 0 && g.from == 768.0 && g.to == 1152.0), "{log:?}");
+        assert!(log.iter().filter(|g| g.track == 1).count() >= 3, "{log:?}");
     }
 
     #[test]

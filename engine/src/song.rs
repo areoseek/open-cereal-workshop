@@ -1162,6 +1162,14 @@ impl Song {
             }
         }
     }
+    /// Where the performance zone ends (the start marker) when the playlist is in performance mode: the clips
+    /// ahead of it are played by hand, the song itself runs from it.
+    pub fn perf_start(&self) -> Option<u32> {
+        if !self.performance {
+            return None;
+        }
+        self.markers.iter().filter(|m| m.kind == 5).map(|m| m.pos).max().filter(|&p| p > 0)
+    }
     /// Where the song goes back to when it reaches its end: the loop marker if there is one, else the start marker.
     pub fn loop_start(&self) -> u32 {
         let of = |kind: u8| self.markers.iter().rev().find(|m| m.kind == kind).map(|m| m.pos);

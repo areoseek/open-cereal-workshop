@@ -59,7 +59,7 @@ pub mod score;
 pub mod song;
 pub mod wav;
 
-pub use player::{new_player, Cmd, CmdSender, Handle, Live, Player, Transport};
+pub use player::{new_player, Cmd, CmdSender, Handle, Live, PerfSeg, Player, Transport};
 pub use sample::{Library, Sample};
 pub use song::Song;
 
