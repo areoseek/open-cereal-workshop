@@ -2322,6 +2322,24 @@ impl eframe::App for App {
             let mut keep = i < self.song.markers.len();
             egui::Window::new("Time marker").collapsible(false).resizable(false).show(ctx, |ui| {
                 crate::widgets::name_field(ui, &mut name);
+                if let Some(m) = self.song.markers.get_mut(i) {
+                    const ACTIONS: [(u8, &str); 9] = [(0, "None"), (1, "Marker loop"), (2, "Marker skip"), (3, "Pause"), (4, "Loop"), (5, "Start"), (6, "Punch in recording"), (7, "Punch out recording"), (8, "Time signature")];
+                    let now = ACTIONS.iter().find(|a| a.0 == m.kind).map(|a| a.1).unwrap_or("None");
+                    ui.horizontal(|ui| {
+                        ui.label("Action");
+                        egui::ComboBox::from_id_salt("marker_action").selected_text(now).show_ui(ui, |ui| {
+                            for (k, label) in ACTIONS {
+                                if ui.selectable_label(m.kind == k, label).clicked() && m.kind != k {
+                                    m.kind = k;
+                                    if k == 8 && (m.sig.0 == 0 || m.sig.1 == 0) {
+                                        m.sig = (4, 4);
+                                    }
+                                    self.dirty = true;
+                                }
+                            }
+                        });
+                    });
+                }
                 if let Some(m) = self.song.markers.get_mut(i).filter(|m| m.kind == 8) {
                     // a time signature change: beats in the bar over the note that counts as one beat
                     ui.horizontal(|ui| {

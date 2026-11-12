@@ -2214,8 +2214,16 @@ impl Player {
             }
         }
         let to_end = (((loop_len - self.pos) / tpf).ceil() as usize).max(1);
-        let n = n.min(to_end);
+        let mut n = n.min(to_end);
         let t0 = self.pos;
+        // time markers with an action: the block ends on the marker so the action lands on it
+        let mut act: Option<(f64, u8, f64)> = None;
+        if song_mode && tr.range().is_none() {
+            act = song.marker_action(t0);
+            if let Some((at, _, _)) = act {
+                n = n.min((((at - t0) / tpf).ceil() as usize).max(1));
+            }
+        }
         let t1 = (t0 + n as f64 * tpf).min(loop_len);
         let chase = std::mem::take(&mut self.chase);
 
@@ -2305,6 +2313,23 @@ impl Player {
         }
 
         self.pos = t0 + n as f64 * tpf;
+        if let Some((at, kind, to)) = act.filter(|a| self.pos >= a.0) {
+            match kind {
+                1 | 2 => {
+                    self.pos = to;
+                    self.chase = true;
+                }
+                3 => {
+                    self.pos = at;
+                    tr.set_playing(false);
+                    self.was_playing = false;
+                    self.silence(true);
+                }
+                6 => tr.set_recording(true),
+                7 => tr.set_recording(false),
+                _ => {}
+            }
+        }
         if self.pos >= loop_len && tr.looping() {
             self.pos = loop_from;
             self.chase |= loop_from > 0.0;

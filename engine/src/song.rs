@@ -1106,6 +1106,30 @@ impl Song {
         let of = |kind: u8| self.markers.iter().rev().find(|m| m.kind == kind).map(|m| m.pos);
         of(4).or(of(5)).unwrap_or(0)
     }
+    /// The next time marker action after `from`: (where it fires, kind, where play goes for the jumping kinds).
+    /// Kinds: 1 loop back to the marker when the next one is reached, 2 skip to the next marker, 3 pause,
+    /// 6 and 7 punch recording in and out.
+    pub fn marker_action(&self, from: f64) -> Option<(f64, u8, f64)> {
+        let mut ms: Vec<(u32, u8)> = self.markers.iter().map(|m| (m.pos, m.kind)).collect();
+        ms.sort();
+        let end = self.length();
+        let mut best: Option<(f64, u8, f64)> = None;
+        let mut take = |c: (f64, u8, f64)| {
+            if c.0 > from && best.map(|b| c.0 < b.0).unwrap_or(true) {
+                best = Some(c);
+            }
+        };
+        for (i, &(pos, kind)) in ms.iter().enumerate() {
+            let next = ms[i + 1..].iter().find(|m| m.0 > pos).map(|m| m.0).unwrap_or(end);
+            match kind {
+                1 if pos as f64 <= from && (next as f64) > from => take((next as f64, 1, pos as f64)),
+                2 if next > pos => take((pos as f64, 2, next as f64)),
+                3 | 6 | 7 => take((pos as f64, kind, pos as f64)),
+                _ => {}
+            }
+        }
+        best
+    }
     pub fn pattern_length(&self, p: usize) -> u32 {
         self.patterns.get(p).map(|p| p.length(self.bar())).unwrap_or(self.bar())
     }
@@ -1981,5 +2005,19 @@ mod tests {
         s.markers.push(TimeMarker { pos: 768 + 288 + 96, name: String::new(), kind: 8, sig: (4, 4) });
         let lines = s.bar_lines(0, 1700);
         assert_eq!(lines, vec![(0, 0, 384), (384, 1, 384), (768, 2, 288), (1056, 3, 96), (1152, 4, 384), (1536, 5, 384)]);
+    }
+
+    #[test]
+    fn marker_actions_fire_in_order() {
+        let mut s = Song::default();
+        let mk = |pos, kind| TimeMarker { pos, name: String::new(), kind, sig: (4, 4) };
+        s.markers = vec![mk(100, 1), mk(300, 0), mk(500, 2), mk(700, 3), mk(900, 0)];
+        // inside the looped section: back to its marker when the next one comes up
+        assert_eq!(s.marker_action(150.0), Some((300.0, 1, 100.0)));
+        // before it nothing loops; the first thing ahead is still that section's end only once inside
+        assert_eq!(s.marker_action(0.0), Some((500.0, 2, 700.0)));
+        assert_eq!(s.marker_action(300.0), Some((500.0, 2, 700.0)));
+        assert_eq!(s.marker_action(500.0), Some((700.0, 3, 700.0)));
+        assert_eq!(s.marker_action(700.0), None);
     }
 }
