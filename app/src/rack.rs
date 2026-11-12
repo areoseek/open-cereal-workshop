@@ -25,10 +25,15 @@ pub struct State {
     /// The graph editor under the channels: open or not, and which property of the steps it shows.
     graph: bool,
     graph_kind: usize,
+    /// The keyboard editor under the channels: every step of the selected channel against the keys.
+    keys: bool,
 }
 
 const GRAPH: [&str; 7] = ["Note pitch", "Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y"];
 const GRAPH_H: f32 = 64.0;
+/// The keyboard editor: the height of one key's row, and of the part of the keyboard in view.
+const KEY_H: f32 = 7.0;
+const KEYS_H: f32 = 147.0;
 
 /// A step's property as a share of the graph's height, and back.
 fn graph_get(n: &cereal_engine::song::Note, kind: usize) -> f32 {
@@ -124,15 +129,74 @@ impl App {
                 if ui.selectable_label(self.rack.graph, "Graph editor").hint("The selected channel's steps as bars: drag to set each step's property").clicked() {
                     self.rack.graph = !self.rack.graph;
                 }
+                if ui.selectable_label(self.rack.keys, "Keyboard editor").hint("The selected channel's steps against a keyboard: click sets a step's note, right-click takes the step away").clicked() {
+                    self.rack.keys = !self.rack.keys;
+                }
                 if self.rack.graph {
                     egui::ComboBox::from_id_salt("rack_graph_kind").width(110.0).selected_text(GRAPH[self.rack.graph_kind.min(6)]).show_ui(ui, |ui| {
                         for (i, name) in GRAPH.iter().enumerate() {
                             ui.selectable_value(&mut self.rack.graph_kind, i, *name);
                         }
                     });
+                }
+                if self.rack.graph || self.rack.keys {
                     ui.label(RichText::new(self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default()).color(TEXT_DIM));
                 }
             });
+            if self.rack.keys {
+                let chan = self.sel_chan as u16;
+                let pitch = STEP_W + 3.0;
+                // opened on the octave the steps are made in
+                egui::ScrollArea::both().id_salt("rack_keys_scroll").max_height(KEYS_H).min_scrolled_height(KEYS_H).auto_shrink([false, false]).show(ui, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(234.0 + nsteps as f32 * pitch, 132.0 * KEY_H), Sense::click_and_drag());
+                    if ui.data_mut(|d| !std::mem::replace(d.get_temp_mut_or_default::<bool>(resp.id.with("placed")), true)) {
+                        let y = rect.top() + (131.0 - 66.0) * KEY_H;
+                        ui.scroll_to_rect(Rect::from_min_max(Pos2::new(rect.left(), y - KEYS_H * 0.5), Pos2::new(rect.left() + 1.0, y + KEYS_H * 0.5)), Some(egui::Align::Center));
+                    }
+                    let area = Rect::from_min_max(Pos2::new(rect.left() + 234.0, rect.top()), rect.max);
+                    let p = ui.painter_at(rect);
+                    let row = |key: i32| area.top() + (131 - key) as f32 * KEY_H;
+                    for key in 0..132 {
+                        let black = matches!(key % 12, 1 | 3 | 6 | 8 | 10);
+                        let r = Rect::from_min_max(Pos2::new(area.left(), row(key)), Pos2::new(area.right(), row(key) + KEY_H));
+                        p.rect_filled(r, 0.0, if black { GRID_DARK } else { GRID_DARK.gamma_multiply(1.35) });
+                        // the keyboard itself, down the left, with each octave named
+                        let k = Rect::from_min_max(Pos2::new(area.left() - 40.0, row(key)), Pos2::new(area.left() - 2.0, row(key) + KEY_H - 1.0));
+                        p.rect_filled(k, 0.0, if black { Color32::from_gray(30) } else { Color32::from_gray(200) });
+                        if key % 12 == 0 {
+                            p.text(Pos2::new(area.left() - 46.0, row(key) + KEY_H * 0.5), egui::Align2::RIGHT_CENTER, format!("C{}", key / 12), egui::FontId::proportional(9.0), TEXT_DIM);
+                            p.line_segment([Pos2::new(area.left(), row(key) + KEY_H), Pos2::new(area.right(), row(key) + KEY_H)], Stroke::new(1.0_f32, LINE_SOFT));
+                        }
+                    }
+                    for s in (0..nsteps).step_by(4) {
+                        let x = area.left() + s as f32 * pitch - 1.5;
+                        p.line_segment([Pos2::new(x, area.top()), Pos2::new(x, area.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+                    }
+                    let at = resp.interact_pointer_pos().filter(|pp| area.contains(*pp));
+                    let cell = at.map(|pp| (((pp.x - area.left()) / pitch) as u32, (131 - ((pp.y - area.top()) / KEY_H) as i32).clamp(0, 131)));
+                    if let Some((s, key)) = cell.filter(|c| (c.0 as usize) < nsteps) {
+                        let pos = s * step;
+                        let notes = &mut self.song.patterns[pat];
+                        if resp.secondary_clicked() || (resp.dragged_by(egui::PointerButton::Secondary)) {
+                            if notes.has_step(chan, pos) {
+                                notes.set_step(chan, pos, false);
+                                self.dirty = true;
+                            }
+                        } else if resp.clicked() || resp.dragged_by(egui::PointerButton::Primary) || resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) {
+                            notes.set_step(chan, pos, true);
+                            for n in notes.notes.iter_mut().filter(|n| n.chan == chan && n.pos == pos) {
+                                n.key = key as _;
+                            }
+                            self.dirty = true;
+                        }
+                    }
+                    for n in self.song.patterns[pat].notes.iter().filter(|n| n.chan == chan && n.pos % step == 0 && ((n.pos / step) as usize) < nsteps) {
+                        let x = area.left() + (n.pos / step) as f32 * pitch;
+                        let y = row(n.key as i32);
+                        p.rect_filled(Rect::from_min_max(Pos2::new(x, y), Pos2::new(x + STEP_W, y + KEY_H - 1.0)), 1.0, ACCENT);
+                    }
+                });
+            }
             if self.rack.graph {
                 let (chan, kind) = (self.sel_chan as u16, self.rack.graph_kind.min(6));
                 let two_sided = kind >= 3;
