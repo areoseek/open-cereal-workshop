@@ -26,21 +26,41 @@ pub struct WaveEd {
     sel: (usize, usize),
     /// The stretch in view.
     view: (usize, usize),
-    undo: Vec<(Vec<[f32; 2]>, (usize, usize))>,
+    undo: Vec<Snap>,
     clip: Vec<[f32; 2]>,
     name: String,
     on_play: bool,
     amp_db: f32,
+    /// Markers and regions, in time order.
+    marks: Vec<ops::Mark>,
+    /// The loop stretch; equal ends mean none.
+    lp: (usize, usize),
+    /// The level below which sound counts as noise.
+    thresh: f32,
+    /// The measured noise, for the clean-up tool.
+    profile: Vec<f32>,
+    clean: f32,
+    /// The flag under the right-click menu, and the one being renamed.
+    menu_mark: Option<usize>,
+    rename: Option<usize>,
+}
+
+/// One step back.
+struct Snap {
+    frames: Vec<[f32; 2]>,
+    sel: (usize, usize),
+    marks: Vec<ops::Mark>,
+    lp: (usize, usize),
 }
 
 impl Default for WaveEd {
     fn default() -> Self {
-        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0 }
+        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None }
     }
 }
 
 /// Writes frames to a new WAV file in `dir` and gives its path.
-pub fn save_take(dir: &Path, name: &str, frames: &[[f32; 2]], rate: u32) -> Result<PathBuf, String> {
+pub fn save_take(dir: &Path, name: &str, frames: &[[f32; 2]], rate: u32, marks: &[ops::Mark]) -> Result<PathBuf, String> {
     if frames.is_empty() {
         return Err("there is nothing to save yet".into());
     }
@@ -48,14 +68,17 @@ pub fn save_take(dir: &Path, name: &str, frames: &[[f32; 2]], rate: u32) -> Resu
     let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
     let clean = if clean.trim().is_empty() { "Take".to_string() } else { clean.trim().to_string() };
     let path = (0..10_000).map(|i| dir.join(if i == 0 { format!("{clean}.wav") } else { format!("{clean} {}.wav", i + 1) })).find(|p| !p.exists()).ok_or("no free file name")?;
-    write_wav(&path, frames, rate)?;
+    write_wav(&path, frames, rate, marks)?;
     Ok(path)
 }
 
-fn write_wav(path: &Path, frames: &[[f32; 2]], rate: u32) -> Result<(), String> {
+fn write_wav(path: &Path, frames: &[[f32; 2]], rate: u32, marks: &[ops::Mark]) -> Result<(), String> {
     let flat: Vec<f32> = frames.iter().flat_map(|f| [f[0], f[1]]).collect();
-    let f = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    cereal_engine::wav::write(std::io::BufWriter::new(f), &flat, rate, 2, 24).map_err(|e| e.to_string())
+    let mut cur = std::io::Cursor::new(Vec::new());
+    cereal_engine::wav::write(&mut cur, &flat, rate, 2, 24).map_err(|e| e.to_string())?;
+    let mut bytes = cur.into_inner();
+    ops::write_marks(&mut bytes, marks);
+    std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 impl WaveEd {
@@ -64,8 +87,57 @@ impl WaveEd {
         if self.sel.1 > self.sel.0 { (self.sel.0, self.sel.1.min(self.frames.len())) } else { (0, self.frames.len()) }
     }
 
+    /// The flags inside `a..b`, counted from `a`, for saving that stretch on its own.
+    fn marks_in(&self, a: usize, b: usize) -> Vec<ops::Mark> {
+        self.marks.iter().filter(|m| m.at >= a && m.at < b).map(|m| ops::Mark { at: m.at - a, len: m.len.min(b - m.at), name: m.name.clone() }).collect()
+    }
+
+    /// The stretch a flag stands for: its own length, or up to the next flag.
+    fn mark_span(&self, k: usize) -> (usize, usize) {
+        let m = &self.marks[k];
+        let end = if m.len > 0 { m.at + m.len } else { self.marks.iter().map(|o| o.at).find(|&o| o > m.at).unwrap_or(self.frames.len()) };
+        (m.at, end.min(self.frames.len()))
+    }
+
+    fn add_mark(&mut self, at: usize, len: usize, name: String) {
+        if self.marks.iter().any(|m| m.at == at && m.len == len) {
+            return;
+        }
+        self.marks.push(ops::Mark { at, len, name });
+        self.marks.sort_by_key(|m| m.at);
+    }
+
+    fn took_out(&mut self, a: usize, b: usize) {
+        ops::marks_removed(&mut self.marks, a, b);
+        let mut l = vec![ops::Mark { at: self.lp.0, len: self.lp.1 - self.lp.0, name: String::new() }];
+        ops::marks_removed(&mut l, a, b);
+        self.lp = l.first().map_or((0, 0), |m| (m.at, m.at + m.len));
+    }
+
+    fn put_in(&mut self, at: usize, n: usize) {
+        ops::marks_inserted(&mut self.marks, at, n);
+        let mut l = [ops::Mark { at: self.lp.0, len: self.lp.1 - self.lp.0, name: String::new() }];
+        ops::marks_inserted(&mut l, at, n);
+        self.lp = (l[0].at, l[0].at + l[0].len);
+    }
+
+    pub fn open(&mut self, p: &Path) -> Result<(), String> {
+        let s = Sample::load(p)?;
+        self.keep();
+        self.rate = s.rate;
+        self.name = p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Take".into());
+        self.frames = s.frames;
+        self.marks = std::fs::read(p).map(|b| ops::read_marks(&b)).unwrap_or_default();
+        let n = self.frames.len();
+        self.marks.retain(|m| m.at < n);
+        self.lp = (0, 0);
+        self.sel = (0, 0);
+        self.fit();
+        Ok(())
+    }
+
     fn keep(&mut self) {
-        self.undo.push((self.frames.clone(), self.sel));
+        self.undo.push(Snap { frames: self.frames.clone(), sel: self.sel, marks: self.marks.clone(), lp: self.lp });
         // a handful of steps back is plenty and keeps long takes from piling up in memory
         let cap = if self.frames.len() > 20_000_000 { 2 } else { 12 };
         while self.undo.len() > cap {
@@ -108,6 +180,10 @@ impl WaveEd {
         if recording && self.on_play && !tr.playing() {
             tr.record_slot(None);
         }
+        let over_id = ui.id().with("wave over");
+        let over = ui.data(|d| d.get_temp::<bool>(over_id)).unwrap_or(false) && ui.memory(|m| m.focused().is_none());
+        let open_key = over && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O));
+        let save_key = over && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S));
         ui.horizontal(|ui| {
             let label = if recording { RichText::new("Stop recording").color(Color32::from_rgb(240, 110, 90)) } else { RichText::new("Record") };
             if ui.button(label).hint("Record the sound arriving at this slot. New sound joins the end of the take.").clicked() {
@@ -132,25 +208,17 @@ impl WaveEd {
                 handle.send(Cmd::StopPreview);
             }
             ui.separator();
-            if ui.button("Open...").clicked() {
+            if ui.button("Open...").hint("Ctrl+O").clicked() || open_key {
                 if let Some(p) = rfd::FileDialog::new().add_filter("Sound", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
-                    match Sample::load(&p) {
-                        Ok(s) => {
-                            self.keep();
-                            self.rate = s.rate;
-                            self.name = p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Take".into());
-                            self.frames = s.frames;
-                            self.sel = (0, 0);
-                            self.fit();
-                        }
-                        Err(e) => act = Some(WaveAct::Status(e)),
+                    if let Err(e) = self.open(&p) {
+                        act = Some(WaveAct::Status(e));
                     }
                 }
             }
-            if ui.add_enabled(!self.frames.is_empty(), egui::Button::new("Save as...")).clicked() {
+            if ui.add_enabled(!self.frames.is_empty(), egui::Button::new("Save as...")).hint("Ctrl+S. Markers and regions are kept in the file.").clicked() || (save_key && !self.frames.is_empty()) {
                 if let Some(p) = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(format!("{}.wav", self.name)).save_file() {
                     let (a, b) = self.range();
-                    act = Some(WaveAct::Status(match write_wav(&p, &self.frames[a..b], self.rate) {
+                    act = Some(WaveAct::Status(match write_wav(&p, &self.frames[a..b], self.rate, &self.marks_in(a, b)) {
                         Ok(()) => format!("Saved {}", p.display()),
                         Err(e) => e,
                     }));
@@ -187,6 +255,60 @@ impl WaveEd {
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).hint("Ctrl+Z").clicked() {
                     edit = Some(20);
                 }
+                ui.menu_button("Paste as", |ui| {
+                    for (k, name) in [(14u8, "Paste over what is there (Alt+V)"), (15, "Paste mixed in (Shift+V)"), (16, "Insert silence (Ins)"), (17, "Delete all after the loop end (Alt+Del)")] {
+                        if ui.button(name).clicked() {
+                            edit = Some(k);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.menu_button("Regions", |ui| {
+                    for (k, name) in [
+                        (23u8, "Add a marker at the cursor (M)"),
+                        (22, "Make the marked stretch a region (Alt+M)"),
+                        (24, "Make the marked stretch the loop (Alt+L)"),
+                        (25, "Delete the markers, regions and loop in the marked stretch (Shift+Ctrl+Del)"),
+                        (26, "Previous region (Left)"),
+                        (27, "Next region (Right)"),
+                        (39, "Slice at the hardest hits"),
+                        (38, "Slice at the hits (Alt+S)"),
+                        (40, "Slice at every hit, soft ones too"),
+                    ] {
+                        if ui.button(name).clicked() {
+                            edit = Some(k);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.menu_button("Noise", |ui| {
+                    for (k, name) in [
+                        (30u8, "Take the noise level from the marked stretch (Alt+N)"),
+                        (33, "Silence everything below the noise level"),
+                        (34, "Trim the noise off both ends"),
+                        (35, "Take out all the noise and slice what is left"),
+                        (31, "Learn the noise from the marked stretch (Alt+U)"),
+                        (32, "Clean up: take the learned noise out (Ctrl+U)"),
+                        (36, "Take the click off the start"),
+                        (37, "Take the click off the end"),
+                    ] {
+                        if ui.add_enabled(k != 32 || !self.profile.is_empty(), egui::Button::new(name)).clicked() {
+                            edit = Some(k);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Noise level");
+                        let mut db = 20.0 * self.thresh.max(1e-5).log10();
+                        if ui.add(egui::DragValue::new(&mut db).range(-90.0..=0.0).speed(0.2).suffix(" dB")).changed() {
+                            self.thresh = 10f32.powf(db / 20.0);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Clean-up strength");
+                        ui.add(egui::DragValue::new(&mut self.clean).range(0.2..=4.0).speed(0.02));
+                    });
+                });
             });
         });
         // the picture
@@ -200,7 +322,6 @@ impl WaveEd {
         let (v0, v1) = self.view;
         let span = (v1 - v0).max(1);
         let x_of = |at: usize| rect.left() + (at.saturating_sub(v0)) as f32 / span as f32 * rect.width();
-        let at_of = |x: f32| (v0 as f64 + ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * span as f64).round() as usize;
         if self.sel.1 > self.sel.0 {
             let (a, b) = (x_of(self.sel.0.max(v0)), x_of(self.sel.1.min(v1)));
             if b > a {
@@ -229,11 +350,86 @@ impl WaveEd {
         } else {
             p.text(rect.center(), egui::Align2::CENTER_CENTER, "Nothing recorded yet. Press Record, or open a sound.", egui::FontId::proportional(13.0), TEXT_DIM);
         }
+        // the loop along the bottom, the flags along the top
+        if self.lp.1 > self.lp.0 && self.lp.1 > v0 && self.lp.0 < v1 {
+            let (a, b) = (x_of(self.lp.0.max(v0)), x_of(self.lp.1.min(v1)));
+            p.rect_filled(egui::Rect::from_min_max(Pos2::new(a, rect.bottom() - 5.0), Pos2::new(b, rect.bottom())), 0.0, Color32::from_rgb(110, 200, 120));
+        }
+        let flag = Color32::from_rgb(240, 190, 90);
+        let mut over_mark = None;
+        let hover_pos = resp.hover_pos().or(resp.interact_pointer_pos());
+        for (k, m) in self.marks.iter().enumerate() {
+            if m.at + m.len < v0 || m.at > v1 {
+                continue;
+            }
+            let x = x_of(m.at.max(v0));
+            if m.len > 0 {
+                let e = x_of((m.at + m.len).min(v1));
+                p.rect_filled(egui::Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(e, rect.top() + 4.0)), 0.0, flag.gamma_multiply(0.7));
+            }
+            if m.at >= v0 {
+                p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, flag.gamma_multiply(0.6)));
+                let text = if m.name.is_empty() { format!("{}", k + 1) } else { m.name.clone() };
+                let g = p.text(Pos2::new(x + 3.0, rect.top() + 5.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(10.0), flag);
+                if hover_pos.is_some_and(|h| h.y < rect.top() + 18.0 && h.x >= x - 4.0 && h.x <= g.right() + 2.0) {
+                    over_mark = Some(k);
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            self.menu_mark = over_mark;
+        }
+        let mut zoom_to = None;
+        resp.context_menu(|ui| {
+            if let Some(k) = self.menu_mark.filter(|&k| k < self.marks.len()) {
+                if ui.button("Rename").clicked() {
+                    self.rename = Some(k);
+                    ui.close_menu();
+                }
+                if ui.button("Select").clicked() {
+                    self.sel = self.mark_span(k);
+                    ui.close_menu();
+                }
+                if ui.button("Zoom to").clicked() {
+                    zoom_to = Some(self.mark_span(k));
+                    ui.close_menu();
+                }
+                if ui.button("Clone").clicked() {
+                    let m = self.marks[k].clone();
+                    let (a, b) = self.mark_span(k);
+                    self.add_mark(b.min(self.frames.len().saturating_sub(1)), if m.len > 0 { (b - a).min(self.frames.len() - b) } else { 0 }, m.name);
+                    ui.close_menu();
+                }
+                if self.marks[k].len > 0 && ui.button("Turn into a marker").clicked() {
+                    self.marks[k].len = 0;
+                    ui.close_menu();
+                }
+                if ui.button("Delete").clicked() {
+                    self.marks.remove(k);
+                    self.menu_mark = None;
+                    ui.close_menu();
+                }
+            } else {
+                for (k, name) in [(23u8, "Add a marker here"), (22, "Make the marked stretch a region"), (24, "Make the marked stretch the loop")] {
+                    if ui.button(name).clicked() {
+                        edit = Some(k);
+                        ui.close_menu();
+                    }
+                }
+            }
+        });
+        if let Some((a, b)) = zoom_to.filter(|z| z.1 > z.0) {
+            self.view = (a, b);
+        }
+        let (v0, v1) = self.view;
+        let span = (v1 - v0).max(1);
+        let at_of = |x: f32| (v0 as f64 + ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * span as f64).round() as usize;
         // marking, zooming and moving about
         let anchor_id = resp.id.with("anchor");
         if has && !recording {
             if resp.drag_started_by(egui::PointerButton::Primary) {
-                if let Some(pos) = resp.interact_pointer_pos() {
+                // from where the button went down, not from where the drag was noticed
+                if let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()) {
                     let a = at_of(pos.x);
                     // shift carries on from the far end of what is marked
                     let anchor = if ui.input(|i| i.modifiers.shift) && self.sel.1 > self.sel.0 { if a < (self.sel.0 + self.sel.1) / 2 { self.sel.1 } else { self.sel.0 } } else { a };
@@ -253,9 +449,19 @@ impl WaveEd {
                 }
             }
             if resp.double_clicked() {
-                self.sel = (0, n);
+                // a flag marks its own stretch; anywhere else marks from the flag before to the flag after
+                self.sel = match (over_mark, resp.interact_pointer_pos()) {
+                    (Some(k), _) => self.mark_span(k),
+                    (None, Some(pos)) => {
+                        let a = at_of(pos.x);
+                        (self.marks.iter().map(|m| m.at).filter(|&m| m <= a).max().unwrap_or(0), self.marks.iter().map(|m| m.at).find(|&m| m > a).unwrap_or(n))
+                    }
+                    _ => (0, n),
+                };
             }
         }
+        ui.data_mut(|d| d.insert_temp(over_id, resp.hovered()));
+        let mut send_key = false;
         if has && resp.hovered() {
             let (scroll, zoom, hover) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
             let wheel = if zoom != 1.0 { zoom } else if scroll.y != 0.0 && !ui.input(|i| i.modifiers.shift) { (scroll.y * 0.004).exp() } else { 1.0 };
@@ -276,20 +482,47 @@ impl WaveEd {
             let key = |ui: &mut Ui, m: egui::Modifiers, k: egui::Key| ui.input_mut(|i| i.consume_key(m, k));
             use egui::{Key, Modifiers as M};
             if !recording {
+                let typing = ui.memory(|m| m.focused().is_some());
+                send_key = !typing && key(ui, M::SHIFT, Key::C);
+                // the ones with more keys held come first, so the plain ones do not take them
                 for (m, k, e) in [
+                    (M::CTRL | M::SHIFT, Key::Delete, 25u8),
                     (M::CTRL, Key::Delete, 1u8),
+                    (M::SHIFT, Key::Delete, 6),
+                    (M::ALT, Key::Delete, 17),
                     (M::NONE, Key::Delete, 2),
                     (M::CTRL, Key::X, 3),
                     (M::CTRL, Key::C, 4),
                     (M::CTRL, Key::V, 5),
+                    (M::ALT, Key::V, 14),
+                    (M::SHIFT, Key::V, 15),
+                    (M::NONE, Key::Insert, 16),
                     (M::ALT, Key::ArrowLeft, 7),
+                    (M::CTRL, Key::ArrowLeft, 43),
+                    (M::CTRL, Key::ArrowRight, 44),
+                    (M::NONE, Key::ArrowLeft, 26),
+                    (M::NONE, Key::ArrowRight, 27),
+                    (M::NONE, Key::ArrowUp, 28),
+                    (M::ALT, Key::M, 22),
+                    (M::NONE, Key::M, 23),
+                    (M::ALT, Key::L, 24),
+                    (M::ALT, Key::N, 30),
+                    (M::ALT, Key::U, 31),
+                    (M::CTRL, Key::U, 32),
+                    (M::ALT, Key::S, 38),
+                    (M::ALT, Key::A, 13),
+                    (M::NONE, Key::PageUp, 45),
+                    (M::NONE, Key::PageDown, 46),
+                    (M::NONE, Key::Home, 47),
+                    (M::NONE, Key::End, 48),
                     (M::CTRL, Key::N, 8),
                     (M::CTRL, Key::F, 9),
                     (M::ALT, Key::F, 10),
                     (M::CTRL, Key::Z, 20),
                     (M::CTRL, Key::A, 21),
                 ] {
-                    if key(ui, m, k) {
+                    let plain = m == M::NONE || m == M::SHIFT;
+                    if !(plain && typing) && key(ui, m, k) {
                         edit = Some(e);
                     }
                 }
@@ -299,24 +532,95 @@ impl WaveEd {
             let (a, b) = self.range();
             match e {
                 20 => {
-                    if let Some((f, s)) = self.undo.pop() {
-                        self.frames = f;
-                        self.sel = s;
+                    if let Some(s) = self.undo.pop() {
+                        self.frames = s.frames;
+                        self.sel = s.sel;
+                        self.marks = s.marks;
+                        self.lp = s.lp;
                         self.fit();
                     }
                 }
                 21 => self.sel = (0, self.frames.len()),
                 4 => self.clip = self.frames[a..b].to_vec(),
+                28 => self.sel = (self.sel.0, self.sel.0),
+                26 | 27 => {
+                    // step to the stretch before or after, flag to flag
+                    let here = self.sel.0;
+                    let k = if e == 27 { self.marks.iter().position(|m| m.at > here) } else { self.marks.iter().rposition(|m| m.at < here) };
+                    if let Some(k) = k {
+                        self.sel = self.mark_span(k);
+                        if self.sel.0 < self.view.0 || self.sel.1 > self.view.1 {
+                            let w = (self.view.1 - self.view.0).max(self.sel.1 - self.sel.0);
+                            let left = self.sel.0.min(self.frames.len() - w.min(self.frames.len()));
+                            self.view = (left, (left + w).min(self.frames.len()));
+                        }
+                    }
+                }
+                30 => {
+                    self.thresh = ops::peak(&self.frames, a, b).max(1e-5);
+                    act = Some(WaveAct::Status(format!("Noise level set to {:.1} dB", 20.0 * self.thresh.log10())));
+                }
+                31 => {
+                    self.profile = ops::noise_profile(&self.frames, a, b);
+                    act = Some(WaveAct::Status("Noise learned. Mark what to clean and press Ctrl+U.".into()));
+                }
+                43..=48 => {
+                    let n = self.frames.len();
+                    let (v0, v1) = self.view;
+                    let w = v1 - v0;
+                    let around = |mid: usize, w: usize| {
+                        let w = w.clamp(32.min(n), n);
+                        let left = mid.saturating_sub(w / 2).min(n - w);
+                        (left, left + w)
+                    };
+                    self.view = match e {
+                        43 => around(self.sel.0, w),
+                        44 => around(self.sel.1, w),
+                        45 => around((v0 + v1) / 2, w / 2),
+                        46 => around((v0 + v1) / 2, w * 2),
+                        47 => (0, n),
+                        _ if self.sel.1 > self.sel.0 => (self.sel.0, self.sel.1.min(n)),
+                        _ => (v0, v1),
+                    };
+                }
+                22..=25 | 38..=40 => {
+                    self.keep();
+                    match e {
+                        22 if self.sel.1 > self.sel.0 => self.add_mark(a, b - a, String::new()),
+                        23 => self.add_mark(self.sel.0.min(self.frames.len().saturating_sub(1)), 0, String::new()),
+                        24 => self.lp = if self.sel.1 > self.sel.0 { (a, b) } else { (0, 0) },
+                        25 => {
+                            self.marks.retain(|m| m.at < a || m.at >= b);
+                            if self.lp.0 >= a && self.lp.0 < b {
+                                self.lp = (0, 0);
+                            }
+                        }
+                        38..=40 => {
+                            let sense = [0.5, 0.2, 0.85][(e - 38) as usize];
+                            let hits = ops::onsets(&self.frames, a, b, self.rate, sense);
+                            let had = self.marks.len();
+                            for h in hits {
+                                self.add_mark(h, 0, String::new());
+                            }
+                            act = Some(WaveAct::Status(format!("{} slices marked", self.marks.len() - had)));
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {
                     self.keep();
                     match e {
                         1 => {
+                            let n = self.frames.len();
                             ops::trim(&mut self.frames, a, b);
+                            self.took_out(b, n);
+                            self.took_out(0, a);
                             self.sel = (0, 0);
                             self.fit();
                         }
                         2 | 3 => {
                             let cut = ops::remove(&mut self.frames, a, b);
+                            self.took_out(a, b);
                             if e == 3 {
                                 self.clip = cut;
                             }
@@ -326,14 +630,79 @@ impl WaveEd {
                         5 => {
                             let at = if self.sel.1 > self.sel.0 {
                                 ops::remove(&mut self.frames, a, b);
+                                self.took_out(a, b);
                                 a
                             } else {
                                 self.sel.0.min(self.frames.len())
                             };
                             ops::insert(&mut self.frames, at, &self.clip);
+                            self.put_in(at, self.clip.len());
                             self.sel = (at, at + self.clip.len());
                             self.fit();
                         }
+                        14 | 15 => {
+                            let at = self.sel.0.min(self.frames.len());
+                            let grew = self.frames.len() < at + self.clip.len();
+                            if e == 14 {
+                                let end = (at + self.clip.len()).min(self.frames.len());
+                                ops::silence(&mut self.frames, at, end);
+                            }
+                            ops::mix(&mut self.frames, at, &self.clip);
+                            self.sel = (at, at + self.clip.len());
+                            if grew {
+                                self.fit();
+                            }
+                        }
+                        16 => {
+                            let (at, len) = if self.sel.1 > self.sel.0 { (a, b - a) } else { (self.sel.0.min(self.frames.len()), self.rate as usize) };
+                            ops::insert(&mut self.frames, at, &vec![[0.0; 2]; len]);
+                            self.put_in(at, len);
+                            self.sel = (at, at + len);
+                            self.fit();
+                        }
+                        17 if self.lp.1 > self.lp.0 && self.lp.1 < self.frames.len() => {
+                            let n = self.frames.len();
+                            ops::remove(&mut self.frames, self.lp.1, n);
+                            self.took_out(self.lp.1, n);
+                            self.sel = (0, 0);
+                            self.fit();
+                        }
+                        32 => ops::denoise(&mut self.frames, a, b, &self.profile, self.clean),
+                        33 => ops::gate(&mut self.frames, a, b, self.thresh, self.rate),
+                        34 | 35 => {
+                            let loud = ops::loud_parts(&self.frames, a, b, self.thresh, self.rate);
+                            if let (Some(first), Some(last)) = (loud.first().copied(), loud.last().copied()) {
+                                // from the back forward, so the places further on stay where they were
+                                let mut holes = vec![(last.1, b)];
+                                if e == 35 {
+                                    holes.extend(loud.windows(2).rev().map(|w| (w[0].1, w[1].0)));
+                                }
+                                holes.push((a, first.0));
+                                let mut joins = vec![];
+                                for (s, t) in holes {
+                                    if t > s {
+                                        ops::remove(&mut self.frames, s, t);
+                                        self.took_out(s, t);
+                                        for j in joins.iter_mut() {
+                                            *j -= t - s;
+                                        }
+                                    }
+                                    joins.push(s);
+                                }
+                                if e == 35 {
+                                    // every piece that was kept starts at a join
+                                    for j in joins.into_iter().skip(1) {
+                                        if j < self.frames.len() {
+                                            self.add_mark(j, 0, String::new());
+                                        }
+                                    }
+                                }
+                                self.sel = (0, 0);
+                                self.fit();
+                            }
+                        }
+                        36 => ops::declick(&mut self.frames, a, b, self.rate, true),
+                        37 => ops::declick(&mut self.frames, a, b, self.rate, false),
                         6 => ops::silence(&mut self.frames, a, b),
                         7 => ops::reverse(&mut self.frames, a, b),
                         8 => ops::normalize(&mut self.frames, a, b),
@@ -358,24 +727,36 @@ impl WaveEd {
                 self.view = (self.sel.0, self.sel.1.min(self.frames.len()));
             }
         });
+        if let Some(k) = self.rename.filter(|&k| k < self.marks.len()) {
+            ui.horizontal(|ui| {
+                ui.label("Name of the flag");
+                let r = ui.add(egui::TextEdit::singleline(&mut self.marks[k].name).desired_width(200.0));
+                if !r.has_focus() && !r.lost_focus() {
+                    r.request_focus();
+                }
+                if ui.button("Done").clicked() || r.lost_focus() {
+                    self.rename = None;
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.add_enabled_ui(has && !recording, |ui| {
                 let (a, b) = self.range();
-                if ui.button("Send to playlist").hint("Save the marked stretch (or everything) beside the project and place it as an audio clip").clicked() {
-                    act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate) {
+                if ui.button("Send to playlist").hint("Save the marked stretch (or everything) beside the project and place it as an audio clip (Shift+C)").clicked() || (send_key && has && !recording) {
+                    act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate, &self.marks_in(a, b)) {
                         Ok(p) => WaveAct::ToPlaylist(p),
                         Err(e) => WaveAct::Status(e),
                     });
                 }
                 if ui.button("Send to a new channel").hint("Save the marked stretch (or everything) beside the project and load it into a new sampler channel").clicked() {
-                    act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate) {
+                    act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate, &self.marks_in(a, b)) {
                         Ok(p) => WaveAct::ToChannel(p),
                         Err(e) => WaveAct::Status(e),
                     });
                 }
             });
         });
-        ui.label(RichText::new("Drag to mark a stretch, click to set the cursor, double-click to mark everything. Scroll to zoom, Shift+scroll to move along.").small().color(TEXT_DIM));
+        ui.label(RichText::new("Drag to mark a stretch, click to set the cursor, double-click to mark from flag to flag. Right-click for markers and regions. Scroll to zoom, Shift+scroll to move along.").small().color(TEXT_DIM));
         act
     }
 }

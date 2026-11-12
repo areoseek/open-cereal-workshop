@@ -482,6 +482,10 @@ impl App {
             }
         }
         // windows to show at start, for screenshots and tests: CEREAL_SHOW=mixer,piano,channel
+        if let Ok(p) = std::env::var("CEREAL_WAVE") {
+            // a sound straight into the wave recorder of the master track's first slot, for trying it out
+            let _ = app.wave_eds.entry((0, 0)).or_default().open(std::path::Path::new(&p));
+        }
         if let Ok(show) = std::env::var("CEREAL_SHOW") {
             for w in show.split(',') {
                 match w.trim() {

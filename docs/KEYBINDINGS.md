@@ -235,3 +235,36 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Drag a plug-in from the plug-in page | Onto the rack: a new channel; onto a mixer track or slot: the effect goes there | yes |
 | Backspace / Shift+Backspace | Navigate back / forward | no |
 | Alt+click, Shift+click a sound | Play it whole / from the pointer | no |
+
+## Wave Recorder (audio editor)
+
+These work while the pointer is over the wave picture.
+
+| Key | Action | Done |
+|---|---|---|
+| Ctrl+O / Ctrl+S | Open a sound / save the marked stretch or everything | yes |
+| Ctrl+Z | Undo | yes |
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste in at the cursor | yes |
+| Alt+V / Shift+V | Paste over what is there / paste mixed in | yes |
+| Del / Ctrl+Del | Delete the marked stretch / keep only it | yes |
+| Shift+Del | Silence the marked stretch | yes |
+| Alt+Del | Delete everything after the loop end | yes |
+| Ins | Insert silence | yes |
+| Alt+A | Amplify | yes |
+| Ctrl+N | Normalize | yes |
+| Ctrl+F / Alt+F | Fade in / fade out | yes |
+| Alt+Left | Reverse | yes |
+| Alt+N | Take the noise level from the marked stretch | yes |
+| Alt+U / Ctrl+U | Learn the noise from the marked stretch / clean it out | yes |
+| Alt+S | Slice at the hits | yes |
+| M / Alt+M | Add a marker / make the marked stretch a region | yes |
+| Alt+L | Make the marked stretch the loop | yes |
+| Shift+Ctrl+Del | Delete markers, regions and loop in the marked stretch | yes |
+| Left / Right | Previous / next region | yes |
+| Up | Let go of the marked stretch | yes |
+| Ctrl+A | Mark everything | yes |
+| PgUp / PgDn | Zoom in / out | yes |
+| Home / End | Show everything / show the marked stretch | yes |
+| Ctrl+Left / Ctrl+Right | Bring the start / end of the marked stretch into view | yes |
+| Shift+C | Send the marked stretch to the playlist | yes |
+| Alt+T, Ctrl+T, Alt+W, Ctrl+R, Ctrl+B, Ctrl+Q, Ctrl+L, S | Time stretch, drum stretch, claw, reverb, blur, equalise, loop tuning, spectrum view | no |
