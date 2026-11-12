@@ -163,7 +163,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+I | Write the control's current value (with the event editor open: an event at the play position) | yes |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
-| Shift+Ctrl+V | Paste from the MIDI clipboard | no |
+| Shift+Ctrl+V | Paste from the MIDI clipboard | yes (the clipboard holds the path of a MIDI file) |
 | Shift+M, Shift+N | Select groups of notes at random; chord stamp off (the Stamp menu on the toolbar picks a chord the draw tool lays down) | yes |
 | Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
 | Right Shift+click | Slice, and its variants | no |

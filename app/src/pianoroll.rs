@@ -615,6 +615,47 @@ impl App {
         }
     }
 
+    /// Paste from the MIDI clipboard: the notes of a MIDI file another program put on the clipboard (as
+    /// the file's path or address), all onto this channel from the first bar in view.
+    pub(crate) fn pr_paste_midi(&mut self, text: &str) {
+        let name = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or("");
+        let name = name.strip_prefix("file://").map(|p| p.replace("%20", " ")).unwrap_or_else(|| name.to_string());
+        let path = std::path::Path::new(&name);
+        let is_midi = path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["mid", "midi", "rmi", "kar"].contains(&e.to_ascii_lowercase().as_str()));
+        if !is_midi || !path.is_file() {
+            self.status = "The clipboard holds no MIDI file".into();
+            return;
+        }
+        let got = std::fs::read(path).map_err(|e| e.to_string()).and_then(|d| cereal_engine::midifile::import(&d, self.song.ppq));
+        let parts = match got {
+            Ok(m) if m.parts.iter().any(|p| !p.notes.is_empty()) => m.parts,
+            Ok(_) => {
+                self.status = "That MIDI file holds no notes".into();
+                return;
+            }
+            Err(e) => {
+                self.status = format!("MIDI paste failed: {e}");
+                return;
+            }
+        };
+        let pat = self.pr_pat();
+        let bar = self.song.bar();
+        let chan = self.sel_chan as u16;
+        let first = parts.iter().flat_map(|p| p.notes.iter()).map(|n| n.pos).min().unwrap_or(0) / bar * bar;
+        let to = self.piano.left_tick.div_ceil(bar) * bar;
+        let notes = &mut self.song.patterns[pat].notes;
+        self.piano.sel.clear();
+        let mut count = 0;
+        for n in parts.into_iter().flat_map(|p| p.notes) {
+            self.piano.sel.insert(notes.len());
+            notes.push(Note { pos: n.pos - first + to, chan, ..n });
+            count += 1;
+        }
+        self.pr_sort(pat);
+        self.dirty = true;
+        self.status = format!("Pasted {count} notes from the MIDI clipboard");
+    }
+
     /// Paste at the first bar in view, keeping each note's place inside its bar.
     pub(crate) fn pr_paste(&mut self) {
         if self.piano.clip.is_empty() {

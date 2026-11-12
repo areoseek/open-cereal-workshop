@@ -1709,8 +1709,10 @@ impl App {
                     }
                     continue;
                 }
-                egui::Event::Paste(_) if !typing_text => {
-                    if self.focus == Win::Rack && self.show_rack {
+                egui::Event::Paste(text) if !typing_text => {
+                    if self.focus == Win::Piano && self.show_piano && ctx.input(|i| i.modifiers.shift) {
+                        self.pr_paste_midi(text);
+                    } else if self.focus == Win::Rack && self.show_rack {
                         self.rack_paste();
                     } else if self.focus == Win::Piano && self.show_piano {
                         self.pr_paste();

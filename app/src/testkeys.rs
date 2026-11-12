@@ -67,6 +67,11 @@ impl Script {
                 }
             }
             "text" => raw.events.push(Event::Text(arg.clone())),
+            // the paste key with Shift held, carrying this as what the clipboard holds
+            "shiftpaste" => {
+                raw.modifiers = Modifiers::SHIFT | Modifiers::COMMAND;
+                raw.events.push(Event::Paste(arg.clone()));
+            }
             "alttext" => {
                 raw.modifiers = Modifiers::ALT;
                 raw.events.push(Event::Text(arg.clone()));
