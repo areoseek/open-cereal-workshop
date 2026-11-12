@@ -18,8 +18,9 @@ const TARGETS: usize = 8;
 const WS_N: usize = 257;
 const PAT_N: usize = 257;
 const MAP_N: usize = 65;
-/// Table space of one target: pattern length in beats (0 = unused), the pattern, three mappings.
-const ART: usize = 1 + PAT_N + 3 * MAP_N;
+/// Table space of one target: pattern length in beats (0 = unused), the slow wave's depth, speed and
+/// tempo switch, the pattern, three mappings.
+const ART: usize = 4 + PAT_N + 3 * MAP_N;
 const TABLES: usize = WS_N + TARGETS * ART;
 /// Frames between two readings of the drawn lines.
 const CHUNK: usize = 32;
@@ -108,6 +109,16 @@ pub fn decode(state: &[u8]) -> Option<Vec<f32>> {
             let k = first + 1 + a * 14;
             let (head, n, span, _) = l[k];
             p.push(if n > 1 && span > 1e-4 { span } else { 0.0 });
+            // the slow wave: its first point says how deep it goes (the top is none), scaled by the unit's
+            // slow-wave slider; behind the line sits its speed
+            let (lh, ln, _, lend) = l[k + 10];
+            let size = (lend - 20 - lh - 12) / ln;
+            let y = if size == 24 { f64::from_le_bytes(d[lh + 20..lh + 28].try_into().ok()?) as f32 } else { f32::from_le_bytes(d[lh + 16..lh + 20].try_into().ok()?) };
+            let level = int(4)? as f32 / 128.0;
+            let flags = int(lend - 20)?;
+            p.push(if flags & 1 != 0 { (1.0 - y).clamp(0.0, 1.0) * level * level.abs() } else { 0.0 });
+            p.push(int(lend)? as f32);
+            p.push((flags >> 1 & 1) as f32);
             drawn_table_n(&d, head, PAT_N, &mut p)?;
             for m in 11..14 {
                 drawn_table_n(&d, l[k + m].0, MAP_N, &mut p)?;
@@ -250,6 +261,8 @@ pub fn fresh() -> Vec<u8> {
 pub struct State {
     /// Place in each target's pattern, in beats.
     pos: [[f32; TARGETS]; BANKS],
+    /// Where each target's slow wave is in its turn (0..1).
+    wave: [[f32; TARGETS]; BANKS],
     /// Filter memory: bank, stage, channel, two integrators.
     svf: [[[[f32; 2]; 2]; 3]; BANKS],
     /// Output gains in use, left and right.
@@ -259,7 +272,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { pos: [[0.0; TARGETS]; BANKS], svf: [[[[0.0; 2]; 2]; 3]; BANKS], gain: [[-1.0; 2]; BANKS], follow: 0.0 }
+        Self { pos: [[0.0; TARGETS]; BANKS], wave: [[0.0; TARGETS]; BANKS], svf: [[[[0.0; 2]; 2]; 3]; BANKS], gain: [[-1.0; 2]; BANKS], follow: 0.0 }
     }
 }
 
@@ -302,20 +315,30 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             for a in 0..TARGETS {
                 let art = &tables[WS_N + a * ART..WS_N + (a + 1) * ART];
                 let len = art[0];
-                let maps = &art[1 + PAT_N..];
+                let maps = &art[4 + PAT_N..];
                 let (mx, my, mf) = (look(&maps[..MAP_N], pad_x), look(&maps[MAP_N..2 * MAP_N], pad_y), look(&maps[2 * MAP_N..], st.follow));
                 let pat = if len > 0.0 {
-                    let v = look(&art[1..1 + PAT_N], st.pos[b][a] / len);
+                    let v = look(&art[4..4 + PAT_N], st.pos[b][a] / len);
                     st.pos[b][a] = (st.pos[b][a] + n as f32 / (cx.step * 4.0).max(1.0)) % len;
                     Some(v)
                 } else {
                     None
                 };
+                // the slow wave: free speeds run on an estimated scale, tempo speeds double every 4850 units
+                // around one turn a beat
+                let wave = if art[1].abs() > 1e-4 {
+                    let per_frame = if art[3] >= 0.5 { ((art[2] - 31102.0) / 4850.0).exp2() / (cx.step * 4.0).max(1.0) } else { 0.05 * (art[2].clamp(0.0, 65536.0) / 65536.0 * 11.0).exp2() / sr };
+                    let ph = &mut st.wave[b][a];
+                    *ph = (*ph + per_frame * n as f32).fract();
+                    Some((*ph * 2.0 * PI).sin())
+                } else {
+                    None
+                };
                 if matches!(a, 0 | 2 | 3) {
-                    drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5;
+                    drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5 + wave.map_or(0.0, |w| 0.5 * art[1] * w);
                     steady[a] = mx - 0.5 + my - 0.5;
                 } else {
-                    drawn[a] = pat.unwrap_or(1.0) * mf;
+                    drawn[a] = pat.unwrap_or(1.0) * mf * wave.map_or(1.0, |w| 1.0 - art[1] * (0.5 - 0.5 * w));
                     steady[a] = mx * my;
                 }
             }
@@ -456,4 +479,26 @@ mod tests {
         assert!(level(100.0) > 0.4, "{}", level(100.0));
         assert!(level(8000.0) < 0.05, "{}", level(8000.0));
     }
+
+    #[test]
+    fn a_slow_wave_drawn_down_moves_the_level() {
+        let block = fresh();
+        let k = 1 + 14 + 10;
+        let mut c = line(&block, k).unwrap();
+        c.pts[0].y = 0.0;
+        let wobbly = decode(&set_line(&block, k, &c).unwrap()).unwrap();
+        let steady = decode(&block).unwrap();
+        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
+        let spread = |p: &[f32]| {
+            let mut st = State::default();
+            let mut io: Vec<[f32; 2]> = (0..48000).map(|i| [(i as f32 * 200.0 / 48000.0 * 2.0 * PI).sin() * 0.5; 2]).collect();
+            process(p, &mut st, &mut io, &cx);
+            let tops: Vec<f32> = io[4800..].chunks(480).map(|c| c.iter().fold(0f32, |m, f| m.max(f[0].abs()))).collect();
+            let (lo, hi) = tops.iter().fold((f32::MAX, 0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            hi / lo.max(1e-6)
+        };
+        assert!(spread(&steady) < 1.1);
+        assert!(spread(&wobbly) > 4.0);
+    }
 }
+

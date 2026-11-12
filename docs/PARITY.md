@@ -90,7 +90,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Free Filter (built as Open Filter: seven shapes; frequency law fitted to three known points, Q and gain scales estimated)
 - [~] Fruity HTML NoteBook (Web Notes: the address is read, edited and saved, and opens in the system browser; no page view inside the window)
 - [~] Fruity Limiter (built, approximate)
-- [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Not yet: slow oscillators, patterns 2 to 10 played and key switching, the note text. Every drawn line of every bank can be edited and is saved. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
+- [~] Fruity Love Philter (built as Filter Bank: eight banks in parallel or in a row, twelve filter types, slopes, curve shaper, pattern 1 of each target, pad and input-follower mappings; packed block read and written. Each target's slow wave runs, free or in tempo; its depth law (a line drawn below the top) and speed scales are estimates. Not yet: patterns 2 to 10 played and key switching, the note text. Every drawn line of every bank can be edited and is saved. Filter laws, resonance scale and follower times are estimates; the type order is inferred from named presets)
 - [~] Fruity LSD (opens, block kept; no bank playback)
 - [~] Fruity Multiband Compressor (built as Three Band Compressor, approximate)
 - [~] Fruity Mute 2 (built as Mute Switch; no stored block seen, layout is a guess)
