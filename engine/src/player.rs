@@ -405,6 +405,7 @@ impl Handle {
             script_emit: None,
             script_serial: 0,
             script_ctl: Vec::new(),
+            layer_sets: Vec::new(),
             midi_wait: Vec::with_capacity(64),
             midi_live: Vec::new(),
             host_wait: Vec::with_capacity(64),
@@ -894,6 +895,8 @@ pub struct Player {
     script_serial: u32,
     /// Output values note scripts sent, waiting for their bays: the channel, the script's unit, the output, the value.
     script_ctl: Vec<(u16, usize, u16, f32)>,
+    /// What bay cables last sent to the settings of layered instruments: the channel, the unit, the setting, the value.
+    layer_sets: Vec<(usize, usize, u16, f32)>,
     /// MIDI messages on their way out, with the frames each still waits.
     midi_wait: Vec<(u64, crate::midiout::Msg)>,
     /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
@@ -1701,10 +1704,19 @@ impl Player {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
                     // settings a clip or an event is driving stand in for the stored ones from this note on
                     let driven = li == 0 && self.ov.gen.iter().any(|e| e.0 == n.chan as usize);
+                    // a layered instrument of a bay: what the bay's cables last sent to its settings
+                    let node = if li > 0 { song.channels.get(n.chan as usize).and_then(|c| c.bay()).and_then(|b| b.layers.get(li - 1)).map(|l| l.0) } else { None };
+                    let cabled = node.is_some_and(|nd| self.layer_sets.iter().any(|e| e.0 == n.chan as usize && e.1 == nd));
                     let tone = if driven {
                         let mut g = g.clone();
                         for e in self.ov.gen.iter().filter(|e| e.0 == n.chan as usize) {
                             g.set_travel(e.1 as usize, e.2);
+                        }
+                        g.tone()
+                    } else if cabled {
+                        let mut g = g.clone();
+                        for e in self.layer_sets.iter().filter(|e| e.0 == n.chan as usize && Some(e.1) == node) {
+                            g.set_travel(e.2 as usize, e.3);
                         }
                         g.tone()
                     } else {
@@ -2335,6 +2347,13 @@ impl Player {
                         for (node, k, v) in st.gen_sets.drain(..) {
                             if node == lead {
                                 self.ov.set(Target::ChanParam(c, k), v);
+                            } else {
+                                let at = self.layer_sets.iter().position(|e| e.0 == c && e.1 == node && e.2 == k);
+                                match at {
+                                    Some(i) => self.layer_sets[i].3 = v,
+                                    None if self.layer_sets.len() < 4096 => self.layer_sets.push((c, node, k, v)),
+                                    None => {}
+                                }
                             }
                         }
                     }
@@ -2926,6 +2945,52 @@ mod tests {
         };
         let (open, shut) = (run(0.8), run(0.0));
         assert!(open > 0.01 && shut < open * 0.01, "{open} {shut}");
+    }
+
+    #[test]
+    fn a_cable_reaches_the_setting_of_a_layered_instrument() {
+        if crate::pyrt::get().is_none() {
+            eprintln!("no Python on this machine: skipped");
+            return;
+        }
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        let run = |to: f32| {
+            use crate::fxpatch::{Cable, End, Node, SetCable};
+            use crate::noteshape::{Link, Shaper};
+            let src = format!("import flvfx\nflvfx.addOutputController('Out', 0.5)\ndef onTriggerVoice(v):\n    o = flvfx.Voice(v)\n    v.o = o\n    o.trigger()\n    flvfx.setOutputController('Out', {to})\ndef onReleaseVoice(v):\n    v.o.release()\n");
+            crate::script::allow(&src);
+            let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+            ch.plugin = crate::song::BAY.to_string();
+            let node = |fx| Node { ident: String::new(), name: String::new(), fx };
+            // only the layered instrument (unit 2) is cabled to the way out; the script's output goes to its first coarse tuning
+            let patch = crate::fxpatch::Patch {
+                nodes: vec![node(None), node(None), node(None)],
+                cables: vec![Cable { from: End::Node(2), to: End::Bay, level: 1.0 }],
+                order: vec![0, 1, 2],
+                shape: vec![(0, vec![Link { shaper: Shaper::Script(Arc::new(crate::script::ScriptDef { source: src, params: String::new() })), port: 0, node: 1 }])],
+                sets: vec![SetCable { from: (1, 0), to: (2, 2) }],
+                feeds: vec![2],
+                ..Default::default()
+            };
+            let layer = crate::synth::Gen::new(crate::synth::Kind::Osc3);
+            ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![(2, layer)] });
+            let mut song = Song::new();
+            song.channels = vec![ch];
+            let (h, mut p) = new_player(song, 48_000.0);
+            let mut a = vec![0.0; 12_000 * 2];
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            p.render(&mut a, 2);
+            p.render(&mut a, 2);
+            h.send(Cmd::NoteOff { chan: 0, key: 60 });
+            for _ in 0..8 {
+                p.render(&mut a, 2);
+            }
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            p.render(&mut a, 2);
+            rises(&a)
+        };
+        let (same, up) = (run(0.5), run(1.0));
+        assert!(same > 20.0 && (up / same - 4.0).abs() < 0.4, "{same} {up}");
     }
 
     #[test]
