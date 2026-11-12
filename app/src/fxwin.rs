@@ -215,7 +215,7 @@ impl App {
                         let tr = &self.handle.transport;
                         let tempo = if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo };
                         let tick = if tr.playing() { tr.tick().max(0.0) } else { 0.0 };
-                        clock_ui(ui, tick, self.song.ppq, tempo, self.song.bar());
+                        clock_ui(ui, tick, self.song.beat_ticks(), tempo, self.song.bar());
                     }
                     _ => scope_ui(ui, &frames, rate, None),
                 }

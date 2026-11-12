@@ -998,8 +998,12 @@ impl Song {
 
     /// Ticks in one bar.
     pub fn bar(&self) -> u32 {
-        let (n, d) = (self.time_sig.0.max(1) as u32, self.time_sig.1.max(1) as u32);
-        (self.ppq * 4 * n / d).max(1)
+        (self.beat_ticks() * self.time_sig.0.max(1) as u32).max(1)
+    }
+    /// Ticks in one beat of the tempo. The project's second time signature number counts steps in a beat, a step
+    /// being a quarter of the file's time base, so 4/8 has beats twice as long as 4/4 and plays twice as fast.
+    pub fn beat_ticks(&self) -> u32 {
+        (self.ppq * self.time_sig.1.max(1) as u32 / 4).max(1)
     }
     /// The stretches of the time line that each keep one time signature: where it starts, the
     /// number of its first bar (from 0) and the ticks in one of its bars. Time signature markers
@@ -1024,9 +1028,10 @@ impl Song {
         let mut out = (0u32, 0u32, (self.time_sig.0.max(1), self.time_sig.1.max(1)));
         let mut sigs: Vec<&TimeMarker> = self.markers.iter().filter(|m| m.kind == 8 && m.sig.0 > 0 && m.sig.1 > 0 && m.pos <= tick).collect();
         sigs.sort_by_key(|m| m.pos);
+        let mut was = self.bar();
         for m in sigs {
-            let was = (self.ppq * 4 * out.2 .0 as u32 / out.2 .1 as u32).max(1);
             out = (m.pos, out.1 + (m.pos - out.0).div_ceil(was), m.sig);
+            was = (self.ppq * 4 * m.sig.0 as u32 / m.sig.1 as u32).max(1);
         }
         out
     }
@@ -2165,6 +2170,18 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_second_time_signature_number_is_steps_in_a_beat() {
+        let mut s = Song::default();
+        s.ppq = 96;
+        s.time_sig = (4, 4);
+        assert_eq!((s.beat_ticks(), s.bar()), (96, 384));
+        s.time_sig = (4, 8);
+        assert_eq!((s.beat_ticks(), s.bar()), (192, 768));
+        s.time_sig = (3, 4);
+        assert_eq!((s.beat_ticks(), s.bar()), (96, 288));
+    }
 
     #[test]
     fn patterns_move_and_split_without_changing_the_song() {

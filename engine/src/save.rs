@@ -305,7 +305,7 @@ fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bo
         match (e.id, &mut e.value) {
             (id::PATTERN_NOTES, Value::Data(d)) => {
                 let mut nd = Vec::with_capacity(d.len());
-                for n in d.chunks_exact(NOTE_SIZE) {
+                for n in d.chunks_exact(flp::note_size(orig.version_tuple())) {
                     if let Some(&to) = remap.get(&u16at(n, 6)) {
                         let mut n = n.to_vec();
                         put_u16(&mut n, 6, to);
@@ -330,11 +330,11 @@ fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bo
                 *d = nd;
             }
             (id::PLAYLIST, Value::Data(d)) => {
-                if let Some(size) = item_size(d) {
+                if let Some(size) = crate::flp::old_playlist_size(d, (0, 0, 0, 0)).or(item_size(d)) {
                     let mut nd = Vec::with_capacity(d.len());
                     for item in d.chunks_exact(size) {
                         let ix = u16at(item, 6);
-                        if ix > ITEM_BASE {
+                        if ix > ITEM_BASE || u16at(item, 4) == 0 {
                             nd.extend_from_slice(item);
                         } else if let Some(&to) = remap.get(&ix) {
                             let mut item = item.to_vec();
@@ -434,6 +434,7 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
 }
 
 fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, word_insert: bool) {
+    let old_levels = ev.iter().find(|e| e.id == id::VERSION).and_then(|e| e.bytes()).map(|b| version_tuple(&latin1(b))).is_some_and(|v| v < (7, 0, 0, 0));
     // channel runs, last first so earlier indices stay good while events are added or removed
     let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::NEW_CHANNEL).map(|(i, _)| i).collect();
     for (ci, &start) in starts.iter().enumerate().rev() {
@@ -687,7 +688,12 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 end += 1;
             }
         }
-        let levels = (pan_u(now.pan), vol_u(now.volume), now.pitch_cents.round() as i32);
+        let mut levels = (pan_u(now.pan), vol_u(now.volume), now.pitch_cents.round() as i32);
+        if old_levels {
+            // up to version 6 pan and volume are stored in 128 steps
+            levels.0 = (levels.0 + 50) / 100;
+            levels.1 = (levels.1 + 50) / 100;
+        }
         if levels != (pan_u(was.pan), vol_u(was.volume), was.pitch_cents.round() as i32) {
             match find(ev, end, id::CHAN_LEVELS) {
                 Some(i) => {
@@ -720,6 +726,10 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                     put_u32(d, 16, now.root_key as u32);
                 }
             }
+            // early files keep the root note in an event of its own
+            if let Some(i) = find(ev, end, id::CHAN_ROOT) {
+                ev[i].value = Value::Int(now.root_key as u32);
+            }
         }
         if now.env_on != was.env_on {
             if let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(1) {
@@ -729,7 +739,7 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
             }
         }
         if now.smp != was.smp {
-            patch_sampler(ev, start, end, &now.smp, &was.smp);
+            patch_sampler(ev, start, end, &now.smp, &was.smp, old_levels);
         }
     }
 }
@@ -955,7 +965,7 @@ fn env_raw(seconds: f32) -> u32 {
 }
 
 /// Write the sampler settings that changed into the events of one channel (`start..end`).
-fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sampler, was: &Sampler) {
+fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sampler, was: &Sampler, old_levels: bool) {
     use crate::song::Env;
     // a word or int setting: replace it, or add it ahead of the levels block
     fn put(ev: &mut Vec<Event>, start: usize, end: &mut usize, e: Event) {
@@ -1027,7 +1037,11 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
     }
     let echo = |f: &Sampler| (q(f.echo_feedback, 12800.0), q(f.echo_pan, 6400.0) + 6400, q(f.echo_cents, 1.0), f.echoes, q(f.echo_steps, 48.0));
     if echo(now) != echo(was) {
-        let (fb, pan, cents, n, time) = echo(now);
+        let (mut fb, mut pan, cents, n, time) = echo(now);
+        if old_levels {
+            fb = (fb + 50) / 100;
+            pan = (pan + 50) / 100;
+        }
         block(ev, start, &mut end, id::CHAN_ECHO, "0000000000190000000000000400000090000000", |d| {
             if d.len() < 20 {
                 d.resize(20, 0);
@@ -1190,6 +1204,7 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
             }
             let mut sorted: Vec<&Note> = now.notes.iter().collect();
             sorted.sort_by_key(|n| (n.pos, n.chan, n.key));
+            let old_notes = flp::note_size(flp.version_tuple()) == 20;
             let mut data = Vec::with_capacity(sorted.len() * NOTE_SIZE);
             for note in sorted {
                 let mut f = old.get_mut(&(note.pos, note.chan, note.key as u16)).and_then(|v| v.pop()).unwrap_or(flp::Note {
@@ -1200,7 +1215,7 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                     key: 60,
                     group: 0,
                     fine_pitch: 120,
-                    release: 64,
+                    release: if old_notes { 0 } else { 64 },
                     midi_channel: 0,
                     pan: 64,
                     velocity: 100,
@@ -1222,7 +1237,11 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                 f.mod_y = (note.mod_y * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
                 f.midi_channel = (f.midi_channel & !15) | (note.color & 15);
                 f.group = note.group;
-                f.write(&mut data);
+                if old_notes {
+                    f.write_old(&mut data);
+                } else {
+                    f.write(&mut data);
+                }
             }
 
             // the note events this pattern already has
@@ -1256,6 +1275,24 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                     ev.insert(at, Event::word(id::NEW_PATTERN, number));
                 }
                 None => {}
+            }
+            // early projects keep step dots beside the channels; they are all notes now
+            if flp.has_dots {
+                let mut cur = 0u16;
+                let mut in_channel = false;
+                let mut i = 0;
+                while i < ev.len() {
+                    match (ev[i].id, &ev[i].value) {
+                        (64, _) => in_channel = true,
+                        (id::NEW_PATTERN, Value::Word(v)) => cur = *v,
+                        (id::DOT | id::DOT_VOL | id::DOT_PAN | id::DOT_NOTE | id::DOT_PITCH | id::DOT_SHIFT | id::DOT_CUT | id::DOT_RES, Value::Word(_)) if in_channel && cur == number => {
+                            ev.remove(i);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
             }
         }
 
@@ -1407,6 +1444,51 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
     let tracks = track_count(flp);
     let at = ev.iter().position(|e| e.id == id::PLAYLIST);
     let old: Vec<u8> = at.and_then(|i| ev[i].bytes().map(|b| b.to_vec())).unwrap_or_default();
+    let old_layout = flp.version_tuple() < (11, 0, 0, 0) && (old.is_empty() || flp.arrangements.first().is_some_and(|a| a.old_playlist));
+    if old_layout {
+        // Before version 11: 99 clip tracks counted from the top, in 28-byte items up to version 8 and 32 after.
+        // Blocks are written back as pattern clips on the tracks they were shown on.
+        let size = crate::flp::old_playlist_size(&old, flp.version_tuple()).unwrap_or(if flp.version_tuple() < (9, 0, 0, 0) { 28 } else { 32 });
+        let top: u32 = if size == 28 { 30818 } else { 98 };
+        let ppq = song.ppq.max(1) as f32;
+        let mut data = Vec::with_capacity(now.len() * size);
+        for c in &now {
+            let (index, audio) = match c.src {
+                ClipSrc::Pattern(p) => (ITEM_BASE + p as u16 + 1, false),
+                ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => (ch as u16, true),
+            };
+            let mut it = vec![0u8; size];
+            put_u32(&mut it, 0, c.pos);
+            put_u16(&mut it, 4, ITEM_BASE);
+            put_u16(&mut it, 6, index);
+            put_u32(&mut it, 8, c.len);
+            put_u16(&mut it, 12, top.saturating_sub(c.track.min(98) as u32) as u16);
+            if size == 32 {
+                put_u16(&mut it, 14, c.group);
+                put_u16(&mut it, 16, 0x78);
+                put_u16(&mut it, 18, if c.muted { 0x2000 } else { 0 });
+            }
+            it[size - 12..size - 8].copy_from_slice(&[0x40, 0x64, 0x80, 0x80]);
+            let none = (-1.0f32).to_bits();
+            let (a, b) = match (audio, c.offset) {
+                (false, 0) if size == 32 => (0, c.len),
+                (_, 0) => (none, none),
+                (false, o) => (o, o + c.len),
+                (true, o) => ((o as f32 / ppq).to_bits(), ((o + c.len) as f32 / ppq).to_bits()),
+            };
+            put_u32(&mut it, size - 8, a);
+            put_u32(&mut it, size - 4, b);
+            data.extend(it);
+        }
+        match at {
+            Some(i) => ev[i].value = Value::Data(data),
+            None => {
+                let at = ev.iter().position(|e| matches!(e.id, 236 | 238 | 42 | 149 | 204)).unwrap_or(ev.len());
+                ev.insert(at, Event::data(id::PLAYLIST, data));
+            }
+        }
+        return;
+    }
     let size = item_size(&old).unwrap_or_else(|| item_size_for(flp.version_tuple()));
     let ppq = song.ppq.max(1) as f32;
 

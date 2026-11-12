@@ -1604,7 +1604,7 @@ impl Player {
         if self.was_playing && self.tpf > 0.0 {
             self.tpf
         } else {
-            (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9)
+            (song.tempo.max(1.0) as f64 * song.beat_ticks() as f64 / 60.0 / self.sr as f64).max(1e-9)
         }
     }
 
@@ -2204,6 +2204,8 @@ impl Player {
                     ..Default::default()
                 });
             }
+            // a wrapper whose plug-in is not on this machine stays silent
+            ChannelKind::Plugin if ch.gen.is_none() && ch.ext.is_none() && ch.bay().is_none() && ch.plugin.eq_ignore_ascii_case(crate::song::WRAPPER) => {}
             ChannelKind::Plugin | ChannelKind::Other(_) => {
                 let note_gain = law::velocity_gain(n.vel);
                 let gain = chan_vol * note_gain;
@@ -2735,7 +2737,7 @@ impl Player {
                 let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                 // ticks into the audio at which we begin
                 let into = begin - pos0 + offset;
-                let secs = into / song.ppq as f64 * 60.0 / tempo as f64;
+                let secs = into / song.beat_ticks() as f64 * 60.0 / tempo as f64;
                 let f = &ch.smp;
                 let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * f.gain;
                 let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
@@ -3054,7 +3056,7 @@ impl Player {
         }
         if self.count_in > 0.0 {
             // a bar or more of clicks while the song waits where it is
-            let tpf = (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
+            let tpf = (song.tempo.max(1.0) as f64 * song.beat_ticks() as f64 / 60.0 / self.sr as f64).max(1e-9);
             let n = n.min(((self.count_in / tpf).ceil() as usize).max(1));
             let beat = (song.ppq * 4 / song.time_sig.1.max(1) as u32).max(1) as f64;
             let one = song.bar() as f64;
@@ -3114,7 +3116,7 @@ impl Player {
         let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
         tr.tempo.store(tempo.to_bits(), Relaxed);
         crate::minis::set_tempo(tempo);
-        let tpf = (tempo as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
+        let tpf = (tempo as f64 * song.beat_ticks() as f64 / 60.0 / self.sr as f64).max(1e-9);
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
         // a performance has no end of its own: the song runs on until it is stopped

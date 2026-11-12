@@ -82,6 +82,15 @@ pub mod id {
     pub const PATTERN_CTRL: u8 = 223;
     pub const MIXER_PARAMS: u8 = 225;
     pub const PLAYLIST: u8 = 233;
+    // the step sequencer of early files, one event per step
+    pub const DOT_VOL: u8 = 72;
+    pub const DOT_PAN: u8 = 73;
+    pub const DOT_NOTE: u8 = 77;
+    pub const DOT_PITCH: u8 = 78;
+    pub const DOT_RES: u8 = 87;
+    pub const DOT_CUT: u8 = 88;
+    pub const DOT_SHIFT: u8 = 92;
+    pub const DOT: u8 = 91;
     pub const CHAN_AUTOMATION: u8 = 234;
     pub const LINK: u8 = 227;
     /// The mapping formula of the link written just before it.
@@ -96,6 +105,8 @@ pub mod id {
     pub const CHAN_SWING: u8 = 97;
     pub const CHAN_CUT_GROUP: u8 = 132;
     pub const CHAN_ECHO: u8 = 209;
+    /// The root note up to version 11, written only when it was moved off C5.
+    pub const CHAN_ROOT: u8 = 135;
     pub const CHAN_POLY: u8 = 221;
     pub const CHAN_TRACKING: u8 = 228;
     pub const CHAN_ADJUST: u8 = 229;
@@ -480,6 +491,15 @@ pub struct Note {
 
 pub const NOTE_SIZE: usize = 24;
 
+/// Bytes in one stored note: 20 up to version 8 (one byte for the key, no group), 24 since.
+pub fn note_size(ver: (u32, u32, u32, u32)) -> usize {
+    if ver < (9, 0, 0, 0) {
+        20
+    } else {
+        NOTE_SIZE
+    }
+}
+
 impl Note {
     fn read(n: &[u8]) -> Self {
         Self {
@@ -497,6 +517,31 @@ impl Note {
             mod_x: n[22],
             mod_y: n[23],
         }
+    }
+    fn read_old(n: &[u8]) -> Self {
+        Self {
+            position: u32at(n, 0),
+            flags: u16at(n, 4),
+            rack_channel: u16at(n, 6),
+            length: u32at(n, 8),
+            key: n[12] as u16,
+            group: 0,
+            fine_pitch: n[13],
+            release: n[14],
+            midi_channel: n[15],
+            pan: n[16],
+            velocity: n[17],
+            mod_x: n[18],
+            mod_y: n[19],
+        }
+    }
+    /// The 20-byte form of versions up to 8.
+    pub fn write_old(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.position.to_le_bytes());
+        out.extend_from_slice(&self.flags.to_le_bytes());
+        out.extend_from_slice(&self.rack_channel.to_le_bytes());
+        out.extend_from_slice(&self.length.to_le_bytes());
+        out.extend_from_slice(&[self.key.min(255) as u8, self.fine_pitch, self.release, self.midi_channel, self.pan, self.velocity, self.mod_x, self.mod_y]);
     }
     pub fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.position.to_le_bytes());
@@ -582,6 +627,8 @@ pub struct FlpArrangement {
     pub items: Vec<PlaylistItem>,
     pub tracks: Vec<FlpTrack>,
     pub markers: Vec<Marker>,
+    /// The playlist is in the layout from before version 11 (pattern blocks and 99 clip tracks).
+    pub old_playlist: bool,
 }
 
 /// A slot that was never closed by an index event: old files end a slot at the next plugin or at the
@@ -677,6 +724,8 @@ pub struct Flp {
     pub links: Vec<FlpLink>,
     /// Mapping formulas: which entry of `links` and the text written after it.
     pub link_formulas: Vec<(usize, String)>,
+    /// The file keeps its step sequencer dots in the early per-step events instead of among the notes.
+    pub has_dots: bool,
     pub file: FlpFile,
 }
 
@@ -829,6 +878,11 @@ impl Flp {
         // the channel whose name came from the early name event, which wins over a later plug-in name
         let mut named_chan: Option<usize> = None;
 
+        // Early files keep the step sequencer apart from the notes: inside a channel, a pattern selector and then
+        // one event per lit step (low byte the step, high byte the value), with the step's own level, pan, key
+        // and so on in like events. Keyed by channel, pattern and step: [lit, level, pan, key, pitch, shift, x, y].
+        let mut dots: BTreeMap<(u16, u16, u8), [Option<u8>; 8]> = BTreeMap::new();
+
         let old_mixer = old_mixer_span(&file.events);
         for (at, e) in file.events.iter().enumerate() {
             let text = |d: &[u8]| if unicode { utf16(d) } else { latin1(d) };
@@ -862,6 +916,22 @@ impl Flp {
                 (id::SHUFFLE, Value::Byte(v)) => flp.shuffle = *v,
                 (id::CURRENT_PATTERN, Value::Word(v)) => flp.current_pattern = *v,
 
+                (id::DOT | id::DOT_VOL | id::DOT_PAN | id::DOT_NOTE | id::DOT_PITCH | id::DOT_SHIFT | id::DOT_CUT | id::DOT_RES, Value::Word(w)) if scope == Scope::Channel => {
+                    if let Some(c) = flp.channels.last() {
+                        let field = match e.id {
+                            id::DOT => 0,
+                            id::DOT_VOL => 1,
+                            id::DOT_PAN => 2,
+                            id::DOT_NOTE => 3,
+                            id::DOT_PITCH => 4,
+                            id::DOT_SHIFT => 5,
+                            id::DOT_CUT => 6,
+                            _ => 7,
+                        };
+                        dots.entry((c.index, cur_pat, *w as u8)).or_default()[field] = Some((*w >> 8) as u8);
+                    }
+                }
+
                 // ---- patterns
                 (id::NEW_PATTERN, Value::Word(v)) => {
                     in_pattern = true;
@@ -876,7 +946,11 @@ impl Flp {
                 }
                 (id::PATTERN_NOTES, Value::Data(d)) => {
                     let p = patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
-                    p.notes.extend(d.chunks_exact(NOTE_SIZE).map(Note::read));
+                    if note_size(version_tuple(&flp.version)) == 20 {
+                        p.notes.extend(d.chunks_exact(20).map(Note::read_old));
+                    } else {
+                        p.notes.extend(d.chunks_exact(NOTE_SIZE).map(Note::read));
+                    }
                 }
                 (id::PATTERN_CTRL, Value::Data(d)) => {
                     let p = patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
@@ -900,7 +974,8 @@ impl Flp {
                         flp.arrangements.push(FlpArrangement { name: "Arrangement".into(), ..Default::default() });
                     }
                     let a = flp.arrangements.last_mut().unwrap();
-                    a.items = parse_playlist(d);
+                    let ver = version_tuple(&flp.version);
+                    (a.items, a.old_playlist) = parse_playlist(d, ver);
                 }
                 (id::ARRANGEMENT_NAME, Value::Data(d)) => {
                     if let Some(a) = flp.arrangements.last_mut() {
@@ -1083,13 +1158,20 @@ impl Flp {
                         (id::CHAN_LEVELS, Value::Data(d)) if d.len() >= 12 => {
                             c.pan = u32at(d, 0);
                             c.volume = u32at(d, 4);
+                            if version_tuple(&flp.version) < (7, 0, 0, 0) && c.pan <= 128 && c.volume <= 128 {
+                                // 128 steps then, a hundred times finer since
+                                c.pan *= 100;
+                                c.volume *= 100;
+                            }
                             c.pitch_cents = u32at(d, 8) as i32;
                             if d.len() >= 24 {
                                 c.filter = (u32at(d, 12), u32at(d, 16), u32at(d, 20));
                             }
                         }
                         (id::CHAN_PARAMS, Value::Data(d)) if d.len() >= 20 => {
-                            c.root_key = u32at(d, 16);
+                            if c.root_key == 60 || version_tuple(&flp.version) >= (12, 0, 0, 0) {
+                                c.root_key = u32at(d, 16);
+                            }
                             c.echo_flags = d[10];
                             if d.len() >= 66 {
                                 let i = |o: usize| u32at(d, o) as i32;
@@ -1129,9 +1211,14 @@ impl Flp {
                         (id::CHAN_CUT_GROUP, Value::Int(v)) => c.cut_group = ((*v & 0xffff) as u16, (*v >> 16) as u16),
                         (id::CHAN_GROUP, Value::Int(v)) => c.rack_group = *v,
                         (id::CHAN_ZIPPED, Value::Byte(v)) => c.zipped = *v != 0,
+                        (id::CHAN_ROOT, Value::Int(v)) if *v > 0 && *v < 132 && version_tuple(&flp.version) < (12, 0, 0, 0) => c.root_key = *v,
                         (id::CHAN_ECHO, Value::Data(d)) if d.len() >= 20 => {
                             for k in 0..5 {
                                 c.echo[k] = u32at(d, k * 4) as i32;
+                            }
+                            if version_tuple(&flp.version) < (7, 0, 0, 0) && c.echo[0] <= 128 && c.echo[1] <= 128 {
+                                c.echo[0] *= 100;
+                                c.echo[1] *= 100;
                             }
                         }
                         (id::CHAN_TRACKING, Value::Data(d)) if d.len() >= 16 => {
@@ -1141,6 +1228,10 @@ impl Flp {
                         (id::CHAN_ADJUST, Value::Data(d)) if d.len() >= 20 => {
                             for k in 0..5 {
                                 c.adjust[k] = u32at(d, k * 4) as i32;
+                            }
+                            if version_tuple(&flp.version) < (7, 0, 0, 0) && c.adjust[0].abs() <= 64 && c.adjust[1] <= 256 {
+                                c.adjust[0] *= 100;
+                                c.adjust[1] *= 100;
                             }
                         }
                         (id::CHAN_AUTOMATION, Value::Data(d)) => c.automation = d.clone(),
@@ -1152,6 +1243,31 @@ impl Flp {
             }
         }
 
+        flp.has_dots = !dots.is_empty();
+        let step = (flp.header.ppq as u32 / 4).max(1);
+        for ((chan, pat, at), d) in dots {
+            if d[0].unwrap_or(0) == 0 {
+                continue;
+            }
+            let p = patterns.entry(pat).or_insert_with(|| FlpPattern { index: pat, ..Default::default() });
+            p.notes.push(Note {
+                position: at as u32 * step + d[5].unwrap_or(0) as u32,
+                flags: 0x4000,
+                rack_channel: chan,
+                length: 0,
+                key: d[3].unwrap_or(60) as u16,
+                group: 0,
+                fine_pitch: d[4].unwrap_or(120),
+                release: 64,
+                midi_channel: 0,
+                pan: d[2].unwrap_or(64),
+                velocity: d[1].unwrap_or(100),
+                mod_x: d[6].unwrap_or(128),
+                mod_y: d[7].unwrap_or(128),
+            });
+            p.notes.sort_by_key(|n| n.position);
+        }
+
         // patterns: the highest numbered pattern that has anything in it bounds the list
         flp.patterns = patterns.into_values().collect();
 
@@ -1160,8 +1276,10 @@ impl Flp {
         for a in &mut flp.arrangements {
             // old projects list only some of their 199 tracks
             let n = if ver < (12, 9, 0, 0) { 199 } else if !a.tracks.is_empty() { a.tracks.len() as u16 } else { 500 };
-            for it in &mut a.items {
-                it.track = (n - 1).saturating_sub(it.track);
+            if !a.old_playlist {
+                for it in &mut a.items {
+                    it.track = (n - 1).saturating_sub(it.track);
+                }
             }
             a.items.sort_by_key(|i| (i.position, i.track));
         }
@@ -1224,15 +1342,73 @@ impl Flp {
     }
 }
 
-fn parse_playlist(d: &[u8]) -> Vec<PlaylistItem> {
+/// Item size of a playlist from before version 11, when the playlist had a block area (one row per pattern)
+/// next to 99 clip tracks. `None` for the later layout.
+pub(crate) fn old_playlist_size(d: &[u8], ver: (u32, u32, u32, u32)) -> Option<usize> {
+    if d.is_empty() || ver >= (11, 0, 0, 0) {
+        return None;
+    }
+    // 28 bytes up to version 8 (and a few early 9 files), 32 after; the constant after the track word tells them apart
+    let fits = |s: usize, at: usize| d.len() % s == 0 && d.chunks_exact(s).all(|it| matches!(u16at(it, 4), 0 | 0x5000) && u32at(it, at) == 0x8080_6440);
+    if fits(28, 16) {
+        Some(28)
+    } else if fits(32, 20) {
+        Some(32)
+    } else {
+        None
+    }
+}
+
+const OLD_BLOCK_TOP_28: u32 = 30951;
+const OLD_CLIP_TOP_28: u32 = 30818;
+const OLD_BLOCK_TOP_32: u32 = 999;
+const OLD_CLIP_TOP_32: u32 = 98;
+
+/// Returns the items and whether this was the old layout (tracks already final, counted from the top).
+fn parse_playlist(d: &[u8], ver: (u32, u32, u32, u32)) -> (Vec<PlaylistItem>, bool) {
     const BASE: u16 = 0x5000;
+    if let Some(size) = old_playlist_size(d, ver) {
+        // A block sits in the row of its pattern. Today each pattern that has blocks gets a track of its own, the
+        // lowest pattern on top, sharing those tracks with the clip tracks, which also count from the top.
+        let (block_top, clip_top) = if size == 28 { (OLD_BLOCK_TOP_28, OLD_CLIP_TOP_28) } else { (OLD_BLOCK_TOP_32, OLD_CLIP_TOP_32) };
+        let block_pattern = |it: &[u8]| block_top.saturating_sub(u16at(it, 12) as u32).clamp(1, 999) as u16;
+        let mut used: Vec<u16> = d.chunks_exact(size).filter(|it| u16at(it, 4) == 0).map(block_pattern).collect();
+        used.sort_unstable();
+        used.dedup();
+        let items = d
+            .chunks_exact(size)
+            .map(|it| {
+                let (start, end) = (u32at(it, size - 8), u32at(it, size - 4));
+                let muted = size == 32 && u16at(it, 18) & 0x2000 != 0;
+                let group = if size == 32 { u16at(it, 14) } else { 0 };
+                if u16at(it, 4) == 0 {
+                    let p = block_pattern(it);
+                    PlaylistItem { position: u32at(it, 0), length: u32at(it, 8), track: used.binary_search(&p).unwrap_or(0) as u16, source: ClipSource::Pattern(p), muted, group, start_offset: u32::MAX, end_offset: u32::MAX }
+                } else {
+                    let ix = u16at(it, 6);
+                    PlaylistItem {
+                        position: u32at(it, 0),
+                        length: u32at(it, 8),
+                        track: clip_top.saturating_sub(u16at(it, 12) as u32) as u16,
+                        source: if ix > BASE { ClipSource::Pattern(ix - BASE) } else { ClipSource::Channel(ix) },
+                        muted,
+                        group,
+                        start_offset: start,
+                        end_offset: end,
+                    }
+                }
+            })
+            .collect();
+        return (items, true);
+    }
     // The item grew over the years (32, then 60, then 80 bytes, maybe more later). Every item carries the
     // constant 0x5000 at offset 4, so pick the size for which that holds for every item.
     let size = [32usize, 60, 80, 88, 96, 104, 112, 120, 128]
         .into_iter()
         .find(|&s| !d.is_empty() && d.len() % s == 0 && d.chunks_exact(s).all(|it| u16at(it, 4) == BASE));
-    let Some(size) = size else { return vec![] };
-    d.chunks_exact(size)
+    let Some(size) = size else { return (vec![], false) };
+    let items = d
+        .chunks_exact(size)
         .map(|it| {
             let item_index = u16at(it, 6);
             PlaylistItem {
@@ -1246,7 +1422,8 @@ fn parse_playlist(d: &[u8]) -> Vec<PlaylistItem> {
                 end_offset: u32at(it, 28),
             }
         })
-        .collect()
+        .collect();
+    (items, false)
 }
 
 fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
@@ -1342,6 +1519,102 @@ mod tests {
         let flp = parse(&bytes).unwrap();
         assert_eq!(flp.channels[0].name, "Lead");
         assert_eq!(flp.channels[1].name, "Kick");
+    }
+
+    /// One item of the playlist as early versions wrote it: 28 bytes with the row word at 12.
+    fn old_item(pos: u32, base: u16, ix: u16, len: u32, row: u16) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&pos.to_le_bytes());
+        d.extend_from_slice(&base.to_le_bytes());
+        d.extend_from_slice(&ix.to_le_bytes());
+        d.extend_from_slice(&len.to_le_bytes());
+        d.extend_from_slice(&row.to_le_bytes());
+        d.extend_from_slice(&3u16.to_le_bytes());
+        d.extend_from_slice(&0x8080_6440u32.to_le_bytes());
+        d.extend_from_slice(&u32::MAX.to_le_bytes());
+        d.extend_from_slice(&0x7fff_ffffu32.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn early_playlists_put_blocks_and_clips_on_tracks_from_the_top() {
+        let mut d = old_item(0, 0, 0, 768, 30951 - 9);
+        d.extend(old_item(768, 0, 0, 768, 30951 - 4));
+        d.extend(old_item(1536, 0, 0, 768, 30951 - 9));
+        d.extend(old_item(0, 0x5000, 6, 384, 30818 - 2));
+        d.extend(old_item(96, 0x5000, 0x5000 + 3, 96, 30818));
+        assert_eq!(old_playlist_size(&d, (4, 1, 2, 0)), Some(28));
+        assert_eq!(old_playlist_size(&d, (12, 0, 0, 0)), None);
+        let bytes = file(1, 96, vec![version("4.1.2"), Event::data(id::PLAYLIST, d)]);
+        let flp = parse(&bytes).unwrap();
+        let arr = &flp.arrangements[0];
+        assert!(arr.old_playlist);
+        let got: Vec<(u32, u16, ClipSource)> = arr.items.iter().map(|i| (i.position, i.track, i.source)).collect();
+        // patterns 4 and 9 have blocks: 4 takes the top track, 9 the next
+        assert_eq!(
+            got,
+            vec![
+                (0, 1, ClipSource::Pattern(9)),
+                (0, 2, ClipSource::Channel(6)),
+                (96, 0, ClipSource::Pattern(3)),
+                (768, 0, ClipSource::Pattern(4)),
+                (1536, 1, ClipSource::Pattern(9)),
+            ]
+        );
+    }
+
+    #[test]
+    fn early_notes_are_twenty_bytes_and_go_back_the_same() {
+        assert_eq!(note_size((4, 1, 2, 0)), 20);
+        assert_eq!(note_size((8, 0, 0, 0)), 20);
+        assert_eq!(note_size((9, 0, 0, 0)), 24);
+        let raw: Vec<u8> = vec![48, 0, 0, 0, 0x08, 0x40, 7, 0, 192, 0, 0, 0, 65, 120, 0, 0, 64, 100, 124, 130];
+        let bytes = file(8, 96, vec![version("4.1.2"), Event::word(id::NEW_PATTERN, 3), Event::data(id::PATTERN_NOTES, raw.clone())]);
+        let flp = parse(&bytes).unwrap();
+        let n = &flp.patterns[0].notes[0];
+        assert_eq!((n.position, n.rack_channel, n.length, n.key, n.velocity, n.pan, n.mod_x, n.mod_y), (48, 7, 192, 65, 100, 64, 124, 130));
+        let mut out = Vec::new();
+        n.write_old(&mut out);
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn early_levels_count_in_128_steps() {
+        let levels = |pan: u32, vol: u32| {
+            let mut d = Vec::new();
+            for v in [pan, vol, 0, 256, 0, 0] {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+            d
+        };
+        let old = parse(&file(1, 96, vec![version("4.1.2"), Event::word(id::NEW_CHANNEL, 0), Event::data(id::CHAN_LEVELS, levels(64, 56))])).unwrap();
+        assert_eq!((old.channels[0].pan, old.channels[0].volume), (6400, 5600));
+        let new = parse(&file(1, 96, vec![version("12.5.0"), Event::word(id::NEW_CHANNEL, 0), Event::data(id::CHAN_LEVELS, levels(6400, 5600))])).unwrap();
+        assert_eq!((new.channels[0].pan, new.channels[0].volume), (6400, 5600));
+    }
+
+    #[test]
+    fn step_dots_become_notes() {
+        let bytes = file(
+            2,
+            96,
+            vec![
+                version("4.1.2"),
+                Event::word(id::NEW_CHANNEL, 0),
+                Event::word(id::NEW_CHANNEL, 1),
+                Event::word(id::NEW_PATTERN, 2),
+                Event::word(id::DOT_VOL, 0x6000),
+                Event::word(id::DOT, 0x0100),
+                Event::word(id::DOT, 0x0104),
+                Event::word(id::DOT, 0x0008),
+            ],
+        );
+        let flp = parse(&bytes).unwrap();
+        assert!(flp.has_dots);
+        let p = flp.patterns.iter().find(|p| p.index == 2).unwrap();
+        let got: Vec<(u32, u16, u8)> = p.notes.iter().map(|n| (n.position, n.rack_channel, n.velocity)).collect();
+        // steps 0 and 4 are lit (step 8 is stored but off); the first carries its own level
+        assert_eq!(got, vec![(0, 1, 0x60), (96, 1, 100)]);
     }
 
     #[test]

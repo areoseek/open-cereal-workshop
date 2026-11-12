@@ -1193,7 +1193,8 @@ impl Gen {
                     t.osc[k] = Osc {
                         pan: (f[0] / 64.0).clamp(-1.0, 1.0),
                         shape: f[1] as u8,
-                        ratio: 2f32.powf((f[2] + f[3] / 100.0) / 12.0),
+                        // the keyboard's C5 is 523 Hz here: an octave above the note number
+                        ratio: 2.0 * 2f32.powf((f[2] + f[3] / 100.0) / 12.0),
                         phase: f[4] / 64.0,
                         // the knob spreads the two sides by up to half a semitone
                         spread: 2f32.powf(f[5] / 64.0 * 0.5 / 12.0),
@@ -2207,7 +2208,8 @@ mod tests {
         let dphase = 441.0 / 44100.0;
         let x: Vec<f32> = (0..44100).map(|_| st.frame(&tone, dphase)[0]).collect();
         let crossings = x.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
-        assert!((440..=442).contains(&crossings), "{crossings}");
+        // an octave above the note it is given, as the original sounds
+        assert!((880..=884).contains(&crossings), "{crossings}");
         // every shape stays in range
         for shape in 0..7 {
             g.p[1] = shape as f32;
