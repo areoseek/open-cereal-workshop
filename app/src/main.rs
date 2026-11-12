@@ -202,6 +202,9 @@ pub(crate) struct App {
     show_playlist: bool,
     show_mixer: bool,
     show_browser: bool,
+    /// The toolbar's output picture: the wave, or the level of each frequency.
+    scope_bars: bool,
+    scope_buf: Vec<f32>,
     typing_keys: bool,
     /// Snap hand-played notes to the piano roll's grid as they are recorded.
     rec_quantise: bool,
@@ -379,6 +382,8 @@ impl App {
             show_playlist: true,
             show_mixer: false,
             show_browser: true,
+            scope_bars: false,
+            scope_buf: Vec::new(),
             typing_keys: true,
             rec_quantise: false,
             focus: Win::None,
@@ -2475,6 +2480,41 @@ impl App {
                     let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                     ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
                     ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
+                    // what is going out: the wave, or after a click the level of each frequency
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 20.0), egui::Sense::click());
+                    if resp.hint("Output: click to switch between the wave and the frequencies").clicked() {
+                        self.scope_bars = !self.scope_bars;
+                    }
+                    let paint = ui.painter_at(rect);
+                    paint.rect_filled(rect, 2.0, egui::Color32::from_rgb(22, 26, 30));
+                    tr.output_scope(&mut self.scope_buf);
+                    let line = egui::Color32::from_rgb(130, 220, 170);
+                    if self.scope_bars {
+                        let spec = cereal_engine::scope::spectrum(&self.scope_buf);
+                        let half = spec.len() / 2;
+                        let bars = 32usize;
+                        for b in 0..bars {
+                            // evenly spaced by pitch from the second bin to the top
+                            let lo = (2.0 * (half as f32 / 2.0).powf(b as f32 / bars as f32)) as usize;
+                            let hi = ((2.0 * (half as f32 / 2.0).powf((b + 1) as f32 / bars as f32)) as usize).max(lo + 1).min(half);
+                            let v = spec.get(lo..hi).map_or(0.0, |s| s.iter().fold(0.0f32, |m, x| m.max(*x)));
+                            let h = ((20.0 * v.max(1e-6).log10() + 72.0) / 72.0).clamp(0.0, 1.0) * rect.height();
+                            if h > 0.5 {
+                                let x = rect.left() + b as f32 * rect.width() / bars as f32;
+                                paint.rect_filled(egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - h), egui::pos2(x + rect.width() / bars as f32 - 1.0, rect.bottom())), 0.0, line);
+                            }
+                        }
+                    } else {
+                        let n = self.scope_buf.len();
+                        let take = 1024.min(n);
+                        let pts: Vec<egui::Pos2> = (0..rect.width() as usize)
+                            .map(|x| {
+                                let v = self.scope_buf[n - take + (x * take / rect.width() as usize).min(take - 1)];
+                                egui::pos2(rect.left() + x as f32, rect.center().y - v.clamp(-1.0, 1.0) * rect.height() * 0.5)
+                            })
+                            .collect();
+                        paint.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, line)));
+                    }
                 });
             });
             ui.add_space(2.0);

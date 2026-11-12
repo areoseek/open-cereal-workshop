@@ -91,6 +91,9 @@ pub struct Transport {
     seek: AtomicI64,
     master: AtomicU32,
     peaks: Vec<[AtomicU32; 2]>,
+    /// The last stretch of what went out, both sides as one, for the scope in the toolbar.
+    out_scope: Vec<AtomicU32>,
+    out_scope_at: AtomicUsize,
     voices: AtomicUsize,
     tempo: AtomicU32,
     metronome: AtomicBool,
@@ -231,6 +234,8 @@ impl Transport {
             perf_log: Mutex::new(Vec::new()),
             perf_on: AtomicBool::new(false),
             midi: Mutex::new(Vec::with_capacity(256)),
+            out_scope: (0..OUT_SCOPE).map(|_| AtomicU32::new(0)).collect(),
+            out_scope_at: AtomicUsize::new(0),
             tap_want: AtomicU32::new(u32::MAX),
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
             rec_want: AtomicU32::new(u32::MAX),
@@ -408,6 +413,12 @@ impl Transport {
     pub fn take_recorded(&self) -> Vec<[f32; 2]> {
         let fresh = Vec::with_capacity(96_000);
         self.rec.lock().map(|mut r| std::mem::replace(&mut *r, fresh)).unwrap_or_default()
+    }
+    /// The last frames that went out, oldest first, both sides as one.
+    pub fn output_scope(&self, out: &mut Vec<f32>) {
+        let at = self.out_scope_at.load(Relaxed);
+        out.clear();
+        out.extend((0..OUT_SCOPE).map(|k| f32::from_bits(self.out_scope[(at + k) % OUT_SCOPE].load(Relaxed))));
     }
     pub fn watch_slot(&self, at: Option<(usize, u16)>) {
         self.tap_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
@@ -1057,6 +1068,9 @@ impl Hold {
         true
     }
 }
+
+/// Frames the toolbar scope looks back over.
+pub const OUT_SCOPE: usize = 2048;
 
 /// Making up for plug-ins whose sound comes out late: every other way into a mixer track is held back by
 /// as much, so that all of them meet in time.
@@ -3599,6 +3613,15 @@ impl Player {
             self.run_midi(&song, n);
             self.mix(&song, &mut out[done * channels..(done + n) * channels], channels);
             done += n;
+        }
+        if !self.offline {
+            let tr = &self.transport;
+            let mut at = tr.out_scope_at.load(Relaxed);
+            for f in out.chunks_exact(channels) {
+                tr.out_scope[at].store(((f[0] + f[channels - 1]) * 0.5).to_bits(), Relaxed);
+                at = (at + 1) % OUT_SCOPE;
+            }
+            tr.out_scope_at.store(at, Relaxed);
         }
     }
 
