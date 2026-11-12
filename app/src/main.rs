@@ -209,6 +209,9 @@ pub(crate) struct App {
     playlist: playlist::State,
     browser: browser::State,
     peaks: Vec<(f32, f32)>,
+    /// The mixer's wave view: the latest levels of every track, newest first, drawn down its meter.
+    pub(crate) mixer_wave: bool,
+    peak_hist: Vec<std::collections::VecDeque<f32>>,
     held: HashMap<Key, (u16, u8)>,
     actions: Vec<Action>,
     /// Undo history: snapshots of the song, oldest first; `hist_at` is the one on screen.
@@ -363,6 +366,8 @@ impl App {
             playlist: Default::default(),
             browser,
             peaks: vec![],
+            mixer_wave: false,
+            peak_hist: vec![],
             held: HashMap::new(),
             actions: vec![],
             history: vec![],

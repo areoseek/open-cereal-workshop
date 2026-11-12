@@ -115,7 +115,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+A / Ctrl+D | Select all the tracks / only the one with the keys | yes |
 | Ctrl+click, Shift+click a name plate, Shift+Left / Right | Add to the selection, select the run up to it; the selected tracks' faders, pans and mutes move together | yes |
 | Alt+R | Render the armed tracks to audio files | no |
-| Alt+W | Wave view | no |
+| Alt+W | Wave view: the meters show each track's latest sound as a wave | yes |
 | Shift+wheel on a track's name plate | Move that track left / right | yes |
 
 ## Piano roll

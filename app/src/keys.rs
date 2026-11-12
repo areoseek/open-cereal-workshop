@@ -427,6 +427,7 @@ impl App {
         if m.alt {
             match key {
                 Key::S if !repeat => self.solo_insert(i, true),
+                Key::W if !repeat => self.mixer_wave = !self.mixer_wave,
                 Key::ArrowLeft if i > 1 => {
                     self.song.swap_inserts(i, i - 1);
                     self.sel_insert = i - 1;

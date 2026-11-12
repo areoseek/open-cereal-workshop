@@ -24,8 +24,16 @@ impl App {
         if self.peaks.len() != n {
             self.peaks = vec![(0.0, 0.0); n];
         }
+        if self.peak_hist.len() != n {
+            self.peak_hist = vec![Default::default(); n];
+        }
         for (i, p) in self.peaks.iter_mut().enumerate() {
             let (l, r) = self.handle.transport.take_peak(i);
+            if self.mixer_wave {
+                let h = &mut self.peak_hist[i];
+                h.push_front(l.max(r));
+                h.truncate(110);
+            }
             p.0 = l.max(p.0 * 0.88);
             p.1 = r.max(p.1 * 0.88);
         }
@@ -104,7 +112,20 @@ impl App {
                                         self.dirty = true;
                                     }
                                     let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
-                                    let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), self.peaks[i]);
+                                    let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), if self.mixer_wave { (0.0, 0.0) } else { self.peaks[i] });
+                                    if self.mixer_wave {
+                                        // the sound of the last moments, newest at the top, as a wave down the meter
+                                        let (p, at) = (ui.painter(), r.rect);
+                                        for (k, a) in self.peak_hist[i].iter().enumerate() {
+                                            let y = at.top() + 1.0 + k as f32 * 2.0;
+                                            if y > at.bottom() - 1.0 {
+                                                break;
+                                            }
+                                            let w = (a.min(1.0).sqrt() * (at.width() * 0.5 - 1.0)).max(0.5);
+                                            let col = if *a > 1.0 { Color32::from_rgb(240, 80, 70) } else { GREEN.gamma_multiply(0.6) };
+                                            p.line_segment([egui::Pos2::new(at.center().x - w, y), egui::Pos2::new(at.center().x + w, y)], Stroke::new(1.5_f32, col));
+                                        }
+                                    }
                                     control_menu(&r, cereal_engine::song::Target::InsertVolume(i));
                                     if r.changed() {
                                         self.dirty = true;
