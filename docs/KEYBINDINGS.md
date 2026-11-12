@@ -55,7 +55,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | F4 | Next empty pattern, and name it | yes |
 | Ctrl+F4 | Next empty pattern | yes |
 | Shift+Ctrl+Up / Down | Move the current pattern up / down the list (outside the piano roll and playlist) | yes |
-| F2 | Rename the pattern | part: repeated presses do not walk the colours |
+| F2 | Rename the pattern | yes |
 | Ctrl+Shift+C | Clone the pattern | yes |
 
 ### Windows
@@ -186,7 +186,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Home | Play position to the start | yes |
 | Alt+T | Add a time marker at the play position and name it | yes |
 | Alt+* / Alt+/ | Play position to the next / previous time marker | yes |
-| Click, drag, right-click a marker | Jump to it, move it, rename or delete it | part: no marker action menu yet |
+| Click, drag, right-click a marker | Jump to it, move it, rename or delete it | yes |
 | PgUp / PgDn | Zoom in / out | yes |
 | 5, Shift+5 | Zoom on the selection | part: plain 5 with the typing keyboard off |
 | Shift+0 | Centre the view on the play position | yes |

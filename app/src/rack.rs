@@ -474,6 +474,10 @@ impl App {
         if let Some((ci, mut name)) = self.rack.rename.take() {
             let mut keep = true;
             egui::Window::new("Rename channel").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                if let (Some(c), Some(ch)) = (crate::widgets::walk_colour(ui), self.song.channels.get_mut(ci)) {
+                    ch.color = c;
+                    self.dirty = true;
+                }
                 crate::widgets::name_field(ui, &mut name);
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     if let Some(c) = self.song.channels.get_mut(ci) {

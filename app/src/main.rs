@@ -2423,6 +2423,10 @@ impl App {
             let mut keep = true;
             let mut open = true;
             egui::Window::new("Pattern name and colour").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                if let (Some(c), Some(p)) = (crate::widgets::walk_colour(ui), self.song.patterns.get_mut(pi)) {
+                    p.color = Some(c);
+                    self.dirty = true;
+                }
                 crate::widgets::name_field(ui, &mut name);
                 let mut col = self.song.patterns.get(pi).and_then(|p| p.color).unwrap_or([72, 81, 86]);
                 if ui.color_edit_button_srgb(&mut col).changed() {
@@ -2618,6 +2622,10 @@ impl eframe::App for App {
         if let Some((i, mut name)) = self.rename_insert.take() {
             let mut keep = true;
             egui::Window::new("Rename mixer track").collapsible(false).resizable(false).show(ctx, |ui| {
+                if let (Some(c), Some(ins)) = (crate::widgets::walk_colour(ui), self.song.inserts.get_mut(i)) {
+                    ins.color = Some(c);
+                    self.dirty = true;
+                }
                 crate::widgets::name_field(ui, &mut name);
                 if ui.input(|x| x.key_pressed(Key::Enter)) {
                     if let Some(ins) = self.song.inserts.get_mut(i) {

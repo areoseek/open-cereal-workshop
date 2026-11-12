@@ -200,6 +200,19 @@ pub(crate) fn set_group<T>(items: &mut [T], idx: &[usize], on: bool, group: impl
     }
 }
 
+/// F2 pressed again inside a rename window hands out another colour each time. Call it ahead of the name field.
+pub fn walk_colour(ui: &Ui) -> Option<[u8; 3]> {
+    let id = ui.make_persistent_id("name_field");
+    if !ui.memory(|m| m.has_focus(id)) || !ui.input(|i| i.key_pressed(egui::Key::F2)) {
+        return None;
+    }
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let hue = (n % 360) as f32 / 360.0;
+    let sat = 0.35 + ((n / 360) % 30) as f32 / 100.0;
+    let c: egui::Color32 = egui::ecolor::Hsva::new(hue, sat, 0.62, 1.0).into();
+    Some([c.r(), c.g(), c.b()])
+}
+
 /// The one text line of a rename window: it takes the keys as it appears, with the old name selected so typing replaces it.
 pub fn name_field(ui: &mut Ui, text: &mut String) -> Response {
     let id = ui.make_persistent_id("name_field");
