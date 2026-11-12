@@ -523,10 +523,44 @@ impl App {
         self.raise = Some(w);
     }
 
+    /// The name a big window goes by this session. Putting a saved layout on show gives the windows new
+    /// names, so they come up where the layout wants them and forget where they were.
+    pub(crate) fn win_id(&self, name: &str) -> egui::Id {
+        if self.layout_gen == 0 { egui::Id::new(name) } else { egui::Id::new((name, self.layout_gen)) }
+    }
+
+    /// The place and inner size a saved layout gives window `k`, or the usual starting ones.
+    pub(crate) fn win_place(&self, k: usize, pos: [f32; 2], size: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+        match &self.layout {
+            Some(n) if n[k * 4 + 2] > 0.0 => ([n[k * 4], n[k * 4 + 1]], [n[k * 4 + 2], n[k * 4 + 3]]),
+            _ => (pos, size),
+        }
+    }
+
+    pub(crate) fn save_layout(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let flags = [self.show_playlist, self.show_rack, self.show_piano, self.show_mixer, self.show_browser];
+        self.settings.layouts.retain(|l| l.0 != name);
+        self.settings.layouts.push((name.to_string(), self.win_now, flags));
+        let _ = self.settings.save();
+        self.status = format!("Layout \"{name}\" saved");
+    }
+
+    pub(crate) fn apply_layout(&mut self, k: usize) {
+        let Some((_, n, f)) = self.settings.layouts.get(k).cloned() else { return };
+        self.layout = Some(n);
+        self.layout_gen += 1;
+        self.pl_max = false;
+        [self.show_playlist, self.show_rack, self.show_piano, self.show_mixer, self.show_browser] = f;
+    }
+
     /// What `focus_window` asked for, done once the frame's drawing surface is at hand.
     pub(crate) fn raise_window(&mut self, ctx: &egui::Context) {
         if let Some(name) = self.raise.take().and_then(|w| WINDOWS.iter().find(|x| x.0 == w)).map(|x| x.1) {
-            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(name)));
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, self.win_id(name)));
         }
     }
 

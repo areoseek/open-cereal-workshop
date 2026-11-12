@@ -216,6 +216,13 @@ pub(crate) struct App {
     pub(crate) focus: Win,
     /// A window to bring in front of the others on the next frame.
     raise: Option<Win>,
+    /// Counts the layouts put on show; see `win_id`.
+    layout_gen: u32,
+    layout: Option<[f32; 16]>,
+    /// Where the four big windows are now: left, top, inner width and height each.
+    win_now: [f32; 16],
+    layout_name: String,
+    backdrop_tex: Option<(std::path::PathBuf, Option<egui::TextureHandle>)>,
     /// The playlist fills the whole work area.
     pl_max: bool,
     /// The window for picking an instrument to add (F8).
@@ -397,6 +404,11 @@ impl App {
             rec_quantise: false,
             focus: Win::None,
             raise: None,
+            layout_gen: 0,
+            layout: None,
+            win_now: [0.0; 16],
+            layout_name: String::new(),
+            backdrop_tex: None,
             pl_max: false,
             show_picker: false,
             show_project: false,
@@ -1962,7 +1974,10 @@ impl App {
                         self.handle.transport.set_pattern(to);
                         self.dirty = true;
                     }
-                    Key::H if modifiers.shift => ctx.memory_mut(|m| m.reset_areas()),
+                    Key::H if modifiers.shift => {
+                        self.layout = None;
+                        ctx.memory_mut(|m| m.reset_areas());
+                    }
                     Key::B => {
                         self.rec_blend = !self.rec_blend;
                         self.status = format!("Blend recorded notes: {}", if self.rec_blend { "on" } else { "off" });
@@ -2288,15 +2303,55 @@ impl App {
                     ui.separator();
                     ui.menu_button("Layout", |ui| {
                         if ui.button("Arrange windows: default     Ctrl+Shift+H").clicked() {
+                            self.layout = None;
                             ui.ctx().memory_mut(|m| m.reset_areas());
                             ui.close_menu();
                         }
+                        let mut gone = None;
+                        for k in 0..self.settings.layouts.len() {
+                            ui.horizontal(|ui| {
+                                if ui.button(format!("Arrange windows: {}", self.settings.layouts[k].0)).clicked() {
+                                    self.apply_layout(k);
+                                    ui.close_menu();
+                                }
+                                if ui.small_button("x").hint("Forget this layout").clicked() {
+                                    gone = Some(k);
+                                }
+                            });
+                        }
+                        if let Some(k) = gone {
+                            self.settings.layouts.remove(k);
+                            let _ = self.settings.save();
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.layout_name).desired_width(120.0).hint_text("Name"));
+                            if ui.add_enabled(!self.layout_name.trim().is_empty(), egui::Button::new("Save this layout")).hint("Remember where the windows are and which are open, under this name").clicked() {
+                                let name = std::mem::take(&mut self.layout_name);
+                                self.save_layout(&name);
+                                ui.close_menu();
+                            }
+                        });
+                        ui.separator();
                         if ui.button("Close all windows     F12").clicked() {
                             self.close_all();
                             ui.close_menu();
                         }
                         if ui.button("Show the main windows").hint("Playlist, channel rack, mixer and browser").clicked() {
                             (self.show_playlist, self.show_rack, self.show_mixer, self.show_browser) = (true, true, true, true);
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Background", |ui| {
+                        if ui.button("Choose a picture...").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().add_filter("Picture", &["png", "jpg", "jpeg", "bmp"]).pick_file() {
+                                self.settings.backdrop = Some(p);
+                                let _ = self.settings.save();
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(self.settings.backdrop.is_some(), egui::Button::new("No picture")).clicked() {
+                            self.settings.backdrop = None;
+                            let _ = self.settings.save();
                             ui.close_menu();
                         }
                     });
@@ -2973,7 +3028,28 @@ impl eframe::App for App {
         if self.show_browser {
             egui::SidePanel::left("browser").default_width(230.0).frame(egui::Frame::new().fill(PANEL_DARK).inner_margin(6.0)).show(ctx, |ui| self.browser_ui(ui));
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |_| {});
+        // the picture behind the windows is read once, and again when another is chosen
+        if self.backdrop_tex.as_ref().map(|t| &t.0) != self.settings.backdrop.as_ref() {
+            self.backdrop_tex = self.settings.backdrop.clone().map(|p| {
+                let tex = image::open(&p).ok().map(|pic| {
+                    let pic = if pic.width() > 2560 || pic.height() > 1600 { pic.resize(2560, 1600, image::imageops::FilterType::Triangle) } else { pic };
+                    let rgba = pic.to_rgba8();
+                    let img = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], &rgba);
+                    ctx.load_texture("backdrop", img, egui::TextureOptions::LINEAR)
+                });
+                (p, tex)
+            });
+        }
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |ui| {
+            if let Some(tex) = self.backdrop_tex.as_ref().and_then(|t| t.1.as_ref()) {
+                // fills the space, cut at the sides or top and bottom rather than squeezed
+                let area = ui.max_rect();
+                let [w, h] = tex.size().map(|v| v as f32);
+                let (fit_w, fit_h) = ((area.width() / area.height() * h / w).min(1.0), (area.height() / area.width() * w / h).min(1.0));
+                let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(fit_w, fit_h));
+                ui.painter().image(tex.id(), area, uv, egui::Color32::WHITE);
+            }
+        });
 
         let frame = egui::Frame::window(&ctx.style()).fill(PANEL);
         // where windows first appear: playlist on top, rack and mixer side by side under it, channel settings
@@ -3000,26 +3076,59 @@ impl eframe::App for App {
                 self.playlist_ui(ui)
             })
         } else {
-            egui::Window::new("Playlist").open(&mut open).frame(frame).default_pos([left, top]).default_size([wide, upper]).show(ctx, |ui| self.playlist_ui(ui))
+            let (pos, size) = self.win_place(0, [left, top], [wide, upper]);
+            let shown = egui::Window::new("Playlist").id(self.win_id("Playlist")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+                let inner = ui.max_rect().size();
+                self.playlist_ui(ui);
+                inner
+            });
+            if let Some(r) = &shown {
+                self.win_now[0..4].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(wide, |s| s.x), r.inner.map_or(upper, |s| s.y)]);
+            }
+            shown.map(|r| egui::InnerResponse::new(Some(()), r.response))
         };
         if shown.is_some_and(|r| took(&r.response)) {
             self.focus = Win::Playlist;
         }
         self.show_playlist = open;
         let mut open = self.show_rack;
-        let shown = egui::Window::new("Channel rack").open(&mut open).frame(frame).default_pos([left, low_y]).default_size([rack_w, low_h]).show(ctx, |ui| self.rack_ui(ui));
+        let (pos, size) = self.win_place(1, [left, low_y], [rack_w, low_h]);
+        let shown = egui::Window::new("Channel rack").id(self.win_id("Channel rack")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+            let inner = ui.max_rect().size();
+            self.rack_ui(ui);
+            inner
+        });
+        if let Some(r) = &shown {
+            self.win_now[4..8].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(rack_w, |s| s.x), r.inner.map_or(low_h, |s| s.y)]);
+        }
         if shown.is_some_and(|r| took(&r.response)) {
             self.focus = Win::Rack;
         }
         self.show_rack = open;
         let mut open = self.show_piano;
-        let shown = egui::Window::new("Piano roll").open(&mut open).frame(frame).default_pos([left + 24.0, top + 24.0]).default_size([wide - 24.0, upper + 60.0]).show(ctx, |ui| self.piano_ui(ui));
+        let (pos, size) = self.win_place(2, [left + 24.0, top + 24.0], [wide - 24.0, upper + 60.0]);
+        let shown = egui::Window::new("Piano roll").id(self.win_id("Piano roll")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+            let inner = ui.max_rect().size();
+            self.piano_ui(ui);
+            inner
+        });
+        if let Some(r) = &shown {
+            self.win_now[8..12].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(wide, |s| s.x), r.inner.map_or(upper, |s| s.y)]);
+        }
         if shown.is_some_and(|r| took(&r.response)) {
             self.focus = Win::Piano;
         }
         self.show_piano = open;
         let mut open = self.show_mixer;
-        let shown = egui::Window::new("Mixer").open(&mut open).frame(frame).default_pos([left + rack_w + 28.0, low_y]).default_size([(screen.width() - left - rack_w - 44.0).max(400.0), low_h]).show(ctx, |ui| self.mixer_ui(ui));
+        let (pos, size) = self.win_place(3, [left + rack_w + 28.0, low_y], [(screen.width() - left - rack_w - 44.0).max(400.0), low_h]);
+        let shown = egui::Window::new("Mixer").id(self.win_id("Mixer")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+            let inner = ui.max_rect().size();
+            self.mixer_ui(ui);
+            inner
+        });
+        if let Some(r) = &shown {
+            self.win_now[12..16].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(400.0, |s| s.x), r.inner.map_or(low_h, |s| s.y)]);
+        }
         if shown.is_some_and(|r| took(&r.response)) {
             self.focus = Win::Mixer;
         }

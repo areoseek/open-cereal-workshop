@@ -63,6 +63,11 @@ pub struct Settings {
     pub tags: Vec<(PathBuf, Vec<String>)>,
     /// The browser pages of the user's own: name, then a folder ('F') or a search ('S') and what it holds.
     pub tabs: Vec<(String, char, String)>,
+    /// Saved window layouts: name, the four big windows (left, top, width, height each), and which of
+    /// playlist, rack, piano roll, mixer and browser are on show.
+    pub layouts: Vec<(String, [f32; 16], [bool; 5])>,
+    /// A picture behind the windows.
+    pub backdrop: Option<PathBuf>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -147,6 +152,17 @@ impl Settings {
                         }
                     }
                 }
+                Some(("layout", v)) => {
+                    let mut it = v.splitn(3, '\t');
+                    if let (Some(name), Some(nums), Some(flags)) = (it.next(), it.next(), it.next()) {
+                        let n: Vec<f32> = nums.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        let f: Vec<bool> = flags.trim().chars().map(|c| c == '1').collect();
+                        if let (Ok(n), Ok(f)) = (<[f32; 16]>::try_from(n), <[bool; 5]>::try_from(f)) {
+                            s.layouts.push((name.to_string(), n, f));
+                        }
+                    }
+                }
+                Some(("backdrop", v)) => s.backdrop = Some(PathBuf::from(v.trim())).filter(|p| !p.as_os_str().is_empty()),
                 Some(("content_prompt", v)) => s.never_ask = v.trim() == "never",
                 Some(("audio_out", v)) => s.audio_out = v.trim().to_string(),
                 Some(("audio_in", v)) => s.audio_in = v.trim().to_string(),
@@ -205,6 +221,14 @@ impl Settings {
         }
         for (name, kind, what) in &self.tabs {
             out += &format!("tab={}\t{kind}\t{what}\n", name.replace(['\t', '\n'], " "));
+        }
+        for (name, n, f) in &self.layouts {
+            let nums: Vec<String> = n.iter().map(|x| format!("{x:.0}")).collect();
+            let flags: String = f.iter().map(|b| if *b { '1' } else { '0' }).collect();
+            out += &format!("layout={}\t{}\t{flags}\n", name.replace(['\t', '\n'], " "), nums.join(","));
+        }
+        if let Some(p) = &self.backdrop {
+            out += &format!("backdrop={}\n", p.display());
         }
         if self.rate != 0 {
             out += &format!("rate={}\n", self.rate);
