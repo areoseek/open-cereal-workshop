@@ -690,6 +690,7 @@ pub(super) struct Plug {
     frame: *mut Frame,
     /// Whether it offers an editor we can show, once asked.
     editor: std::sync::OnceLock<bool>,
+    latency: AtomicU32,
     run: Mutex<Run>,
 }
 
@@ -804,7 +805,7 @@ impl Plug {
                 out_changes: Changes::new(),
                 steady: 0,
             };
-            let plug = Plug { component, processor, controller, separate, links, side, midi_map, meta: Mutex::new(HashMap::new()), has_note_in, frame: Frame::make(), editor: std::sync::OnceLock::new(), run: Mutex::new(run) };
+            let plug = Plug { component, processor, controller, separate, links, side, midi_map, meta: Mutex::new(HashMap::new()), has_note_in, frame: Frame::make(), editor: std::sync::OnceLock::new(), latency: AtomicU32::new(0), run: Mutex::new(run) };
             plug.sync_controller();
             plug.params();
             Some((plug, found))
@@ -879,6 +880,7 @@ impl Plug {
             }
             r.active = (cv.set_active)(self.component, 1) == OK;
             if r.active {
+                self.latency.store((pv.latency)(self.processor), Relaxed);
                 (pv.set_processing)(self.processor, 1);
             }
             r.active
@@ -1187,6 +1189,10 @@ impl Plug {
 
     pub fn take_rescan(&self) -> bool {
         self.handler().rescan.swap(false, Relaxed)
+    }
+
+    pub fn latency(&self) -> u32 {
+        self.latency.load(Relaxed)
     }
 
     pub fn has_window(&self) -> bool {

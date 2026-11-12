@@ -547,6 +547,7 @@ impl Handle {
             scratch: Vec::with_capacity(BLOCK),
             cap: Vec::new(),
             cap_at: Vec::new(),
+            comp: Comp::default(),
             inbuf: Vec::new(),
             blockno: 0,
             dirty: vec![],
@@ -1001,6 +1002,115 @@ impl Voice {
 }
 
 /// Lives on the audio thread.
+/// A stretch of sound held back by a fixed number of frames.
+#[derive(Default)]
+struct Hold {
+    buf: Vec<[f32; 2]>,
+    at: usize,
+    /// How many frames of what it holds may still carry sound.
+    live: usize,
+}
+
+impl Hold {
+    fn set(&mut self, frames: usize) {
+        if self.buf.len() != frames {
+            self.buf.clear();
+            self.buf.resize(frames, [0.0; 2]);
+            self.at = 0;
+            self.live = 0;
+        }
+    }
+    /// Pass a block through. `sound` says whether the block may carry any; the answer says the same of
+    /// what comes out.
+    fn run(&mut self, io: &mut [[f32; 2]], sound: bool) -> bool {
+        let d = self.buf.len();
+        if d == 0 || (!sound && self.live == 0) {
+            return sound;
+        }
+        for f in io.iter_mut() {
+            std::mem::swap(f, &mut self.buf[self.at]);
+            self.at += 1;
+            if self.at == d {
+                self.at = 0;
+            }
+        }
+        self.live = if sound { d } else { self.live.saturating_sub(io.len()) };
+        true
+    }
+}
+
+/// Making up for plug-ins whose sound comes out late: every other way into a mixer track is held back by
+/// as much, so that all of them meet in time.
+#[derive(Default)]
+struct Comp {
+    on: bool,
+    /// Which song and block this was last worked out for.
+    stamp: (usize, u64),
+    /// Per track: the hold on what plays straight into it, and on each of its sends (by destination).
+    direct: Vec<Hold>,
+    sends: Vec<Vec<(usize, Hold)>>,
+    tmp: Vec<[f32; 2]>,
+    #[cfg(test)]
+    fake: Vec<(usize, usize)>,
+}
+
+impl Comp {
+    fn fit(&mut self, song: &Song, at: u64, rate: f32) {
+        let key = song as *const Song as usize;
+        if self.stamp.0 == key && at < self.stamp.1 + 64 && self.stamp.1 != 0 {
+            return;
+        }
+        self.stamp = (key, at.max(1));
+        let ni = song.inserts.len();
+        let cap = (rate * 2.0) as usize;
+        let (mut into, mut out) = (vec![0usize; ni], vec![0usize; ni]);
+        let mut any = false;
+        for &i in &song.mix_order {
+            if i >= ni {
+                continue;
+            }
+            let ins = &song.inserts[i];
+            #[allow(unused_mut)]
+            let mut own: usize = ins.slots.iter().filter(|s| s.enabled).filter_map(|s| s.fx.as_ref()?.ext.as_ref()).map(|h| h.0.latency() as usize).sum();
+            #[cfg(test)]
+            {
+                own += self.fake.iter().filter(|f| f.0 == i).map(|f| f.1).sum::<usize>();
+            }
+            any |= own > 0;
+            out[i] = (into[i] + own).min(cap);
+            if ins.enabled && i != 0 {
+                for &d in ins.sends.iter().filter(|d| **d < ni) {
+                    into[d] = into[d].max(out[i]);
+                }
+            }
+        }
+        self.on = any;
+        if !any {
+            if !self.direct.is_empty() {
+                self.direct.clear();
+                self.sends.clear();
+            }
+            return;
+        }
+        self.direct.resize_with(ni, Hold::default);
+        self.sends.resize_with(ni, Vec::new);
+        for i in 0..ni {
+            self.direct[i].set(into[i]);
+            let ins = &song.inserts[i];
+            let list = &mut self.sends[i];
+            list.retain(|l| ins.sends.contains(&l.0));
+            for &d in ins.sends.iter().filter(|d| **d < ni) {
+                if !list.iter().any(|l| l.0 == d) {
+                    list.push((d, Hold::default()));
+                }
+            }
+            for l in list.iter_mut() {
+                l.1.set(into[l.0].saturating_sub(out[i]));
+            }
+        }
+    }
+}
+
 pub struct Player {
     /// A mixer track whose sound after its fader is kept in `stem_buf`, for rendering tracks to files.
     pub stem: Option<usize>,
@@ -1060,6 +1170,7 @@ pub struct Player {
     /// What each insert put out this block, kept for units on other inserts that listen to it.
     cap: Vec<Vec<[f32; 2]>>,
     cap_at: Vec<u64>,
+    comp: Comp,
     /// This block's share of the sound card inputs.
     inbuf: Vec<f32>,
     blockno: u64,
@@ -3059,12 +3170,20 @@ impl Player {
                 }
             }
         }
+        self.comp.fit(song, self.blockno, self.sr);
+        if self.comp.on {
+            for i in 0..ni.min(self.comp.direct.len()) {
+                self.dirty[i] = self.comp.direct[i].run(&mut self.buses[i][..n], self.dirty[i]);
+            }
+        }
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
             let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Deck)));
             // a track being recorded runs through silence too, or the pauses would fall out of the take
             let taken = self.transport.rec_want.load(Relaxed);
             let sender = sender || (taken != u32::MAX && (taken >> 6) as usize == i);
+            // so does sound still held back on its way out of the track
+            let sender = sender || (self.comp.on && self.comp.sends.get(i).is_some_and(|l| l.iter().any(|h| h.1.live > 0)));
             if i >= ni || (!self.dirty[i] && self.ring[i] == 0 && !sender) {
                 if self.stem == Some(i) {
                     self.stem_buf.resize(self.stem_buf.len() + n, [0.0; 2]);
@@ -3072,6 +3191,7 @@ impl Player {
                 continue;
             }
             let ins = &song.inserts[i];
+            let had_sound = self.dirty[i] || self.ring[i] > 0;
             let mut bus = std::mem::take(&mut self.buses[i]);
             // effect slots, top to bottom, ahead of the insert's own controls
             if ins.enabled && (!ins.slots.is_empty() || !self.fx[i].is_empty()) {
@@ -3306,9 +3426,21 @@ impl Player {
                                 self.dirty[d] = true;
                             }
                             let lv = law::fader_gain(ins.send_level(d));
-                            for (o, f) in self.buses[d][..n].iter_mut().zip(&bus[..n]) {
-                                o[0] += f[0] * lv;
-                                o[1] += f[1] * lv;
+                            let hold = if self.comp.on { self.comp.sends.get_mut(i).and_then(|l| l.iter_mut().find(|h| h.0 == d && !h.1.buf.is_empty())) } else { None };
+                            if let Some(h) = hold {
+                                let tmp = &mut self.comp.tmp;
+                                tmp.clear();
+                                tmp.extend_from_slice(&bus[..n]);
+                                h.1.run(tmp, had_sound);
+                                for (o, f) in self.buses[d][..n].iter_mut().zip(tmp.iter()) {
+                                    o[0] += f[0] * lv;
+                                    o[1] += f[1] * lv;
+                                }
+                            } else {
+                                for (o, f) in self.buses[d][..n].iter_mut().zip(&bus[..n]) {
+                                    o[0] += f[0] * lv;
+                                    o[1] += f[1] * lv;
+                                }
                             }
                             self.dirty[d] = true;
                         }
@@ -4245,6 +4377,34 @@ mod tests {
         assert!(buf.iter().any(|x| x.abs() > 0.1));
         assert!(h.transport.take_peak(3).0 > 0.1);
         assert!(h.transport.take_peak(0).0 > 0.1);
+    }
+
+    #[test]
+    fn a_late_track_makes_the_others_wait_for_it() {
+        let mut s = Song::new();
+        let mut data = vec![0.0f32; 256];
+        data[0] = 0.9;
+        s.channels[0].set_sample(Some(Arc::new(Sample::from_mono("tick", 48_000, &data))));
+        s.channels[0].volume = 1.0;
+        s.channels[1] = s.channels[0].clone();
+        s.channels[0].insert = 1;
+        s.channels[1].insert = 2;
+        let first_and_last = |fake: Vec<(usize, usize)>| {
+            let (mut h, mut p) = new_player(s.clone(), 48_000.0);
+            p.comp.fake = fake;
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            h.send(Cmd::NoteOn { chan: 1, key: 60, vel: 1.0 });
+            let mut buf = vec![0.0f32; 4096];
+            p.render(&mut buf, 2);
+            let hits: Vec<usize> = buf.chunks(2).enumerate().filter(|(_, f)| f[0].abs() > 0.05).map(|(i, _)| i).collect();
+            (hits[0], *hits.last().unwrap())
+        };
+        let (a, b) = first_and_last(vec![]);
+        assert!(b - a < 8, "with nothing late both tracks sound together ({a}..{b})");
+        // track 1 says its sound comes 100 frames late: track 2 is held back by as much to meet it
+        let (c, d) = first_and_last(vec![(1, 100)]);
+        assert_eq!(c, a);
+        assert!((d as i64 - b as i64 - 100).abs() <= 1, "the other track waits 100 frames ({c}..{d})");
     }
 
     fn tone_song(secs: f32) -> Song {

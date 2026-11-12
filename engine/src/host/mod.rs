@@ -522,6 +522,8 @@ pub struct Instance {
     seen_calls: AtomicU64,
     gui_open: AtomicBool,
     offline: AtomicBool,
+    /// How many frames late its sound comes out, as it said when last started.
+    latency: AtomicU32,
     pub has_note_in: bool,
     /// Set when the plug-in is of the VST3 kind; the fields above then stay empty.
     v3: Option<vst3::Plug>,
@@ -571,6 +573,7 @@ impl Instance {
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
                 offline: AtomicBool::new(false),
+                latency: AtomicU32::new(0),
                 has_note_in: plug.has_note_in,
                 v3: Some(plug),
                 table: Mutex::new((Vec::new(), Vec::new())),
@@ -675,6 +678,7 @@ impl Instance {
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
                 offline: AtomicBool::new(false),
+                latency: AtomicU32::new(0),
                 has_note_in,
                 v3: None,
                 table: Mutex::new((Vec::new(), Vec::new())),
@@ -776,7 +780,20 @@ impl Instance {
             p.out_bufs = bufs(&p.outs, &mut p.out_ptrs);
             p.rate = rate;
             p.active = pl.activate.is_some_and(|f| f(self.plugin, rate as f64, 1, MAX_FRAMES as u32));
+            if p.active {
+                let table = pl.get_extension.map(|f| f(self.plugin, EXT_LATENCY.as_ptr() as *const c_char) as *const PluginLatency);
+                let late = table.and_then(|t| t.as_ref()).and_then(|t| t.get).map(|f| f(self.plugin)).unwrap_or(0);
+                self.latency.store(late, Relaxed);
+            }
             p.active
+        }
+    }
+
+    /// How many frames late the plug-in's sound comes out (look-ahead and the like), for the mixer to make up.
+    pub fn latency(&self) -> u32 {
+        match &self.v3 {
+            Some(v) => v.latency(),
+            None => self.latency.load(Relaxed),
         }
     }
 

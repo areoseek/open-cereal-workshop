@@ -340,6 +340,13 @@ pub struct PluginFd {
     pub on_fd: Option<unsafe extern "C" fn(p: *const Plugin, fd: i32, flags: u32)>,
 }
 
+pub const EXT_LATENCY: &[u8] = b"clap.latency\0";
+
+#[repr(C)]
+pub struct PluginLatency {
+    pub get: Option<unsafe extern "C" fn(p: *const Plugin) -> u32>,
+}
+
 pub const EXT_GUI: &[u8] = b"clap.gui\0";
 pub const WINDOW_X11: &[u8] = b"x11\0";
 pub const WINDOW_WAYLAND: &[u8] = b"wayland\0";
