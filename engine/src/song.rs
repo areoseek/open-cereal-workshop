@@ -1594,7 +1594,16 @@ impl Song {
                     Arc::new(m)
                 });
                 let mut ch = Chan {
-                    name: if c.name.is_empty() { if c.plugin.is_empty() { "Sampler".into() } else { c.plugin.clone() } } else { c.name.clone() },
+                    name: if !c.name.is_empty() {
+                        c.name.clone()
+                    } else if !c.plugin.is_empty() {
+                        c.plugin.clone()
+                    } else {
+                        // a nameless sampler goes by its sound's file name
+                        let file = c.sample_path.rsplit(['/', '\\']).next().unwrap_or("");
+                        let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+                        if stem.is_empty() { "Sampler".into() } else { stem.to_string() }
+                    },
                     kind: c.kind,
                     plugin: c.plugin.clone(),
                     sample_path: c.sample_path.clone(),
