@@ -184,7 +184,7 @@ impl App {
         let ci = self.song.channels.len() - 1;
         let ntracks = self.song.tracks.len().max(1) as u16;
         let track = (0..ntracks).find(|&tr| !self.song.clips.iter().any(|c| c.track == tr)).unwrap_or(0);
-        self.song.clips.push(Clip { pos: 0, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false });
+        self.song.clips.push(Clip { pos: 0, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false, group: 0 });
         self.show_playlist = true;
         self.dirty = true;
         self.status = format!("Automation clip made for {}", self.song.target_name(t));
@@ -201,6 +201,7 @@ impl App {
     }
 
     pub(crate) fn playlist_ui(&mut self, ui: &mut Ui) {
+        self.pl_whole_groups();
         let pat = self.handle.transport.pattern();
         let ppq = self.song.ppq as f32;
         let bar = self.song.bar();
@@ -566,7 +567,14 @@ impl App {
                                 if !self.playlist.sel.contains(&i) {
                                     self.playlist.sel.clear();
                                 }
-                                let mut targets: Vec<usize> = if self.playlist.sel.is_empty() { vec![i] } else { self.playlist.sel.iter().copied().collect() };
+                                let mut targets: Vec<usize> = if !self.playlist.sel.is_empty() {
+                                    self.playlist.sel.iter().copied().collect()
+                                } else if self.song.clips[i].group != 0 {
+                                    // a grouped clip takes its group along
+                                    (0..self.song.clips.len()).filter(|&k| self.song.clips[k].group == self.song.clips[i].group).collect()
+                                } else {
+                                    vec![i]
+                                };
                                 let mode = if tool == Tool::Slip { Mode::Slip } else { match edge { -1 => Mode::Left, 1 => Mode::Right, _ => Mode::Move } };
                                 if mods.shift && mode == Mode::Move {
                                     // the originals stay; copies travel
@@ -577,6 +585,7 @@ impl App {
                                         let c = self.song.clips[t].clone();
                                         self.song.clips.push(c);
                                     }
+                                    crate::widgets::fresh_groups(&mut self.song.clips, &copies, |c| &mut c.group);
                                     self.playlist.sel = if was_sel { copies.iter().copied().collect() } else { BTreeSet::new() };
                                     targets = copies;
                                     self.dirty = true;
@@ -587,7 +596,7 @@ impl App {
                             None if tool == Tool::Slip => {}
                             None => {
                                 let (src, len, offset) = self.playlist.brush.unwrap_or((ClipSrc::Pattern(pat), self.song.pattern_length(pat), 0));
-                                let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false };
+                                let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false, group: 0 };
                                 self.song.clips.push(c.clone());
                                 self.playlist.sel.clear();
                                 self.playlist.drag = Some(if tool == Tool::Paint { Drag::Paint } else { Drag::Clips { mode: Mode::Move, anchor_tick: tick_of(pp.x), anchor_track: track as i32, orig: vec![(self.song.clips.len() - 1, c)] } });
@@ -727,7 +736,7 @@ impl App {
                         let pos = snap(tick_of(pp.x)) / unit * unit;
                         let track = track_of(pp.y) as u16;
                         if !self.song.clips.iter().any(|c| c.track == track && c.pos < pos + len && pos < c.pos + c.len) {
-                            self.song.clips.push(Clip { pos, len, track, src, offset, muted: false });
+                            self.song.clips.push(Clip { pos, len, track, src, offset, muted: false, group: 0 });
                             self.dirty = true;
                         }
                     } else if !down {
@@ -935,6 +944,24 @@ impl App {
         self.playlist.sel = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].pos >= lo && self.song.clips[i].pos < hi).collect();
     }
 
+    /// Make the selected clips one group, or take them out of their groups.
+    fn pl_group(&mut self, on: bool) {
+        let t: Vec<usize> = self.playlist.sel.iter().copied().collect();
+        if !t.is_empty() {
+            crate::widgets::set_group(&mut self.song.clips, &t, on, |c| &mut c.group);
+            self.dirty = true;
+        }
+    }
+
+    /// A selection that holds part of a group holds all of it.
+    fn pl_whole_groups(&mut self) {
+        let clips = &self.song.clips;
+        let groups: BTreeSet<u16> = self.playlist.sel.iter().filter_map(|&i| clips.get(i)).map(|c| c.group).filter(|g| *g != 0).collect();
+        if !groups.is_empty() {
+            self.playlist.sel.extend((0..clips.len()).filter(|&i| groups.contains(&clips[i].group)));
+        }
+    }
+
     /// Every clip that plays the same thing as one of the selected clips.
     fn pl_select_same(&mut self) {
         let clips = &self.song.clips;
@@ -1004,6 +1031,8 @@ impl App {
             self.playlist.sel.insert(clips.len());
             clips.push(c);
         }
+        let new: Vec<usize> = self.playlist.sel.iter().copied().collect();
+        crate::widgets::fresh_groups(clips, &new, |c| &mut c.group);
         self.dirty = true;
     }
 
@@ -1098,6 +1127,8 @@ impl App {
                 self.song.clips.push(Clip { pos: c.pos - first + to, ..c.clone() });
             }
         }
+        let new: Vec<usize> = self.playlist.sel.iter().copied().collect();
+        crate::widgets::fresh_groups(&mut self.song.clips, &new, |c| &mut c.group);
         self.dirty = true;
     }
 
@@ -1125,6 +1156,7 @@ impl App {
                 Key::T if !m.shift && !repeat => self.add_marker(),
                 Key::Slash => self.jump_marker(false),
                 Key::M => self.pl_mute(!m.shift),
+                Key::G if !repeat => self.pl_group(false),
                 _ => return false,
             }
             return true;
@@ -1141,6 +1173,10 @@ impl App {
                 }
                 Key::Q => {
                     self.pl_quantise();
+                    return true;
+                }
+                Key::G if !repeat => {
+                    self.pl_group(true);
                     return true;
                 }
                 k => {

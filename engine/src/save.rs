@@ -86,10 +86,10 @@ fn fine_u(v: f32) -> u8 {
     (v / 10.0 + 120.0).round().clamp(0.0, 240.0) as u8
 }
 
-type NoteKey = ((u32, u32, u16, u8, u8, u8, u8, bool), (i32, i32, i32, bool, bool, u8));
+type NoteKey = ((u32, u32, u16, u8, u8, u8, u8, bool), (i32, i32, i32, bool, bool, u8, u16));
 fn note_key(n: &Note) -> NoteKey {
     let q = |v: f32| (v * 128.0).round() as i32;
-    ((n.pos, n.len, n.chan, n.key, vel_u(n.vel), npan_u(n.pan), fine_u(n.fine_cents), n.muted), (q(n.release), q(n.mod_x), q(n.mod_y), n.slide, n.porta, n.color))
+    ((n.pos, n.len, n.chan, n.key, vel_u(n.vel), npan_u(n.pan), fine_u(n.fine_cents), n.muted), (q(n.release), q(n.mod_x), q(n.mod_y), n.slide, n.porta, n.color, n.group))
 }
 fn notes_key(notes: &[Note]) -> Vec<NoteKey> {
     let mut v: Vec<NoteKey> = notes.iter().map(note_key).collect();
@@ -1158,6 +1158,7 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                 f.mod_x = (note.mod_x * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
                 f.mod_y = (note.mod_y * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
                 f.midi_channel = (f.midi_channel & !15) | (note.color & 15);
+                f.group = note.group;
                 f.write(&mut data);
             }
 
@@ -1392,6 +1393,9 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
             }
         };
         let fresh = reused.is_none();
+        if fresh || before.map(|b| b.group != c.group).unwrap_or(true) {
+            put_u16(&mut it, 14, c.group);
+        }
         if fresh || before.map(|b| b.muted != c.muted).unwrap_or(true) {
             let f = u16at(&it, 18);
             put_u16(&mut it, 18, if c.muted { f | 0x2000 } else { f & !0x2000 });
@@ -1966,7 +1970,7 @@ mod tests {
         s.channels[1].volume = 0.5;
         s.channels[1].pan = -0.25;
         s.channels[3].kind = ChannelKind::AudioClip;
-        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false, group: 0 });
         s.channels[2].insert = 3;
         s.patterns[0].events = vec![crate::song::PatEvent { tick: 0, param: 0, dest: 1, raw: 12800 }, crate::song::PatEvent { tick: 48, param: 0, dest: 1, raw: 400 }];
         s.patterns[0].toggle_step(0, 0);
@@ -1976,8 +1980,8 @@ mod tests {
         s.ensure_pattern(2);
         s.patterns[2].name = "Fill".into();
         s.patterns[2].toggle_step(3, 24);
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
-        s.clips.push(Clip { pos: 384, len: 192, track: 2, src: ClipSrc::Pattern(2), offset: 96, muted: true });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 384, len: 192, track: 2, src: ClipSrc::Pattern(2), offset: 96, muted: true, group: 0 });
         s.inserts[3].name = "Drums".into();
         s.inserts[3].volume = 0.8;
         s.inserts[3].pan = 0.5;
@@ -2216,6 +2220,28 @@ mod tests {
     }
 
     #[test]
+    fn note_and_clip_groups_are_saved_and_read_back() {
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        r.patterns[0].notes.push(Note { pos: 0, len: 24, key: 60, group: 3, ..Default::default() });
+        r.patterns[0].notes.push(Note { pos: 24, len: 24, key: 62, group: 3, ..Default::default() });
+        r.patterns[0].notes.push(Note { pos: 48, len: 24, key: 64, ..Default::default() });
+        r.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2 });
+        r.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2 });
+        r.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        assert_eq!(r2.patterns[0].notes.iter().map(|n| n.group).collect::<Vec<_>>(), [3, 3, 0]);
+        assert_eq!(r2.clips.iter().map(|c| c.group).collect::<Vec<_>>(), [2, 2, 0]);
+        r2.clips[1].group = 0;
+        r2.patterns[0].notes[2].group = 5;
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        assert_eq!(r3.patterns[0].notes.iter().map(|n| n.group).collect::<Vec<_>>(), [3, 3, 5]);
+        assert_eq!(r3.clips.iter().map(|c| c.group).collect::<Vec<_>>(), [2, 0, 0]);
+    }
+
+    #[test]
     fn a_pad_machine_is_saved_with_its_edits() {
         use crate::zones::{Kit, Map};
         use crate::song::Chan;
@@ -2289,7 +2315,7 @@ mod tests {
         let pts = vec![AutoPt { tick: 0.0, value: 0.25, tension: 0.0, mode: 0 }, AutoPt { tick: 96.0, value: 1.0, tension: 0.5, mode: 0 }, AutoPt { tick: 384.0, value: 0.0, tension: -0.25, mode: 2 }];
         let ac = r.channels.len();
         r.channels.push(Chan { name: "Kick - Volume".into(), kind: ChannelKind::AutomationClip, auto: Some(std::sync::Arc::new(Automation { points: pts.clone(), targets: vec![Target::ChanVolume(0), Target::InsertPan(2)] })), ..Default::default() });
-        r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+        r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
         r.prepare();
         let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
         let (mut r2, _) = reload(&bytes2);
@@ -2342,7 +2368,7 @@ mod tests {
             s.ensure_pattern(extra);
             s.patterns[extra].name = "Brand new".into();
             s.patterns[extra].notes.push(Note::step(0, 0));
-            s.clips.push(Clip { pos: 96 * 4 * 300, len: 96, track: 1, src: ClipSrc::Pattern(extra), offset: 0, muted: false });
+            s.clips.push(Clip { pos: 96 * 4 * 300, len: 96, track: 1, src: ClipSrc::Pattern(extra), offset: 0, muted: false, group: 0 });
             if s.inserts.len() > 2 {
                 s.inserts[1].name = "Renamed".into();
                 s.inserts[1].volume = 0.5;

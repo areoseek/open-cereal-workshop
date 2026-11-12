@@ -531,6 +531,8 @@ pub struct PlaylistItem {
     pub track: u16,
     pub source: ClipSource,
     pub muted: bool,
+    /// Clips that share a number other than 0 are grouped and move as one.
+    pub group: u16,
     /// Raw bits of the start/end offsets: ticks (i32, -1 = none) for pattern clips, f32 for audio clips.
     pub start_offset: u32,
     pub end_offset: u32,
@@ -1068,6 +1070,7 @@ fn parse_playlist(d: &[u8]) -> Vec<PlaylistItem> {
                 track: u16at(it, 12), // reversed; fixed up by the caller
                 source: if item_index > BASE { ClipSource::Pattern(item_index - BASE) } else { ClipSource::Channel(item_index) },
                 muted: u16at(it, 18) & 0x2000 != 0,
+                group: u16at(it, 14),
                 start_offset: u32at(it, 24),
                 end_offset: u32at(it, 28),
             }

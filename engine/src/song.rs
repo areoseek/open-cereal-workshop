@@ -555,11 +555,13 @@ pub struct Note {
     pub porta: bool,
     /// Note colour, 0..=15; also the MIDI channel it goes out on.
     pub color: u8,
+    /// Notes that share a number other than 0 are grouped and are picked and moved as one.
+    pub group: u16,
 }
 
 impl Default for Note {
     fn default() -> Self {
-        Self { pos: 0, len: 0, chan: 0, key: 60, vel: 1.0, pan: 0.0, fine_cents: 0.0, muted: false, release: 0.5, mod_x: 0.0, mod_y: 0.0, slide: false, porta: false, color: 0 }
+        Self { pos: 0, len: 0, chan: 0, key: 60, vel: 1.0, pan: 0.0, fine_cents: 0.0, muted: false, release: 0.5, mod_x: 0.0, mod_y: 0.0, slide: false, porta: false, color: 0, group: 0 }
     }
 }
 
@@ -640,6 +642,8 @@ pub struct Clip {
     /// Ticks into the source at which the clip starts.
     pub offset: u32,
     pub muted: bool,
+    /// Clips that share a number other than 0 are grouped and are picked and moved as one.
+    pub group: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -1480,6 +1484,7 @@ impl Song {
                     slide: n.flags & 0x0008 != 0,
                     porta: n.flags & 0x0010 != 0,
                     color: n.midi_channel & 15,
+                    group: n.group,
                 })
                 .collect();
             out.sort();
@@ -1507,7 +1512,7 @@ impl Song {
                         }
                     }
                 };
-                clips.push(Clip { pos: it.position, len: it.length, track: it.track, src, offset, muted: it.muted });
+                clips.push(Clip { pos: it.position, len: it.length, track: it.track, src, offset, muted: it.muted, group: it.group });
             }
         }
 

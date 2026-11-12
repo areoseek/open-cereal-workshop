@@ -157,7 +157,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
 | M | Keyboard / note names view | no |
 | Alt+B, Alt+N | Note helpers, waveform helper | no |
-| Alt+G / Shift+G | Ungroup / group | no |
+| Alt+G / Shift+G | Ungroup / group the selected notes; a group is picked, moved and copied as one | yes |
 | Ctrl+I | Write the lane's current value | no |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
@@ -199,7 +199,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | 7 / 8, 9 | Transpose an audio clip down / up, reverse it | no |
 | Insert | Slice the clip under the pointer at the grid line | yes |
 | Shift+Alt+T | Time signature change | no |
-| Shift+G / Alt+G | Group / ungroup | no |
+| Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |
 | Ctrl+Alt+G | Grid colour | no |
 | Ctrl+Enter | Select the time round the selection | yes |

@@ -1009,7 +1009,7 @@ impl App {
         let free = |song: &Song, t: u16| !song.clips.iter().any(|c| c.track == t && c.pos < pos + len && pos < c.pos + c.len);
         let ntracks = self.song.tracks.len().max(1) as u16;
         let track = track.filter(|&t| free(&self.song, t)).or_else(|| (track.unwrap_or(0)..ntracks).chain(0..ntracks).find(|&t| free(&self.song, t))).unwrap_or(0);
-        self.song.clips.push(cereal_engine::song::Clip { pos, len, track, src: cereal_engine::song::ClipSrc::Audio(ci), offset: 0, muted: false });
+        self.song.clips.push(cereal_engine::song::Clip { pos, len, track, src: cereal_engine::song::ClipSrc::Audio(ci), offset: 0, muted: false, group: 0 });
         self.song.clips.sort_by_key(|c| c.pos);
         self.dirty = true;
     }

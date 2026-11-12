@@ -415,6 +415,26 @@ impl App {
         self.dirty = true;
     }
 
+    /// Make the selected notes one group, or take them out of their groups.
+    fn pr_group(&mut self, on: bool) {
+        let pat = self.pr_pat();
+        let t: Vec<usize> = self.piano.sel.iter().copied().collect();
+        if !t.is_empty() {
+            crate::widgets::set_group(&mut self.song.patterns[pat].notes, &t, on, |n| &mut n.group);
+            self.dirty = true;
+        }
+    }
+
+    /// A selection that holds part of a group holds all of it.
+    fn pr_whole_groups(&mut self, pat: usize) {
+        let chan = self.sel_chan as u16;
+        let notes = &self.song.patterns[pat].notes;
+        let groups: BTreeSet<u16> = self.piano.sel.iter().filter_map(|&i| notes.get(i)).map(|n| n.group).filter(|g| *g != 0).collect();
+        if !groups.is_empty() {
+            self.piano.sel.extend((0..notes.len()).filter(|&i| notes[i].chan == chan && groups.contains(&notes[i].group)));
+        }
+    }
+
     /// Select the notes in the stretch of time just before or just after the selection, of the same length.
     fn pr_select_beside(&mut self, after: bool) {
         let Some((a, b)) = self.pr_span() else { return };
@@ -576,6 +596,8 @@ impl App {
             self.piano.sel.insert(notes.len());
             notes.push(Note { pos: n.pos - first + to, chan, ..n.clone() });
         }
+        let new: Vec<usize> = self.piano.sel.iter().copied().collect();
+        crate::widgets::fresh_groups(notes, &new, |n| &mut n.group);
         self.pr_sort(pat);
         self.dirty = true;
     }
@@ -600,6 +622,8 @@ impl App {
             self.piano.sel.insert(notes.len());
             notes.push(n);
         }
+        let new: Vec<usize> = self.piano.sel.iter().copied().collect();
+        crate::widgets::fresh_groups(notes, &new, |n| &mut n.group);
         self.pr_sort(pat);
         self.dirty = true;
     }
@@ -978,6 +1002,7 @@ impl App {
                 Key::ArrowRight => self.pr_nudge_by(1),
                 Key::C => self.pr_recolour(),
                 Key::V => self.piano.ghosts = !self.piano.ghosts,
+                Key::G if !repeat => self.pr_group(false),
                 k => match HELPERS.iter().position(|h| h.1 == k) {
                     Some(i) => self.pr_helper(i),
                     None => return false,
@@ -992,6 +1017,7 @@ impl App {
                 Key::ArrowLeft => self.pr_nudge(-1),
                 Key::ArrowRight => self.pr_nudge(1),
                 Key::I => self.pr_invert_selection(),
+                Key::G if !repeat => self.pr_group(true),
                 Key::C => self.pr_select_colour(),
                 Key::R => self.pr_select_random(),
                 Key::D => self.pr_discard_lengths(),
@@ -1168,6 +1194,7 @@ impl App {
 
     pub(crate) fn piano_ui(&mut self, ui: &mut Ui) {
         let pat = self.pr_pat();
+        self.pr_whole_groups(pat);
         let chan = self.sel_chan as u16;
         let ppq = self.song.ppq as f32;
         let step = self.song.step();
@@ -1450,7 +1477,14 @@ impl App {
                                 if !self.piano.sel.contains(&i) {
                                     self.piano.sel.clear();
                                 }
-                                let mut targets: Vec<usize> = if self.piano.sel.is_empty() { vec![i] } else { self.piano.sel.iter().copied().collect() };
+                                let mut targets: Vec<usize> = if !self.piano.sel.is_empty() {
+                                    self.piano.sel.iter().copied().collect()
+                                } else if notes[i].group != 0 {
+                                    // a grouped note takes its group along
+                                    (0..notes.len()).filter(|&k| notes[k].chan == chan && notes[k].group == notes[i].group).collect()
+                                } else {
+                                    vec![i]
+                                };
                                 let mut grabbed = i;
                                 if mods.shift && !edge {
                                     // leave the originals where they are and carry copies
@@ -1465,6 +1499,7 @@ impl App {
                                         let n = notes[t].clone();
                                         notes.push(n);
                                     }
+                                    crate::widgets::fresh_groups(notes, &copies, |n| &mut n.group);
                                     if was_sel {
                                         self.piano.sel = copies.iter().copied().collect();
                                     }

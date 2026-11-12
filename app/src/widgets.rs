@@ -134,6 +134,37 @@ pub fn fit(ui: &Ui, text: &str, width: f32, font: &egui::FontId) -> String {
     format!("{out}..")
 }
 
+/// Give the groups among the items at `idx` numbers no other item uses, so copies of a group stand apart
+/// from the group they were copied from.
+pub(crate) fn fresh_groups<T>(items: &mut [T], idx: &[usize], group: impl Fn(&mut T) -> &mut u16) {
+    let mut next = items.iter_mut().map(|i| *group(i)).max().unwrap_or(0);
+    let mut map: Vec<(u16, u16)> = vec![];
+    for &i in idx {
+        let Some(g) = items.get_mut(i).map(&group) else { continue };
+        if *g != 0 {
+            let old = *g;
+            *g = match map.iter().find(|m| m.0 == old) {
+                Some(m) => m.1,
+                None => {
+                    next = next.saturating_add(1);
+                    map.push((old, next));
+                    next
+                }
+            };
+        }
+    }
+}
+
+/// Make the items at `idx` one group, or with `on` false take them out of their groups.
+pub(crate) fn set_group<T>(items: &mut [T], idx: &[usize], on: bool, group: impl Fn(&mut T) -> &mut u16) {
+    let next = if on { items.iter_mut().map(|i| *group(i)).max().unwrap_or(0).saturating_add(1) } else { 0 };
+    for &i in idx {
+        if let Some(it) = items.get_mut(i) {
+            *group(it) = next;
+        }
+    }
+}
+
 /// The one text line of a rename window: it takes the keys as it appears, with the old name selected so typing replaces it.
 pub fn name_field(ui: &mut Ui, text: &mut String) -> Response {
     let id = ui.make_persistent_id("name_field");

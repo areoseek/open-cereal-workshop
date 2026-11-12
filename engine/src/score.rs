@@ -31,6 +31,7 @@ pub fn parse(bytes: &[u8], ppq: u32, chan: u16) -> Result<Vec<Note>, String> {
                 slide: flags & 0x0008 != 0,
                 porta: flags & 0x0010 != 0,
                 color: n[19] & 15,
+                group: u16::from_le_bytes([n[14], n[15]]),
             });
         }
     }

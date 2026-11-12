@@ -3438,9 +3438,9 @@ mod tests {
     fn song_mode_plays_clips_and_respects_mutes() {
         let mut s = click_song();
         s.patterns[0].toggle_step(0, 0);
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
-        s.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: true });
-        s.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: true, group: 0 });
+        s.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
         let (h, mut p) = new_player(s, 48_000.0);
         h.transport.set_song_mode(true);
         h.transport.set_looping(false);
@@ -3469,8 +3469,8 @@ mod tests {
         };
         s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: ramp(1.0, 0.0, Target::ChanVolume(0)), ..Default::default() });
         let ac = s.channels.len() - 1;
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
-        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
         let (h, mut p) = new_player(s.clone(), 48_000.0);
         h.transport.set_song_mode(true);
         h.transport.set_looping(false);
@@ -3838,8 +3838,8 @@ mod tests {
             let pts = vec![crate::song::AutoPt { tick: 0.0, value, tension: 0.0, mode: 0 }, crate::song::AutoPt { tick: len as f64, value, tension: 0.0, mode: 0 }];
             s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: Some(Arc::new(crate::song::Automation { points: pts, targets: vec![Target::SlotParam(0, 0, 0)] })), ..Default::default() });
             let ac = s.channels.len() - 1;
-            s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false });
-            s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false });
+            s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+            s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
             let got = loud(&crate::render_song(&s, 48_000.0, true, 0, 0.0), 0.1, 0.4);
             assert!((got / plain - want).abs() < 0.1, "{got} against {plain}, wanted {want} times");
             assert_eq!(s.target_name(Target::SlotParam(0, 0, 0)).rsplit(" - ").next(), Some("Gain"));
@@ -3950,7 +3950,7 @@ mod tests {
         s.channels[0].kind = ChannelKind::AudioClip;
         s.channels[0].smp.stretch_beats = 4.0;
         s.channels[0].smp.keep_pitch = true;
-        s.clips.push(Clip { pos: 0, len: 96 * 8, track: 0, src: ClipSrc::Audio(0), offset: 0, muted: false });
+        s.clips.push(Clip { pos: 0, len: 96 * 8, track: 0, src: ClipSrc::Audio(0), offset: 0, muted: false, group: 0 });
         let buf = crate::render_song(&s, 48_000.0, true, 0, 0.0);
         assert!(loud(&buf, 1.5, 1.9) > 0.1, "still sounding in its second second");
         assert!(loud(&buf, 2.1, 3.0) < 1e-3);
