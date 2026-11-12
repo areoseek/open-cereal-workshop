@@ -1951,6 +1951,10 @@ impl Song {
                     return ((k as usize) < h.0.param_count()).then_some(HOSTED_RANGE);
                 }
                 let q = crate::fx::def(fx.kind).params.get(k as usize)?;
+                if fx.kind == crate::fx::Kind::Deck {
+                    // the turntable's settings are counted in thousandths (seen in a project that scratches)
+                    return Some((0, 1000));
+                }
                 (q.min, q.max)
             }
             Target::ChanParam(c, k) => {

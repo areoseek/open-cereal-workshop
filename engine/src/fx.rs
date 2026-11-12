@@ -898,7 +898,20 @@ pub static DEFS: &[Def] = &[
             p("Mode", 56, 0, 3, 0),
         ],
     },
-    Def { kind: Kind::Deck, ident: "Fruity Scratcher", title: "Turntable", size: 64, fixed: &[(0, 1001000), (8, 0x3f800000), (16, 0x3e800000), (20, 0x3f000000), (32, 0x3f000000), (40, 0x3f000000), (44, 0x3f6872b0), (48, 0x3f7fbe77), (52, 0x3ecccccd), (56, 0x41100000)], params: &[p("Position", 4, 0, 10000, 0), p("Pan", 12, 0, 10000, 5000), p("Volume", 24, 0, 10000, 7800)] },
+    Def { kind: Kind::Deck, ident: "Fruity Scratcher", title: "Turntable", size: 64, fixed: &[(0, 1001000), (8, 0x3f800000), (16, 0x3e800000), (20, 0x3f000000), (32, 0x3f000000), (40, 0x3f000000), (44, 0x3f6872b0), (48, 0x3f7fbe77), (52, 0x3ecccccd), (56, 0x41100000)], params: &[
+            // in the order of the block, which is the order events count them in; which of the middle ones is
+            // which is our reading of their rest values
+            p("Position", 4, 0, 10000, 0),
+            p("Direction", 8, 0, 10000, 10000),
+            p("Pan", 12, 0, 10000, 5000),
+            p("Acceleration", 16, 0, 10000, 2500),
+            p("Sensitivity", 20, 0, 10000, 5000),
+            p("Volume", 24, 0, 10000, 7800),
+            p("Hold", 28, 0, 10000, 0),
+            p("Speed", 32, 0, 10000, 5000),
+            p("Mute", 36, 0, 10000, 0),
+        ],
+    },
     Def { kind: Kind::BassBoost, ident: "Fruity Bass Boost", title: "Bass Lift", size: 12, fixed: &[(0, 1)], params: &[p("Frequency", 4, 0, 1024, 512), p("Amount", 8, 0, 1024, 768)] },
     Def {
         kind: Kind::Phaser,
@@ -2087,6 +2100,16 @@ impl Fx {
                     }
                 } else {
                     out[off..off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
+                }
+            }
+        }
+        if self.kind == Kind::Deck && out.len() >= 64 {
+            // a newly chosen record replaces the stored path
+            if let Some(ir) = self.ir.as_ref().filter(|i| !i.path.is_empty()) {
+                let old_n = (u32::from_le_bytes([out[60], out[61], out[62], out[63]]) as usize).min(out.len() - 64);
+                if String::from_utf8_lossy(&out[64..64 + old_n]).trim_end_matches('\0') != ir.path {
+                    let new = [&(ir.path.len() as u32).to_le_bytes()[..], ir.path.as_bytes()].concat();
+                    out.splice(60..64 + old_n, new);
                 }
             }
         }
@@ -3936,25 +3959,52 @@ impl Unit {
                 }
             }
             Kind::Deck => {
-                // the record keeps turning at its own speed and is heard on top of what comes in
+                // a record heard on top of what comes in: it turns by itself, or is dragged to wherever the
+                // position setting points while that is held or being moved
                 if let Some(ir) = &self.fx.ir {
                     let n = ir.smp.frames.len();
-                    if n > 1 {
+                    if n > 1 && p.len() >= 9 {
                         let inc = ir.smp.rate as f32 / sr;
-                        let (l, r) = balance(p[1] / 5000.0 - 1.0);
-                        let vol = p[2] / 10000.0;
-                        if self.pos == 0 && self.ph == 0.0 {
-                            self.pos = ((p[0] / 10000.0).clamp(0.0, 1.0) * (n - 1) as f32) as usize;
+                        let (l, r) = balance(p[2] / 5000.0 - 1.0);
+                        let vol = if p[8] >= 5000.0 { 0.0 } else { p[5] / 10000.0 };
+                        let hold = p[6] >= 5000.0;
+                        let dir = if p[1] > 7500.0 { 1.0 } else if p[1] < 2500.0 { -1.0 } else { 0.0 };
+                        let own = dir * ((p[7] / 10000.0 - 0.5) * 4.0).exp2() * inc;
+                        let want = (p[0] / 10000.0).clamp(0.0, 1.0) as f64 * (n - 1) as f64;
+                        // a heavier platter (less acceleration) takes longer to come up to speed
+                        let slow = 1.0 - (p[3] / 10000.0).clamp(0.0, 1.0);
+                        let a_own = 1.0 - (-1.0 / ((0.004 + 0.8 * slow * slow * slow) * sr)).exp();
+                        let a_hand = 1.0 - (-1.0 / (0.003 * sr)).exp();
+                        let catch = 0.012 * sr;
+                        if z[3] == 0.0 {
+                            z[3] = 1.0;
+                            z[1] = p[0];
+                            z[0] = if hold { 0.0 } else { own };
+                            self.clock = want;
                         }
+                        if p[0] != z[1] {
+                            z[1] = p[0];
+                            z[2] = 0.1 * sr;
+                        }
+                        let len = n as f64;
                         for f in io.iter_mut() {
-                            let a = ir.smp.frames[self.pos % n];
-                            let b = ir.smp.frames[(self.pos + 1) % n];
-                            f[0] += (a[0] + (b[0] - a[0]) * self.ph) * l * vol;
-                            f[1] += (a[1] + (b[1] - a[1]) * self.ph) * r * vol;
-                            self.ph += inc;
-                            let whole = self.ph.floor();
-                            self.ph -= whole;
-                            self.pos = (self.pos + whole as usize) % n;
+                            if hold || z[2] > 0.0 {
+                                z[2] -= 1.0;
+                                z[0] += (((want - self.clock) as f32 / catch) - z[0]) * a_hand;
+                            } else {
+                                z[0] += (own - z[0]) * a_own;
+                            }
+                            self.clock = (self.clock + z[0] as f64).rem_euclid(len);
+                            let i = self.clock as usize % n;
+                            let t = (self.clock - self.clock.floor()) as f32;
+                            let (x, y) = (ir.smp.frames[i], ir.smp.frames[(i + 1) % n]);
+                            // a record standing still makes no sound
+                            let g = vol * (z[0].abs() / inc * 50.0).min(1.0);
+                            f[0] += (x[0] + (y[0] - x[0]) * t) * l * g;
+                            f[1] += (x[1] + (y[1] - x[1]) * t) * r * g;
+                        }
+                        if z[0].abs() < 1e-9 {
+                            z[0] = 0.0;
                         }
                     }
                 }
@@ -5549,6 +5599,53 @@ mod tests {
         // ten thousandths of a second of delay: the click comes out 441 frames late
         let y = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 1000);
         assert!(y[441][0] > 0.9 && y[0][0].abs() < 1e-4 && y[440][0].abs() < 1e-4, "{} {}", y[441][0], y[0][0]);
+    }
+    #[test]
+    fn the_turntable_turns_holds_and_is_dragged() {
+        let ramp: Vec<f32> = (0..44_100).map(|i| i as f32 / 44_100.0).collect();
+        let rec = Ir { smp: std::sync::Arc::new(crate::sample::Sample::from_mono("r", 44_100, &ramp)), path: "r.wav".into() };
+        let quiet = |_: usize| [0.0f32, 0.0];
+        let mut fx = Fx::new(Kind::Deck);
+        fx.ir = Some(rec);
+        fx.p[2] = 5000.0;
+        fx.p[5] = 10000.0;
+        // forwards at its own speed: the ramp comes out as it is
+        let y = run(fx.clone(), quiet, 2000);
+        let (l, _) = balance(0.0);
+        assert!((y[1000][0] - ramp[1001] * l).abs() < 1e-3, "{}", y[1000][0]);
+        // backwards
+        let mut back = fx.clone();
+        back.p[0] = 5000.0;
+        back.p[1] = 0.0;
+        let y = run(back, quiet, 2000);
+        assert!(y[1000][0] < y[10][0] && y[10][0] > 0.4 * l);
+        // held, the record stands still and is silent; muted it is silent too
+        let mut held = fx.clone();
+        held.p[0] = 5000.0;
+        held.p[6] = 10000.0;
+        assert!(run(held.clone(), quiet, 2000).iter().all(|f| f[0].abs() < 1e-4));
+        let mut mute = fx.clone();
+        mute.p[8] = 10000.0;
+        assert!(run(mute, quiet, 2000).iter().all(|f| f[0] == 0.0));
+        // moving the position while held drags the record there
+        let cx = Ctx { sr: 44100.0, step: 5000.0, clock: Default::default() };
+        let mut u = Unit::new(held, cx.sr);
+        let mut io = vec![[0.0f32; 2]; 256];
+        u.process(&mut io, &cx);
+        u.fx.p[0] = 6000.0;
+        let mut heard = 0f32;
+        for _ in 0..40 {
+            io.fill([0.0; 2]);
+            u.process(&mut io, &cx);
+            heard = heard.max(io.iter().fold(0f32, |m, f| m.max(f[0])));
+        }
+        assert!(heard > 0.5 * l && heard < 0.61, "{heard}");
+        assert!((u.clock - 0.6 * 44_099.0).abs() < 2.0, "{}", u.clock);
+        // a new record's path goes into the block and the settings stay
+        let block = fx.encode(None);
+        assert_eq!(sample_named_in("Fruity Scratcher", &block).as_deref(), Some("r.wav"));
+        assert_eq!(Fx::decode("Fruity Scratcher", &block).unwrap().p, fx.p);
+        assert_eq!(fx.encode(Some(&block)), block);
     }
     #[test]
     fn the_three_axis_pad_reads_its_block_and_follows_at_its_own_pace() {

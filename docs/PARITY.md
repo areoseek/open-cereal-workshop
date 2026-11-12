@@ -104,7 +104,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)
 - [~] Fruity Reeverb 2 (built, approximate)
-- [~] Fruity Scratcher (built as Turntable; the record plays straight on top of the input, no scratching by hand or timecode)
+- [~] Fruity Scratcher (built as Turntable; the record turns forwards, backwards or pauses, with speed, platter weight, hold and mute; scratching by dragging the platter or by moving the position from events, clips and controllers; which stored value is direction, speed, acceleration and sensitivity is read from their rest values, and the scales are estimates; the four smoothing values are kept only; no timecode records)
 - [~] Fruity Send (built as Send Tap; target taken as the n-th routed track, master left out)
 - [~] Fruity Soft Clipper (built, approximate)
 - [~] Fruity Spectroman (Spectrum View: the frequencies of the sound on its track; its saved display options are not read)

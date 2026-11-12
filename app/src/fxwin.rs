@@ -250,6 +250,47 @@ impl App {
                     }
                 });
             }
+            if f.kind == Kind::Deck && f.p.len() >= 9 {
+                ui.horizontal(|ui| {
+                    let name = match &f.ir {
+                        Some(ir) => format!("{} ({:.2} s)", ir.smp.name, ir.smp.seconds()),
+                        None => "No record loaded".to_string(),
+                    };
+                    ui.label(RichText::new(name).small());
+                    if ui.button(RichText::new("Load sample...").small()).clicked() {
+                        pick_ir = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let dir = if f.p[1] > 7500.0 { 2 } else if f.p[1] < 2500.0 { 0 } else { 1 };
+                    for (k, label, tip) in [(0, "<<", "Play backwards"), (1, "||", "Pause"), (2, ">>", "Play forwards")] {
+                        if ui.selectable_label(dir == k, RichText::new(label).small()).on_hover_text(tip).clicked() {
+                            f.p[1] = k as f32 * 5000.0;
+                            changed = true;
+                        }
+                    }
+                    for (i, label, tip) in [(6, "Hold", "Stop the record turning by itself, to move it by the position alone"), (8, "Mute", "Silence the record")] {
+                        let mut on = f.p[i] >= 5000.0;
+                        if ui.checkbox(&mut on, RichText::new(label).small()).on_hover_text(tip).changed() {
+                            f.p[i] = if on { 10000.0 } else { 0.0 };
+                            changed = true;
+                        }
+                    }
+                });
+                // the platter: drag up and down to scratch
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(260.0, 44.0), egui::Sense::drag());
+                let paint = ui.painter_at(rect);
+                paint.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+                let at = rect.left() + rect.width() * (f.p[0] / 10000.0).clamp(0.0, 1.0);
+                paint.line_segment([egui::pos2(at, rect.top()), egui::pos2(at, rect.bottom())], egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill));
+                paint.text(rect.center(), egui::Align2::CENTER_CENTER, "drag to scratch", egui::FontId::proportional(10.0), ui.visuals().weak_text_color());
+                if resp.dragged() {
+                    let d = resp.drag_delta();
+                    let turn = (d.x - d.y) * (0.5 + f.p[4] / 2500.0);
+                    f.p[0] = (f.p[0] + turn).clamp(0.0, 10000.0);
+                    changed = true;
+                }
+            }
             if f.kind == Kind::Rack {
                 use cereal_engine::fxrack as rk;
                 let mut soft = f.p[0] >= 0.5;
@@ -630,7 +671,8 @@ impl App {
         }
         if pick_ir {
             let mut dlg = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]);
-            if let Some(dir) = self.lib.factory_roots.iter().map(|r| r.join("Data/Patches/Impulses")).find(|d| d.is_dir()) {
+            let deck = self.song.inserts[ins].slots[si].fx.as_ref().is_some_and(|f| f.kind == Kind::Deck);
+            if let Some(dir) = self.lib.factory_roots.iter().map(|r| r.join("Data/Patches/Impulses")).find(|d| d.is_dir() && !deck) {
                 dlg = dlg.set_directory(dir);
             }
             if let Some(path) = dlg.pick_file() {
