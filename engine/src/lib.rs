@@ -73,6 +73,15 @@ pub fn load_flp(path: &Path, lib: &mut Library) -> Result<(Song, flp::Flp), Stri
 /// Render a song offline into interleaved stereo at `sample_rate`. In song mode the whole playlist is rendered;
 /// otherwise `pattern` once. `tail` seconds are added for sounds still ringing. No audio device is touched.
 pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32) -> Vec<f32> {
+    render_part(song, sample_rate, song_mode, pattern, tail, None)
+}
+
+/// Render the song and keep only what one mixer track puts out after its fader.
+pub fn render_track(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32, insert: usize) -> Vec<f32> {
+    render_part(song, sample_rate, song_mode, pattern, tail, Some(insert))
+}
+
+fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32, stem: Option<usize>) -> Vec<f32> {
     // hosted plug-ins are lent to the render and handed back as they were
     let hosted: Vec<_> = song.hosted().into_iter().map(|i| (i.rate(), i)).collect();
     for (_, i) in &hosted {
@@ -81,6 +90,7 @@ pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usiz
     }
     let (h, mut p) = new_player(song.clone(), sample_rate);
     p.set_offline(true);
+    p.stem = stem;
     h.transport.set_song_mode(song_mode);
     h.transport.set_pattern(pattern);
     h.transport.set_looping(false);
@@ -108,6 +118,11 @@ pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usiz
             i.activate(*r);
         }
     }
+    if stem.is_some() {
+        let frames = out.len() / 2;
+        p.stem_buf.resize(frames, [0.0; 2]);
+        return p.stem_buf.iter().flat_map(|f| [f[0], f[1]]).collect();
+    }
     out
 }
 
@@ -115,6 +130,24 @@ pub fn render_song(song: &Song, sample_rate: f32, song_mode: bool, pattern: usiz
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn a_track_render_holds_only_that_track() {
+        let mut s = Song::new();
+        let data: Vec<f32> = (0..24_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        s.channels[0].sample = Some(Arc::new(Sample::from_mono("tone", 48_000, &data)));
+        s.channels[0].insert = 1;
+        s.patterns[0].toggle_step(0, 0);
+        s.prepare();
+        let whole = render_song(&s, 48_000.0, false, 0, 0.5);
+        let one = render_track(&s, 48_000.0, false, 0, 0.5, 1);
+        let two = render_track(&s, 48_000.0, false, 0, 0.5, 2);
+        assert_eq!(whole.len(), one.len());
+        assert_eq!(whole.len(), two.len());
+        let peak = |b: &[f32]| b.iter().fold(0f32, |a, v| a.max(v.abs()));
+        assert!(peak(&one) > 0.1, "the track the channel plays into is heard");
+        assert!(peak(&two) == 0.0, "another track is silent");
+    }
 
     #[test]
     fn offline_render_has_the_length_of_the_pattern_plus_tail() {

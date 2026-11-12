@@ -434,6 +434,8 @@ impl Handle {
             wheel: Vec::new(),
             buses: vec![],
             eq: vec![],
+            stem: None,
+            stem_buf: Vec::new(),
             fx: vec![],
             driven: Vec::with_capacity(64),
             env_runs: Vec::new(),
@@ -910,6 +912,9 @@ impl Voice {
 
 /// Lives on the audio thread.
 pub struct Player {
+    /// A mixer track whose sound after its fader is kept in `stem_buf`, for rendering tracks to files.
+    pub stem: Option<usize>,
+    pub stem_buf: Vec<[f32; 2]>,
     song: Arc<ArcSwap<Song>>,
     transport: Arc<Transport>,
     cmds: Arc<Mutex<Vec<Cmd>>>,
@@ -2638,6 +2643,9 @@ impl Player {
             let taken = self.transport.rec_want.load(Relaxed);
             let sender = sender || (taken != u32::MAX && (taken >> 6) as usize == i);
             if i >= ni || (!self.dirty[i] && self.ring[i] == 0 && !sender) {
+                if self.stem == Some(i) {
+                    self.stem_buf.resize(self.stem_buf.len() + n, [0.0; 2]);
+                }
                 continue;
             }
             let ins = &song.inserts[i];
@@ -2823,6 +2831,9 @@ impl Player {
                     f[1] *= gr;
                     peak[0] = peak[0].max(f[0].abs());
                     peak[1] = peak[1].max(f[1].abs());
+                }
+                if self.stem == Some(i) {
+                    self.stem_buf.extend_from_slice(&bus[..n]);
                 }
                 if let Some(m) = self.transport.peaks.get(i) {
                     for c in 0..2 {

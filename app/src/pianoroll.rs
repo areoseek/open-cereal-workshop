@@ -182,6 +182,8 @@ pub struct State {
     /// The light rows that show the white keys or the scale, and the channel's sample drawn behind the notes.
     rows: bool,
     wave: bool,
+    /// Chord laid down with every drawn note (index into STAMPS), 0 for none.
+    stamp: usize,
     /// Selected notes, as indices into the pattern's note list.
     pub sel: BTreeSet<usize>,
     sel_for: (usize, u16),
@@ -222,6 +224,7 @@ impl Default for State {
             names: false,
             rows: true,
             wave: false,
+            stamp: 0,
             sel: BTreeSet::new(),
             sel_for: (usize::MAX, 0),
             clip: vec![],
@@ -253,6 +256,29 @@ fn note_len(n: &Note, step: u32) -> u32 {
         n.len
     }
 }
+
+/// Chords the draw tool can lay down in one click: name and the keys above the clicked one.
+const STAMPS: [(&str, &[u8]); 19] = [
+    ("None", &[0]),
+    ("Major", &[0, 4, 7]),
+    ("Minor", &[0, 3, 7]),
+    ("Diminished", &[0, 3, 6]),
+    ("Augmented", &[0, 4, 8]),
+    ("Sus 2", &[0, 2, 7]),
+    ("Sus 4", &[0, 5, 7]),
+    ("Fifth", &[0, 7]),
+    ("Octave", &[0, 12]),
+    ("Major 6", &[0, 4, 7, 9]),
+    ("Minor 6", &[0, 3, 7, 9]),
+    ("Seventh", &[0, 4, 7, 10]),
+    ("Major 7", &[0, 4, 7, 11]),
+    ("Minor 7", &[0, 3, 7, 10]),
+    ("Diminished 7", &[0, 3, 6, 9]),
+    ("Minor 7 flat 5", &[0, 3, 6, 10]),
+    ("Ninth", &[0, 4, 7, 10, 14]),
+    ("Major 9", &[0, 4, 7, 11, 14]),
+    ("Minor 9", &[0, 3, 7, 10, 14]),
+];
 
 impl App {
     fn pr_sound(&mut self, key: Option<u8>) {
@@ -1037,6 +1063,12 @@ impl App {
                 Key::ArrowRight => self.pr_nudge(1),
                 Key::I => self.pr_invert_selection(),
                 Key::G if !repeat => self.pr_group(true),
+                Key::N if !repeat => self.piano.stamp = 0,
+                Key::M if !repeat => {
+                    self.pr_select_random();
+                    let pat = self.pr_pat();
+                    self.pr_whole_groups(pat);
+                }
                 Key::C => self.pr_select_colour(),
                 Key::R => self.pr_select_random(),
                 Key::D => self.pr_discard_lengths(),
@@ -1183,6 +1215,16 @@ impl App {
                                 self.dirty = true;
                             }
                         }
+                    }
+                }
+            });
+            let stamp_name = if self.piano.stamp == 0 { "Stamp" } else { STAMPS[self.piano.stamp.min(STAMPS.len() - 1)].0 };
+            ui.menu_button(RichText::new(stamp_name).small(), |ui| {
+                for (i, (n, _)) in STAMPS.iter().enumerate() {
+                    let label = if i == 0 { "None        Shift+N" } else { n };
+                    if ui.selectable_label(self.piano.stamp == i, label).clicked() {
+                        self.piano.stamp = i;
+                        ui.close_menu();
                     }
                 }
             });
@@ -1594,9 +1636,17 @@ impl App {
                                 let pos = snap_floor(tick_of(pp.x));
                                 let n = Note { pos, len: self.piano.last_len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, slide: self.piano.slide, porta: self.piano.porta, color: self.piano.color, ..Default::default() };
                                 let notes = &mut self.song.patterns[pat].notes;
-                                notes.push(n.clone());
+                                let mut orig = vec![];
+                                for add in STAMPS[self.piano.stamp.min(STAMPS.len() - 1)].1 {
+                                    let k = key as i32 + *add as i32;
+                                    if (0..=131).contains(&k) {
+                                        let n = Note { key: k as u8, ..n.clone() };
+                                        notes.push(n.clone());
+                                        orig.push((notes.len() - 1, n));
+                                    }
+                                }
                                 self.piano.sel.clear();
-                                self.piano.drag = Some(if tool == Tool::Paint { Drag::Paint } else { Drag::Notes { mode: Mode::Move, anchor_tick: tick_of(pp.x), anchor_key: key as i32, orig: vec![(notes.len() - 1, n)] } });
+                                self.piano.drag = Some(if tool == Tool::Paint { Drag::Paint } else { Drag::Notes { mode: Mode::Move, anchor_tick: tick_of(pp.x), anchor_key: key as i32, orig } });
                                 self.dirty = true;
                                 self.pr_sound(Some(key));
                             }

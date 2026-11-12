@@ -200,6 +200,43 @@ impl App {
     }
 
     /// A key press while the channel rack has the focus. True when it was ours.
+    /// Write each selected mixer track's sound over the whole song (or pattern) to its own file.
+    fn render_tracks(&mut self) {
+        let mut tracks: Vec<usize> = self.mixer_sel.iter().copied().collect();
+        if !tracks.contains(&self.sel_insert) {
+            tracks.push(self.sel_insert);
+        }
+        tracks.retain(|i| *i < self.song.inserts.len());
+        let tr = self.handle.transport.clone();
+        let dir = crate::record::folder(self.path.as_deref());
+        let rate = 44_100u32;
+        let mut done = 0;
+        let mut failed = None;
+        for i in tracks {
+            let buf = cereal_engine::render_track(&self.song, rate as f32, tr.song_mode(), tr.pattern(), 2.0, i);
+            let name: String = self.song.insert_name(i).chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+            let made = std::fs::create_dir_all(&dir).and_then(|_| {
+                let mut n = 1;
+                let path = loop {
+                    let p = dir.join(if n == 1 { format!("{name}.wav") } else { format!("{name} {n}.wav") });
+                    if !p.exists() {
+                        break p;
+                    }
+                    n += 1;
+                };
+                crate::wav::write(std::io::BufWriter::new(std::fs::File::create(&path)?), &buf, rate, 2, 24)
+            });
+            match made {
+                Ok(_) => done += 1,
+                Err(e) => failed = Some(e.to_string()),
+            }
+        }
+        self.status = match failed {
+            Some(e) => format!("Track render failed: {e}"),
+            None => format!("Rendered {done} track{} to {}", if done == 1 { "" } else { "s" }, dir.display()),
+        };
+    }
+
     pub(crate) fn rack_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
         let n = self.song.channels.len();
         if n == 0 {
@@ -228,6 +265,15 @@ impl App {
                 } else {
                     self.song.channels[k].enabled = !self.song.channels[k].enabled;
                     self.dirty = true;
+                }
+            }
+            return true;
+        }
+        if m.command && m.alt && key == Key::R {
+            // stretched clips follow the tempo as they play; this redoes the treated copies as well
+            if !repeat {
+                for c in self.song.channels.iter_mut().filter(|c| c.sample.is_some()) {
+                    c.bake();
                 }
             }
             return true;
@@ -428,6 +474,7 @@ impl App {
             match key {
                 Key::S if !repeat => self.solo_insert(i, true),
                 Key::W if !repeat => self.mixer_wave = !self.mixer_wave,
+                Key::R if !repeat => self.render_tracks(),
                 Key::ArrowLeft if i > 1 => {
                     self.song.swap_inserts(i, i - 1);
                     self.sel_insert = i - 1;

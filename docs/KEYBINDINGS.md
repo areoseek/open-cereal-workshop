@@ -97,7 +97,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Alt+G | Put the selected channels in a new or existing group, by name | yes |
 | Alt+Z / Alt+U | Zip the selected channels to a thin strip / unzip | yes |
 | PgUp / PgDn | Next / previous channel group | yes |
-| Ctrl+Alt+R | Restretch all audio clips | no |
+| Ctrl+Alt+R | Restretch all audio clips (stretching already follows the tempo live; this redoes the treated copies) | yes |
 | Shift+wheel on a channel name | Move that channel up / down | yes |
 
 ## Mixer
@@ -114,7 +114,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+Shift+S | Save the track's state | yes |
 | Ctrl+A / Ctrl+D | Select all the tracks / only the one with the keys | yes |
 | Ctrl+click, Shift+click a name plate, Shift+Left / Right | Add to the selection, select the run up to it; the selected tracks' faders, pans and mutes move together | yes |
-| Alt+R | Render the armed tracks to audio files | no |
+| Alt+R | Render the selected tracks to audio files, one each, in the project's Recorded folder | yes |
 | Alt+W | Wave view: the meters show each track's latest sound as a wave | yes |
 | Shift+wheel on a track's name plate | Move that track left / right | yes |
 
@@ -163,7 +163,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Shift+Ctrl+V | Paste from the MIDI clipboard | no |
-| Shift+M, Shift+N | Random groups, chord stamp off | no |
+| Shift+M, Shift+N | Select groups of notes at random; chord stamp off (the Stamp menu on the toolbar picks a chord the draw tool lays down) | yes |
 | Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
 | Right Shift+click | Slice, and its variants | no |
 
@@ -197,7 +197,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Right-click a clip | Delete | yes |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
 | 6, Shift+6, Ctrl+P | Performance mode and its zoom | no |
-| 7 / 8, 9 | Transpose an audio clip down / up, reverse it | no |
+| 7 / 8, 9 | Transpose an audio clip down / up, reverse it | yes |
 | Insert | Slice the clip under the pointer at the grid line | yes |
 | Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |
 | Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |

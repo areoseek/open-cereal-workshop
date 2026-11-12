@@ -1388,6 +1388,9 @@ impl App {
             }
             _ if self.typing_keys || repeat => return false,
             Key::Num5 => self.pl_zoom_key(5),
+            Key::Num7 => self.pl_audio_keys(-100.0, false),
+            Key::Num8 => self.pl_audio_keys(100.0, false),
+            Key::Num9 => self.pl_audio_keys(0.0, true),
             Key::P => self.playlist.tool = Tool::Draw,
             Key::B => self.playlist.tool = Tool::Paint,
             Key::D => self.playlist.tool = Tool::Delete,
@@ -1400,6 +1403,32 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Transpose or reverse the sound of the selected audio clips (or the one under the pointer).
+    fn pl_audio_keys(&mut self, cents: f32, reverse: bool) {
+        let mut clips: Vec<usize> = self.playlist.sel.iter().copied().collect();
+        if clips.is_empty() {
+            if let Some((_, Some(i))) = self.playlist.hover {
+                clips.push(i);
+            }
+        }
+        let mut chans: Vec<usize> = clips.iter().filter_map(|&i| match self.song.clips.get(i).map(|c| c.src) {
+            Some(ClipSrc::Audio(ch)) if ch < self.song.channels.len() => Some(ch),
+            _ => None,
+        }).collect();
+        chans.sort();
+        chans.dedup();
+        for ch in chans {
+            let c = &mut self.song.channels[ch];
+            if reverse {
+                c.smp.reverse = !c.smp.reverse;
+                c.bake();
+            } else {
+                c.smp.stretch_cents = (c.smp.stretch_cents + cents).clamp(-1200.0, 1200.0);
+            }
+            self.dirty = true;
+        }
     }
 
     fn playlist_header(&mut self, ui: &mut Ui, pat: usize) {
