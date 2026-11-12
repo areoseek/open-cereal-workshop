@@ -2303,6 +2303,35 @@ impl App {
                             });
                         });
                     }
+                    ui.menu_button("One-click audio recording", |ui| {
+                        if ui.button("Into the audio editor").hint("A Wave Recorder on the selected mixer track starts taking down what arrives there").clicked() {
+                            let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
+                            let have = self.song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.plugin.eq_ignore_ascii_case("Edison")).map(|s| s.index));
+                            let free = || (0..10u16).find(|n| !self.song.inserts[ins].slots.iter().any(|s| s.index == *n));
+                            match have.or_else(free) {
+                                Some(slot) => {
+                                    if have.is_none() {
+                                        self.set_effect(ins, slot, cereal_engine::fx::Kind::Thru, "Edison");
+                                        self.dirty = true;
+                                        self.handle.publish(self.song.clone());
+                                    }
+                                    self.fx_open = Some((ins, slot));
+                                    self.handle.transport.record_slot(Some((ins, slot)));
+                                    self.status = "Recording into the Wave Recorder".into();
+                                }
+                                None => self.status = "No free effect slot on the selected mixer track".into(),
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Into the playlist as an audio clip").hint("The song starts and the input device is recorded onto the playlist until you stop").clicked() {
+                            self.rec_audio = true;
+                            self.handle.transport.set_recording(true);
+                            if !self.handle.transport.playing() {
+                                self.play();
+                            }
+                            ui.close_menu();
+                        }
+                    });
                     ui.menu_button("Score logger", |ui| {
                         if ui.button("Dump score log to selected pattern").hint("Every key played by hand is remembered, recording or not; this writes the last minutes of it into the pattern on show").clicked() {
                             let n = self.dump_score_log();
