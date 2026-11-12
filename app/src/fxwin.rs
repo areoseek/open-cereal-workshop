@@ -1544,8 +1544,118 @@ pub fn note_unit_ui(ui: &mut Ui, ident: &str, block: &mut Vec<u8>) -> bool {
                 }
             });
         }
-        Shaper::Motion(_) => {
-            ui.label(RichText::new("Its lines and slow waves play as stored; they are not editable here yet.").small().color(TEXT_DIM));
+        Shaper::Motion(m) => {
+            use cereal_engine::fm::Curve;
+            use cereal_engine::noteshape::Motion;
+            let pieces = Motion::pieces(block);
+            let id = ui.id().with("mover-pick");
+            let (mut art, mut part): (usize, usize) = ui.data(|d| d.get_temp(id)).unwrap_or((0, 0));
+            art = art.min(pieces.len().saturating_sub(1));
+            ui.horizontal_wrapped(|ui| {
+                for k in 0..pieces.len() {
+                    let used = m.arts.get(k).is_some_and(|a| a.parts.iter().any(|p| p.env_on || p.lfo_on));
+                    let text = RichText::new(format!("{}", k + 1)).small();
+                    if ui.selectable_label(art == k, if used { text.strong() } else { text.color(TEXT_DIM) }).clicked() {
+                        art = k;
+                    }
+                }
+            });
+            let int = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0);
+            let put = |d: &mut [u8], o: usize, v: [u8; 4]| {
+                if let Some(t) = d.get_mut(o..o + 4) {
+                    t.copy_from_slice(&v);
+                }
+            };
+            if let Some((head, parts)) = pieces.get(art).cloned() {
+                // which notes this mover answers to
+                let mut d = block[head.clone()].to_vec();
+                let was = d.clone();
+                ui.horizontal(|ui| {
+                    let (mut c, mut lo, mut hi) = (int(&d, 4) + 1, int(&d, 8), int(&d, 12));
+                    ui.label("Note colour");
+                    ui.add(egui::DragValue::new(&mut c).range(1..=16));
+                    ui.label("Keys");
+                    let name = |v: f64, _: std::ops::RangeInclusive<usize>| format!("{}{}", NOTE[(v as i32).rem_euclid(12) as usize], (v as i32).div_euclid(12));
+                    ui.add(egui::DragValue::new(&mut lo).range(0..=131).custom_formatter(name));
+                    ui.label("to");
+                    ui.add(egui::DragValue::new(&mut hi).range(0..=131).custom_formatter(name));
+                    put(&mut d, 4, (c - 1).to_le_bytes());
+                    put(&mut d, 8, lo.to_le_bytes());
+                    put(&mut d, 12, hi.to_le_bytes());
+                });
+                if d != was {
+                    *block = Motion::splice(block, head, &d);
+                    lines = true;
+                }
+                const PARTS: [&str; 5] = ["Loudness", "Pitch", "Pan", "Mod X", "Mod Y"];
+                ui.horizontal(|ui| {
+                    for (k, n) in PARTS.iter().enumerate() {
+                        let on = m.arts.get(art).and_then(|a| a.parts.get(k)).is_some_and(|p| p.env_on || p.lfo_on);
+                        let text = RichText::new(*n).small();
+                        if ui.selectable_label(part == k, if on { text.strong() } else { text }).clicked() {
+                            part = k;
+                        }
+                    }
+                });
+                // the head edit above never moves the pieces after it when nothing changed; read them afresh if it did
+                let parts = if lines { Motion::pieces(block).get(art).map(|a| a.1.clone()).unwrap_or(parts) } else { parts };
+                match parts.get(part.min(4)).cloned().flatten() {
+                    None => {
+                        ui.label(RichText::new("This property holds no lines in the stored unit.").small().color(TEXT_DIM));
+                    }
+                    Some(r) => {
+                        let mut d = block[r.clone()].to_vec();
+                        let was = d.clone();
+                        let flt = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0.0);
+                        ui.horizontal(|ui| {
+                            for (o, label, lo) in [(4usize, "Rest", 0.0f32), (8, "Amount", -100.0), (12, "Wave share", -100.0)] {
+                                let mut v = flt(&d, o) * 100.0;
+                                ui.label(RichText::new(label).small());
+                                if ui.add(egui::DragValue::new(&mut v).range(lo..=100.0).speed(0.5).suffix(" %").max_decimals(1)).changed() {
+                                    put(&mut d, o, (v / 100.0).to_le_bytes());
+                                }
+                            }
+                        });
+                        if let Some(mut env) = Curve::read_at(&d, 16) {
+                            let e = env.span.1;
+                            let mut on = int(&d, e - 16) != 0;
+                            if ui.checkbox(&mut on, "Line").changed() {
+                                put(&mut d, e - 16, (on as i32).to_le_bytes());
+                            }
+                            let done = ui.push_id(("mover-env", art, part), |ui| crate::curve::curve_editor(ui, &mut env, crate::curve::Line::Envelope, 90.0)).inner;
+                            if done {
+                                Curve::replace_at(&mut d, 16, &env);
+                            }
+                        }
+                        // the slow wave sits behind the line, wherever the line now ends
+                        if let Some(e) = Curve::read_at(&d, 16).map(|c| c.span.1) {
+                            if let Some(mut lfo) = Curve::read_at(&d, e + 16) {
+                                let l = lfo.span.1;
+                                ui.horizontal(|ui| {
+                                    let mut on = int(&d, l - 16) != 0;
+                                    if ui.checkbox(&mut on, "Slow wave").changed() {
+                                        put(&mut d, l - 16, (on as i32).to_le_bytes());
+                                    }
+                                    let mut sp = int(&d, l).clamp(0, 65536);
+                                    let hz = |v: i32| 0.05 * (v as f32 / 65536.0 * 11.0).exp2();
+                                    if ui.add(egui::Slider::new(&mut sp, 0..=65536).custom_formatter(move |v, _| format!("{:.2} Hz", hz(v as i32)))).changed() {
+                                        put(&mut d, l, sp.to_le_bytes());
+                                    }
+                                });
+                                let done = ui.push_id(("mover-lfo", art, part), |ui| crate::curve::curve_editor(ui, &mut lfo, crate::curve::Line::Envelope, 70.0)).inner;
+                                if done {
+                                    Curve::replace_at(&mut d, e + 16, &lfo);
+                                }
+                            }
+                        }
+                        if d != was {
+                            *block = Motion::splice(block, r, &d);
+                            lines = true;
+                        }
+                    }
+                }
+            }
+            ui.data_mut(|d| d.insert_temp(id, (art, part)));
         }
         Shaper::Script(_) => {
             ui.label(RichText::new("The program and its knobs are shown in the channel's own window.").small().color(TEXT_DIM));

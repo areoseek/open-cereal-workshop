@@ -462,6 +462,41 @@ impl Motion {
         (!arts.is_empty() && at == b.len()).then_some(Motion { arts })
     }
 
+    /// The pieces of a mover's block for the editing window: for each mover where its head lies (colour, lowest
+    /// and highest key at 4, 8 and 12) and, per property, where that property's knobs and lines lie.
+    pub fn pieces(b: &[u8]) -> Vec<(std::ops::Range<usize>, [Option<std::ops::Range<usize>>; 5])> {
+        let mut out: Vec<(std::ops::Range<usize>, [Option<std::ops::Range<usize>>; 5])> = Vec::new();
+        let (mut at, mut part) = (4, 0usize);
+        while at + 12 <= b.len() {
+            let Some(id) = int(b, at) else { break };
+            let len = u64::from_le_bytes(b[at + 4..at + 12].try_into().unwrap()) as usize;
+            let Some(end) = (at + 12).checked_add(len).filter(|e| *e <= b.len()) else { break };
+            let r = at + 12..end;
+            match id {
+                1004 => out.push((r, Default::default())),
+                1005 => part = int(b, r.start + 4).unwrap_or(0).clamp(0, 4) as usize,
+                1006 => {
+                    if let Some(a) = out.last_mut() {
+                        a.1[part] = Some(r);
+                    }
+                }
+                _ => {}
+            }
+            at = end;
+        }
+        out
+    }
+
+    /// The block with the piece at `r` replaced by `data`, its stored length brought up to date.
+    pub fn splice(b: &[u8], r: std::ops::Range<usize>, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(b.len() + data.len());
+        out.extend_from_slice(&b[..r.start - 8]);
+        out.extend((data.len() as u64).to_le_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(&b[r.end..]);
+        out
+    }
+
     /// Whether any mover would touch a note at all.
     pub fn moving(&self) -> bool {
         self.arts.iter().any(|a| a.parts.iter().any(|p| p.env_on || p.lfo_on))
@@ -517,6 +552,51 @@ pub fn motion_of(chain: &[Link]) -> Option<std::sync::Arc<Motion>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With CEREAL_FLP_CORPUS set: the pieces of the stock movers are found where the reader finds them, go
+    /// back unchanged, and a switch flipped in one is read back.
+    #[test]
+    fn stock_movers_can_be_edited_piece_by_piece() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let dir = std::path::Path::new(&root).join("Patches/Plugin presets/Effects/VFX Envelope");
+        let (mut files, mut parts_seen) = (0, 0);
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let Ok(f) = crate::preset::read(&e.path()) else { continue };
+            let block = f.state;
+            let Some(m) = Motion::decode(&block) else { continue };
+            files += 1;
+            let pieces = Motion::pieces(&block);
+            assert_eq!(pieces.len(), m.arts.len());
+            let mut same = block.clone();
+            for (k, (head, parts)) in pieces.iter().enumerate() {
+                same = Motion::splice(&same, head.clone(), &block[head.clone()]);
+                for (j, r) in parts.iter().enumerate() {
+                    let Some(r) = r else { continue };
+                    parts_seen += 1;
+                    let mut d = block[r.clone()].to_vec();
+                    let c = crate::fm::Curve::read_at(&d, 16).unwrap();
+                    assert!(crate::fm::Curve::replace_at(&mut d, 16, &c));
+                    assert_eq!(d, &block[r.clone()], "a line goes back as it came");
+                    // flip the line's switch and add a point: both are read back, nothing else moves
+                    let e = c.span.1;
+                    let on = int(&d, e - 16).unwrap() != 0;
+                    set_int(&mut d, e - 16, !on as i32);
+                    let mut c2 = c.clone();
+                    c2.pts.push(crate::fm::Pt { x: 0.25, y: 0.75, ..Default::default() });
+                    assert!(crate::fm::Curve::replace_at(&mut d, 16, &c2));
+                    let back = Motion::decode(&Motion::splice(&block, r.clone(), &d)).expect("still a mover");
+                    assert_eq!(back.arts[k].parts[j].env_on, !on);
+                    assert_eq!(back.arts[k].parts[j].env.pts.len(), c.pts.len() + 1);
+                    assert_eq!(back.arts[k].parts[j].lfo_on, m.arts[k].parts[j].lfo_on);
+                    assert_eq!(back.arts[k].parts[j].lfo_hz, m.arts[k].parts[j].lfo_hz);
+                    assert_eq!(back.arts.len(), m.arts.len());
+                }
+            }
+            assert_eq!(same, block);
+        }
+        eprintln!("{files} movers, {parts_seen} parts");
+        assert!(files >= 3 && parts_seen > 10);
+    }
 
     #[test]
     fn edited_note_units_go_back_into_their_blocks() {
