@@ -5491,6 +5491,13 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
+            if d.kind == Kind::Comp {
+                // 64 samples late by design, otherwise untouched
+                let out = run(Fx::new(d.kind), sine, 8192);
+                let worst = out.iter().enumerate().skip(4096).map(|(i, f)| (f[0] - sine(i - 64)[0]).abs()).fold(0.0, f32::max);
+                assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
+                continue;
+            }
             if matches!(d.kind, Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
