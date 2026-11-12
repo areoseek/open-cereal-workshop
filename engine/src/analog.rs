@@ -689,6 +689,161 @@ pub fn pocket(p: &[f32]) -> Set {
 
 /// The six-voice vintage poly's stored values (0 to 1, in file order) as a voice set. The arpeggiator, hold and
 /// tempo sync of the slow oscillator are not played.
+const ADSR: [&str; 4] = ["Attack", "Decay", "Sustain", "Release"];
+
+fn fill(n: usize, placed: &[(usize, crate::duo::Info)], defs: &[f32]) -> Vec<crate::duo::Info> {
+    let mut v: Vec<crate::duo::Info> = (0..n).map(|i| crate::duo::Info { name: "", ctl: crate::duo::Ctl::Kept, def: defs.get(i).copied().unwrap_or(0.0), group: 0 }).collect();
+    for (i, info) in placed {
+        v[*i] = crate::duo::Info { name: info.name, ctl: info.ctl, def: v[*i].def, group: info.group };
+    }
+    v
+}
+
+const TRIO_GROUPS: [&str; 7] = ["Oscillator 1", "Oscillator 2", "Oscillator 3", "Slow oscillator", "Filter", "Filter envelope", "Level"];
+const POCKET_GROUPS: [&str; 4] = ["Oscillators", "Filter", "Filter envelope", "Level envelope"];
+const SAW_GROUPS: [&str; 5] = ["Oscillator", "Filter", "Filter envelope", "Level envelope", "Master"];
+
+/// What a fresh one of these holds, in file order.
+pub fn plain(kind: crate::synth::Kind) -> Vec<f32> {
+    use crate::synth::Kind;
+    match kind {
+        Kind::Trio => (0..71)
+            .map(|i| match i {
+                0..=20 => [0.5, 0.5, 0.5, 0.6, 0.5, 0.5, 0.1][i % 7],
+                26 | 28 | 29 | 39 => 0.5,
+                37 => 1.0,
+                _ => 0.0,
+            })
+            .collect(),
+        Kind::Pocket => vec![
+            0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.68, 0.0, 0.0, 0.374, 0.5, 0.0, 1.0, 1.0, 0.0, 0.0, 0.156, 0.0, 0.0, 0.667, 0.0, 0.0, 1.0, 0.0, 0.498, 0.527, 1.0, 0.0, 0.374, 0.0,
+            0.0, 1.0, 0.0,
+        ],
+        Kind::SawSyn => {
+            let mut v = vec![0.0f32; 96];
+            for (i, x) in [(0, 0.5), (1, 0.5), (3, 1.0), (4, 1.0), (6, 0.5), (7, 0.5), (15, 0.25), (17, 1.0), (18, 0.5), (27, 1.0), (33, 1.0), (34, 1.0), (35, 1.0), (39, 0.5), (42, 1.0), (48, 0.5), (49, 0.25), (50, 0.3)] {
+                v[i] = x;
+            }
+            for (i, x) in [(52, 0.3), (53, 0.2), (54, 0.7), (56, 0.6), (58, 0.4), (59, 0.4), (60, 0.3), (61, 0.25), (63, 1.0), (64, 0.5), (66, 0.5), (67, 0.5), (68, 0.5), (69, 0.5), (72, 0.5), (74, 1.0), (75, 1.0), (76, 2.0)] {
+                v[i] = x;
+            }
+            for x in &mut v[78..84] {
+                *x = 0.5;
+            }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The editing page of the three small analogue synths: the group titles and one entry per stored value.
+pub fn page(kind: crate::synth::Kind) -> (&'static [&'static str], Vec<crate::duo::Info>) {
+    use crate::duo::Ctl;
+    use crate::synth::Kind;
+    let e = |name: &'static str, ctl: Ctl, group: u8| crate::duo::Info { name, ctl, def: 0.0, group };
+    let k = |name: &'static str, group: u8| e(name, Ctl::Knob, group);
+    let mut placed: Vec<(usize, crate::duo::Info)> = Vec::new();
+    let adsr = |placed: &mut Vec<(usize, crate::duo::Info)>, at: usize, group: u8| {
+        for (j, name) in ADSR.iter().enumerate() {
+            placed.push((at + j, k(name, group)));
+        }
+    };
+    let defs = plain(kind);
+    match kind {
+        Kind::Trio => {
+            for o in 0..3 {
+                let (b, g) = (o * 7, o as u8);
+                placed.push((b + 6, e("Wave", Ctl::Tenths(&["Sine", "Saw", "Pulse", "Triangle", "Noise"]), g)));
+                for (j, name) in ["Width", "Coarse", "Fine", "Level", "Slow bend", "Envelope bend"].into_iter().enumerate() {
+                    placed.push((b + j, k(name, g)));
+                }
+            }
+            placed.push((24, e("Wave", Ctl::Tenths(&["Sine", "Triangle", "Saw", "Square", "Noise"]), 3)));
+            placed.push((22, k("Rate", 3)));
+            placed.push((21, k("Delay", 3)));
+            for (i, name) in [(26, "Cutoff"), (27, "Emphasis"), (28, "Envelope"), (29, "Slow osc"), (30, "Key follow"), (32, "High pass"), (33, "Band pass")] {
+                placed.push((i, k(name, 4)));
+            }
+            adsr(&mut placed, 41, 5);
+            adsr(&mut placed, 35, 6);
+            placed.push((39, k("Volume", 6)));
+            (&TRIO_GROUPS, fill(71, &placed, &defs))
+        }
+        Kind::Pocket => {
+            const MODES: &[&str] = &["Saw and pulse", "Two saws", "Pulse width", "Pulse and saw", "Two pulses", "Saw stack", "Saw and bells", "Doubled saw", "Octaves", "Fifths"];
+            placed.push((4, e("Mode", Ctl::Pick(MODES), 0)));
+            placed.push((5, k("Modifier", 0)));
+            placed.push((6, k("Noise", 0)));
+            placed.push((19, k("Fine", 0)));
+            for (i, name) in [(7, "Cutoff"), (8, "Resonance"), (9, "Key follow"), (10, "Envelope")] {
+                placed.push((i, k(name, 1)));
+            }
+            adsr(&mut placed, 11, 2);
+            adsr(&mut placed, 20, 3);
+            (&POCKET_GROUPS, fill(42, &placed, &defs))
+        }
+        _ => {
+            placed.push((6, k("Transpose", 0)));
+            placed.push((7, k("Fine", 0)));
+            placed.push((14, e("Voices", Ctl::Pick(&["1", "2", "3", "4", "5", "6", "7", "8"]), 0)));
+            placed.push((15, k("Detune", 0)));
+            placed.push((17, k("Sub level", 0)));
+            placed.push((23, e("Square sub", Ctl::Switch, 0)));
+            for (i, name) in [(27, "Cutoff"), (28, "Resonance"), (29, "Key follow"), (36, "Envelope")] {
+                placed.push((i, k(name, 1)));
+            }
+            adsr(&mut placed, 32, 2);
+            adsr(&mut placed, 2, 3);
+            placed.push((0, k("Level", 4)));
+            placed.push((47, e("Ensemble", Ctl::Switch, 4)));
+            (&SAW_GROUPS, fill(96, &placed, &defs))
+        }
+    }
+}
+
+/// A new block for one of the three, laid out as the stored ones are.
+pub fn fresh(kind: crate::synth::Kind) -> Vec<u8> {
+    use crate::synth::Kind;
+    let p = plain(kind);
+    let mut v = Vec::new();
+    match kind {
+        Kind::Trio => {
+            for x in &p[..70] {
+                v.extend_from_slice(&(*x as f64).to_le_bytes());
+            }
+            v.extend_from_slice(&0u32.to_le_bytes());
+        }
+        Kind::Pocket => {
+            let name: Vec<u16> = "New sound".encode_utf16().collect();
+            v.extend_from_slice(b"SSLF\0\0\0\0\x99FLS\r\n\x1a\nHEAD");
+            v.extend_from_slice(&(6 + name.len() as u32 * 2).to_le_bytes());
+            for w in [1u16, 1, name.len() as u16].into_iter().chain(name) {
+                v.extend_from_slice(&w.to_le_bytes());
+            }
+            v.extend_from_slice(b"DATA");
+            v.extend_from_slice(&(8 + p.len() as u32 * 4).to_le_bytes());
+            v.extend_from_slice(b"0rev\0\0\0\0");
+            for x in &p {
+                v.extend_from_slice(&x.to_le_bytes());
+            }
+            let len = v.len() as u32 - 8;
+            v[4..8].copy_from_slice(&len.to_le_bytes());
+        }
+        Kind::SawSyn => {
+            v.extend_from_slice(b"SSLF\0\0\0\x001rwS");
+            for x in &p {
+                v.extend_from_slice(&x.to_le_bytes());
+            }
+            v.extend_from_slice(&[0xff; 96]);
+            v.extend_from_slice(&[0; 128]);
+            let len = v.len() as u32 - 8;
+            v[4..8].copy_from_slice(&len.to_le_bytes());
+        }
+        _ => {}
+    }
+    v
+}
+
 /// The length of a beat in seconds, as the player last knew it: tempo-locked rates are worked out from it.
 static BEAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f00_0000);
 

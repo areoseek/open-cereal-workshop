@@ -109,7 +109,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Trio | Kind::SawSyn | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Pocket | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -784,6 +784,10 @@ impl Gen {
     pub fn new(kind: Kind) -> Self {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
         g.raw = g.encode(None);
+        if matches!(kind, Kind::Trio | Kind::Pocket | Kind::SawSyn) {
+            g.p = crate::analog::plain(kind);
+            g.raw = crate::analog::fresh(kind);
+        }
         if kind == Kind::Poly {
             g.p = crate::analog::poly_defaults();
             g.raw = crate::analog::poly_fresh();
@@ -1044,7 +1048,23 @@ impl Gen {
                 v
             }
         };
-        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin | Kind::Kit | Kind::Poly) {
+        if self.kind == Kind::Trio {
+            // seventy long numbers and the word of switches
+            if out.len() >= 564 && self.p.len() >= 71 {
+                for (i, &v) in self.p[..70].iter().enumerate() {
+                    let o = i * 8;
+                    if f64::from_le_bytes(out[o..o + 8].try_into().unwrap()) as f32 != v {
+                        out[o..o + 8].copy_from_slice(&(v as f64).to_le_bytes());
+                    }
+                }
+                let word = self.p[70] as u32;
+                if u32::from_le_bytes(out[560..564].try_into().unwrap()) != word {
+                    out[560..564].copy_from_slice(&word.to_le_bytes());
+                }
+            }
+            return out;
+        }
+        if matches!(self.kind, Kind::Duo | Kind::StrModel | Kind::Triple | Kind::Hybrid | Kind::Morph | Kind::KickD | Kind::Skin | Kind::Kit | Kind::Poly | Kind::Pocket | Kind::SawSyn) {
             // a list of numbers (from the twelfth byte for most): only the ones that were moved are written
             let first = match self.kind {
                 Kind::Triple => crate::triple::base(&out).unwrap_or(usize::MAX / 8),
@@ -1053,6 +1073,7 @@ impl Gen {
                 Kind::KickD => crate::kickd::FIRST,
                 Kind::Skin => crate::membrane::FIRST,
                 Kind::Kit => crate::drumkit::FIRST,
+                Kind::Pocket => out.windows(4).position(|w| w == b"DATA").map_or(usize::MAX / 8, |at| at + 16),
                 // past the name, its version and the count
                 Kind::Poly => out.get(12..16).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).filter(|&n| n < 64).map_or(usize::MAX / 8, |n| 24 + n),
                 _ => 12,
@@ -1524,6 +1545,26 @@ mod tests {
         let patch = tone.mini.as_ref().unwrap();
         let mut voice = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
         assert!((0..4000).map(|_| voice.frame(patch, 0.005)[0].abs()).fold(0.0, f32::max) > 0.03);
+    }
+
+    #[test]
+    fn the_small_analogue_synths_are_made_new_and_written_back() {
+        for (kind, ident, len, moved_at) in [(Kind::Trio, "SimSynth", 564, 26 * 8..27 * 8), (Kind::Pocket, "MiniSynth", 0, 0..0), (Kind::SawSyn, "Sawer", 620, 12 + 26 * 4..12 + 27 * 4)] {
+            let g = Gen::new(kind);
+            assert!(len == 0 || g.raw.len() == len, "{ident}");
+            assert!(!def(kind).arrives_only());
+            let mut back = Gen::decode(ident, &g.raw).unwrap();
+            assert_eq!(back.kind, kind);
+            assert_eq!(back.p, crate::analog::plain(kind), "{ident}");
+            assert_eq!(back.encode(None), g.raw, "{ident}");
+            let (_, page) = crate::analog::page(kind);
+            assert_eq!(page.len(), back.p.len());
+            back.p[26] = 0.125;
+            let out = back.encode(None);
+            let moved: Vec<usize> = (0..out.len()).filter(|&i| out[i] != g.raw[i]).collect();
+            assert!(!moved.is_empty() && (moved_at.is_empty() || moved.iter().all(|i| moved_at.contains(i))), "{ident} {moved:?}");
+            assert_eq!(Gen::decode(ident, &out).unwrap().p[26], 0.125);
+        }
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub enum Ctl {
     Whole(u32),
     /// One of these by name, stored as its place in the list.
     Choice(&'static [&'static str]),
+    /// One of these by name, stored as its place in the list over ten.
+    Tenths(&'static [&'static str]),
     /// Not placed yet: kept, not shown.
     Kept,
 }

@@ -94,6 +94,17 @@ fn float_panel_at(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen, gro
                             }
                         });
                     }
+                    Ctl::Tenths(names) => {
+                        let now = ((v * 10.0).round().max(0.0) as usize).min(names.len() - 1);
+                        egui::ComboBox::from_id_salt(("floats", ci, base + i)).selected_text(format!("{}: {}", info.name, names[now])).show_ui(ui, |ui| {
+                            for (k, name) in names.iter().enumerate() {
+                                if ui.selectable_label(k == now, *name).clicked() && k != now {
+                                    g.p[base + i] = k as f32 / 10.0;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
                     Ctl::Kept => {}
                 }
             }
@@ -1448,6 +1459,15 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                     ui.label(format!("{}{}  {n}", ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][k % 12], k / 12));
                 }
             });
+        }
+        Kind::Trio | Kind::Pocket | Kind::SawSyn => {
+            let (groups, params) = cereal_engine::analog::page(g.kind);
+            if g.p.len() < params.len() {
+                ui.label(RichText::new("The stored settings could not be read. They are kept untouched and the default sound plays.").color(TEXT_DIM));
+                return false;
+            }
+            changed |= float_panel(ui, ci, g, groups, &params);
+            ui.label(RichText::new("Only the settings we could place are shown; the others stay as stored.").small().color(TEXT_DIM));
         }
         Kind::Poly => {
             use cereal_engine::analog::{POLY_COUNT, POLY_GROUPS, POLY_PARAMS};
