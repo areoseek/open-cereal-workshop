@@ -1749,10 +1749,77 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             ui.label(RichText::new("Pack sounds are protected files and are not read. A stand-in voice chosen by the preset's name plays instead.").color(TEXT_DIM));
         }
         Kind::Image => {
+            use cereal_engine::beep;
+            let mut fresh = false;
+            ui.horizontal(|ui| {
+                if ui.button("Open picture...").hint("Load a picture (PNG, JPEG or BMP); it is kept inside the project").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "bmp"]).pick_file() {
+                        if let Ok(pic) = image::open(&p) {
+                            // wide pictures are squeezed to a sensible size; the row limit squeezes the height when played
+                            let pic = if pic.width() > 2048 || pic.height() > 256 { pic.resize(2048, 256, image::imageops::FilterType::Triangle) } else { pic };
+                            let rgb = pic.to_rgb8();
+                            g.raw = beep::with_picture(&g.raw, rgb.width() as usize, rgb.height() as usize, rgb.as_raw());
+                            fresh = true;
+                        }
+                    }
+                }
+                if g.raw.len() >= 68 {
+                    for &(name, place, _, _) in beep::FIELDS.iter().filter(|f| f.3 == 1) {
+                        let mut on = beep::get(&g.raw, place) != 0;
+                        if ui.checkbox(&mut on, name).changed() {
+                            beep::put(&mut g.raw, place, on as i32);
+                            fresh = true;
+                        }
+                    }
+                }
+            });
+            if g.raw.len() >= 68 {
+                ui.horizontal(|ui| {
+                    for &(name, place, lo, hi) in beep::FIELDS.iter().filter(|f| f.3 > 1) {
+                        let mut v = beep::get(&g.raw, place) as f32;
+                        let cents = beep::get(&g.raw, 3) != 0;
+                        let say = move |v: f32| match place {
+                            1 if cents => format!("Range: {v:.0} cents"),
+                            1 => format!("Range: {v:.0} Hz at C5"),
+                            2 => format!("Length: {:.1} ms a pixel", v / 44.1),
+                            _ => format!("At most {v:.0} sine waves a note"),
+                        };
+                        if cap_knob(ui, name, &mut v, lo as f32, hi as f32, if place == 1 { 7200.0 } else if place == 2 { 2048.0 } else { 64.0 }, say) {
+                            beep::put(&mut g.raw, place, v.round() as i32);
+                            fresh = true;
+                        }
+                    }
+                });
+            }
+            if fresh {
+                g.img = beep::Image::parse(&g.raw).map(std::sync::Arc::new);
+                changed = true;
+            }
             match &g.img {
                 Some(im) => {
-                    ui.label(RichText::new(format!("Picture {} x {}, {:.1} s a pass, {}", im.w, im.h, im.seconds(), if im.looped { "looped" } else { "played once" })).strong());
-                    ui.label(RichText::new("Red plays on the left, green on the right; each row is one sine wave above the played key. Loading and pasting pictures is still to come.").color(TEXT_DIM));
+                    // the picture is drawn from a texture made once for each picture
+                    let key = egui::Id::new("picture_synth_tex");
+                    let at = std::sync::Arc::as_ptr(im) as usize;
+                    let held: Option<(usize, egui::TextureHandle)> = ui.ctx().data(|d| d.get_temp(key));
+                    let tex = match held {
+                        Some((p, t)) if p == at => t,
+                        _ => {
+                            let mut rgb = vec![0u8; im.w * im.h * 3];
+                            for y in 0..im.h {
+                                for x in 0..im.w {
+                                    for c in 0..3 {
+                                        rgb[((im.h - 1 - y) * im.w + x) * 3 + c] = (im.px[(y * im.w + x) * 3 + c] * 255.0) as u8;
+                                    }
+                                }
+                            }
+                            let t = ui.ctx().load_texture("picture_synth", egui::ColorImage::from_rgb([im.w, im.h], &rgb), egui::TextureOptions::NEAREST);
+                            ui.ctx().data_mut(|d| d.insert_temp(key, (at, t.clone())));
+                            t
+                        }
+                    };
+                    let w = ui.available_width().min(520.0);
+                    ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(w, 150.0)).maintain_aspect_ratio(false));
+                    ui.label(RichText::new(format!("Picture {} x {}, {:.1} s a pass. Red plays on the left, green on the right; each row is one sine wave above the played key.", im.w, im.h, im.seconds())).color(TEXT_DIM));
                 }
                 None => {
                     ui.label(RichText::new("The stored picture could not be read. The block is kept untouched.").color(TEXT_DIM));

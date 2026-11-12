@@ -9,7 +9,7 @@ use std::f32::consts::TAU;
 pub struct Image {
     pub w: usize,
     pub h: usize,
-    /// Red then green, 0..1, row 0 at the bottom, `w * h * 2` long.
+    /// Red, green, blue, 0..1, row 0 at the bottom, `w * h * 3` long.
     pub px: Vec<f32>,
     /// The span of the whole height: cents when `cents`, else cycles per second.
     pub range: f32,
@@ -17,6 +17,73 @@ pub struct Image {
     pub length: f32,
     pub cents: bool,
     pub looped: bool,
+    /// The blue of a pixel lifts its pitch, by the whole range at full blue (the size of the lift is our guess).
+    pub blue: bool,
+    /// Every pixel sounds as a grain of its own with a gap after it.
+    pub grainy: bool,
+    /// The difference between the sides is doubled.
+    pub widen: bool,
+}
+
+/// The switches and knobs at the head of the block, four bytes each: (name, place, lowest, highest).
+pub const FIELDS: [(&str, usize, i32, i32); 8] = [
+    ("Range", 1, 100, 12000),
+    ("Length", 2, 32, 8192),
+    ("Cents scale", 3, 0, 1),
+    ("Use blue", 4, 0, 1),
+    ("Grainy", 5, 0, 1),
+    ("Loop", 6, 0, 1),
+    ("Widen", 7, 0, 1),
+    ("Most rows", 15, 1, 256),
+];
+
+pub fn get(state: &[u8], i: usize) -> i32 {
+    int(state, i * 4).unwrap_or(0)
+}
+
+pub fn put(state: &mut [u8], i: usize, v: i32) {
+    if let Some(b) = state.get_mut(i * 4..i * 4 + 4) {
+        b.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// The block with a new picture in it, `rgb` three bytes a pixel with the top row first. The settings of
+/// `old` are kept; without one a new unit's settings are used.
+pub fn with_picture(old: &[u8], w: usize, h: usize, rgb: &[u8]) -> Vec<u8> {
+    let mut b = if old.len() >= 68 { old[..64].to_vec() } else { [0i32, 7200, 2048, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 64].iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let mut bmp = vec![0u8; 54];
+    bmp[..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&((54 + w * h * 4) as u32).to_le_bytes());
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&(w as u32).to_le_bytes());
+    bmp[22..26].copy_from_slice(&(h as u32).to_le_bytes());
+    bmp[26] = 1;
+    bmp[28] = 32;
+    bmp[34..38].copy_from_slice(&((w * h * 4) as u32).to_le_bytes());
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let p = &rgb[(y * w + x) * 3..];
+            bmp.extend_from_slice(&[p[2], p[1], p[0], 0]);
+        }
+    }
+    b.extend_from_slice(&(bmp.len() as u32).to_le_bytes());
+    b.extend_from_slice(&bmp);
+    b
+}
+
+/// A new unit's block: a picture of our own, two lines of light crossing, one on each side.
+pub fn fresh() -> Vec<u8> {
+    let (w, h) = (192usize, 48usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    for x in 0..w {
+        let up = x * (h - 1) / (w - 1);
+        for (y, c) in [(h - 1 - up, 0), (up, 1), (h - 1 - up / 2, 0), (h - 1 - up / 2, 1)] {
+            let fade = 255 - (x * 160 / w) as u8;
+            rgb[(y * w + x) * 3 + c] = fade;
+        }
+    }
+    with_picture(&[], w, h, &rgb)
 }
 
 fn int(b: &[u8], o: usize) -> Option<i32> {
@@ -47,7 +114,7 @@ impl Image {
         let body = bmp.get(data..data + stride * full)?;
         // taller pictures are squeezed to the height the block allows
         let h = full.min(limit);
-        let mut px = vec![0.0f32; w * h * 2];
+        let mut px = vec![0.0f32; w * h * 3];
         let mut hits = vec![0u16; h];
         for row in 0..full {
             // bitmaps are stored bottom row first unless the height is negative
@@ -55,24 +122,26 @@ impl Image {
             hits[y] += 1;
             let line = &body[row * stride..];
             for x in 0..w {
-                let (r, g) = match bits {
+                let (r, g, b) = match bits {
                     16 => {
                         let v = u16::from_le_bytes([line[x * 2], line[x * 2 + 1]]);
-                        (((v >> 10) & 31) as f32 / 31.0, ((v >> 5) & 31) as f32 / 31.0)
+                        (((v >> 10) & 31) as f32 / 31.0, ((v >> 5) & 31) as f32 / 31.0, (v & 31) as f32 / 31.0)
                     }
-                    n => (line[x * n / 8 + 2] as f32 / 255.0, line[x * n / 8 + 1] as f32 / 255.0),
+                    n => (line[x * n / 8 + 2] as f32 / 255.0, line[x * n / 8 + 1] as f32 / 255.0, line[x * n / 8] as f32 / 255.0),
                 };
-                px[(y * w + x) * 2] += r;
-                px[(y * w + x) * 2 + 1] += g;
+                px[(y * w + x) * 3] += r;
+                px[(y * w + x) * 3 + 1] += g;
+                px[(y * w + x) * 3 + 2] += b;
             }
         }
         for y in 0..h {
             let n = hits[y].max(1) as f32;
-            for v in &mut px[y * w * 2..(y + 1) * w * 2] {
+            for v in &mut px[y * w * 3..(y + 1) * w * 3] {
                 *v /= n;
             }
         }
-        Some(Self { w, h, px, range, length: length.max(1.0), cents, looped })
+        let on = |i: usize| int(state, i * 4).unwrap_or(0) != 0;
+        Some(Self { w, h, px, range, length: length.max(1.0), cents, looped, blue: on(4), grainy: on(5), widen: on(7) })
     }
 
     /// Seconds one pass over the picture takes.
@@ -95,6 +164,7 @@ pub struct Voice {
     vel: f32,
     fade: f32,
     fading: bool,
+    base: f32,
 }
 
 impl Voice {
@@ -102,14 +172,19 @@ impl Voice {
         let base = dphase * sr;
         let rows = (0..img.h)
             .map(|y| {
-                let up = y as f32 / img.h as f32 * img.range;
-                // the bottom row sits on the played key
-                let hz = if img.cents { base * 2f32.powf(up / 1200.0) } else { base + up * base / 261.6256 };
-                let w = if hz < sr * 0.45 { TAU * hz / sr } else { 0.0 };
+                let w = Self::turn(img, base, sr, y as f32 / img.h as f32);
                 [1.0, 0.0, w.cos(), w.sin()]
             })
             .collect();
-        Self { img: img.clone(), sr, rows, at: 0.0, step: 44100.0 / sr / img.length, level: [vec![0.0; img.h], vec![0.0; img.h]], k: 0, vel, fade: 1.0, fading: false }
+        Self { img: img.clone(), sr, rows, at: 0.0, step: 44100.0 / sr / img.length, level: [vec![0.0; img.h], vec![0.0; img.h]], k: 0, vel, fade: 1.0, fading: false, base }
+    }
+
+    /// The turn per frame of a row `up` of the way (0..1 and beyond) through the range.
+    fn turn(img: &Image, base: f32, sr: f32, up: f32) -> f32 {
+        let up = up * img.range;
+        // the bottom row sits on the played key
+        let hz = if img.cents { base * 2f32.powf(up / 1200.0) } else { base + up * base / 261.6256 };
+        if hz < sr * 0.45 { TAU * hz / sr } else { 0.0 }
     }
 
     pub fn release(&mut self) -> f32 {
@@ -134,9 +209,22 @@ impl Voice {
         if self.k == 0 {
             self.k = 32;
             let x = (self.at as usize).min(im.w - 1);
+            // a grain swells and dies away inside its pixel, leaving the last third silent
+            let grain = if im.grainy {
+                let t = self.at.fract() * 1.5;
+                if t < 1.0 { (std::f32::consts::PI * t).sin().powi(2) } else { 0.0 }
+            } else {
+                1.0
+            };
             for y in 0..im.h {
-                self.level[0][y] = im.px[(y * im.w + x) * 2];
-                self.level[1][y] = im.px[(y * im.w + x) * 2 + 1];
+                let p = &im.px[(y * im.w + x) * 3..];
+                self.level[0][y] = p[0] * grain;
+                self.level[1][y] = p[1] * grain;
+                if im.blue && p[0] + p[1] > 0.0 {
+                    let w = Self::turn(im, self.base, self.sr, y as f32 / im.h as f32 + p[2]);
+                    self.rows[y][2] = w.cos();
+                    self.rows[y][3] = w.sin();
+                }
             }
         }
         self.k -= 1;
@@ -164,6 +252,10 @@ impl Voice {
             self.fade *= 1.0 - 1.0 / (0.012 * self.sr);
         }
         let g = 1.2 / (im.h as f32).sqrt() * self.vel * self.fade;
+        if im.widen {
+            let (mid, side) = ((o[0] + o[1]) * 0.5, o[0] - o[1]);
+            return [(mid + side) * g, (mid - side) * g];
+        }
         [o[0] * g, o[1] * g]
     }
 }
@@ -198,7 +290,7 @@ mod tests {
     fn red_plays_on_the_left_first_and_green_on_the_right_after() {
         let im = std::sync::Arc::new(Image::parse(&block()).unwrap());
         assert_eq!((im.w, im.h), (4, 2));
-        assert_eq!(&im.px[..4], &[1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(&im.px[..6], &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let mut v = Voice::start(&im, 44100.0, 1.0, 440.0 / 44100.0);
         let mut sum = |n: usize| (0..n).fold([0.0f32; 2], |a, _| { let f = v.frame(); [a[0] + f[0].abs(), a[1] + f[1].abs()] });
         let first = sum(1900);
@@ -209,5 +301,33 @@ mod tests {
         // played once, it ends
         assert!(sum(2000)[0] < 1.0 && v.left() == 0.0);
         assert!(Image::parse(&[0; 40]).is_none());
+    }
+
+    #[test]
+    fn a_new_picture_goes_in_and_the_switches_change_the_sound() {
+        let mut b = fresh();
+        let im = Image::parse(&b).unwrap();
+        assert_eq!((im.w, im.h, im.looped, im.grainy), (192, 48, true, false));
+        // top row first going in, bottom row first inside
+        let b2 = with_picture(&b, 2, 2, &[255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 128]);
+        let im2 = Image::parse(&b2).unwrap();
+        assert_eq!(&im2.px[..6], &[0.0, 0.0, 0.0, 0.0, 1.0, 128.0 / 255.0]);
+        assert_eq!(get(&b2, 1), 7200);
+        let run = |b: &[u8]| {
+            let im = std::sync::Arc::new(Image::parse(b).unwrap());
+            let mut v = Voice::start(&im, 44100.0, 1.0, 220.0 / 44100.0);
+            (0..20000).map(|_| v.frame()).collect::<Vec<_>>()
+        };
+        let plain = run(&b);
+        put(&mut b, 5, 1);
+        let grainy = run(&b);
+        // grains leave silent gaps the plain sound does not have
+        let quiet = |o: &[[f32; 2]]| o.chunks(64).filter(|c| c.iter().all(|f| f[0].abs() + f[1].abs() < 1e-4)).count();
+        assert!(quiet(&grainy) > quiet(&plain) + 5, "{} {}", quiet(&grainy), quiet(&plain));
+        put(&mut b, 5, 0);
+        put(&mut b, 7, 1);
+        let wide = run(&b);
+        let side = |o: &[[f32; 2]]| o.iter().map(|f| (f[0] - f[1]).abs()).sum::<f32>();
+        assert!(side(&wide) > side(&plain) * 1.8);
     }
 }

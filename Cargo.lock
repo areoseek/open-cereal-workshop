@@ -433,6 +433,7 @@ dependencies = [
  "cpal",
  "eframe",
  "egui",
+ "image",
  "lzma-rs",
  "rfd",
 ]
@@ -1569,6 +1570,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
