@@ -13,6 +13,10 @@ pub struct State {
     pub roots: Vec<(String, PathBuf)>,
     listing: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
     selected: Option<PathBuf>,
+    /// The files on show, top to bottom, for the arrow keys to walk.
+    visible: Vec<PathBuf>,
+    /// The picked file has just moved by key and wants scrolling into view.
+    reveal: bool,
 }
 
 const AUDIO: [&str; 7] = ["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"];
@@ -81,7 +85,18 @@ impl App {
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
                 let text = RichText::new(&name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
                 let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate());
-                if resp.clicked() {
+                self.browser.visible.push(path.clone());
+                if selected && self.browser.reveal {
+                    resp.scroll_to_me(None);
+                    self.browser.reveal = false;
+                }
+                let mods = ui.input(|i| i.modifiers);
+                if resp.clicked() && mods.command && mods.alt {
+                    self.focus = crate::Win::Browser;
+                    self.browser.selected = Some(path.clone());
+                    self.browser_replace();
+                } else if resp.clicked() {
+                    self.focus = crate::Win::Browser;
                     self.browser.selected = Some(path.clone());
                     if preset {
                         self.actions.push(Action::LoadPreset(path.clone(), crate::PresetTo::Auto));
@@ -126,7 +141,53 @@ impl App {
         }
     }
 
+    /// Put the picked file in the selected channel: a sound replaces its sample, a preset its settings.
+    fn browser_replace(&mut self) {
+        let Some(path) = self.browser.selected.clone() else { return };
+        let ext = ext_of(&path);
+        if ext == "flp" {
+            self.actions.push(Action::Open(path));
+        } else if ext == "fsc" || ext == "mid" {
+            self.actions.push(Action::LoadScore(path, None));
+        } else if cereal_engine::preset::EXTS.contains(&ext.as_str()) {
+            self.actions.push(Action::LoadPreset(path, crate::PresetTo::Auto));
+        } else {
+            self.actions.push(Action::LoadSample(path, Some(self.sel_chan)));
+        }
+    }
+
+    /// Keys while the browser has them: the arrows walk the files on show and play each, Enter loads the one picked.
+    pub(crate) fn browser_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if m.command || m.alt {
+            return false;
+        }
+        match key {
+            egui::Key::ArrowUp | egui::Key::ArrowDown => {
+                let v = &self.browser.visible;
+                if v.is_empty() {
+                    return true;
+                }
+                let at = self.browser.selected.as_ref().and_then(|s| v.iter().position(|p| p == s));
+                let to = match (at, key == egui::Key::ArrowDown) {
+                    (Some(i), true) => (i + 1).min(v.len() - 1),
+                    (Some(i), false) => i.saturating_sub(1),
+                    (None, _) => 0,
+                };
+                let path = v[to].clone();
+                if AUDIO.contains(&ext_of(&path).as_str()) {
+                    self.actions.push(Action::Preview(path.clone()));
+                }
+                self.browser.selected = Some(path);
+                self.browser.reveal = true;
+            }
+            egui::Key::Enter => self.browser_replace(),
+            _ => return false,
+        }
+        true
+    }
+
     pub(crate) fn browser_ui(&mut self, ui: &mut Ui) {
+        self.browser.visible.clear();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Browser").strong().color(TEXT));
             if ui.small_button("Refresh").clicked() {

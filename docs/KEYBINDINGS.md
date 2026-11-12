@@ -216,5 +216,5 @@ keyboard is on, and the number pad meaning applies otherwise.
 |---|---|---|
 | Click | Preview a sound | yes |
 | Drag onto a channel, the rack, the playlist or a mixer slot | Load it there | yes |
-| Enter, Ctrl+Alt+click | Replace the selected channel with the item | no |
-| Shift+Up / Down | Step through the list with preview | no |
+| Enter, Ctrl+Alt+click | Replace the selected channel with the item | yes |
+| Up / Down, Shift+Up / Down | Step through the files on show, playing each | yes |

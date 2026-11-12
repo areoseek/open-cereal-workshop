@@ -22,6 +22,7 @@ pub(crate) enum Win {
     Piano,
     Playlist,
     Mixer,
+    Browser,
 }
 mod keys;
 mod testkeys;
@@ -1597,6 +1598,9 @@ impl App {
                 continue;
             }
             if self.focus == Win::Mixer && self.show_mixer && self.mixer_key(key, modifiers, repeat) {
+                continue;
+            }
+            if self.focus == Win::Browser && self.show_browser && self.browser_key(key, modifiers) {
                 continue;
             }
             if modifiers.command {
