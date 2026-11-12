@@ -17,6 +17,58 @@ pub struct State {
     visible: Vec<PathBuf>,
     /// The picked file has just moved by key and wants scrolling into view.
     reveal: bool,
+    tab: Tab,
+    /// What the search box holds, and the files found for it.
+    query: String,
+    hits: Option<(String, Vec<PathBuf>)>,
+    /// Ctrl+F: the search box takes the keyboard.
+    find: bool,
+}
+
+/// The browser's pages.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Tab {
+    #[default]
+    All,
+    Project,
+    Plugins,
+}
+
+const SHOWN: [&str; 7] = ["flp", "fst", "fsc", "mid", "gmsynth", "tbio", "mrp"];
+
+/// Every file under the folders whose name holds all the words asked for (a few hundred at most).
+fn search(roots: &[(String, PathBuf)], query: &str) -> Vec<PathBuf> {
+    let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let mut out = Vec::new();
+    let mut todo: Vec<(PathBuf, u32)> = roots.iter().map(|r| (r.1.clone(), 0)).collect();
+    let mut seen = 0usize;
+    while let Some((dir, depth)) = todo.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > 400_000 || out.len() >= 400 {
+                out.sort();
+                return out;
+            }
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with('.') {
+                continue;
+            }
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                if depth < 24 {
+                    todo.push((p, depth + 1));
+                }
+            } else if words.iter().all(|w| name.contains(w.as_str())) {
+                let ext = ext_of(&p);
+                if AUDIO.contains(&ext.as_str()) || SHOWN.contains(&ext.as_str()) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 const AUDIO: [&str; 7] = ["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"];
@@ -50,7 +102,7 @@ impl State {
                             let is_dir = p.is_dir();
                             let ext = ext_of(&p);
                             let hidden = e.file_name().to_string_lossy().starts_with('.');
-                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || ["flp", "fst", "fsc", "mid", "gmsynth", "tbio", "mrp"].contains(&ext.as_str()))).then_some((p, is_dir))
+                            (!hidden && (is_dir || AUDIO.contains(&ext.as_str()) || SHOWN.contains(&ext.as_str()))).then_some((p, is_dir))
                         })
                         .collect()
                 })
@@ -78,12 +130,22 @@ impl App {
                         }
                     });
             } else {
+                self.browser_file(ui, &path, &name);
+            }
+        }
+    }
+
+    /// One file's row: click to hear or load it, drag it out, right-click for more.
+    fn browser_file(&mut self, ui: &mut Ui, path: &Path, name: &str) {
+        let path = path.to_path_buf();
+        {
+            {
                 let ext = ext_of(&path);
                 let project = ext == "flp";
                 let preset = cereal_engine::preset::EXTS.contains(&ext.as_str());
                 let score = ext == "fsc" || ext == "mid";
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
-                let text = RichText::new(&name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
+                let text = RichText::new(name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
                 let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate());
                 self.browser.visible.push(path.clone());
                 if selected && self.browser.reveal {
@@ -135,6 +197,11 @@ impl App {
                             self.actions.push(Action::LoadSample(path.clone(), Some(self.sel_chan)));
                             ui.close_menu();
                         }
+                        if ui.button("Add to the playlist").hint("As an audio clip where the song stands").clicked() {
+                            let at = if self.handle.transport.song_mode() { self.handle.transport.tick() as u32 } else { 0 };
+                            self.add_audio_clip(&path, at, None);
+                            ui.close_menu();
+                        }
                     }
                 });
             }
@@ -158,6 +225,11 @@ impl App {
 
     /// Keys while the browser has them: the arrows walk the files on show and play each, Enter loads the one picked.
     pub(crate) fn browser_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if m.command && !m.alt && !m.shift && key == egui::Key::F {
+            self.browser.tab = Tab::All;
+            self.browser.find = true;
+            return true;
+        }
         if m.command || m.alt {
             return false;
         }
@@ -181,6 +253,7 @@ impl App {
                 self.browser.reveal = true;
             }
             egui::Key::Enter => self.browser_replace(),
+            egui::Key::Escape if !self.browser.query.is_empty() => self.browser.query.clear(),
             _ => return false,
         }
         true
@@ -199,7 +272,42 @@ impl App {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            for (tab, label, tip) in [(Tab::All, "All", "Every folder"), (Tab::Project, "Current project", "What this project is made of"), (Tab::Plugins, "Plug-in database", "The instruments and effects")] {
+                if ui.selectable_label(self.browser.tab == tab, RichText::new(label).small()).hint(tip).clicked() {
+                    self.browser.tab = tab;
+                }
+            }
+        });
+        match self.browser.tab {
+            Tab::All => {}
+            Tab::Project => return self.browser_project(ui),
+            Tab::Plugins => return self.browser_plugins(ui),
+        }
+        let find = ui.add(egui::TextEdit::singleline(&mut self.browser.query).hint_text("Find (Ctrl+F)").desired_width(f32::INFINITY));
+        if std::mem::take(&mut self.browser.find) {
+            find.request_focus();
+        }
         ui.separator();
+        let query = self.browser.query.trim().to_string();
+        if !query.is_empty() {
+            if self.browser.hits.as_ref().is_none_or(|h| h.0 != query) {
+                self.browser.hits = Some((query.clone(), search(&self.browser.roots, &query)));
+            }
+            let hits = self.browser.hits.as_ref().map(|h| h.1.clone()).unwrap_or_default();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                if hits.is_empty() {
+                    ui.label(RichText::new("Nothing found.").color(TEXT_DIM));
+                }
+                for path in hits {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.browser_file(ui, &path, &name);
+                }
+            });
+            return self.browser_drag(ui);
+        }
+        self.browser.hits = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             let roots = self.browser.roots.clone();
@@ -215,6 +323,151 @@ impl App {
                     .body(|ui| self.browser_dir(ui, &path, 0));
             }
         });
+        self.browser_drag(ui);
+    }
+
+    /// The current project page: its history, patterns, channels, effects and sounds, each a click away.
+    fn browser_project(&mut self, ui: &mut Ui) {
+        ui.separator();
+        let tr = self.handle.transport.clone();
+        let head = |ui: &mut Ui, name: &str, open: bool, body: &mut dyn FnMut(&mut Ui)| {
+            let id = ui.make_persistent_id(("project-page", name));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new(name).strong().color(TEXT));
+                })
+                .body(|ui| body(ui));
+        };
+        let row = |ui: &mut Ui, text: String, lit: bool| ui.add(egui::Label::new(RichText::new(text).color(if lit { GREEN } else { TEXT_DIM })).selectable(false).sense(Sense::click()).truncate());
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let mut jump = None;
+            head(ui, "History", false, &mut |ui| {
+                for k in (0..self.history.len()).rev() {
+                    let text = if k == 0 { "Start".to_string() } else { format!("Edit {k}") };
+                    if row(ui, text, k == self.hist_at).hint("Go back or forward to this point").clicked() {
+                        jump = Some(k);
+                    }
+                }
+            });
+            if let Some(k) = jump {
+                self.hist_at = k;
+                self.restore();
+            }
+            let pat = tr.pattern();
+            head(ui, "Patterns", true, &mut |ui| {
+                for i in 0..self.song.patterns.len() {
+                    let p = &self.song.patterns[i];
+                    if p.notes.is_empty() && p.name.is_empty() && i != pat {
+                        continue;
+                    }
+                    let r = row(ui, self.song.pattern_name(i), i == pat);
+                    if r.clicked() {
+                        tr.set_pattern(i);
+                    }
+                    if r.double_clicked() {
+                        self.show_piano = true;
+                    }
+                }
+            });
+            let mut pick = None;
+            head(ui, "Generators", true, &mut |ui| {
+                for (i, c) in self.song.channels.iter().enumerate() {
+                    if c.kind != cereal_engine::flp::ChannelKind::AutomationClip && row(ui, c.name.clone(), i == self.sel_chan).clicked() {
+                        pick = Some(i);
+                    }
+                }
+            });
+            head(ui, "Automation", false, &mut |ui| {
+                for (i, c) in self.song.channels.iter().enumerate() {
+                    if c.kind == cereal_engine::flp::ChannelKind::AutomationClip && row(ui, c.name.clone(), i == self.sel_chan).clicked() {
+                        pick = Some(i);
+                    }
+                }
+            });
+            if let Some(i) = pick {
+                self.sel_chan = i;
+                self.show_chanset = true;
+            }
+            let mut open = None;
+            head(ui, "Effects", true, &mut |ui| {
+                for (i, ins) in self.song.inserts.iter().enumerate() {
+                    for s in &ins.slots {
+                        if row(ui, format!("{}: {}", self.song.insert_name(i), s.title()), self.fx_open == Some((i, s.index))).clicked() {
+                            open = Some((i, s.index));
+                        }
+                    }
+                }
+            });
+            if let Some((i, s)) = open {
+                self.fx_open = Some((i, s));
+                self.sel_insert = i;
+            }
+            let mut hear = None;
+            head(ui, "Sounds", false, &mut |ui| {
+                let mut seen: Vec<&str> = Vec::new();
+                for c in &self.song.channels {
+                    if c.sample_path.is_empty() || seen.contains(&c.sample_path.as_str()) {
+                        continue;
+                    }
+                    seen.push(&c.sample_path);
+                    let name = c.sample_path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+                    if row(ui, name, false).hint(c.sample_path.clone()).clicked() {
+                        hear = Some(PathBuf::from(&c.sample_path));
+                    }
+                }
+            });
+            if let Some(p) = hear.filter(|p| p.is_file()) {
+                self.actions.push(Action::Preview(p));
+            }
+        });
+    }
+
+    /// The plug-in page: every instrument and effect; a click adds one.
+    fn browser_plugins(&mut self, ui: &mut Ui) {
+        ui.separator();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let id = ui.make_persistent_id("plug-generators");
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new("Generators").strong().color(TEXT));
+                })
+                .body(|ui| {
+                    let mut defs: Vec<_> = cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()).collect();
+                    defs.sort_by_key(|d| d.title);
+                    for d in defs {
+                        if ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click()).truncate()).hint("Click to add a channel with this instrument").clicked() {
+                            self.song.channels.push(cereal_engine::song::Chan::instrument(d.kind));
+                            self.sel_chan = self.song.channels.len() - 1;
+                            self.dirty = true;
+                        }
+                    }
+                });
+            let id = ui.make_persistent_id("plug-effects");
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new("Effects").strong().color(TEXT));
+                })
+                .body(|ui| {
+                    for d in Self::effect_defs() {
+                        if ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click()).truncate()).hint("Click to put it in the first free slot of the selected mixer track").clicked() {
+                            let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
+                            let used: Vec<u16> = self.song.inserts.get(ins).map(|i| i.slots.iter().map(|s| s.index).collect()).unwrap_or_default();
+                            if let Some(slot) = (0..10u16).find(|s| !used.contains(s)) {
+                                self.set_effect(ins, slot, d.kind, d.ident);
+                                self.show_mixer = true;
+                                self.dirty = true;
+                            } else {
+                                self.status = "Every slot of the selected mixer track is in use".into();
+                            }
+                        }
+                    }
+                });
+        });
+    }
+
+    fn browser_drag(&mut self, ui: &mut Ui) {
         // a sample being dragged follows the pointer
         if let Some(path) = egui::DragAndDrop::payload::<PathBuf>(ui.ctx()) {
             if let Some(pos) = ui.ctx().pointer_hover_pos() {

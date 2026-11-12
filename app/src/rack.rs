@@ -364,74 +364,7 @@ impl App {
                     self.dirty = true;
                 }
                 ui.menu_button("Instrument", |ui| {
-                    // some instruments have no fresh block of their own yet: they arrive with projects and presets
-                    for d in cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()) {
-                        if ui.button(d.title).clicked() {
-                            self.song.channels.push(Chan::instrument(d.kind));
-                            self.sel_chan = self.song.channels.len() - 1;
-                            self.dirty = true;
-                            ui.close_menu();
-                        }
-                    }
-                    ui.menu_button("Plug-ins", |ui| {
-                        if let Some(inst) = crate::hostui::menu(ui, true) {
-                            self.song.channels.push(Chan::hosted(inst));
-                            self.sel_chan = self.song.channels.len() - 1;
-                            self.dirty = true;
-                        }
-                    });
-                    if ui.button("MIDI Sender").hint("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
-                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
-                        c.plugin = cereal_engine::midiout::IDENT.into();
-                        c.name = "MIDI Sender".into();
-                        if let Some(g) = c.gen.as_mut() {
-                            g.raw = cereal_engine::midiout::Set::fresh().write();
-                        }
-                        self.song.channels.push(c);
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Envelope Sender").hint("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
-                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
-                        c.plugin = cereal_engine::fm::ENV_SENDER.into();
-                        c.name = "Envelope Sender".into();
-                        if let Some(g) = c.gen.as_mut() {
-                            g.raw = cereal_engine::fm::Sender::fresh();
-                        }
-                        self.song.channels.push(c);
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Key Controller").hint("A silent channel whose notes move the controls linked to it").clicked() {
-                        let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
-                        c.plugin = cereal_engine::synth::KEY_SENDER.into();
-                        c.name = "Key Controller".into();
-                        if let Some(g) = c.gen.as_mut() {
-                            cereal_engine::synth::key_sender_set(&mut g.raw, 255, 0.0);
-                        }
-                        self.song.channels.push(c);
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Pad Machine").clicked() {
-                        let mut c = Chan { name: "Pad Machine".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: cereal_engine::zones::Kit::IDENT.into(), ..Chan::default() };
-                        c.zones = cereal_engine::zones::Map::parse(&c.plugin, &cereal_engine::zones::Kit::fresh().write()).map(std::sync::Arc::new);
-                        self.song.channels.push(c);
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Sound Bank Player").clicked() {
-                        let mut c = Chan { name: "Sound Bank Player".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
-                        c.zones = cereal_engine::sf2::open(&c.plugin, &[], None, None).map(std::sync::Arc::new);
-                        self.song.channels.push(c);
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
+                    self.instrument_menu(ui);
                 })
                 .response
                 .hint("Add a channel playing a built-in instrument");
@@ -504,5 +437,79 @@ impl App {
         self.rack.sel.clear();
         self.sel_chan = self.sel_chan.min(self.song.channels.len().saturating_sub(1));
         self.dirty = true;
+    }
+}
+
+impl App {
+    /// The built-in instruments and the installed plug-ins, as menu rows that each add a channel.
+    pub(crate) fn instrument_menu(&mut self, ui: &mut Ui) {
+        // some instruments have no fresh block of their own yet: they arrive with projects and presets
+        for d in cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()) {
+            if ui.button(d.title).clicked() {
+                self.song.channels.push(Chan::instrument(d.kind));
+                self.sel_chan = self.song.channels.len() - 1;
+                self.dirty = true;
+                ui.close_menu();
+            }
+        }
+        ui.menu_button("Plug-ins", |ui| {
+            if let Some(inst) = crate::hostui::menu(ui, true) {
+                self.song.channels.push(Chan::hosted(inst));
+                self.sel_chan = self.song.channels.len() - 1;
+                self.dirty = true;
+            }
+        });
+        if ui.button("MIDI Sender").hint("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
+            let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+            c.plugin = cereal_engine::midiout::IDENT.into();
+            c.name = "MIDI Sender".into();
+            if let Some(g) = c.gen.as_mut() {
+                g.raw = cereal_engine::midiout::Set::fresh().write();
+            }
+            self.song.channels.push(c);
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            ui.close_menu();
+        }
+        if ui.button("Envelope Sender").hint("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
+            let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+            c.plugin = cereal_engine::fm::ENV_SENDER.into();
+            c.name = "Envelope Sender".into();
+            if let Some(g) = c.gen.as_mut() {
+                g.raw = cereal_engine::fm::Sender::fresh();
+            }
+            self.song.channels.push(c);
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            ui.close_menu();
+        }
+        if ui.button("Key Controller").hint("A silent channel whose notes move the controls linked to it").clicked() {
+            let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
+            c.plugin = cereal_engine::synth::KEY_SENDER.into();
+            c.name = "Key Controller".into();
+            if let Some(g) = c.gen.as_mut() {
+                cereal_engine::synth::key_sender_set(&mut g.raw, 255, 0.0);
+            }
+            self.song.channels.push(c);
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            ui.close_menu();
+        }
+        if ui.button("Pad Machine").clicked() {
+            let mut c = Chan { name: "Pad Machine".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: cereal_engine::zones::Kit::IDENT.into(), ..Chan::default() };
+            c.zones = cereal_engine::zones::Map::parse(&c.plugin, &cereal_engine::zones::Kit::fresh().write()).map(std::sync::Arc::new);
+            self.song.channels.push(c);
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            ui.close_menu();
+        }
+        if ui.button("Sound Bank Player").clicked() {
+            let mut c = Chan { name: "Sound Bank Player".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: "SoundFont Player".into(), ..Chan::default() };
+            c.zones = cereal_engine::sf2::open(&c.plugin, &[], None, None).map(std::sync::Arc::new);
+            self.song.channels.push(c);
+            self.sel_chan = self.song.channels.len() - 1;
+            self.dirty = true;
+            ui.close_menu();
+        }
     }
 }

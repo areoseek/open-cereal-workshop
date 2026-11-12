@@ -232,9 +232,7 @@ impl App {
                                 }
                             });
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
-                                defs.sort_by_key(|d| d.title);
-                                for d in defs {
+                                for d in Self::effect_defs() {
                                     if ui.button(d.title).clicked() {
                                         act = Some(SlotAct::Set(slot, d.kind, d.ident));
                                     }
@@ -283,18 +281,7 @@ impl App {
                                     self.fx_open = Some((i, s));
                                 }
                             }
-                            SlotAct::Set(s, kind, ident) => {
-                                slots.retain(|x| x.index != s);
-                                let mut new = cereal_engine::song::Slot::with_fx(s, kind);
-                                // several units share a kind; the name is what tells them apart
-                                new.plugin = ident.to_string();
-                                if let (cereal_engine::fx::Kind::Notes, Some(f), Some(fl)) = (kind, &mut new.fx, cereal_engine::notes::flavour_of(ident)) {
-                                    f.p = cereal_engine::notes::Notes { flavour: fl, active: 1, pages: vec![(1, String::new())] }.pack();
-                                }
-                                slots.push(new);
-                                slots.sort_by_key(|x| x.index);
-                                self.fx_open = Some((i, s));
-                            }
+                            SlotAct::Set(s, kind, ident) => self.set_effect(i, s, kind, ident),
                         }
                         if !matches!(a, SlotAct::Open(_)) {
                             changed = true;
@@ -386,3 +373,29 @@ impl App {
         }
     }
 }
+
+impl App {
+    /// Put a built-in effect in a mixer slot and open it.
+    pub(crate) fn set_effect(&mut self, insert: usize, slot: u16, kind: cereal_engine::fx::Kind, ident: &str) {
+        let Some(ins) = self.song.inserts.get_mut(insert) else { return };
+        let slots = &mut ins.slots;
+        slots.retain(|x| x.index != slot);
+        let mut new = cereal_engine::song::Slot::with_fx(slot, kind);
+        // several units share a kind; the name is what tells them apart
+        new.plugin = ident.to_string();
+        if let (cereal_engine::fx::Kind::Notes, Some(f), Some(fl)) = (kind, &mut new.fx, cereal_engine::notes::flavour_of(ident)) {
+            f.p = cereal_engine::notes::Notes { flavour: fl, active: 1, pages: vec![(1, String::new())] }.pack();
+        }
+        slots.push(new);
+        slots.sort_by_key(|x| x.index);
+        self.fx_open = Some((insert, slot));
+    }
+
+    /// The built-in effects a slot can take, by title.
+    pub(crate) fn effect_defs() -> Vec<&'static cereal_engine::fx::Def> {
+        let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
+        defs.sort_by_key(|d| d.title);
+        defs
+    }
+}
+

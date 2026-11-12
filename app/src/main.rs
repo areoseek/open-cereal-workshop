@@ -89,10 +89,6 @@ fn out_lag(info: &cpal::OutputCallbackInfo) {
     }
 }
 
-/// Open the sound card the settings name (or the system's default) and let the player `make` builds for
-/// its rate run on it.
-/// Tests run on a sound device that takes blocks as fast as they come; with CEREAL_PACE set the blocks are
-/// held back to the speed of the clock so that time in the song passes as it would be heard.
 /// How much of each block's time the sound engine used, in thousandths, smoothed.
 static CPU_LOAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -105,6 +101,8 @@ fn cpu_load(took: std::time::Duration, frames: usize, rate: f32) {
     CPU_LOAD.store(next.clamp(0.0, 9999.0) as u32, Relaxed);
 }
 
+/// Tests run on a sound device that takes blocks as fast as they come; with CEREAL_PACE set the blocks are
+/// held back to the speed of the clock so that time in the song passes as it would be heard.
 fn pace(frames: usize, rate: f32) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static FROM: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
