@@ -193,8 +193,8 @@ pub static DEFS: &[Def] = &[
         kind: Kind::Eq,
         ident: "Fruity Parametric EQ 2",
         title: "Seven Band EQ",
-        size: 148,
-        fixed: &[(0, 8)],
+        size: 305,
+        fixed: &[(0, 2)],
         params: &[
             p("Level 1", 4, -1800, 1800, 0),
             p("Level 2", 8, -1800, 1800, 0),
@@ -2097,6 +2097,7 @@ impl Fx {
             None if self.kind == Kind::Xyz => xyz_fresh(),
             None if self.kind == Kind::Warp => warp_fresh(),
             None if self.kind == Kind::MorphEq => meq_fresh(),
+            None if self.kind == Kind::Eq => eq_fresh(d),
             None => {
                 let mut v = vec![0u8; d.size];
                 for &(o, x) in d.fixed {
@@ -2207,6 +2208,21 @@ fn old_floats(d: &Def, state: &[u8]) -> bool {
         })
         // a current block starts with its version number; a travel that small would be a denormal
         && !d.fixed.iter().any(|&(at, v)| at == 0 && state[..4] == (v as u32).to_le_bytes())
+}
+
+/// A new seven band block: version, the settings, a second bank holding the same, then the view options.
+fn eq_fresh(d: &Def) -> Vec<u8> {
+    let mut v = vec![0u8; 305];
+    v[..4].copy_from_slice(&2i32.to_le_bytes());
+    for q in d.params {
+        let x = (q.def as i32).to_le_bytes();
+        v[q.off..q.off + 4].copy_from_slice(&x);
+        v[q.off + 144..q.off + 148].copy_from_slice(&x);
+    }
+    v[292] = 1;
+    v[300] = 1;
+    v[301] = 2;
+    v
 }
 
 fn wrapped_value(q: &Param, raw: &[u8]) -> f32 {
@@ -2500,6 +2516,45 @@ fn band_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5
     let q_bell = 1.0 / (2.0 * (std::f32::consts::LN_2 / 2.0 * bw * w / s.max(1e-6)).sinh()).max(1e-3);
     let q_res = (0.3 * ((1.0 - width.clamp(0.0, 1.0)) * 4.5).exp2()).clamp(0.3, 12.0);
     let q_shelf = 0.4 + (1.0 - width.clamp(0.0, 1.0)) * 0.8;
+    band_raw(kind, s, c, a, q_bell, q_res, q_shelf)
+}
+
+/// Band of the seven band unit, laws as measured: the bell spans 0.1 to 5 octaves between its half-gain points,
+/// band pass and notch use that width over and times root two, the passes run from sharp to heavily damped.
+fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5] {
+    let w = TAU * (hz / sr).clamp(0.0001, 0.49);
+    let (s, c) = w.sin_cos();
+    let a = 10f32.powf(gain_db / 40.0);
+    let x = width.clamp(0.0, 1.0);
+    let oct = 0.1 + 4.9 * x;
+    let q_of = |bw: f32| 1.0 / (2.0 * (std::f32::consts::LN_2 / 2.0 * bw).sinh());
+    let q_band = match kind {
+        2 => q_of(oct / std::f32::consts::SQRT_2),
+        4 => q_of(oct * std::f32::consts::SQRT_2),
+        _ => q_of(oct),
+    };
+    let q_res = q_of((-1.5945 + 3.7278 * x - 0.0986 * x * x).exp());
+    let q_shelf = 0.454 + (1.0 - x) * 0.8;
+    band_raw(kind, s, c, a, q_band, q_res, q_shelf)
+}
+
+/// Three first-order sections of a two-path half-band filter; `st` holds four values.
+#[inline]
+fn hb_chain(c: &[f32; 3], st: &mut [f32], x: f32) -> f32 {
+    let mut v = x;
+    for k in 0..3 {
+        let y = c[k] * (v - st[k + 1]) + st[k];
+        st[k] = v;
+        v = y;
+    }
+    st[3] = v;
+    v
+}
+
+const HB_EVEN: [f32; 3] = [0.039_151_598, 0.302_646_85, 0.674_615_9];
+const HB_ODD: [f32; 3] = [0.147_377_11, 0.482_468_54, 0.883_005_03];
+
+fn band_raw(kind: i32, s: f32, c: f32, a: f32, q_bell: f32, q_res: f32, q_shelf: f32) -> [f32; 5] {
     let (b0, b1, b2, a0, a1, a2);
     match kind {
         1 => {
@@ -5033,28 +5088,38 @@ impl Unit {
                 }
             }
             Kind::Eq => {
+                // runs at twice the rate between two half-band filters, so bands near the top keep their shape
                 let main = db(p[35] / 100.0);
+                if self.lines.len() != 1 || self.lines[0].len() != 32 {
+                    self.lines = vec![vec![0.0; 32]];
+                }
+                let mut bands = [([0f32; 5], 0usize, 0usize); 7];
+                let mut nb = 0;
                 for b in 0..7 {
                     let kind = p[21 + b] as i32;
                     let gain = p[b] / 100.0;
                     if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain.abs() < 0.005) {
                         continue;
                     }
-                    let c = band_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, sr);
+                    let c = eq_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, sr * 2.0);
                     // steeper slopes on the pass types run the section more than once
-                    let passes = if matches!(kind, 1 | 3) { (1 + (p[28 + b].abs() as usize)).min(4) } else { 1 };
-                    for k in 0..passes.min(2) {
-                        let zo = b * 8 + k * 4;
-                        for f in io.iter_mut() {
-                            f[0] = biquad(&c, &mut z[zo..], f[0]);
-                            f[1] = biquad(&c, &mut z[zo + 2..], f[1]);
-                        }
-                    }
+                    let passes = if matches!(kind, 1 | 3) { (1 + (p[28 + b].abs() as usize)).min(2) } else { 1 };
+                    bands[nb] = (c, b * 8, passes);
+                    nb += 1;
                 }
-                if main != 1.0 {
-                    for f in io.iter_mut() {
-                        f[0] *= main;
-                        f[1] *= main;
+                let st = &mut self.lines[0];
+                for f in io.iter_mut() {
+                    for ch in 0..2 {
+                        let h = ch * 16;
+                        let mut two = [hb_chain(&HB_EVEN, &mut st[h..h + 4], f[ch]), hb_chain(&HB_ODD, &mut st[h + 4..h + 8], f[ch])];
+                        for v in two.iter_mut() {
+                            for (c, zo, passes) in &bands[..nb] {
+                                for k in 0..*passes {
+                                    *v = biquad(c, &mut z[zo + k * 4 + ch * 2..], *v);
+                                }
+                            }
+                        }
+                        f[ch] = 0.5 * (hb_chain(&HB_EVEN, &mut st[h + 8..h + 12], two[1]) + hb_chain(&HB_ODD, &mut st[h + 12..h + 16], two[0])) * main;
                     }
                 }
             }
@@ -5628,7 +5693,7 @@ mod tests {
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
-            if matches!(d.kind, Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
+            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
