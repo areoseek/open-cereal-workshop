@@ -23,6 +23,34 @@ pub struct State {
     hits: Option<(String, Vec<PathBuf>)>,
     /// Ctrl+F: the search box takes the keyboard.
     find: bool,
+    /// Frames left in which every folder is being shut (Ctrl+Up).
+    collapse: u8,
+    /// The tag list is on show, with the tags picked and whether a file must carry all of them.
+    tag_on: bool,
+    tag_pick: std::collections::BTreeSet<String>,
+    tag_all: bool,
+    /// The file whose tags are being typed, and the text so far.
+    tag_ask: Option<(PathBuf, String)>,
+    /// Favourites are listed under the folders they lie in.
+    star_parents: bool,
+    /// A page of the user's own being renamed: its number and the text so far.
+    tab_name: Option<(usize, String)>,
+}
+
+/// A plug-in dragged out of the plug-in page.
+#[derive(Clone, Copy)]
+pub(crate) enum PlugDrag {
+    Gen(cereal_engine::synth::Kind),
+    Fx(cereal_engine::fx::Kind, &'static str),
+}
+
+impl PlugDrag {
+    fn title(&self) -> &'static str {
+        match self {
+            PlugDrag::Gen(k) => cereal_engine::synth::def(*k).title,
+            PlugDrag::Fx(k, ident) => cereal_engine::fx::DEFS.iter().find(|d| d.kind == *k && d.ident == *ident).map(|d| d.title).unwrap_or("Effect"),
+        }
+    }
 }
 
 /// The browser's pages.
@@ -32,6 +60,9 @@ enum Tab {
     All,
     Project,
     Plugins,
+    Starred,
+    /// One of the user's own pages, by its place in the settings.
+    User(usize),
 }
 
 const SHOWN: [&str; 8] = ["flp", "fst", "fsc", "mid", "gmsynth", "tbio", "mrp", "dwp"];
@@ -119,20 +150,58 @@ impl App {
         for (path, is_dir) in entries {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             if is_dir {
-                let id = ui.make_persistent_id(&path);
-                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                    .show_header(ui, |ui| {
-                        ui.label(RichText::new(&name).color(TEXT));
-                    })
-                    .body(|ui| {
-                        if depth < 24 {
-                            self.browser_dir(ui, &path, depth + 1);
-                        }
-                    });
+                self.browser_folder(ui, &path, RichText::new(&name).color(TEXT), depth);
             } else {
                 self.browser_file(ui, &path, &name);
             }
         }
+    }
+
+    /// A folder's row and, when open, what lies in it. A click anywhere on the row opens or shuts it.
+    fn browser_folder(&mut self, ui: &mut Ui, path: &Path, label: RichText, depth: usize) {
+        let id = ui.make_persistent_id(path);
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        if self.browser.collapse > 0 {
+            state.set_open(false);
+        }
+        let head = ui.horizontal(|ui| {
+            state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+            let r = ui.add(egui::Label::new(label).selectable(false).sense(Sense::click()).truncate());
+            if r.clicked() {
+                state.toggle(ui);
+            }
+            r.context_menu(|ui| {
+                if ui.button("Open in new tab").clicked() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Folder".into());
+                    self.settings.tabs.push((name, 'F', path.display().to_string()));
+                    self.browser.tab = Tab::User(self.settings.tabs.len() - 1);
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+                if ui.button("Reread").clicked() {
+                    self.browser.refresh();
+                    ui.close_menu();
+                }
+            });
+        });
+        state.show_body_indented(&head.response, ui, |ui| {
+            if depth < 24 {
+                self.browser_dir(ui, path, depth + 1);
+            }
+        });
+    }
+
+    fn is_starred(&self, path: &Path) -> bool {
+        self.settings.starred.iter().any(|p| p == path)
+    }
+
+    fn star(&mut self, path: &Path) {
+        if self.is_starred(path) {
+            self.settings.starred.retain(|p| p != path);
+        } else {
+            self.settings.starred.push(path.to_path_buf());
+        }
+        let _ = self.settings.save();
     }
 
     /// One file's row: click to hear or load it, drag it out, right-click for more.
@@ -146,7 +215,33 @@ impl App {
                 let score = ext == "fsc" || ext == "mid";
                 let selected = self.browser.selected.as_deref() == Some(path.as_path());
                 let text = RichText::new(name).color(if project { ACCENT } else if selected { GREEN } else { TEXT_DIM });
-                let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate());
+                let starred = self.is_starred(&path);
+                let row = ui.horizontal(|ui| {
+                    let w = ui.available_width() - 16.0;
+                    ui.set_max_width(w.max(40.0));
+                    ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()).truncate())
+                });
+                let resp = row.inner;
+                {
+                    // the star at the end of the row: there for a favourite, or while the pointer is on the row
+                    let at = egui::Rect::from_center_size(egui::pos2(ui.max_rect().right() - 8.0, row.response.rect.center().y), egui::vec2(13.0, 13.0));
+                    let over = ui.rect_contains_pointer(row.response.rect.union(at));
+                    if starred || over {
+                        let star = ui.interact(at, ui.id().with(("star", &path)), Sense::click());
+                        let pts: Vec<egui::Pos2> = (0..10)
+                            .map(|k| {
+                                let a = std::f32::consts::PI * (k as f32 / 5.0 - 0.5);
+                                let r = if k % 2 == 0 { 5.5 } else { 2.4 };
+                                at.center() + egui::vec2(a.cos() * r, a.sin() * r)
+                            })
+                            .collect();
+                        let col = if starred { egui::Color32::from_rgb(240, 200, 70) } else { TEXT_DIM.gamma_multiply(0.6) };
+                        ui.painter().add(egui::Shape::closed_line(pts, egui::Stroke::new(if starred { 1.6_f32 } else { 1.0_f32 }, col)));
+                        if star.hint(if starred { "A favourite (click to take the star away)" } else { "Mark as a favourite" }).clicked() {
+                            self.star(&path);
+                        }
+                    }
+                }
                 self.browser.visible.push(path.clone());
                 if selected && self.browser.reveal {
                     resp.scroll_to_me(None);
@@ -166,6 +261,11 @@ impl App {
                         self.actions.push(Action::Preview(path.clone()));
                     }
                 }
+                if resp.middle_clicked() {
+                    self.focus = crate::Win::Browser;
+                    self.browser.selected = Some(path.clone());
+                    self.browser_replace();
+                }
                 if resp.double_clicked() && project {
                     self.actions.push(Action::Open(path.clone()));
                 }
@@ -173,6 +273,21 @@ impl App {
                     egui::DragAndDrop::set_payload(ui.ctx(), path.clone());
                 }
                 resp.context_menu(|ui| {
+                    if ui.button(if starred { "Favorite (remove)" } else { "Favorite" }).clicked() {
+                        self.star(&path);
+                        ui.close_menu();
+                    }
+                    if ui.button("Add a tag...").clicked() {
+                        let now = self.settings.tags.iter().find(|t| t.0 == path).map(|t| t.1.join(", ")).unwrap_or_default();
+                        self.browser.tag_ask = Some((path.clone(), now));
+                        ui.close_menu();
+                    }
+                    if ui.button("Send to selected channel").clicked() {
+                        self.browser.selected = Some(path.clone());
+                        self.browser_replace();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if project {
                         if ui.button("Open project").clicked() {
                             self.actions.push(Action::Open(path.clone()));
@@ -230,9 +345,22 @@ impl App {
             self.browser.find = true;
             return true;
         }
+        if m.command && !m.alt && !m.shift {
+            match key {
+                egui::Key::ArrowUp => self.browser.collapse = 12,
+                egui::Key::R => self.browser.refresh(),
+                _ => return false,
+            }
+            return true;
+        }
         if m.command || m.alt {
             return false;
         }
+        let key = match key {
+            egui::Key::F2 if !self.browser.query.is_empty() => egui::Key::ArrowUp,
+            egui::Key::F3 if !self.browser.query.is_empty() => egui::Key::ArrowDown,
+            k => k,
+        };
         match key {
             egui::Key::ArrowUp | egui::Key::ArrowDown => {
                 let v = &self.browser.visible;
@@ -251,6 +379,10 @@ impl App {
                 }
                 self.browser.selected = Some(path);
                 self.browser.reveal = true;
+                if m.shift {
+                    // straight into the selected channel
+                    self.browser_replace();
+                }
             }
             egui::Key::Enter => self.browser_replace(),
             egui::Key::Escape if !self.browser.query.is_empty() => self.browser.query.clear(),
@@ -272,25 +404,120 @@ impl App {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            for (tab, label, tip) in [(Tab::All, "All", "Every folder"), (Tab::Project, "Current project", "What this project is made of"), (Tab::Plugins, "Plug-in database", "The instruments and effects")] {
+        ui.horizontal_wrapped(|ui| {
+            for (tab, label, tip) in [(Tab::All, "All", "Every folder"), (Tab::Project, "Current project", "What this project is made of"), (Tab::Plugins, "Plug-in database", "The instruments and effects"), (Tab::Starred, "Starred", "The files marked as favourites")] {
                 if ui.selectable_label(self.browser.tab == tab, RichText::new(label).small()).hint(tip).clicked() {
                     self.browser.tab = tab;
                 }
             }
+            let mut gone = None;
+            for k in 0..self.settings.tabs.len() {
+                let r = ui.selectable_label(self.browser.tab == Tab::User(k), RichText::new(&self.settings.tabs[k].0).small()).hint("A page of your own (right-click to rename or delete)");
+                if r.clicked() {
+                    self.browser.tab = Tab::User(k);
+                }
+                r.context_menu(|ui| {
+                    if ui.button("Rename...").clicked() {
+                        self.browser.tab_name = Some((k, self.settings.tabs[k].0.clone()));
+                        ui.close_menu();
+                    }
+                    if k > 0 && ui.button("Move left").clicked() {
+                        self.settings.tabs.swap(k, k - 1);
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                    if ui.button("Clone").clicked() {
+                        let c = self.settings.tabs[k].clone();
+                        self.settings.tabs.insert(k + 1, c);
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete").clicked() {
+                        gone = Some(k);
+                        ui.close_menu();
+                    }
+                });
+            }
+            if let Some(k) = gone {
+                self.settings.tabs.remove(k);
+                self.browser.tab = Tab::All;
+                let _ = self.settings.save();
+            }
         });
+        self.browser_tag_window(ui.ctx());
+        if self.browser.collapse > 0 {
+            self.browser.collapse -= 1;
+            ui.ctx().request_repaint();
+        }
         match self.browser.tab {
             Tab::All => {}
             Tab::Project => return self.browser_project(ui),
             Tab::Plugins => return self.browser_plugins(ui),
+            Tab::Starred => return self.browser_starred(ui),
+            Tab::User(k) => return self.browser_user(ui, k),
         }
-        let find = ui.add(egui::TextEdit::singleline(&mut self.browser.query).hint_text("Find (Ctrl+F)").desired_width(f32::INFINITY));
-        if std::mem::take(&mut self.browser.find) {
-            find.request_focus();
+        ui.horizontal(|ui| {
+            if ui.selectable_label(self.browser.tag_on, RichText::new("Tags").small()).hint("Show the tags and find by them").clicked() {
+                self.browser.tag_on = !self.browser.tag_on;
+            }
+            let find = ui.add(egui::TextEdit::singleline(&mut self.browser.query).hint_text("Find (Ctrl+F)").desired_width(f32::INFINITY));
+            if std::mem::take(&mut self.browser.find) {
+                find.request_focus();
+            }
+        });
+        if self.browser.tag_on {
+            let mut all: Vec<String> = self.settings.tags.iter().flat_map(|t| t.1.iter().cloned()).collect();
+            all.sort();
+            all.dedup();
+            self.browser.tag_pick.retain(|t| all.contains(t));
+            ui.horizontal_wrapped(|ui| {
+                if all.is_empty() {
+                    ui.label(RichText::new("No tags yet. Right-click a file and pick Add a tag.").small().color(TEXT_DIM));
+                } else if ui.small_button(if self.browser.tag_all { "All" } else { "Any" }).hint("Whether a file must carry all the picked tags or any one of them").clicked() {
+                    self.browser.tag_all = !self.browser.tag_all;
+                }
+                for t in all {
+                    let on = self.browser.tag_pick.contains(&t);
+                    if ui.selectable_label(on, RichText::new(&t).small()).clicked() && !self.browser.tag_pick.remove(&t) {
+                        self.browser.tag_pick.insert(t);
+                    }
+                }
+            });
         }
         ui.separator();
         let query = self.browser.query.trim().to_string();
+        if self.browser.tag_on && !self.browser.tag_pick.is_empty() {
+            let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+            let pick = &self.browser.tag_pick;
+            let hits: Vec<PathBuf> = self
+                .settings
+                .tags
+                .iter()
+                .filter(|(_, tags)| if self.browser.tag_all { pick.iter().all(|p| tags.contains(p)) } else { pick.iter().any(|p| tags.contains(p)) })
+                .map(|t| t.0.clone())
+                .filter(|p| {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                    words.iter().all(|w| name.contains(w.as_str()))
+                })
+                .collect();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                if hits.is_empty() {
+                    ui.label(RichText::new("Nothing carries those tags.").color(TEXT_DIM));
+                }
+                for path in hits {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.browser_file(ui, &path, &name);
+                }
+            });
+            return self.browser_drag(ui);
+        }
         if !query.is_empty() {
+            if ui.small_button("Save search result as tab").clicked() {
+                self.settings.tabs.push((query.clone(), 'S', query.clone()));
+                self.browser.tab = Tab::User(self.settings.tabs.len() - 1);
+                let _ = self.settings.save();
+            }
             if self.browser.hits.as_ref().is_none_or(|h| h.0 != query) {
                 self.browser.hits = Some((query.clone(), search(&self.browser.roots, &query)));
             }
@@ -315,12 +542,7 @@ impl App {
                 ui.label(RichText::new("No folders yet. Use Add folder to point at your samples and projects.").color(TEXT_DIM));
             }
             for (label, path) in roots {
-                let id = ui.make_persistent_id(("root", &path));
-                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                    .show_header(ui, |ui| {
-                        ui.label(RichText::new(&label).strong().color(TEXT));
-                    })
-                    .body(|ui| self.browser_dir(ui, &path, 0));
+                self.browser_folder(ui, &path, RichText::new(&label).strong().color(TEXT), 0);
             }
         });
         self.browser_drag(ui);
@@ -437,7 +659,11 @@ impl App {
                     let mut defs: Vec<_> = cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()).collect();
                     defs.sort_by_key(|d| d.title);
                     for d in defs {
-                        if ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click()).truncate()).hint("Click to add a channel with this instrument").clicked() {
+                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to add a channel with this instrument, or drag it onto the channel rack");
+                        if r.drag_started() {
+                            egui::DragAndDrop::set_payload(ui.ctx(), PlugDrag::Gen(d.kind));
+                        }
+                        if r.clicked() {
                             self.song.channels.push(cereal_engine::song::Chan::instrument(d.kind));
                             self.sel_chan = self.song.channels.len() - 1;
                             self.dirty = true;
@@ -451,23 +677,134 @@ impl App {
                 })
                 .body(|ui| {
                     for d in Self::effect_defs() {
-                        if ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click()).truncate()).hint("Click to put it in the first free slot of the selected mixer track").clicked() {
+                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to put it in the first free slot of the selected mixer track, or drag it onto a mixer track or slot");
+                        if r.drag_started() {
+                            egui::DragAndDrop::set_payload(ui.ctx(), PlugDrag::Fx(d.kind, d.ident));
+                        }
+                        if r.clicked() {
                             let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
-                            let used: Vec<u16> = self.song.inserts.get(ins).map(|i| i.slots.iter().map(|s| s.index).collect()).unwrap_or_default();
-                            if let Some(slot) = (0..10u16).find(|s| !used.contains(s)) {
-                                self.set_effect(ins, slot, d.kind, d.ident);
-                                self.show_mixer = true;
-                                self.dirty = true;
-                            } else {
-                                self.status = "Every slot of the selected mixer track is in use".into();
-                            }
+                            self.effect_to_free_slot(ins, d.kind, d.ident);
                         }
                     }
                 });
         });
+        self.browser_drag(ui);
+    }
+
+    /// Put an effect in the first free slot of a mixer track.
+    pub(crate) fn effect_to_free_slot(&mut self, ins: usize, kind: cereal_engine::fx::Kind, ident: &'static str) {
+        let used: Vec<u16> = self.song.inserts.get(ins).map(|i| i.slots.iter().map(|s| s.index).collect()).unwrap_or_default();
+        if let Some(slot) = (0..10u16).find(|s| !used.contains(s)) {
+            self.set_effect(ins, slot, kind, ident);
+            self.sel_insert = ins;
+            self.show_mixer = true;
+            self.dirty = true;
+        } else {
+            self.status = "Every slot of that mixer track is in use".into();
+        }
+    }
+
+    /// The favourites page.
+    fn browser_starred(&mut self, ui: &mut Ui) {
+        ui.checkbox(&mut self.browser.star_parents, RichText::new("Show parent folders").small());
+        ui.separator();
+        let mut files = self.settings.starred.clone();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if files.is_empty() {
+                ui.label(RichText::new("No favourites yet. Click the star at the end of a file's row.").color(TEXT_DIM));
+            }
+            if self.browser.star_parents {
+                files.sort();
+                let mut last: Option<PathBuf> = None;
+                for path in files {
+                    let dir = path.parent().map(Path::to_path_buf);
+                    if dir != last {
+                        let name = dir.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        ui.label(RichText::new(name).strong().color(TEXT)).hint(dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default());
+                        last = dir;
+                    }
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    ui.indent(("starred", &path), |ui| self.browser_file(ui, &path, &name));
+                }
+            } else {
+                for path in files {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.browser_file(ui, &path, &name);
+                }
+            }
+        });
+        self.browser_drag(ui);
+    }
+
+    /// A page of the user's own: one folder, or what a search finds.
+    fn browser_user(&mut self, ui: &mut Ui, k: usize) {
+        let Some((_, kind, what)) = self.settings.tabs.get(k).cloned() else {
+            self.browser.tab = Tab::All;
+            return;
+        };
+        if let Some((n, mut name)) = self.browser.tab_name.take() {
+            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+            r.request_focus();
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(t) = self.settings.tabs.get_mut(n).filter(|_| !name.trim().is_empty()) {
+                    t.0 = name.trim().to_string();
+                    let _ = self.settings.save();
+                }
+            } else if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.browser.tab_name = Some((n, name));
+            }
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if kind == 'F' {
+                self.browser_dir(ui, Path::new(&what), 0);
+            } else {
+                if self.browser.hits.as_ref().is_none_or(|h| h.0 != what) {
+                    self.browser.hits = Some((what.clone(), search(&self.browser.roots, &what)));
+                }
+                for path in self.browser.hits.as_ref().map(|h| h.1.clone()).unwrap_or_default() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.browser_file(ui, &path, &name);
+                }
+            }
+        });
+        self.browser_drag(ui);
+    }
+
+    /// The small window for typing a file's tags.
+    fn browser_tag_window(&mut self, ctx: &egui::Context) {
+        let Some((path, mut text)) = self.browser.tag_ask.take() else { return };
+        let mut keep = true;
+        egui::Window::new("Tags").collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(RichText::new(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).color(TEXT));
+            ui.label(RichText::new("Several tags are set apart by commas. Empty takes them all away.").small().color(TEXT_DIM));
+            ui.add(egui::TextEdit::singleline(&mut text).desired_width(260.0)).request_focus();
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let tags: Vec<String> = text.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+                self.settings.tags.retain(|t| t.0 != path);
+                if !tags.is_empty() {
+                    self.settings.tags.push((path.clone(), tags));
+                }
+                let _ = self.settings.save();
+                keep = false;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                keep = false;
+            }
+        });
+        if keep {
+            self.browser.tag_ask = Some((path, text));
+        }
     }
 
     fn browser_drag(&mut self, ui: &mut Ui) {
+        if let Some(p) = egui::DragAndDrop::payload::<PlugDrag>(ui.ctx()) {
+            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-plug"))).text(pos + egui::vec2(12.0, 4.0), egui::Align2::LEFT_TOP, p.title(), egui::FontId::proportional(12.0), TEXT);
+            }
+        }
         // a sample being dragged follows the pointer
         if let Some(path) = egui::DragAndDrop::payload::<PathBuf>(ui.ctx()) {
             if let Some(pos) = ui.ctx().pointer_hover_pos() {

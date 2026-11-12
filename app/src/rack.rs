@@ -67,6 +67,14 @@ const STEP_H: f32 = 24.0;
 
 impl App {
     pub(crate) fn rack_ui(&mut self, ui: &mut Ui) {
+        if let Some(p) = egui::DragAndDrop::payload::<crate::browser::PlugDrag>(ui.ctx()) {
+            // an instrument dragged out of the browser and let go over the rack becomes a new channel
+            if let (crate::browser::PlugDrag::Gen(kind), true) = (*p, ui.input(|i| i.pointer.any_released()) && ui.rect_contains_pointer(ui.max_rect())) {
+                self.song.channels.push(cereal_engine::song::Chan::instrument(kind));
+                self.sel_chan = self.song.channels.len() - 1;
+                self.dirty = true;
+            }
+        }
         let pat = self.handle.transport.pattern();
         self.song.ensure_pattern(pat);
         let step = self.song.step();
@@ -74,6 +82,8 @@ impl App {
         let playing = self.handle.transport.playing() && !self.handle.transport.song_mode();
         let now = (self.handle.transport.tick() as u32 / step) as usize;
         let (primary, secondary) = ui.input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
+        // something dragged in from the browser must not paint steps on its way
+        let (primary, secondary) = if egui::DragAndDrop::has_any_payload(ui.ctx()) { (false, false) } else { (primary, secondary) };
         let mut delete: Option<usize> = None;
         let mut clone: Option<usize> = None;
 

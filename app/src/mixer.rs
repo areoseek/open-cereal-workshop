@@ -97,6 +97,11 @@ impl App {
                     let mut hosted = None;
                     for slot in 0..10u16 {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(side - 8.0, 18.0), Sense::click());
+                        if let Some(p) = resp.dnd_release_payload::<crate::browser::PlugDrag>() {
+                            if let crate::browser::PlugDrag::Fx(kind, ident) = *p {
+                                act = Some(SlotAct::Set(slot, kind, ident));
+                            }
+                        }
                         ui.painter().rect_filled(rect, 2.0, PANEL_DARK);
                         let dot = Rect::from_center_size(rect.right_center() - Vec2::new(9.0, 0.0), Vec2::splat(16.0));
                         let over_dot = resp.hover_pos().map(|p| dot.contains(p)).unwrap_or(false);
@@ -476,6 +481,11 @@ impl App {
         });
         if selected {
             ui.painter().rect_stroke(inner.response.rect, 3.0, Stroke::new(1.0_f32, GREEN), egui::StrokeKind::Inside);
+        }
+        if let Some(p) = inner.response.dnd_release_payload::<crate::browser::PlugDrag>() {
+            if let crate::browser::PlugDrag::Fx(kind, ident) = *p {
+                self.effect_to_free_slot(i, kind, ident);
+            }
         }
         if self.song.inserts[i].separator {
             ui.add_space(8.0);

@@ -223,4 +223,15 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Click | Preview a sound | yes |
 | Drag onto a channel, the rack, the playlist or a mixer slot | Load it there | yes |
 | Enter, Ctrl+Alt+click | Replace the selected channel with the item | yes |
-| Up / Down, Shift+Up / Down | Step through the files on show, playing each | yes |
+| Up / Down | Step through the files on show, playing each | yes |
+| Shift+Up / Shift+Down | Send the previous / next file to the selected channel | yes |
+| Middle-click | Send the file to the selected channel (a project opens) | yes |
+| Ctrl+F | Find | yes |
+| F2 / F3 | Previous / next search result | yes |
+| Ctrl+Up | Collapse the folder structure | yes |
+| Ctrl+R | Reread the folder structure | yes |
+| Click a folder's row | Open or shut it | yes |
+| Star at the end of a row, right-click > Favorite | Mark as a favourite (Starred page) | yes |
+| Drag a plug-in from the plug-in page | Onto the rack: a new channel; onto a mixer track or slot: the effect goes there | yes |
+| Backspace / Shift+Backspace | Navigate back / forward | no |
+| Alt+click, Shift+click a sound | Play it whole / from the pointer | no |

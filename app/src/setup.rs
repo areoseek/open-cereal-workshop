@@ -57,6 +57,12 @@ pub struct Settings {
     pub folders: Vec<PathBuf>,
     /// The projects opened or saved last, newest first.
     pub recent: Vec<PathBuf>,
+    /// The browser files marked as favourites.
+    pub starred: Vec<PathBuf>,
+    /// Tags given to browser files.
+    pub tags: Vec<(PathBuf, Vec<String>)>,
+    /// The browser pages of the user's own: name, then a folder ('F') or a search ('S') and what it holds.
+    pub tabs: Vec<(String, char, String)>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -124,6 +130,23 @@ impl Settings {
                 Some(("content", v)) if !v.trim().is_empty() => s.content.push(PathBuf::from(v.trim())),
                 Some(("folder", v)) if !v.trim().is_empty() => s.folders.push(PathBuf::from(v.trim())),
                 Some(("recent", v)) if !v.trim().is_empty() => s.recent.push(PathBuf::from(v.trim())),
+                Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
+                Some(("tag", v)) => {
+                    if let Some((tags, path)) = v.split_once('\t') {
+                        let tags: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+                        if !tags.is_empty() && !path.is_empty() {
+                            s.tags.push((PathBuf::from(path), tags));
+                        }
+                    }
+                }
+                Some(("tab", v)) => {
+                    let mut it = v.splitn(3, '\t');
+                    if let (Some(name), Some(kind), Some(what)) = (it.next(), it.next(), it.next()) {
+                        if let Some(k) = kind.chars().next().filter(|k| *k == 'F' || *k == 'S') {
+                            s.tabs.push((name.to_string(), k, what.to_string()));
+                        }
+                    }
+                }
                 Some(("content_prompt", v)) => s.never_ask = v.trim() == "never",
                 Some(("audio_out", v)) => s.audio_out = v.trim().to_string(),
                 Some(("audio_in", v)) => s.audio_in = v.trim().to_string(),
@@ -173,6 +196,15 @@ impl Settings {
         }
         for f in &self.recent {
             out += &format!("recent={}\n", f.display());
+        }
+        for f in &self.starred {
+            out += &format!("star={}\n", f.display());
+        }
+        for (f, tags) in &self.tags {
+            out += &format!("tag={}\t{}\n", tags.join(","), f.display());
+        }
+        for (name, kind, what) in &self.tabs {
+            out += &format!("tab={}\t{kind}\t{what}\n", name.replace(['\t', '\n'], " "));
         }
         if self.rate != 0 {
             out += &format!("rate={}\n", self.rate);
