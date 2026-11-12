@@ -917,6 +917,64 @@ impl Song {
         let (n, d) = (self.time_sig.0.max(1) as u32, self.time_sig.1.max(1) as u32);
         (self.ppq * 4 * n / d).max(1)
     }
+    /// The stretches of the time line that each keep one time signature: where it starts, the
+    /// number of its first bar (from 0) and the ticks in one of its bars. Time signature markers
+    /// start a new bar where they stand.
+    pub fn bar_spans(&self) -> Vec<(u32, u32, u32)> {
+        let mut out = vec![(0u32, 0u32, self.bar())];
+        let mut sigs: Vec<&TimeMarker> = self.markers.iter().filter(|m| m.kind == 8 && m.sig.0 > 0 && m.sig.1 > 0).collect();
+        sigs.sort_by_key(|m| m.pos);
+        for m in sigs {
+            let len = (self.ppq * 4 * m.sig.0 as u32 / m.sig.1 as u32).max(1);
+            let (start, number, was) = *out.last().unwrap();
+            if m.pos == start {
+                out.last_mut().unwrap().2 = len;
+            } else {
+                out.push((m.pos, number + (m.pos - start).div_ceil(was), len));
+            }
+        }
+        out
+    }
+    /// The time signature in force at a tick of the song: where it took hold, its bar number there, and the signature.
+    pub fn sig_at(&self, tick: u32) -> (u32, u32, (u8, u8)) {
+        let mut out = (0u32, 0u32, (self.time_sig.0.max(1), self.time_sig.1.max(1)));
+        let mut sigs: Vec<&TimeMarker> = self.markers.iter().filter(|m| m.kind == 8 && m.sig.0 > 0 && m.sig.1 > 0 && m.pos <= tick).collect();
+        sigs.sort_by_key(|m| m.pos);
+        for m in sigs {
+            let was = (self.ppq * 4 * out.2 .0 as u32 / out.2 .1 as u32).max(1);
+            out = (m.pos, out.1 + (m.pos - out.0).div_ceil(was), m.sig);
+        }
+        out
+    }
+    /// The next signature change after a tick, if there is one.
+    pub fn next_sig(&self, tick: u32) -> Option<u32> {
+        self.markers.iter().filter(|m| m.kind == 8 && m.sig.0 > 0 && m.sig.1 > 0 && m.pos > tick).map(|m| m.pos).min()
+    }
+    /// The bar lines from the one at or before `from` up to `to`: tick, bar number from 0, ticks to the next line.
+    pub fn bar_lines(&self, from: u32, to: u32) -> Vec<(u32, u32, u32)> {
+        let spans = self.bar_spans();
+        let mut out = vec![];
+        for (i, &(start, number, len)) in spans.iter().enumerate() {
+            let end = spans.get(i + 1).map(|s| s.0).unwrap_or(u32::MAX);
+            if end <= from {
+                continue;
+            }
+            if start > to {
+                break;
+            }
+            let mut k = from.saturating_sub(start) / len;
+            loop {
+                let t = start as u64 + k as u64 * len as u64;
+                if t >= end as u64 || t > to as u64 || out.len() > 20_000 {
+                    break;
+                }
+                let t = t as u32;
+                out.push((t, number + k, len.min(end - t)));
+                k += 1;
+            }
+        }
+        out
+    }
     /// Ticks in one step (a sixteenth).
     pub fn step(&self) -> u32 {
         (self.ppq / 4).max(1)
@@ -1873,5 +1931,18 @@ mod tests {
         let at = |i: usize| s.mix_order.iter().position(|&x| x == i).unwrap();
         assert!(at(5) < at(3));
         assert!(at(3) < at(0));
+    }
+
+    #[test]
+    fn time_signature_markers_change_the_bars() {
+        let mut s = Song::default();
+        s.ppq = 96;
+        s.time_sig = (4, 4);
+        assert_eq!(s.bar_lines(400, 800), vec![(384, 1, 384), (768, 2, 384)]);
+        // 3/4 from the third bar on, and a change that cuts a bar short
+        s.markers.push(TimeMarker { pos: 768, name: String::new(), kind: 8, sig: (3, 4) });
+        s.markers.push(TimeMarker { pos: 768 + 288 + 96, name: String::new(), kind: 8, sig: (4, 4) });
+        let lines = s.bar_lines(0, 1700);
+        assert_eq!(lines, vec![(0, 0, 384), (384, 1, 384), (768, 2, 288), (1056, 3, 96), (1152, 4, 384), (1536, 5, 384)]);
     }
 }

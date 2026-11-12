@@ -2280,14 +2280,27 @@ impl Player {
         }
 
         if tr.metronome() {
-            let beat = (song.ppq * 4 / song.time_sig.1.max(1) as u32).max(1) as f64;
-            let bar = song.bar() as f64;
-            let mut b = (t0 / beat).ceil() * beat;
-            while b < t1 {
-                let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                let smp = self.clicks[if (b % bar) < 0.5 { 0 } else { 1 }].clone();
-                self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+            // in the song the clicks follow the time signature changes on the time line
+            let (from, sig, until) = if song_mode {
+                let (from, _, sig) = song.sig_at(t0.max(0.0) as u32);
+                (from as f64, sig, song.next_sig(t0.max(0.0) as u32).map(|x| x as f64).unwrap_or(f64::MAX))
+            } else {
+                (0.0, (song.time_sig.0.max(1), song.time_sig.1.max(1)), f64::MAX)
+            };
+            let beat = (song.ppq * 4 / sig.1 as u32).max(1) as f64;
+            let bar = beat * sig.0 as f64;
+            let mut b = from + ((t0 - from) / beat).ceil() * beat;
+            let click = |me: &mut Self, at: f64, first: bool| {
+                let delay = (((at - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+                let smp = me.clicks[if first { 0 } else { 1 }].clone();
+                me.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+            };
+            while b < t1 && b < until - 0.5 {
+                click(self, b, ((b - from) % bar) < 0.5);
                 b += beat;
+            }
+            if until > t0 && until < t1 {
+                click(self, until, true);
             }
         }
 

@@ -273,19 +273,18 @@ impl App {
 
         // grid
         let last_tick = tick_of(grid.right()) as u32 + bar;
-        let mut t = (tick_of(grid.left()) as u32 / bar) * bar;
         let bar_px = bar as f32 * px;
         let every = if bar_px >= 14.0 { 1 } else { (14.0 / bar_px).ceil() as u32 };
-        while t <= last_tick {
-            let n = t / bar;
+        // time signature markers change the length of the bars after them
+        let lines = self.song.bar_lines(tick_of(grid.left()) as u32, last_tick);
+        for &(t, n, len) in &lines {
             let x = x_of(t as f32);
             if (n / 4) % 2 == 1 {
-                p.rect_filled(Rect::from_min_max(Pos2::new(x.max(grid.left()), grid.top()), Pos2::new((x + bar_px).max(grid.left()), grid.bottom())), 0.0, GRID_LIGHT);
+                p.rect_filled(Rect::from_min_max(Pos2::new(x.max(grid.left()), grid.top()), Pos2::new((x + len as f32 * px).max(grid.left()), grid.bottom())), 0.0, GRID_LIGHT);
             }
             if n % every == 0 && x >= grid.left() {
                 p.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
             }
-            t += bar;
         }
         for tr in first_track..=last_track {
             let y = y_of(tr);
@@ -430,14 +429,11 @@ impl App {
             }
         }
         let label_every = every.max((40.0 / bar_px).ceil() as u32).max(1);
-        let mut b = (tick_of(grid.left()) as u32 / bar) * bar;
-        while b <= last_tick {
-            let n = b / bar;
+        for &(b, n, _) in &lines {
             let x = x_of(b as f32);
             if n % label_every == 0 && x >= grid.left() - 1.0 {
                 p.text(Pos2::new(x + 3.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", n + 1), FontId::proportional(10.5), TEXT_DIM);
             }
-            b += bar;
         }
         // time markers sit on the ruler; their labels take clicks
         let mut marker_tabs: Vec<(Rect, usize)> = vec![];
@@ -1076,6 +1072,26 @@ impl App {
         self.rename_marker = Some((at, self.song.markers[at].name.clone()));
     }
 
+    /// A time signature change at the start of the picked time, or on the bar under the play position.
+    pub(crate) fn add_time_sig(&mut self) {
+        let now = if self.handle.transport.song_mode() { self.handle.transport.tick().max(0.0) as u32 } else { 0 };
+        let pos = match self.playlist.time_sel {
+            Some((a, _)) => a,
+            None => self.song.bar_lines(now, now).last().map(|l| l.0).unwrap_or(0),
+        };
+        let at = match self.song.markers.iter().position(|m| m.pos == pos && m.kind == 8) {
+            Some(i) => i,
+            None => {
+                let sig = self.song.markers.iter().filter(|m| m.kind == 8 && m.pos < pos).max_by_key(|m| m.pos).map(|m| m.sig).unwrap_or(self.song.time_sig);
+                self.song.markers.push(cereal_engine::song::TimeMarker { pos, name: String::new(), kind: 8, sig });
+                self.song.markers.sort_by_key(|m| m.pos);
+                self.dirty = true;
+                self.song.markers.iter().position(|m| m.pos == pos && m.kind == 8).unwrap_or(0)
+            }
+        };
+        self.rename_marker = Some((at, self.song.markers[at].name.clone()));
+    }
+
     /// Put the play position on the next or the previous time marker.
     pub(crate) fn jump_marker(&mut self, forward: bool) {
         let now = self.handle.transport.tick().max(0.0) as u32;
@@ -1154,6 +1170,7 @@ impl App {
         if m.alt && !m.command {
             match key {
                 Key::T if !m.shift && !repeat => self.add_marker(),
+                Key::T if !repeat => self.add_time_sig(),
                 Key::Slash => self.jump_marker(false),
                 Key::M => self.pl_mute(!m.shift),
                 Key::G if !repeat => self.pl_group(false),

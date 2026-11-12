@@ -1966,8 +1966,12 @@ impl App {
                 ui.separator();
                 // time
                 let tick = tr.tick() as u32;
-                let (bar, step) = (self.song.bar(), self.song.step());
-                ui.label(RichText::new(format!("{:03}:{:02}:{:02}", tick / bar + 1, (tick % bar) / step + 1, tick % step)).monospace().size(18.0).color(GREEN));
+                let step = self.song.step();
+                // in the song the bar count follows the time signature changes
+                let (from, first, sig) = if tr.song_mode() { self.song.sig_at(tick) } else { (0, 0, self.song.time_sig) };
+                let bar = (self.song.ppq * 4 * sig.0.max(1) as u32 / sig.1.max(1) as u32).max(1);
+                let tick = tick - from;
+                ui.label(RichText::new(format!("{:03}:{:02}:{:02}", first + tick / bar + 1, (tick % bar) / step + 1, tick % step)).monospace().size(18.0).color(GREEN));
                 ui.separator();
                 let mut master = tr.master();
                 ui.label(RichText::new("Master").color(TEXT_DIM));
@@ -2263,6 +2267,22 @@ impl eframe::App for App {
             let mut keep = i < self.song.markers.len();
             egui::Window::new("Time marker").collapsible(false).resizable(false).show(ctx, |ui| {
                 crate::widgets::name_field(ui, &mut name);
+                if let Some(m) = self.song.markers.get_mut(i).filter(|m| m.kind == 8) {
+                    // a time signature change: beats in the bar over the note that counts as one beat
+                    ui.horizontal(|ui| {
+                        ui.label("Time signature");
+                        let mut changed = ui.add(egui::DragValue::new(&mut m.sig.0).range(1..=16)).changed();
+                        ui.label("/");
+                        egui::ComboBox::from_id_salt("sig_beat").width(40.0).selected_text(m.sig.1.to_string()).show_ui(ui, |ui| {
+                            for d in [2u8, 4, 8, 16] {
+                                changed |= ui.selectable_value(&mut m.sig.1, d, d.to_string()).changed();
+                            }
+                        });
+                        if changed {
+                            self.dirty = true;
+                        }
+                    });
+                }
                 let enter = ui.input(|x| x.key_pressed(Key::Enter));
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() || enter {

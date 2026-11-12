@@ -199,7 +199,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | 6, Shift+6, Ctrl+P | Performance mode and its zoom | no |
 | 7 / 8, 9 | Transpose an audio clip down / up, reverse it | no |
 | Insert | Slice the clip under the pointer at the grid line | yes |
-| Shift+Alt+T | Time signature change | no |
+| Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |
 | Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |
 | Ctrl+Alt+G | Grid colour | no |
