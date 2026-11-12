@@ -109,7 +109,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -787,6 +787,9 @@ impl Gen {
     pub fn new(kind: Kind) -> Self {
         let mut g = Self { kind, p: def(kind).params.iter().map(|p| p.def as f32).collect(), raw: Vec::new(), fm: None, pre: None, img: None, smp: None };
         g.raw = g.encode(None);
+        if kind == Kind::Travel {
+            g.raw = crate::travel::fresh();
+        }
         if matches!(kind, Kind::Trio | Kind::Pocket | Kind::SawSyn) {
             g.p = crate::analog::plain(kind);
             g.raw = crate::analog::fresh(kind);
@@ -1175,19 +1178,16 @@ impl Gen {
             Kind::Kit => {
                 // the cut groups and the step patterns ride along after the list
                 let p = if self.p.len() >= crate::drumkit::COUNT { crate::drumkit::voice_list(&self.p, &self.raw) } else { crate::drumkit::voice_list(&crate::drumkit::defaults(), &crate::drumkit::fresh()) };
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None, path: None })), ..Default::default() }
             }
-            Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone(), smp: None })), ..Default::default() },
-            Kind::Grain => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, crate::grain::Set::parse(&self.raw))) })), ..Default::default() },
-            Kind::Travel => {
-                let set = crate::grain::Set { hold: 0.05, attack: 0.004, grain_spacing: 1.0, wave_spacing: 1.0, pan: 0.0, depth: 0.0, speed: 1.0, rand: 0.0 };
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Grain, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, set)) })), ..Default::default() }
-            }
+            Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone(), smp: None, path: None })), ..Default::default() },
+            Kind::Grain => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, crate::grain::Set::parse(&self.raw))), path: None })), ..Default::default() },
+            Kind::Travel => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: None, path: self.smp.clone().map(|s| (s, std::sync::Arc::new(crate::travel::Set::parse(&self.raw)))) })), ..Default::default() },
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
             Kind::Keys => {
                 let u = self.p.iter().zip(crate::keys::RANGES).map(|(&v, (lo, hi))| (v - lo as f32) / (hi - lo) as f32).collect();
                 let set = Some(crate::keys::set(&crate::keys::name_in(&self.raw)));
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: u, set, img: None, smp: None, path: None })), ..Default::default() }
             }
             Kind::KickD => {
                 // the layered sample rides along as one number after the list
@@ -1196,7 +1196,7 @@ impl Gen {
                     p.truncate(crate::kickd::COUNT);
                     p.push(crate::kickd::sample_id(&self.raw));
                 }
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None, path: None })), ..Default::default() }
             }
             Kind::Morph => {
                 // the snapshots ride along as one number after the list
@@ -1205,7 +1205,7 @@ impl Gen {
                     p.truncate(crate::morph::COUNT);
                     p.push(crate::morph::body_id(&self.raw));
                 }
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None, path: None })), ..Default::default() }
             }
             Kind::Hybrid => {
                 let mut p = self.p.clone();
@@ -1214,7 +1214,7 @@ impl Gen {
                     let ids = crate::hybrid::wave_ids(&self.raw, &p);
                     p.extend(ids);
                 }
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None, path: None })), ..Default::default() }
             }
             Kind::Triple => {
                 // the three waves ride along as numbers after the list
@@ -1223,9 +1223,9 @@ impl Gen {
                     p.truncate(crate::triple::COUNT);
                     p.extend(crate::triple::wave_ids(&self.raw));
                 }
-                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None })), ..Default::default() }
+                Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p, set: None, img: None, smp: None, path: None })), ..Default::default() }
             }
-            k => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: k, p: self.p.clone(), set: None, img: None, smp: None })), ..Default::default() },
+            k => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: k, p: self.p.clone(), set: None, img: None, smp: None, path: None })), ..Default::default() },
         }
     }
 }

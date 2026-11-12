@@ -48,6 +48,7 @@ pub mod convset;
 mod probe;
 pub mod drumbank;
 pub mod grain;
+pub mod travel;
 pub mod guitar;
 pub mod wavpack;
 pub mod metal;

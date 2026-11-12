@@ -147,3 +147,19 @@ fn probe_survey() {
         println!("{name}: v{} same {same} notes {notes} len {:.1}s peak {peak:.3}{} | {}", flp.version, out.len() as f32 / 88200.0, if bad { " NAN" } else { "" }, units.join(", "));
     }
 }
+
+/// PROBE_FILE=<instrument preset> PROBE_OUT=<project>: a one-channel project holding that preset, for looking at
+/// its panel.
+#[test]
+#[ignore]
+fn probe_preset_project() {
+    let pre = crate::preset::read(std::path::Path::new(&std::env::var("PROBE_FILE").unwrap())).unwrap();
+    let Some(crate::preset::Unit::Gen(g)) = pre.unit() else { panic!("not an instrument preset") };
+    let mut song = crate::song::Song::default();
+    let mut c = crate::song::Chan::instrument(g.kind);
+    c.plugin = pre.ident.clone();
+    c.gen = Some(g);
+    song.channels = vec![c];
+    let (bytes, _) = crate::save::save(&mut song, None).unwrap();
+    std::fs::write(std::env::var("PROBE_OUT").unwrap(), bytes).unwrap();
+}

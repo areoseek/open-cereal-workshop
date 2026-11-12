@@ -1296,6 +1296,288 @@ fn key_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {
     changed
 }
 
+/// The path scratcher: a drawn phrase for every key.
+fn travel_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
+    use cereal_engine::travel::{self, Phrase, Point, Set};
+    const KINDS: [&str; 6] = ["Half cosine", "Straight", "Handles", "Tension", "Quarter sine", "Quarter cosine"];
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui.button("Sample...").hint("Pick the sample the phrases move through").clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
+                if let Ok(s) = cereal_engine::sample::Sample::load(&p) {
+                    g.smp = Some(std::sync::Arc::new(s));
+                    g.raw = travel::with_sample(&g.raw, &p.to_string_lossy());
+                    changed = true;
+                }
+            }
+        }
+        let name = cereal_engine::synth::sample_named_in("Wave Traveller", &g.raw).unwrap_or_else(|| "(no sample)".into());
+        ui.label(RichText::new(name.rsplit(['/', '\\']).next().unwrap_or("").to_string()).strong());
+        if g.smp.is_none() {
+            ui.label(RichText::new("not found").color(TEXT_DIM));
+        }
+    });
+    let mut set = Set::parse(&g.raw);
+    let was = set.clone();
+    let mut key = set.shown.min(127) as u8;
+    let mut ph = set.phrase(key).cloned().unwrap_or_default();
+    let id = ui.id().with("travel");
+    let mut level: bool = ui.data(|d| d.get_temp(id.with("level"))).unwrap_or(false);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Key").color(TEXT_DIM));
+        let drawn: Vec<u8> = set.phrases.iter().filter(|p| p.1 != Phrase::default()).map(|p| p.0).collect();
+        if ui.small_button("<").hint("The drawn phrase below this key").clicked() {
+            if let Some(&k) = drawn.iter().rev().find(|&&k| k < key) {
+                key = k;
+            }
+        }
+        let mut k = key as i32;
+        if ui.add(egui::DragValue::new(&mut k).range(0..=127).custom_formatter(|v, _| key_name(v as u8))).hint("The key whose phrase is shown. Every key plays its own phrase").changed() {
+            key = k.clamp(0, 127) as u8;
+        }
+        if ui.small_button(">").hint("The drawn phrase above this key").clicked() {
+            if let Some(&k) = drawn.iter().find(|&&k| k > key) {
+                key = k;
+            }
+        }
+        if key as usize != set.shown {
+            ph = set.phrase(key).cloned().unwrap_or_default();
+        }
+        ui.add(egui::TextEdit::singleline(&mut ph.name).desired_width(110.0).hint_text("phrase name"));
+        ui.add_space(8.0);
+        if ui.selectable_label(!level, "WAVE").hint("Draw where the play head is along the phrase").clicked() {
+            level = false;
+        }
+        if ui.selectable_label(level, "VOL").hint("Draw the level along the phrase").clicked() {
+            level = true;
+        }
+        ui.menu_button("Phrase", |ui| {
+            if ui.button("Copy").clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("travel_clip"), ph.clone()));
+                ui.close_menu();
+            }
+            let clip: Option<Phrase> = ui.data(|d| d.get_temp(egui::Id::new("travel_clip")));
+            if ui.add_enabled(clip.is_some(), egui::Button::new("Paste")).clicked() {
+                ph = clip.unwrap();
+                ui.close_menu();
+            }
+            for (label, top) in [("Normalise to 100 %", 1.0f32), ("Normalise to 50 %", 0.5)] {
+                if ui.button(label).hint("Stretch the path so that it covers this much of the stretch between start and end").clicked() {
+                    let lo = ph.wave.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+                    let hi = ph.wave.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+                    if hi - lo > 1e-6 {
+                        for p in &mut ph.wave {
+                            p.y = (p.y - lo) / (hi - lo) * top;
+                            p.before[1] *= top / (hi - lo);
+                            p.after[1] *= top / (hi - lo);
+                        }
+                    }
+                    ui.close_menu();
+                }
+            }
+            if ui.button("Reset").hint("Back to the sample played straight through").clicked() {
+                ph = Phrase::default();
+                ui.close_menu();
+            }
+        });
+    });
+    set.shown = key as usize;
+    ui.data_mut(|d| d.insert_temp(id.with("level"), level));
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.checkbox(&mut ph.own_speed, "Own speed").hint("Off: the phrase lasts a number of steps at the song's tempo. On: it runs at a share of the sample's own speed");
+        });
+        if ph.own_speed {
+            cap_knob(ui, "Speed", &mut ph.speed, 0.05, 4.0, 1.0, |v| format!("Speed: {:.0} % of the sample's own with a straight path", v * 100.0));
+        } else {
+            cap_knob(ui, "Length", &mut ph.steps, 0.25, 64.0, 4.0, |v| format!("Length: {v:.2} steps"));
+        }
+        cap_knob(ui, "Start", &mut ph.start, 0.0, 1.0, 0.0, |v| format!("Start of the stretch the path moves in: {:.1} %", v * 100.0));
+        cap_knob(ui, "End", &mut ph.end, 0.0, 1.0, 1.0, |v| format!("End of the stretch the path moves in: {:.1} %", v * 100.0));
+        cap_knob(ui, "Attack", &mut ph.attack, 0.0, 500.0, 1.0, |v| format!("Fade in: {v:.0} ms"));
+        cap_knob(ui, "Release", &mut ph.release, 0.0, 500.0, 1.0, |v| format!("Fade out once the key is let go: {v:.0} ms"));
+        if ph.end < ph.start {
+            ph.end = ph.start;
+        }
+    });
+    // the whole wave, with the stretch in use lit
+    if let Some(s) = &g.smp {
+        let at = ui.cursor().min;
+        let wide = ui.available_width().max(200.0);
+        draw_wave(ui, &s.frames, TEXT_DIM);
+        let r = egui::Rect::from_min_size(at, Vec2::new(wide, 70.0));
+        let shade = Color32::from_black_alpha(120);
+        ui.painter().rect_filled(egui::Rect::from_min_max(r.min, Pos2::new(r.left() + r.width() * ph.start, r.bottom())), 0.0, shade);
+        ui.painter().rect_filled(egui::Rect::from_min_max(Pos2::new(r.left() + r.width() * ph.end, r.top()), r.max), 0.0, shade);
+    }
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(360.0), 190.0), Sense::click_and_drag());
+    let (w, h) = (rect.width() - 10.0, rect.height() - 10.0);
+    let px = |x: f32, y: f32| Pos2::new(rect.left() + 5.0 + x * w, rect.bottom() - 5.0 - y * h);
+    let un = |p: Pos2| (((p.x - rect.left() - 5.0) / w).clamp(0.0, 1.0), ((rect.bottom() - 5.0 - p.y) / h).clamp(0.0, 1.0));
+    let mutes = ph.mutes.clone();
+    let line = if level { &mut ph.level } else { &mut ph.wave };
+    // what is under the pointer: (point, 0 the point itself / 1 the handle before / 2 the handle after)
+    let grab = |line: &[Point], at: Pos2| {
+        let mut best: Option<((usize, u8), f32)> = None;
+        for (i, p) in line.iter().enumerate() {
+            let mut spots = vec![(0u8, px(p.x, p.y))];
+            if p.kind == 2 && i > 0 {
+                spots.push((1, px(p.x + p.before[0], p.y + p.before[1])));
+            }
+            if line.get(i + 1).is_some_and(|n| n.kind == 2) {
+                spots.push((2, px(p.x + p.after[0], p.y + p.after[1])));
+            }
+            for (which, spot) in spots {
+                let d = spot.distance(at);
+                if d < 9.0 && best.is_none_or(|b| d < b.1) {
+                    best = Some(((i, which), d));
+                }
+            }
+        }
+        best.map(|b| b.0)
+    };
+    let held_id = id.with("held");
+    let menu_id = id.with("menu");
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        let hit = resp.interact_pointer_pos().and_then(|at| grab(line, at));
+        ui.data_mut(|d| d.insert_temp(held_id, hit));
+    }
+    let held: Option<(usize, u8)> = ui.data(|d| d.get_temp(held_id)).flatten();
+    if let (true, Some((i, which)), Some(at)) = (resp.dragged_by(egui::PointerButton::Primary), held, resp.interact_pointer_pos()) {
+        if i < line.len() {
+            let (x, y) = un(at);
+            let last = line.len() - 1;
+            match which {
+                0 => {
+                    line[i].x = if i == 0 { 0.0 } else if i == last { 1.0 } else { x.clamp(line[i - 1].x, line[i + 1].x) };
+                    line[i].y = y;
+                }
+                1 => {
+                    line[i].before = [(x - line[i].x).min(0.0), y - line[i].y];
+                    if line[i].locked {
+                        let far = (line[i].after[0].powi(2) + line[i].after[1].powi(2)).sqrt();
+                        let near = (line[i].before[0].powi(2) + line[i].before[1].powi(2)).sqrt().max(1e-6);
+                        line[i].after = [-line[i].before[0] / near * far, -line[i].before[1] / near * far];
+                    }
+                }
+                _ => {
+                    line[i].after = [(x - line[i].x).max(0.0), y - line[i].y];
+                    if line[i].locked {
+                        let far = (line[i].before[0].powi(2) + line[i].before[1].powi(2)).sqrt();
+                        let near = (line[i].after[0].powi(2) + line[i].after[1].powi(2)).sqrt().max(1e-6);
+                        line[i].before = [-line[i].after[0] / near * far, -line[i].after[1] / near * far];
+                    }
+                }
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.insert_temp(held_id, None::<(usize, u8)>));
+    }
+    if resp.clicked() {
+        if let Some(at) = resp.interact_pointer_pos().filter(|&at| grab(line, at).is_none()) {
+            let (x, y) = un(at);
+            let i = line.partition_point(|p| p.x <= x).clamp(1, line.len().max(2) - 1);
+            let kind = line.get(i).map_or(1, |p| p.kind);
+            line.insert(i.min(line.len()), Point { kind, ..Point::plain(x, y) });
+        }
+    }
+    if resp.secondary_clicked() {
+        let hit = resp.interact_pointer_pos().and_then(|at| grab(line, at)).filter(|h| h.1 == 0).map(|h| h.0);
+        ui.data_mut(|d| d.insert_temp(menu_id, hit));
+    }
+    let picked: Option<usize> = ui.data(|d| d.get_temp(menu_id)).flatten();
+    resp.context_menu(|ui| match picked.filter(|&i| i < line.len()) {
+        Some(i) => {
+            ui.label(RichText::new("The piece arriving at this point").small().color(TEXT_DIM));
+            for (k, name) in KINDS.iter().enumerate() {
+                if ui.radio(line[i].kind as usize == k, *name).clicked() {
+                    line[i].kind = k as u8;
+                }
+            }
+            if line[i].kind == 3 {
+                ui.add(egui::Slider::new(&mut line[i].tension, 0.02..=0.98).text("Tension"));
+            }
+            ui.checkbox(&mut line[i].locked, "Handles in one line");
+            if ui.add_enabled(i > 0 && i + 1 < line.len(), egui::Button::new("Delete")).clicked() {
+                line.remove(i);
+                ui.close_menu();
+            }
+        }
+        None => {
+            ui.label(RichText::new("Click an empty place to add a point. Right-click a point for its shape.").color(TEXT_DIM));
+        }
+    });
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 2.0, PANEL_DARK);
+    for q in 1..4 {
+        let x = rect.left() + 5.0 + w * q as f32 / 4.0;
+        p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+    }
+    let n = w as usize;
+    let mut run: Vec<Pos2> = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let x = i as f32 / n.max(1) as f32;
+        let open = travel::open_at(&mutes, x);
+        if !open {
+            p.line_segment([px(x, 0.0), px(x, 1.0)], Stroke::new(1.0_f32, Color32::from_black_alpha(90)));
+        }
+        run.push(px(x, travel::at(line, x).clamp(0.0, 1.0)));
+    }
+    p.add(egui::Shape::line(run, Stroke::new(1.5_f32, ACCENT)));
+    for (i, pt) in line.iter().enumerate() {
+        let c = px(pt.x, pt.y);
+        if pt.kind == 2 && i > 0 {
+            let hnd = px(pt.x + pt.before[0], pt.y + pt.before[1]);
+            p.line_segment([c, hnd], Stroke::new(1.0_f32, TEXT_DIM));
+            p.circle_stroke(hnd, 3.0, Stroke::new(1.0_f32, TEXT_DIM));
+        }
+        if line.get(i + 1).is_some_and(|nx| nx.kind == 2) {
+            let hnd = px(pt.x + pt.after[0], pt.y + pt.after[1]);
+            p.line_segment([c, hnd], Stroke::new(1.0_f32, TEXT_DIM));
+            p.circle_stroke(hnd, 3.0, Stroke::new(1.0_f32, TEXT_DIM));
+        }
+        p.circle_filled(c, 3.5, if held == Some((i, 0)) { Color32::WHITE } else { ACCENT });
+    }
+    // the mute bar: drag with the left button to silence a stretch, with the right to let it sound again
+    let (bar, bresp) = ui.allocate_exact_size(Vec2::new(rect.width(), 14.0), Sense::click_and_drag());
+    const CELLS: usize = 256;
+    let mut cells: Vec<bool> = (0..CELLS).map(|i| travel::open_at(&ph.mutes, (i as f32 + 0.5) / CELLS as f32)).collect();
+    let (left, right) = ui.input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
+    if let (true, Some(at)) = (bresp.is_pointer_button_down_on() && (left || right), ui.input(|i| i.pointer.latest_pos())) {
+        let c = (((at.x - bar.left() - 5.0) / w).clamp(0.0, 0.9999) * CELLS as f32) as usize;
+        if cells[c] != right {
+            cells[c] = right;
+            let mut m = vec![(cells[0], 0.0)];
+            for i in 1..CELLS {
+                if cells[i] != cells[i - 1] {
+                    m.push((cells[i], i as f32 / CELLS as f32));
+                }
+            }
+            ph.mutes = m;
+        }
+    }
+    let bp = ui.painter_at(bar);
+    bp.rect_filled(bar, 2.0, PANEL_DARK);
+    for (i, on) in cells.iter().enumerate() {
+        if *on {
+            let x0 = bar.left() + 5.0 + w * i as f32 / CELLS as f32;
+            bp.rect_filled(egui::Rect::from_min_max(Pos2::new(x0, bar.top() + 3.0), Pos2::new(x0 + w / CELLS as f32 + 0.5, bar.bottom() - 3.0)), 0.0, TEXT_DIM);
+        }
+    }
+    bresp.hint("Muted stretches. Drag with the left button to silence, with the right button to let it sound again");
+    ui.label(RichText::new("Across is time along the phrase, up is the place in the sample between start and end. Fade times are read as milliseconds, which is an estimate.").small().color(TEXT_DIM));
+    if set.phrase(key).map_or(ph != Phrase::default(), |old| *old != ph) {
+        *set.phrase_mut(key) = ph;
+    }
+    if set != was {
+        g.raw = set.store(&g.raw);
+        changed = true;
+    }
+    changed
+}
+
 /// The knobs of a built-in instrument.
 fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -> bool {
     use cereal_engine::synth::{def, Kind, OSC_FIELDS, SHAPES};
@@ -1459,10 +1741,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             ui.label(RichText::new(format!("Grains hold {:.0} ms, fade {:.0} ms, grain spacing {:.0} %, wave spacing {:.0} %", s.hold * 1000.0, s.attack * 1000.0, s.grain_spacing * 100.0, s.wave_spacing * 100.0)).strong());
             ui.label(RichText::new("Plays the channel's sample as grains from the stored settings. Pan and depth effects, random start, transients and the knobs are still to come.").color(TEXT_DIM));
         }
-        Kind::Travel => {
-            ui.label(RichText::new(cereal_engine::synth::sample_named_in("Wave Traveller", &g.raw).unwrap_or_else(|| "(no sample)".into())).strong());
-            ui.label(RichText::new("Plays its sample straight through for now. The travel paths drawn per key are kept in the block but are not read yet.").color(TEXT_DIM));
-        }
+        Kind::Travel => changed |= travel_panel(ui, g),
         Kind::Quiet => {
             ui.label(RichText::new("Makes no sound of its own: it sends control values or notes to other units. Its settings are kept untouched; sending is still to come.").color(TEXT_DIM));
         }

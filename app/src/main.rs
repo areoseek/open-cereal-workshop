@@ -1472,8 +1472,16 @@ impl App {
                     m.load(&mut self.lib, path.parent());
                     std::sync::Arc::new(m)
                 });
+                // the path scratcher names the sample its phrases move through
+                let named = cereal_engine::synth::sample_named_in(ident, &pre.state).and_then(|n| self.lib.load_stored(&n, path.parent()));
                 let c = &mut self.song.channels[ci];
                 c.gen = Some(g);
+                if kind == cereal_engine::synth::Kind::Travel {
+                    c.sample = named.clone();
+                    if let Some(g) = c.gen.as_mut() {
+                        g.smp = named;
+                    }
+                }
                 if bank.is_some() || zones.is_some() {
                     c.zones = bank.or(zones);
                 }

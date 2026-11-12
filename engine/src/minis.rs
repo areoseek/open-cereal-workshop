@@ -15,6 +15,8 @@ pub struct Patch {
     pub img: Option<std::sync::Arc<crate::beep::Image>>,
     /// The sample and settings of the grain player.
     pub smp: Option<(std::sync::Arc<crate::sample::Sample>, crate::grain::Set)>,
+    /// The sample and phrases of the path scratcher.
+    pub path: Option<(std::sync::Arc<crate::sample::Sample>, std::sync::Arc<crate::travel::Set>)>,
 }
 
 static TEMPO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -42,6 +44,7 @@ pub enum Voice {
     Kit(Box<crate::drumkit::Voice>),
     Image(Box<crate::beep::Voice>),
     Grain(Box<crate::grain::Voice>),
+    Travel(Box<crate::travel::Voice>),
     String(Box<Ks>),
     Guitar(Box<crate::guitar::Voice>),
     Analog(Box<(crate::analog::Voice, crate::analog::Set)>),
@@ -128,13 +131,25 @@ impl Voice {
         if let (Kind::Image, Some(img)) = (p.kind, &p.img) {
             return Voice::Image(Box::new(crate::beep::Voice::start(img, sr, vel, dphase)));
         }
+        if let (Kind::Travel, Some((smp, set))) = (p.kind, &p.path) {
+            // a key nothing was drawn for plays the sample straight through
+            let plain;
+            let ph = match set.phrase(key) {
+                Some(ph) => ph,
+                None => {
+                    plain = crate::travel::Phrase::default();
+                    &plain
+                }
+            };
+            return Voice::Travel(Box::new(crate::travel::Voice::start(smp, ph, sr, vel, tempo())));
+        }
         if let (Kind::Grain, Some((smp, set))) = (p.kind, &p.smp) {
             // an empty settings list marks the unit that plays its sample at its own speed whatever the key
             let dphase = if p.p.is_empty() && set.hold == 0.05 { C5 / sr } else { dphase };
             return Voice::Grain(Box::new(crate::grain::Voice::start(smp, *set, sr, vel, dphase)));
         }
         match p.kind {
-            Kind::Image | Kind::Quiet | Kind::Grain => Voice::Quiet,
+            Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel => Voice::Quiet,
             Kind::String => {
                 let hz = (dphase * sr).clamp(20.0, sr * 0.4);
                 // the averaging step adds half a sample to the loop
@@ -318,6 +333,7 @@ impl Voice {
             Voice::Kit(v) => v.release(),
             Voice::Image(v) => v.release(),
             Voice::Grain(v) => v.release(),
+            Voice::Travel(v) => v.release(),
             Voice::Guitar(v) => v.release(),
             Voice::String(v) => {
                 if s_gate(p) {
@@ -373,6 +389,7 @@ impl Voice {
             Voice::Kit(v) => v.frame(&p.p),
             Voice::Image(v) => v.frame(),
             Voice::Grain(v) => v.frame(),
+            Voice::Travel(v) => v.frame(),
             Voice::Guitar(v) => v.frame(),
             Voice::String(v) => {
                 let n = v.line[0].len();
