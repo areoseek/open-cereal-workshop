@@ -2316,6 +2316,22 @@ mod tests {
     }
 
     #[test]
+    fn performance_settings_are_saved_and_read_back() {
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        assert!(!r.performance);
+        r.performance = true;
+        r.tracks[2].perf = crate::song::Perf { press: 3, motion: 5, sync: 2, pos_sync: 4, queue: true, tolerant: false };
+        r.tracks[3].grouped = true;
+        let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
+        let (r2, _) = reload(&bytes2);
+        assert!(r2.performance);
+        assert_eq!(r2.tracks[2].perf, r.tracks[2].perf);
+        assert_eq!(r2.tracks[1].perf, crate::song::Perf::default());
+        assert!(r2.tracks[3].grouped && !r2.tracks[2].grouped);
+    }
+
+    #[test]
     fn rack_groups_are_saved_and_read_back() {
         let bytes = to_bytes(&Song::new(), None).unwrap();
         let (mut r, f) = reload(&bytes);

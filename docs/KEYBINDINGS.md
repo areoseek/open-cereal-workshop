@@ -196,7 +196,11 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+drag, Shift+drag a clip, clip edges | Rectangle select, drag a copy, resize | yes |
 | Right-click a clip | Delete | yes |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
-| 6, Shift+6, Ctrl+P | Performance mode and its zoom | no |
+| Ctrl+P (playlist focused), Shift+6 | Performance mode on and off, fit the performance zone | yes |
+| Click a zone clip; right-click it or click the track name | Start the clip on its grid; stop the track | yes |
+| Alt+click, Shift+click, Ctrl+click a zone clip | Start at once, queue after the playing clip, start the whole column | yes |
+| Click a marker tab over the zone | Play that scene | yes |
+| Typing keys while performing | Rows 1-5, QWERT, ASDFG, ZXCVB, 6-0, YUIOP, HJKL;, NM,./ start clips 1 to 5 of tracks 1 to 8 (layout to be checked) | partly |
 | 7 / 8, 9 | Transpose an audio clip down / up, reverse it | yes |
 | Insert | Slice the clip under the pointer at the grid line | yes |
 | Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |

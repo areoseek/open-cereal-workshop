@@ -2171,7 +2171,12 @@ impl Player {
                     }
                     self.wheel[c] = octaves.clamp(-4.0, 4.0);
                 }
-                Cmd::Perf { track, clip, now, queue } => self.perf_trigger(song, track as usize, clip, now, queue),
+                Cmd::Perf { track, clip, now, queue } => {
+                    self.perf_trigger(song, track as usize, clip, now, queue);
+                    if clip.is_some() {
+                        self.perf_group(song, track as usize, now, queue);
+                    }
+                }
                 Cmd::PerfRelease { track } => self.perf_release(song, track as usize),
                 Cmd::PerfKey { track, nth, down } => {
                     if !down {
@@ -2180,6 +2185,7 @@ impl Player {
                         let at = song.clips.iter().filter(|c| c.track == track && c.pos < zone).nth(nth as usize).map(|c| c.pos);
                         if at.is_some() {
                             self.perf_trigger(song, track as usize, at, false, false);
+                            self.perf_group(song, track as usize, false, false);
                         }
                     }
                 }
@@ -2313,6 +2319,25 @@ impl Player {
     fn zone_clip(song: &Song, track: usize, pos: u32) -> Option<&crate::song::Clip> {
         let k = song.clips.partition_point(|c| c.pos < pos);
         song.clips[k..].iter().take_while(|c| c.pos == pos).find(|c| c.track as usize == track)
+    }
+
+    /// Tracks grouped together sound one clip between them: a clip started on one lets the others go.
+    fn perf_group(&mut self, song: &Song, track: usize, now: bool, queue: bool) {
+        let joined = |t: usize| song.tracks.get(t).is_some_and(|x| x.grouped);
+        let mut lo = track;
+        while lo > 0 && joined(lo) {
+            lo -= 1;
+        }
+        let mut hi = track;
+        while joined(hi + 1) {
+            hi += 1;
+        }
+        for t in lo..=hi {
+            let busy = self.perf.get(t).is_some_and(|p| p.live.is_some() || p.next.is_some_and(|n| n.clip.is_some()));
+            if t != track && busy {
+                self.perf_trigger(song, t, None, now, queue);
+            }
+        }
     }
 
     fn perf_trigger(&mut self, song: &Song, track: usize, clip: Option<u32>, now: bool, queue: bool) {
@@ -3915,6 +3940,35 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got[0] == 0 && got[1].abs_diff(192_000) <= 1, "{got:?}");
         assert!(!h.transport.playing());
+    }
+
+    #[test]
+    fn grouped_performance_tracks_sound_one_clip_between_them() {
+        use crate::song::TimeMarker;
+        let mut s = click_song();
+        s.patterns[0].toggle_step(0, 0);
+        s.performance = true;
+        s.markers.push(TimeMarker { pos: 768, kind: 5, name: "Start".into(), ..Default::default() });
+        for t in 0..3 {
+            s.clips.push(Clip { pos: 0, len: 384, track: t, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+            s.tracks[t as usize].perf.sync = 0;
+        }
+        s.tracks[1].grouped = true;
+        let (h, mut p) = new_player(s, 48_000.0);
+        h.transport.set_song_mode(true);
+        h.transport.set_playing(true);
+        let mut buf = vec![0.0f32; 2 * 512];
+        p.render(&mut buf, 2);
+        h.send(Cmd::Perf { track: 0, clip: Some(0), now: false, queue: false });
+        h.send(Cmd::Perf { track: 2, clip: Some(0), now: false, queue: false });
+        p.render(&mut buf, 2);
+        assert!(h.transport.perf_state(0).0.is_some() && h.transport.perf_state(2).0.is_some());
+        // track 1 is joined to track 0: its clip takes over, the lone track 2 plays on
+        h.send(Cmd::Perf { track: 1, clip: Some(0), now: false, queue: false });
+        p.render(&mut buf, 2);
+        p.render(&mut buf, 2);
+        assert_eq!(h.transport.perf_state(0).0, None);
+        assert!(h.transport.perf_state(1).0.is_some() && h.transport.perf_state(2).0.is_some());
     }
 
     #[test]
