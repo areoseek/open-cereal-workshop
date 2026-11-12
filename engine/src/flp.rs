@@ -568,6 +568,23 @@ pub struct FlpArrangement {
     pub markers: Vec<Marker>,
 }
 
+/// A slot that was never closed by an index event: old files end a slot at the next plugin or at the
+/// insert's routing, and keep the slot number in the plugin head.
+fn push_old_slot(i: &mut FlpInsert, slot: &mut FlpSlot, hint: &mut Option<u16>) {
+    if slot.plugin.is_empty() {
+        return;
+    }
+    let mut s = std::mem::take(slot);
+    let free = |i: &FlpInsert, n: u16| !i.slots.iter().any(|x| x.index == n);
+    s.index = match hint.take() {
+        Some(n) if n < 10 && free(i, n) => n,
+        _ => (0..10).find(|&n| free(i, n)).unwrap_or(9),
+    };
+    s.enabled = true;
+    s.mix = 12800;
+    i.slots.push(s);
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FlpSlot {
     pub index: u16,
@@ -744,6 +761,8 @@ impl Flp {
         let mut cur_pat: u16 = 0;
         let mut insert_open = false;
         let mut slot = FlpSlot::default();
+        // files from before the slot index event name the slot inside the plugin head instead
+        let mut slot_hint: Option<u16> = None;
         let mut mixer_params: Vec<u8> = vec![];
         // an insert's name and colour are written just before the event that opens it
         let mut next_insert_name: Option<String> = None;
@@ -873,11 +892,13 @@ impl Flp {
                     scope = Scope::Insert;
                     insert_open = true;
                     slot = FlpSlot::default();
+                    slot_hint = None;
                     let index = flp.inserts.len();
                     flp.inserts.push(FlpInsert { index, flags: u32at(d, 4), name: next_insert_name.take().unwrap_or_default(), color: next_insert_color.take(), ..Default::default() });
                 }
                 (id::INSERT_OUTPUT, Value::Int(v)) => {
                     if let (true, Some(i)) = (insert_open, flp.inserts.last_mut()) {
+                        push_old_slot(i, &mut slot, &mut slot_hint);
                         i.output = *v as i32;
                     }
                     insert_open = false;
@@ -901,6 +922,7 @@ impl Flp {
                 }
                 (id::INSERT_ROUTING, Value::Data(d)) => {
                     if let (true, Some(i)) = (insert_open, flp.inserts.last_mut()) {
+                        push_old_slot(i, &mut slot, &mut slot_hint);
                         i.routes = d.iter().map(|&b| b != 0).collect();
                     }
                 }
@@ -913,8 +935,10 @@ impl Flp {
                         if !s.plugin.is_empty() || !s.name.is_empty() {
                             i.slots.push(s);
                         }
+                        slot_hint = None;
                     }
                 }
+                (id::NEW_PLUGIN, Value::Data(d)) if scope == Scope::Insert && d.len() >= 8 => slot_hint = Some(u32at(d, 4) as u16),
                 (id::MIXER_PARAMS, Value::Data(d)) => mixer_params = d.clone(),
 
                 // ---- ids shared between channels and effect slots
@@ -924,7 +948,12 @@ impl Flp {
                             c.plugin = text(d);
                         }
                     }
-                    Scope::Insert => slot.plugin = text(d),
+                    Scope::Insert => {
+                        if let (true, Some(i)) = (insert_open, flp.inserts.last_mut()) {
+                            push_old_slot(i, &mut slot, &mut slot_hint);
+                        }
+                        slot.plugin = text(d);
+                    }
                     _ => {}
                 },
                 (id::PLUGIN_NAME, Value::Data(d)) => match scope {
@@ -1095,6 +1124,7 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
     // The insert number is offset by `base`. From 24.2 on the "current" insert uses a number past the normal
     // range and maps to the last insert; before that number 256 is the global group.
     let n = inserts.len();
+    let mut send_levels = false;
     for r in d.chunks_exact(12) {
         let pid = r[4];
         let cd = u16at(r, 6);
@@ -1126,12 +1156,24 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
             224..=226 => ins.eq[pid as usize - 224][2] = value,
             64..=191 => {
                 let dest = pid as usize - 64;
+                send_levels |= (100..104).contains(&dest);
                 match ins.route_levels.iter_mut().find(|r| r.0 == dest) {
                     Some(r) => r.1 = value,
                     None => ins.route_levels.push((dest, value)),
                 }
             }
             _ => {}
+        }
+    }
+    // Old projects (four send tracks, 100 to 103) wire every insert to the send tracks and write a
+    // level only once its knob has been turned up: without any, those knobs are at zero.
+    if n == 105 && !send_levels {
+        for ins in inserts[..100].iter_mut() {
+            for dest in 100..104 {
+                if ins.routes.get(dest).copied().unwrap_or(false) {
+                    ins.route_levels.push((dest, 0));
+                }
+            }
         }
     }
 }

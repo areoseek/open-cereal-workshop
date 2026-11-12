@@ -775,7 +775,10 @@ pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
         return None;
     }
     let s = state.get(20..)?;
-    let s = &s[..s.iter().position(|&b| b == 0)?];
+    // the name's length sits just ahead of it; some blocks close the name with a zero as well
+    let len = state.get(16..20).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).filter(|&n| n <= s.len());
+    let s = &s[..len.unwrap_or(s.len())];
+    let s = &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())];
     let name = String::from_utf8_lossy(s).into_owned();
     (name.len() > 4 && name.contains('.') && s.iter().all(|&b| b >= 0x20)).then_some(name)
 }

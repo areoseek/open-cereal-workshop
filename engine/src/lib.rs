@@ -44,6 +44,8 @@ pub mod slicer;
 pub mod beep;
 pub mod conv;
 pub mod convset;
+#[cfg(test)]
+mod probe;
 pub mod drumbank;
 pub mod grain;
 pub mod guitar;

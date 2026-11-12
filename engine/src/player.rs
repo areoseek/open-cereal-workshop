@@ -2641,7 +2641,7 @@ impl Player {
         }
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
-            let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy | fx::Kind::Xyz)));
+            let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Deck)));
             // a track being recorded runs through silence too, or the pauses would fall out of the take
             let taken = self.transport.rec_want.load(Relaxed);
             let sender = sender || (taken != u32::MAX && (taken >> 6) as usize == i);

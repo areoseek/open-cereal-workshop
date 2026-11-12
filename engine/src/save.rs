@@ -1582,23 +1582,61 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     }
 }
 
+/// Where each effect slot of the insert opened at `open` sits: its index, its events, and whether an
+/// index event closes it (old files have none and keep the slot number in the plugin head).
+fn slot_spans(ev: &[Event], open: usize) -> Vec<(u16, std::ops::Range<usize>, bool)> {
+    let mut out: Vec<(u16, std::ops::Range<usize>, bool)> = vec![];
+    let (mut begin, mut plugin, mut hint) = (open + 1, false, None::<u16>);
+    let old = |out: &Vec<(u16, std::ops::Range<usize>, bool)>, hint: Option<u16>| {
+        let free = |n: u16| !out.iter().any(|(i, _, _)| *i == n);
+        match hint {
+            Some(n) if n < 10 && free(n) => n,
+            _ => (0..10).find(|&n| free(n)).unwrap_or(9),
+        }
+    };
+    for i in open + 1..ev.len() {
+        match ev[i].id {
+            id::SLOT_INDEX => {
+                if let Value::Word(idx) = ev[i].value {
+                    out.push((idx, begin..i, true));
+                }
+                (begin, plugin, hint) = (i + 1, false, None);
+            }
+            id::PLUGIN_INTERNAL_NAME => {
+                if plugin {
+                    let idx = old(&out, hint.take());
+                    out.push((idx, begin..i, false));
+                    begin = i;
+                }
+                plugin = true;
+            }
+            id::NEW_PLUGIN => {
+                if let Some(d) = ev[i].bytes().filter(|d| d.len() >= 8) {
+                    hint = Some(u32at(d, 4) as u16);
+                }
+            }
+            id::INSERT_ROUTING | id::INSERT_OUTPUT | id::INSERT_FLAGS => {
+                if plugin {
+                    let idx = old(&out, hint.take());
+                    out.push((idx, begin..i, false));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mixer_base: usize) {
     let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
     let mut records: Vec<(u8, u16, i32)> = vec![];
     // every slot's events as they stand in the file, so a moved slot takes its plugin with it untouched
     let mut groups: HashMap<(u16, u16), Vec<Event>> = HashMap::new();
     for (k, &open) in opens.iter().enumerate() {
-        let mut g: Vec<Event> = vec![];
-        for e in &ev[open + 1..] {
-            match e.id {
-                id::SLOT_INDEX => {
-                    if let (Value::Word(i), false) = (&e.value, g.is_empty()) {
-                        groups.insert((k as u16, *i), std::mem::take(&mut g));
-                    }
-                    g.clear();
-                }
-                id::INSERT_ROUTING | id::INSERT_OUTPUT | id::INSERT_FLAGS => break,
-                _ => g.push(e.clone()),
+        for (idx, r, _) in slot_spans(ev, open) {
+            if !r.is_empty() {
+                groups.insert((k as u16, idx), ev[r].to_vec());
             }
         }
     }
@@ -1651,7 +1689,8 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         }
         // effect slots: the events of each slot sit ahead of its index event
         let shape = |i: &crate::song::Insert| i.slots.iter().map(|s| (s.index, s.src, s.plugin.clone())).collect::<Vec<_>>();
-        let last_idx = (open..=close).rev().find(|&i| ev[i].id == id::SLOT_INDEX);
+        let spans = slot_spans(ev, open);
+        let slots_end = spans.iter().map(|(_, r, closed)| r.end + *closed as usize).max();
         if shape(now) != shape(was) {
             let n_slots = (open..=close).filter(|&i| ev[i].id == id::SLOT_INDEX).count().max(10);
             let mut region: Vec<Event> = vec![];
@@ -1697,14 +1736,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 }
                 region.push(Event::word(id::SLOT_INDEX, idx));
             }
-            match last_idx {
-                Some(last) => {
-                    ev.splice(open + 1..=last, region);
-                }
-                None => {
-                    ev.splice(open + 1..open + 1, region);
-                }
-            }
+            ev.splice(open + 1..slots_end.unwrap_or(open + 1), region);
             for idx in 0..n_slots as u16 {
                 let s = now.slots.iter().find(|s| s.index == idx);
                 records.push((0, cd | (idx & 63), s.map(|s| s.enabled).unwrap_or(true) as i32));
@@ -1720,9 +1752,8 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                     records.push((1, cd | (s.index & 63), q(s.mix, 12800.0)));
                 }
                 if let (true, Some(f)) = (w.fx != s.fx || s.fx.as_ref().is_some_and(|f| f.ext.is_some()), &s.fx) {
-                    let Some(end) = (open..=close).find(|&i| ev[i].id == id::SLOT_INDEX && ev[i].value == Value::Word(s.index)) else { continue };
-                    let begin = (open..end).rev().find(|&i| ev[i].id == id::SLOT_INDEX).unwrap_or(open);
-                    if let Some(i) = (begin..end).find(|&i| ev[i].id == id::PLUGIN_PARAMS) {
+                    let Some((_, r, _)) = spans.iter().find(|(i, _, _)| *i == s.index) else { continue };
+                    if let Some(i) = r.clone().find(|&i| ev[i].id == id::PLUGIN_PARAMS) {
                         if let Value::Data(d) = &mut ev[i].value {
                             *d = f.encode(Some(d));
                         }
@@ -1743,7 +1774,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
             match i {
                 Some(i) => ev[i].value = Value::Data(r),
                 None => {
-                    let at = (open..=close).rev().find(|&i| ev[i].id == id::SLOT_INDEX).map(|i| i + 1).unwrap_or(open + 1);
+                    let at = slot_spans(ev, open).iter().map(|(_, r, closed)| r.end + *closed as usize).max().unwrap_or(open + 1);
                     ev.insert(at, Event::data(id::INSERT_ROUTING, r));
                 }
             }
@@ -1998,6 +2029,48 @@ mod tests {
         song.inserts[3].slots[0].fx.as_mut().unwrap().p[0] = 33.0;
         let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
         assert_eq!(reload(&bytes).0.inserts[3].slots[0].fx.as_ref().unwrap().p[0], 33.0);
+    }
+
+    #[test]
+    fn slots_of_old_projects_without_index_events() {
+        use crate::fx::Kind;
+        use crate::song::Slot;
+        let mut song = Song::new();
+        while song.inserts.len() < 4 {
+            song.inserts.push(Default::default());
+        }
+        let mut a = Slot::with_fx(0, Kind::Delay);
+        a.fx.as_mut().unwrap().p[3] = 90.0;
+        let mut b = Slot::with_fx(3, Kind::Eq);
+        b.fx.as_mut().unwrap().p[2] = -600.0;
+        song.inserts[1].slots = vec![a.clone(), b.clone()];
+        let (bytes, _) = save(&mut song, None).unwrap();
+        // the way old versions wrote it: no index events, the slot number only in the plugin head
+        let mut file = flp::FlpFile::parse(&bytes).unwrap();
+        file.events.retain(|e| e.id != id::SLOT_INDEX);
+        let old = file.to_bytes();
+        let (mut back, flp) = reload(&old);
+        let got = &back.inserts[1].slots;
+        assert_eq!(got.iter().map(|s| s.index).collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!((&got[0].fx, &got[1].fx), (&a.fx, &b.fx));
+        assert_eq!(to_bytes(&back, Some(&flp)).unwrap(), old);
+
+        // a setting changed in place keeps the old layout
+        back.inserts[1].slots[1].fx.as_mut().unwrap().p[2] = 250.0;
+        let (bytes, _) = save(&mut back, Some(&flp)).unwrap();
+        assert_eq!(bytes.len(), old.len());
+        let (mut back, flp) = reload(&bytes);
+        assert_eq!(back.inserts[1].slots[1].fx.as_ref().unwrap().p[2], 250.0);
+        assert_eq!(back.inserts[1].slots[0].fx, a.fx);
+
+        // moving a slot rewrites the insert with index events; both plugins come through
+        back.inserts[1].slots[0].index = 5;
+        let (bytes, _) = save(&mut back, Some(&flp)).unwrap();
+        let (again, _) = reload(&bytes);
+        let got = &again.inserts[1].slots;
+        assert_eq!(got.iter().map(|s| s.index).collect::<Vec<_>>(), vec![3, 5]);
+        assert_eq!(got[1].fx, a.fx);
+        assert_eq!(got[0].fx.as_ref().unwrap().p[2], 250.0);
     }
 
     fn reload(bytes: &[u8]) -> (Song, Flp) {
