@@ -2280,6 +2280,29 @@ impl App {
                         self.show_project = true;
                         ui.close_menu();
                     }
+                    let tweaked: widgets::Tweaked = ui.ctx().data(|d| d.get_temp(egui::Id::new("tweaked"))).unwrap_or_default();
+                    for (k, label) in ["Last tweaked", "Before last tweaked"].into_iter().enumerate() {
+                        ui.add_enabled_ui(tweaked[k].is_some(), |ui| {
+                            ui.menu_button(label, |ui| {
+                                let Some(target) = tweaked[k] else { return };
+                                ui.label(RichText::new(self.song.target_name(target)).color(TEXT_DIM).small());
+                                let mut ask = None;
+                                if ui.button("Edit events").clicked() {
+                                    ask = Some(widgets::CtlAsk::Events);
+                                }
+                                if ui.button("Create automation clip").clicked() {
+                                    ask = Some(widgets::CtlAsk::AutoClip);
+                                }
+                                if ui.button("Link to controller...").clicked() {
+                                    ask = Some(widgets::CtlAsk::Link);
+                                }
+                                if let Some(a) = ask {
+                                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));
+                                    ui.close_menu();
+                                }
+                            });
+                        });
+                    }
                     ui.menu_button("Score logger", |ui| {
                         if ui.button("Dump score log to selected pattern").hint("Every key played by hand is remembered, recording or not; this writes the last minutes of it into the pattern on show").clicked() {
                             let n = self.dump_score_log();

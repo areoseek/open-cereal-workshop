@@ -92,9 +92,21 @@ pub enum CtlAsk {
     Link,
 }
 
+/// The control moved last and the one moved before it.
+pub type Tweaked = [Option<cereal_engine::song::Target>; 2];
+
 /// The right-click menu every automatable control has. The choice is left for the app to pick up after the
 /// frame, since the control itself is usually borrowed from the song while it is drawn.
 pub fn control_menu(resp: &Response, target: cereal_engine::song::Target) {
+    if resp.changed() || resp.dragged() {
+        // remembered for the TOOLS menu: the control moved last, and the one before it
+        resp.ctx.data_mut(|d| {
+            let had: Tweaked = d.get_temp(egui::Id::new("tweaked")).unwrap_or_default();
+            if had[0] != Some(target) {
+                d.insert_temp(egui::Id::new("tweaked"), [Some(target), had[0]]);
+            }
+        });
+    }
     resp.context_menu(|ui| {
         let mut ask = None;
         if ui.button("Create automation clip").clicked() {
