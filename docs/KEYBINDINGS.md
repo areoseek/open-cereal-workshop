@@ -159,7 +159,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Alt+B, Alt+N | Note helpers, waveform helper | no |
 | Alt+G / Shift+G | Ungroup / group | no |
 | Ctrl+I | Write the lane's current value | no |
-| Ctrl+Enter | Select the time round the selection | no |
+| Ctrl+Enter | Select the time round the selection | yes |
+| Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Shift+Ctrl+V | Paste from the MIDI clipboard | no |
 | Shift+M, Shift+N | Random groups, chord stamp off | no |
 | Alt+wheel | Change the property of the note under the pointer | no |
@@ -201,7 +202,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Shift+G / Alt+G | Group / ungroup | no |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |
 | Ctrl+Alt+G | Grid colour | no |
-| Ctrl+Enter | Select the time round the selection | no |
+| Ctrl+Enter | Select the time round the selection | yes |
+| Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Ctrl+F8, Alt+P | Project picker, picker panel | no |
 | Shift+M | Stretch mode | no |
 | Shift+wheel on a track name | Move the track up / down | yes |

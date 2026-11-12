@@ -50,6 +50,8 @@ pub struct Transport {
     step_edit: AtomicBool,
     /// Play is pressed, and the song starts with the first note played by hand.
     waiting: AtomicBool,
+    /// The stretch of time picked out to play round and round: start in the high half, end in the low; 0 = none.
+    range: AtomicU64,
     /// Notes played by hand while recording is armed and the song runs, for the window to write down.
     live: Mutex<Vec<Live>>,
     /// MIDI messages the sender channels made, for the window's sender thread to put on the wire.
@@ -163,6 +165,7 @@ impl Transport {
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
             step_edit: AtomicBool::new(false),
+            range: AtomicU64::new(0),
             waiting: AtomicBool::new(false),
             live: Mutex::new(Vec::new()),
             midi: Mutex::new(Vec::with_capacity(256)),
@@ -212,6 +215,16 @@ impl Transport {
     }
     pub fn set_countdown(&self, on: bool) {
         self.countdown.store(on, Relaxed);
+    }
+    /// The stretch of time that plays round and round in place of the whole song or pattern.
+    pub fn range(&self) -> Option<(u32, u32)> {
+        let r = self.range.load(Relaxed);
+        let (a, b) = ((r >> 32) as u32, r as u32);
+        (b > a).then_some((a, b))
+    }
+    pub fn set_range(&self, r: Option<(u32, u32)>) {
+        let (a, b) = r.unwrap_or((0, 0));
+        self.range.store((a as u64) << 32 | b as u64, Relaxed);
     }
     pub fn step_edit(&self) -> bool {
         self.step_edit.load(Relaxed)
@@ -2126,6 +2139,11 @@ impl Player {
             }
         }
         if playing && !self.was_playing {
+            if let Some((a, b)) = tr.range() {
+                if self.pos < a as f64 || self.pos >= b as f64 {
+                    self.pos = a as f64;
+                }
+            }
             self.chase = true;
             self.ov.clear();
             self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 } else { 0.0 };
@@ -2184,6 +2202,7 @@ impl Player {
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;
         let loop_from = if song_mode { song.loop_start().min((loop_len as u32).saturating_sub(1)) as f64 } else { 0.0 };
+        let (loop_from, loop_len) = tr.range().map(|(a, b)| (a as f64, b as f64)).unwrap_or((loop_from, loop_len));
         if self.pos >= loop_len {
             if tr.looping() {
                 self.pos = loop_from;

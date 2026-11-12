@@ -51,6 +51,8 @@ enum Drag {
     Paint,
     Slice { tick: u32 },
     Seek,
+    /// Picking out a stretch of time on the ruler, from this tick.
+    TimeSel { from: u32 },
     Marker(usize),
     /// A point of an automation clip: channel, point, clip, and where the clip's picture sits.
     AutoPt { chan: usize, idx: usize, clip: usize, left: f32, top: f32, bottom: f32, offset: u32 },
@@ -73,6 +75,8 @@ pub struct State {
     pub tool: Tool,
     snap: usize,
     pub sel: BTreeSet<usize>,
+    /// The stretch of time picked out on the ruler; it plays round and round and edits by time work on it.
+    pub(crate) time_sel: Option<(u32, u32)>,
     /// The grid point and the clip under the pointer, as of the last frame.
     hover: Option<(u32, Option<usize>)>,
     clip: Vec<Clip>,
@@ -89,7 +93,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -416,6 +420,14 @@ impl App {
 
         // ruler
         p.rect_filled(ruler, 0.0, PANEL_DARK);
+        if let Some((a, b)) = self.playlist.time_sel {
+            let (xa, xb) = (x_of(a as f32).max(grid.left()), x_of(b as f32).min(grid.right()));
+            if xb > xa {
+                let red = Color32::from_rgb(200, 70, 60);
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa, ruler.top()), Pos2::new(xb, ruler.bottom())), 0.0, red.gamma_multiply(0.7));
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa, grid.top()), Pos2::new(xb, grid.bottom())), 0.0, red.gamma_multiply(0.08));
+            }
+        }
         let label_every = every.max((40.0 / bar_px).ceil() as u32).max(1);
         let mut b = (tick_of(grid.left()) as u32 / bar) * bar;
         while b <= last_tick {
@@ -534,6 +546,9 @@ impl App {
                 if let Some(i) = tab {
                     self.handle.transport.seek(self.song.markers[i].pos);
                     self.playlist.drag = Some(Drag::Marker(i));
+                } else if ruler.contains(pp) && mods.command {
+                    self.playlist.time_sel = None;
+                    self.playlist.drag = Some(Drag::TimeSel { from: snap(tick_of(pp.x)) });
                 } else if ruler.contains(pp) {
                     self.playlist.drag = Some(Drag::Seek);
                 } else if grid.contains(pp) {
@@ -781,6 +796,15 @@ impl App {
                         done = true;
                     }
                 }
+                Drag::TimeSel { from } => {
+                    if down {
+                        let to = snap(tick_of(pp.x) + g as f32 * 0.5);
+                        let (a, b) = ((*from).min(to), (*from).max(to));
+                        self.playlist.time_sel = (b > a).then_some((a, b));
+                    } else {
+                        done = true;
+                    }
+                }
                 Drag::Seek => {
                     if down {
                         if !self.handle.transport.song_mode() {
@@ -864,6 +888,11 @@ impl App {
 
     /// Where the selection starts and ends in time, pulled out to whole bars.
     fn pl_span(&self) -> Option<(u32, u32)> {
+        self.playlist.time_sel.or_else(|| self.pl_clip_span())
+    }
+
+    /// The bars the selected clips cover.
+    fn pl_clip_span(&self) -> Option<(u32, u32)> {
         let bar = self.song.bar();
         let clips = &self.song.clips;
         let sel: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| i < clips.len()).collect();
@@ -900,6 +929,9 @@ impl App {
     fn pl_select_beside(&mut self, after: bool) {
         let Some((a, b)) = self.pl_span() else { return };
         let (lo, hi) = if after { (b, b + (b - a)) } else { (a.saturating_sub(b - a), a) };
+        if self.playlist.time_sel.is_some() && hi > lo {
+            self.playlist.time_sel = Some((lo, hi));
+        }
         self.playlist.sel = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].pos >= lo && self.song.clips[i].pos < hi).collect();
     }
 
@@ -1074,7 +1106,11 @@ impl App {
         if m.command && !m.alt {
             match key {
                 Key::A => self.playlist.sel = (0..self.song.clips.len()).collect(),
-                Key::D => self.playlist.sel.clear(),
+                Key::D => {
+                    self.playlist.sel.clear();
+                    self.playlist.time_sel = None;
+                }
+                Key::Enter if !repeat => self.playlist.time_sel = self.pl_clip_span(),
                 Key::B => self.pl_duplicate(),
                 Key::Insert => self.pl_space(true),
                 Key::Delete => self.pl_space(false),

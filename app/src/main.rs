@@ -2134,6 +2134,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // a stretch of time picked out on a ruler plays round and round: the playlist's in song mode, the piano roll's otherwise
+        let tr = &self.handle.transport;
+        tr.set_range(if tr.song_mode() { self.playlist.time_sel } else { self.piano.time_sel });
         if !std::mem::replace(&mut self.prefs_win.scaled, true) && self.settings.scale > 0.0 {
             self.apply_scale(ctx);
         }

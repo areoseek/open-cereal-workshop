@@ -77,8 +77,11 @@ impl Script {
                 raw.events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: Vec2::new(0.0, last.parse().unwrap_or(0.0)), modifiers: mods });
             }
             "move" | "click" | "rclick" | "dclick" | "down" | "up" => {
-                let Some(at) = point(&arg) else { return };
+                let Some(at) = point(last) else { return };
                 self.at = at;
+                if mods != Modifiers::NONE {
+                    raw.modifiers = mods;
+                }
                 match what.as_str() {
                     "move" => raw.events.push(Event::PointerMoved(at)),
                     "click" => button(raw, at, PointerButton::Primary, true, true),

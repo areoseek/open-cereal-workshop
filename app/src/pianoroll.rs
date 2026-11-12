@@ -148,6 +148,8 @@ enum Drag {
     Paint,
     Lane,
     Seek,
+    /// Picking out a stretch of time on the ruler, from this tick.
+    TimeSel { from: u32 },
     Keys,
 }
 
@@ -171,6 +173,8 @@ pub struct State {
     sounding: Option<(u16, u8)>,
     pub tool: Tool,
     snap: usize,
+    /// The stretch of time picked out on the ruler; it plays round and round and edits by time work on it.
+    pub(crate) time_sel: Option<(u32, u32)>,
     lane: Lane,
     ghosts: bool,
     /// Selected notes, as indices into the pattern's note list.
@@ -207,6 +211,7 @@ impl Default for State {
             sounding: None,
             tool: Tool::Draw,
             snap: 0,
+            time_sel: None,
             lane: Lane::Vel,
             ghosts: true,
             sel: BTreeSet::new(),
@@ -368,6 +373,11 @@ impl App {
 
     /// Where the selection starts and ends in time, pulled out to the snap grid.
     fn pr_span(&mut self) -> Option<(u32, u32)> {
+        self.piano.time_sel.or_else(|| self.pr_note_span())
+    }
+
+    /// The stretch the selected notes cover.
+    fn pr_note_span(&mut self) -> Option<(u32, u32)> {
         let pat = self.pr_pat();
         let g = self.pr_snap().max(1);
         let notes = &self.song.patterns[pat].notes;
@@ -409,6 +419,9 @@ impl App {
     fn pr_select_beside(&mut self, after: bool) {
         let Some((a, b)) = self.pr_span() else { return };
         let (lo, hi) = if after { (b, b + (b - a)) } else { (a.saturating_sub(b - a), a) };
+        if self.piano.time_sel.is_some() && hi > lo {
+            self.piano.time_sel = Some((lo, hi));
+        }
         let pat = self.pr_pat();
         let chan = self.sel_chan as u16;
         let notes = &self.song.patterns[pat].notes;
@@ -937,7 +950,11 @@ impl App {
         if m.command && !m.alt {
             match key {
                 Key::A => self.pr_select_all(),
-                Key::D => self.piano.sel.clear(),
+                Key::D => {
+                    self.piano.sel.clear();
+                    self.piano.time_sel = None;
+                }
+                Key::Enter if !repeat => self.piano.time_sel = self.pr_note_span(),
                 Key::B => self.pr_duplicate(),
                 Key::Q => self.pr_quantise(),
                 Key::M if !m.shift => self.open_score_dialog(),
@@ -1361,6 +1378,14 @@ impl App {
 
         // ruler
         p.rect_filled(ruler, 0.0, PANEL_DARK);
+        if let Some((a, b)) = self.piano.time_sel {
+            let (xa, xb) = (x_of(a as f32).max(grid.left()), x_of(b as f32).min(grid.right()));
+            if xb > xa {
+                let red = Color32::from_rgb(200, 70, 60);
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa, ruler.top()), Pos2::new(xb, ruler.bottom())), 0.0, red.gamma_multiply(0.7));
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa, grid.top()), Pos2::new(xb, grid.bottom())), 0.0, red.gamma_multiply(0.08));
+            }
+        }
         let bars_px = bar as f32 * px;
         let every = if bars_px < 14.0 { 8 } else if bars_px < 28.0 { 4 } else if bars_px < 50.0 { 2 } else { 1 };
         let mut b = (tick_of(grid.left()) as u32 / bar) * bar;
@@ -1404,6 +1429,9 @@ impl App {
                 if lane_head.contains(pp) {
                     let at = LANES.iter().position(|l| l.0 == which).unwrap_or(0);
                     self.piano.lane = LANES[(at + 1) % LANES.len()].0;
+                } else if ruler.contains(pp) && mods.command {
+                    self.piano.time_sel = None;
+                    self.piano.drag = Some(Drag::TimeSel { from: snap_floor(tick_of(pp.x)) });
                 } else if ruler.contains(pp) {
                     self.piano.drag = Some(Drag::Seek);
                 } else if keys.contains(pp) {
@@ -1677,6 +1705,15 @@ impl App {
                             }
                             self.dirty = true;
                         }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::TimeSel { from } => {
+                    if down {
+                        let to = snap_floor(tick_of(pp.x) + g as f32 * 0.5);
+                        let (a, b) = ((*from).min(to), (*from).max(to));
+                        self.piano.time_sel = (b > a).then_some((a, b));
                     } else {
                         done = true;
                     }
