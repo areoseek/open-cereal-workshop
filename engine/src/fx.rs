@@ -3004,21 +3004,28 @@ impl Unit {
                 }
             }
             Kind::Overdrive => {
-                let band = p[0] / 10000.0;
-                let g_band = svf_g(200.0 * 40f32.powf(p[1] / 10000.0), sr);
-                let amp = (1.0 + p[2] / 10000.0 * 9.0) * if p[3] >= 0.5 { 100.0 } else { 1.0 };
+                // Levels measured against reference renders: the drive stage always lifts by
+                // 3.9 dB and clips hard at full scale, the pre amp adds up to 26 times more,
+                // the output level knob is squared. The tone shaping is an approximation.
+                let band = (p[0] / 10000.0).clamp(0.0, 1.0);
+                let g_band = svf_g(400.0 * 5.5f32.powf(p[1] / 10000.0), sr);
+                let r = p[2] / 10000.0;
+                let amp = 1.5666 * (1.0 + 25.0 * r * r * r) * if p[3] >= 0.5 { 100.0 } else { 1.0 };
                 let pf = (p[4] / 10000.0).clamp(0.0, 1.0);
-                let g_post = svf_g(20000.0 * 0.02f32.powf(pf), sr);
-                let post = p[5] / 10000.0;
-                let idle = p[0] == 0.0 && p[2] == 0.0 && p[3] < 0.5 && pf == 0.0;
+                let f_post = 20000.0 * 0.02f32.powf(pf);
+                let a1 = 1.0 - (-TAU * f_post / sr).exp();
+                let a2 = 1.0 - (-TAU * (f_post * 6.0).min(0.45 * sr) / sr).exp();
+                let post = (p[5] / 10000.0).powi(2);
                 for f in io.iter_mut() {
                     for ch in 0..2 {
                         let x = f[ch];
-                        let (_, bp, _) = svf(&mut z[ch * 4..], x, g_band, 1.0);
-                        let d = (x + bp * band * 4.0) * amp;
-                        let y = if idle { x } else { d.tanh() };
-                        let (lp, _, _) = svf(&mut z[ch * 4 + 2..], y, g_post, 1.4);
-                        f[ch] = if pf > 0.0 { lp } else { y } * post;
+                        let (_, bp, _) = svf(&mut z[ch * 4..], x, g_band, 1.15);
+                        let d = (x * (1.0 - band) + bp * band * 1.1) * amp;
+                        let y = d.clamp(-1.0, 1.0);
+                        // Two gentle low-pass stages, the second six times higher.
+                        z[ch * 4 + 2] += a1 * (y - z[ch * 4 + 2]);
+                        z[ch * 4 + 3] += a2 * (z[ch * 4 + 2] - z[ch * 4 + 3]);
+                        f[ch] = if pf > 0.0 { z[ch * 4 + 3] } else { y } * post;
                     }
                 }
             }
@@ -4113,14 +4120,16 @@ impl Unit {
                 }
             }
             Kind::BassBoost => {
-                // a slow one-pole follower of the input is added back on top of it
-                let sel = 140.0 - 130.0 * p[0] / 1024.0;
-                let a = 1.0 - (-TAU * (44100.0 / (TAU * (sel + 1.0))) / sr).exp();
-                let ratio = p[1] / 1024.0 * 4.0;
+                // Measured: the input through two equal one-pole low-passes (20..100 Hz)
+                // is added back on top of it, up to five times over.
+                let w = TAU * (20.0 + 80.0 * p[0] / 1024.0) / sr;
+                let a = w * (1.0 - 0.17 * w);
+                let ratio = (11f32.powf(p[1] / 1024.0) - 1.0) / 2.0;
                 for f in io.iter_mut() {
                     for c in 0..2 {
                         z[c] += a * (f[c] - z[c]);
-                        f[c] += z[c] * ratio;
+                        z[c + 2] += a * (z[c] - z[c + 2]);
+                        f[c] += z[c + 2] * ratio;
                     }
                 }
             }
@@ -5307,7 +5316,7 @@ mod tests {
     fn default_settings_are_transparent() {
         // every unit at its defaults leaves a moderate signal alone, apart from the ones that add sound by design
         for d in DEFS {
-            if matches!(d.kind, Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist) {
+            if matches!(d.kind, Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
