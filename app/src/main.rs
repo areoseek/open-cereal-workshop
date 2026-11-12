@@ -1,6 +1,9 @@
 //! Open Cereal Workshop: the application window. Toolbar and transport on top, browser on the left, and the
 //! channel rack, piano roll, playlist and mixer as windows on the workspace.
 
+// no console window behind the program on Windows
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod browser;
 mod chanset;
 mod curve;
@@ -2946,8 +2949,12 @@ impl App {
                 });
             });
             ui.add_space(2.0);
+            // on a narrow screen the window buttons and the monitor take a second row
+            let narrow = ui.available_width() < 1450.0;
+            for row in 0..1 + narrow as usize {
             ui.horizontal(|ui| {
                 let tr = self.handle.transport.clone();
+                if row == 0 {
                 let song_mode = tr.song_mode();
                 if ui.selectable_label(!song_mode, RichText::new("PAT").strong()).hint("Pattern mode (L)").clicked() {
                     tr.set_song_mode(false);
@@ -3115,7 +3122,11 @@ impl App {
                     self.song.main_pitch = pitch.round() as i16;
                     self.dirty = true;
                 }
-                ui.separator();
+                }
+                if row == narrow as usize {
+                if !narrow {
+                    ui.separator();
+                }
                 let buttons: &mut [(&mut bool, &str, &str)] = if self.bar_hidden[0] { &mut [] } else { &mut [
                     (&mut self.show_playlist, "Playlist", "F5"),
                     (&mut self.show_piano, "Piano roll", "F7"),
@@ -3172,7 +3183,9 @@ impl App {
                         paint.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, line)));
                     }
                 });
+                }
             });
+            }
             ui.add_space(2.0);
         });
     }
