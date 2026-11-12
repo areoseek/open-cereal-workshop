@@ -25,6 +25,9 @@ impl App {
         if self.peaks.len() != n {
             self.peaks = vec![(0.0, 0.0); n];
         }
+        if self.peak_top.len() != n {
+            self.peak_top = vec![0.0; n];
+        }
         if self.peak_hist.len() != n {
             self.peak_hist = vec![Default::default(); n];
         }
@@ -35,6 +38,7 @@ impl App {
                 h.push_front(l.max(r));
                 h.truncate(110);
             }
+            self.peak_top[i] = self.peak_top[i].max(l.max(r));
             p.0 = l.max(p.0 * 0.88);
             p.1 = r.max(p.1 * 0.88);
         }
@@ -51,131 +55,36 @@ impl App {
         let mut route: Option<(usize, usize, bool)> = None;
         ui.horizontal_top(|ui| {
             let side = 190.0;
-            let strips_w = (ui.available_width() - side - 8.0).max(120.0);
+            let held = |d: u8| -> Vec<usize> { (0..n).filter(|&i| self.song.inserts[i].dock.min(2) == d).collect() };
+            let (left, middle, right) = (held(0), held(1), held(2));
+            let width_of = |v: &[usize]| -> f32 { v.iter().map(|&i| STRIP_W + 2.0 + if self.song.inserts[i].separator { 8.0 } else { 0.0 }).sum() };
+            let (lw, rw) = (width_of(&left), width_of(&right));
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for &i in &left {
+                self.strip(ui, i, n, used[i], &font, &mut route);
+            }
+            if !left.is_empty() {
+                ui.separator();
+            }
+            let strips_w = (ui.available_width() - side - rw - 20.0).max(120.0);
+            let _ = lw;
             ui.allocate_ui(Vec2::new(strips_w, ui.available_height()), |ui| {
                 egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     ui.horizontal_top(|ui| {
-                        for i in 0..n {
-                            let selected = self.sel_insert == i || self.mixer_sel.contains(&i);
-                            let name = self.song.insert_name(i);
-                            let frame = egui::Frame::new().fill(if selected { PANEL.lerp_to_gamma(Color32::WHITE, 0.08) } else { PANEL }).inner_margin(3.0).corner_radius(3.0);
-                            let inner = frame.show(ui, |ui| {
-                                ui.set_width(STRIP_W - 6.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 3.0;
-                                    // name plate
-                                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 30.0), Sense::click());
-                                    let col = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
-                                    ui.painter().rect_filled(rect, 2.0, col);
-                                    ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
-                                    ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, &name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
-                                    if resp.clicked() {
-                                        let m = ui.input(|x| x.modifiers);
-                                        if m.command {
-                                            // add this track to the selection, or drop it
-                                            if !self.mixer_sel.remove(&i) {
-                                                self.mixer_sel.insert(self.sel_insert);
-                                                self.mixer_sel.insert(i);
-                                                self.sel_insert = i;
-                                            }
-                                        } else if m.shift {
-                                            let (a, b) = (self.sel_insert.min(i), self.sel_insert.max(i));
-                                            self.mixer_sel.extend(a..=b);
-                                            self.sel_insert = i;
-                                        } else {
-                                            self.mixer_sel.clear();
-                                            self.sel_insert = i;
-                                        }
-                                    }
-                                    if resp.hovered() {
-                                        self.wheel_over = Some(crate::keys::WheelMove::Insert(i, false));
-                                    }
-                                    resp.context_menu(|ui| {
-                                        if ui.button("Open mixer track state...").clicked() {
-                                            self.state_ask = Some(crate::StateAsk::OpenTrack(i));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Save mixer track state as...").clicked() {
-                                            self.state_ask = Some(crate::StateAsk::SaveTrack(i));
-                                            ui.close_menu();
-                                        }
-                                    });
-                                    let ins = &mut self.song.inserts[i];
-                                    let before = (ins.volume, ins.pan, ins.enabled);
-                                    if led(ui, ins.enabled, 14.0).hint("Mute").clicked() {
-                                        ins.enabled = !ins.enabled;
-                                        self.dirty = true;
-                                    }
-                                    let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).hint("Panning");
-                                    control_menu(&r, cereal_engine::song::Target::InsertPan(i));
-                                    if r.changed() {
-                                        self.dirty = true;
-                                    }
-                                    let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
-                                    let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), if self.mixer_wave { (0.0, 0.0) } else { self.peaks[i] });
-                                    if self.mixer_wave {
-                                        // the sound of the last moments, newest at the top, as a wave down the meter
-                                        let (p, at) = (ui.painter(), r.rect);
-                                        for (k, a) in self.peak_hist[i].iter().enumerate() {
-                                            let y = at.top() + 1.0 + k as f32 * 2.0;
-                                            if y > at.bottom() - 1.0 {
-                                                break;
-                                            }
-                                            let w = (a.min(1.0).sqrt() * (at.width() * 0.5 - 1.0)).max(0.5);
-                                            let col = if *a > 1.0 { Color32::from_rgb(240, 80, 70) } else { GREEN.gamma_multiply(0.6) };
-                                            p.line_segment([egui::Pos2::new(at.center().x - w, y), egui::Pos2::new(at.center().x + w, y)], Stroke::new(1.5_f32, col));
-                                        }
-                                    }
-                                    control_menu(&r, cereal_engine::song::Target::InsertVolume(i));
-                                    if r.changed() {
-                                        self.dirty = true;
-                                    }
-                                    let db = 20.0 * cereal_engine::law::fader_gain(ins.volume).max(1e-6).log10();
-                                    r.hint(if ins.volume <= 0.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") });
-                                    let now = (ins.volume, ins.pan, ins.enabled);
-                                    if now != before && self.mixer_sel.contains(&i) {
-                                        // the other selected tracks follow by the same amount
-                                        for k in self.mixer_sel.iter().copied().filter(|k| *k != i && *k < n) {
-                                            let s = &mut self.song.inserts[k];
-                                            s.volume = (s.volume + now.0 - before.0).clamp(0.0, 1.25);
-                                            s.pan = (s.pan + now.1 - before.1).clamp(-1.0, 1.0);
-                                            if now.2 != before.2 {
-                                                s.enabled = now.2;
-                                            }
-                                        }
-                                    }
-                                    let dot = if used[i] > 0 { GREEN } else { PANEL_DARK };
-                                    let (rect, _) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 8.0), Sense::hover());
-                                    ui.painter().circle_filled(rect.center(), 3.0, dot);
-                                    // routing from the selected insert into this one
-                                    let src = self.sel_insert;
-                                    if src != i && src != 0 && src < n {
-                                        let routed = self.song.inserts[src].sends.contains(&i);
-                                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 12.0), Sense::click());
-                                        let c = rect.center();
-                                        let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
-                                        ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
-                                        if resp.hint(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
-                                            route = Some((src, i, !routed));
-                                        }
-                                        if routed {
-                                            let mut lv = self.song.inserts[src].send_level(i);
-                                            if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).hint(format!("Send level {:.0} %", lv * 100.0)).changed() {
-                                                self.song.inserts[src].set_send_level(i, lv);
-                                                self.dirty = true;
-                                            }
-                                        }
-                                    }
-                                });
-                            });
-                            if selected {
-                                ui.painter().rect_stroke(inner.response.rect, 3.0, Stroke::new(1.0_f32, GREEN), egui::StrokeKind::Inside);
-                            }
+                        for &i in &middle {
+                            self.strip(ui, i, n, used[i], &font, &mut route);
                         }
                     });
                 });
             });
+            if !right.is_empty() {
+                ui.separator();
+            }
+            for &i in &right {
+                self.strip(ui, i, n, used[i], &font, &mut route);
+            }
+            ui.spacing_mut().item_spacing.x = 8.0;
 
             // the selected insert: its effect slots, sends and channels
             ui.allocate_ui(Vec2::new(side, ui.available_height()), |ui| {
@@ -359,17 +268,217 @@ impl App {
                 }
                 k += 1;
             }
+            let (only, side) = (std::mem::take(&mut self.route_only), std::mem::take(&mut self.route_side));
             let ins = &mut self.song.inserts[src];
-            if !on {
+            if on && only && !reach.contains(&src) {
+                ins.sends = vec![dst];
+                self.dirty = true;
+            } else if !on {
                 ins.sends.retain(|&d| d != dst);
                 self.dirty = true;
             } else if !reach.contains(&src) {
-                ins.sends.push(dst);
+                if !ins.sends.contains(&dst) {
+                    ins.sends.push(dst);
+                }
                 ins.sends.sort_unstable();
+                if side {
+                    // heard by the other track's effects only, not in its sound
+                    ins.set_send_level(dst, 0.0);
+                }
                 self.dirty = true;
             } else {
                 self.status = "That routing would feed the track back into itself".into();
             }
+        }
+    }
+}
+
+impl App {
+    /// One mixer track as a strip: name plate, mute light, pan, fader with its meter, and the routing arrow.
+    fn strip(&mut self, ui: &mut Ui, i: usize, n: usize, used: usize, font: &FontId, route: &mut Option<(usize, usize, bool)>) {
+        let selected = self.sel_insert == i || self.mixer_sel.contains(&i);
+        let name = self.song.insert_name(i);
+        let frame = egui::Frame::new().fill(if selected { PANEL.lerp_to_gamma(Color32::WHITE, 0.08) } else { PANEL }).inner_margin(3.0).corner_radius(3.0);
+        let inner = frame.show(ui, |ui| {
+            ui.set_width(STRIP_W - 6.0);
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                // name plate
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 30.0), Sense::click());
+                let col = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
+                ui.painter().rect_filled(rect, 2.0, col);
+                ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
+                ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, &name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
+                if resp.clicked() {
+                    let m = ui.input(|x| x.modifiers);
+                    if m.command {
+                        // add this track to the selection, or drop it
+                        if !self.mixer_sel.remove(&i) {
+                            self.mixer_sel.insert(self.sel_insert);
+                            self.mixer_sel.insert(i);
+                            self.sel_insert = i;
+                        }
+                    } else if m.shift {
+                        let (a, b) = (self.sel_insert.min(i), self.sel_insert.max(i));
+                        self.mixer_sel.extend(a..=b);
+                        self.sel_insert = i;
+                    } else {
+                        self.mixer_sel.clear();
+                        self.sel_insert = i;
+                    }
+                }
+                if resp.hovered() {
+                    self.wheel_over = Some(crate::keys::WheelMove::Insert(i, false));
+                }
+                resp.context_menu(|ui| {
+                if i > 0 && ui.button("Rename, colour and icon...   F2").clicked() {
+                    self.rename_insert = Some((i, self.song.inserts[i].name.clone()));
+                    ui.close_menu();
+                }
+                if i > 0 && ui.button("Solo   S").clicked() {
+                    self.solo_insert(i, false);
+                    ui.close_menu();
+                }
+                ui.menu_button("Dock to", |ui| {
+                    for (d, t) in [(0u8, "Left"), (1, "Middle"), (2, "Right")] {
+                        if ui.radio(self.song.inserts[i].dock.min(2) == d, t).clicked() {
+                            let all: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
+                            for k in all {
+                                if let Some(x) = self.song.inserts.get_mut(k) {
+                                    x.dock = d;
+                                }
+                            }
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                let mut gap = self.song.inserts[i].separator;
+                if ui.checkbox(&mut gap, "Separator").clicked() {
+                    self.song.inserts[i].separator = gap;
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                let mut fx = self.song.inserts[i].fx_on;
+                if ui.checkbox(&mut fx, "Enable effect slots").clicked() {
+                    self.song.inserts[i].fx_on = fx;
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                if i > 0 {
+                    ui.menu_button("Routing", |ui| {
+                        let src = self.sel_insert;
+                        if src != i && src != 0 && ui.button("Route the selected track to this track only").clicked() {
+                            *route = Some((src, i, true));
+                            self.route_only = true;
+                            ui.close_menu();
+                        }
+                        if src != i && src != 0 && ui.button("Sidechain the selected track to this track").clicked() {
+                            *route = Some((src, i, true));
+                            self.route_side = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Reset routing (to the master only)").clicked() {
+                            self.song.inserts[i].sends = vec![0];
+                            self.song.inserts[i].levels.clear();
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    });
+                }
+                ui.separator();
+                    if ui.button("Open mixer track state...").clicked() {
+                        self.state_ask = Some(crate::StateAsk::OpenTrack(i));
+                        ui.close_menu();
+                    }
+                    if ui.button("Save mixer track state as...").clicked() {
+                        self.state_ask = Some(crate::StateAsk::SaveTrack(i));
+                        ui.close_menu();
+                    }
+                });
+                let ins = &mut self.song.inserts[i];
+                let before = (ins.volume, ins.pan, ins.enabled);
+                if led(ui, ins.enabled, 14.0).hint("Mute").clicked() {
+                    ins.enabled = !ins.enabled;
+                    self.dirty = true;
+                }
+                let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).hint("Panning");
+                control_menu(&r, cereal_engine::song::Target::InsertPan(i));
+                if r.changed() {
+                    self.dirty = true;
+                }
+                {
+                // the highest level seen since the last click on it
+                let top = self.peak_top.get(i).copied().unwrap_or(0.0);
+                let text = if top <= 1e-5 { "-inf".to_string() } else { format!("{:.1}", 20.0 * top.log10()) };
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 11.0), Sense::click());
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(9.0), if top > 1.0 { Color32::from_rgb(240, 80, 70) } else { TEXT_DIM });
+                if resp.hint("Highest peak in dB (click to reset)").clicked() {
+                    self.peak_top.iter_mut().for_each(|p| *p = 0.0);
+                }
+            }
+            let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
+                let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), if self.mixer_wave { (0.0, 0.0) } else { self.peaks[i] });
+                if self.mixer_wave {
+                    // the sound of the last moments, newest at the top, as a wave down the meter
+                    let (p, at) = (ui.painter(), r.rect);
+                    for (k, a) in self.peak_hist[i].iter().enumerate() {
+                        let y = at.top() + 1.0 + k as f32 * 2.0;
+                        if y > at.bottom() - 1.0 {
+                            break;
+                        }
+                        let w = (a.min(1.0).sqrt() * (at.width() * 0.5 - 1.0)).max(0.5);
+                        let col = if *a > 1.0 { Color32::from_rgb(240, 80, 70) } else { GREEN.gamma_multiply(0.6) };
+                        p.line_segment([egui::Pos2::new(at.center().x - w, y), egui::Pos2::new(at.center().x + w, y)], Stroke::new(1.5_f32, col));
+                    }
+                }
+                control_menu(&r, cereal_engine::song::Target::InsertVolume(i));
+                if r.changed() {
+                    self.dirty = true;
+                }
+                let db = 20.0 * cereal_engine::law::fader_gain(ins.volume).max(1e-6).log10();
+                r.hint(if ins.volume <= 0.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") });
+                let now = (ins.volume, ins.pan, ins.enabled);
+                if now != before && self.mixer_sel.contains(&i) {
+                    // the other selected tracks follow by the same amount
+                    for k in self.mixer_sel.iter().copied().filter(|k| *k != i && *k < n) {
+                        let s = &mut self.song.inserts[k];
+                        s.volume = (s.volume + now.0 - before.0).clamp(0.0, 1.25);
+                        s.pan = (s.pan + now.1 - before.1).clamp(-1.0, 1.0);
+                        if now.2 != before.2 {
+                            s.enabled = now.2;
+                        }
+                    }
+                }
+                let dot = if used > 0 { GREEN } else { PANEL_DARK };
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(rect.center(), 3.0, dot);
+                // routing from the selected insert into this one
+                let src = self.sel_insert;
+                if src != i && src != 0 && src < n {
+                    let routed = self.song.inserts[src].sends.contains(&i);
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 12.0), Sense::click());
+                    let c = rect.center();
+                    let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
+                    ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
+                    if resp.hint(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
+                        *route = Some((src, i, !routed));
+                    }
+                    if routed {
+                        let mut lv = self.song.inserts[src].send_level(i);
+                        if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).hint(format!("Send level {:.0} %", lv * 100.0)).changed() {
+                            self.song.inserts[src].set_send_level(i, lv);
+                            self.dirty = true;
+                        }
+                    }
+                }
+            });
+        });
+        if selected {
+            ui.painter().rect_stroke(inner.response.rect, 3.0, Stroke::new(1.0_f32, GREEN), egui::StrokeKind::Inside);
+        }
+        if self.song.inserts[i].separator {
+            ui.add_space(8.0);
         }
     }
 }

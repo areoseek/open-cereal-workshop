@@ -783,6 +783,12 @@ pub struct Insert {
     pub swap: bool,
     /// The sound card input heard on this track: -1 for none, else stereo pairs first and then single inputs.
     pub audio_in: i32,
+    /// Where the strip stands in the mixer: 0 held at the left, 1 in the scrolling middle, 2 held at the right.
+    pub dock: u8,
+    /// A gap drawn after the strip.
+    pub separator: bool,
+    /// The effect slots as a whole, on or off.
+    pub fx_on: bool,
 }
 
 /// One band of an insert's equaliser.
@@ -824,7 +830,7 @@ impl Insert {
 
 impl Default for Insert {
     fn default() -> Self {
-        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false, audio_in: -1 }
+        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false, audio_in: -1, dock: 1, separator: false, fx_on: true }
     }
 }
 
@@ -958,7 +964,7 @@ impl Song {
     /// A new, empty project: four empty sampler channels, one pattern, the default mixer.
     pub fn new() -> Self {
         let names = ["Kick", "Clap", "Hat", "Snare"];
-        let mut inserts: Vec<Insert> = (0..DEFAULT_INSERTS).map(|i| Insert { sends: if i == 0 { vec![] } else { vec![0] }, ..Default::default() }).collect();
+        let mut inserts: Vec<Insert> = (0..DEFAULT_INSERTS).map(|i| Insert { sends: if i == 0 { vec![] } else { vec![0] }, dock: (i != 0) as u8, ..Default::default() }).collect();
         inserts[0].name = "Master".into();
         let mut s = Self {
             title: String::new(),
@@ -1574,7 +1580,7 @@ impl Song {
         }
         self.auto_plan = plan;
         if self.inserts.is_empty() {
-            self.inserts.push(Insert { name: "Master".into(), ..Default::default() });
+            self.inserts.push(Insert { name: "Master".into(), dock: 0, ..Default::default() });
         }
         let n = self.inserts.len();
         for c in &mut self.channels {
@@ -1864,6 +1870,9 @@ impl Song {
                         invert: ins.flags & flp::INSERT_FLAG_INVERT != 0,
                         swap: ins.flags & flp::INSERT_FLAG_SWAP != 0,
                         audio_in: ins.input,
+                        dock: if ins.flags == 0 { (i != 0) as u8 } else if ins.flags & flp::INSERT_FLAG_DOCK_RIGHT != 0 { 2 } else if ins.flags & flp::INSERT_FLAG_DOCK_MIDDLE != 0 { 1 } else { 0 },
+                        separator: ins.flags & flp::INSERT_FLAG_SEPARATOR != 0,
+                        fx_on: ins.flags & flp::INSERT_FLAG_FX != 0 || ins.flags == 0,
                     }
                 })
                 .collect()

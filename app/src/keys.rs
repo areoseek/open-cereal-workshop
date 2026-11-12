@@ -401,7 +401,7 @@ impl App {
 
     /// Only this mixer track is heard (with the master); asked again, all of them are.
     /// `with_routed` keeps the tracks that feed it and the ones it feeds as well.
-    fn solo_insert(&mut self, i: usize, with_routed: bool) {
+    pub(crate) fn solo_insert(&mut self, i: usize, with_routed: bool) {
         let n = self.song.inserts.len();
         if i == 0 || i >= n {
             return;

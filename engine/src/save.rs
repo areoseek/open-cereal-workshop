@@ -169,7 +169,7 @@ fn skeleton(song: &Song) -> Flp {
     ev.push(Event::word(id::CURRENT_ARRANGEMENT, 0));
     let n_ins = song.inserts.len().max(1);
     for i in 0..n_ins {
-        let flags: u32 = if i == 0 { 0x0c } else { 0x4c };
+        let flags: u32 = insert_look(song.inserts.get(i).unwrap_or(&crate::song::Insert::default()), 0x08);
         let mut d = vec![0u8; 12];
         put_u32(&mut d, 4, flags);
         ev.push(Event::data(id::INSERT_FLAGS, d));
@@ -1649,6 +1649,17 @@ fn slot_spans(ev: &[Event], open: usize) -> Vec<(u16, std::ops::Range<usize>, bo
     out
 }
 
+/// The flags of a mixer track with its place, gap and effect switch written in.
+fn insert_look(ins: &crate::song::Insert, f: u32) -> u32 {
+    let f = f & !(flp::INSERT_FLAG_DOCK_MIDDLE | flp::INSERT_FLAG_DOCK_RIGHT | flp::INSERT_FLAG_SEPARATOR | flp::INSERT_FLAG_FX);
+    f | match ins.dock {
+        1 => flp::INSERT_FLAG_DOCK_MIDDLE,
+        2 => flp::INSERT_FLAG_DOCK_RIGHT,
+        _ => 0,
+    } | if ins.separator { flp::INSERT_FLAG_SEPARATOR } else { 0 }
+        | if ins.fx_on { flp::INSERT_FLAG_FX } else { 0 }
+}
+
 fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mixer_base: usize) {
     let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
     let mut records: Vec<(u8, u16, i32)> = vec![];
@@ -1700,6 +1711,12 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
             let last = ev.len();
             if let Some(e) = ev[open..(close + 1).min(last)].iter_mut().find(|e| e.id == id::INSERT_INPUT) {
                 e.value = Value::Int(now.audio_in as u32);
+            }
+        }
+        if (now.dock, now.separator, now.fx_on) != (was.dock, was.separator, was.fx_on) {
+            if let Value::Data(d) = &mut ev[open].value {
+                let f = u32at(d, 4);
+                put_u32(d, 4, insert_look(now, f));
             }
         }
         if (now.invert, now.swap) != (was.invert, was.swap) {
@@ -2132,6 +2149,9 @@ mod tests {
         s.inserts[3].eq[2].q = 0.75;
         s.inserts[4].set_send_level(3, 0.5);
         s.inserts[4].swap = true;
+        s.inserts[6].dock = 2;
+        s.inserts[6].separator = true;
+        s.inserts[2].fx_on = false;
         s.inserts[4].audio_in = 1;
         s.tracks[2].name = "Fills".into();
         s.prepare();
@@ -2167,6 +2187,8 @@ mod tests {
         assert!((r.inserts[4].send_level(3) - 0.5).abs() < 1e-3);
         assert!(r.inserts[4].swap && !r.inserts[4].invert && !r.inserts[3].swap);
         assert_eq!((r.inserts[4].audio_in, r.inserts[3].audio_in), (1, -1));
+        assert_eq!((r.inserts[0].dock, r.inserts[1].dock, r.inserts[6].dock), (0, 1, 2));
+        assert!(r.inserts[6].separator && !r.inserts[5].separator && !r.inserts[2].fx_on && r.inserts[3].fx_on);
         assert_eq!(r.tracks[2].name, "Fills");
 
         // saving what was loaded changes nothing

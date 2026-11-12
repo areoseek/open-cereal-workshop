@@ -644,7 +644,11 @@ impl Default for FlpInsert {
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
 pub const INSERT_FLAG_INVERT: u32 = 1 << 0;
 pub const INSERT_FLAG_SWAP: u32 = 1 << 1;
+pub const INSERT_FLAG_FX: u32 = 1 << 2;
 pub const INSERT_FLAG_ENABLED: u32 = 1 << 3;
+pub const INSERT_FLAG_DOCK_MIDDLE: u32 = 1 << 6;
+pub const INSERT_FLAG_DOCK_RIGHT: u32 = 1 << 7;
+pub const INSERT_FLAG_SEPARATOR: u32 = 1 << 10;
 pub const INSERT_FLAG_SOLO: u32 = 1 << 12;
 
 #[derive(Debug, Clone, Default)]

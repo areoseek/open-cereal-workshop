@@ -259,6 +259,9 @@ pub(crate) struct App {
     /// The mixer's wave view: the latest levels of every track, newest first, drawn down its meter.
     pub(crate) mixer_wave: bool,
     peak_hist: Vec<std::collections::VecDeque<f32>>,
+    peak_top: Vec<f32>,
+    route_only: bool,
+    route_side: bool,
     held: HashMap<Key, (u16, u8)>,
     actions: Vec<Action>,
     /// Undo history: snapshots of the song, oldest first; `hist_at` is the one on screen.
@@ -425,6 +428,9 @@ impl App {
             peaks: vec![],
             mixer_wave: false,
             peak_hist: vec![],
+            peak_top: vec![],
+            route_only: false,
+            route_side: false,
             held: HashMap::new(),
             actions: vec![],
             history: vec![],
