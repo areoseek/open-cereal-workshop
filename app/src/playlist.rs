@@ -1,5 +1,6 @@
 //! The playlist: pattern clips and audio clips on tracks.
 
+use crate::widgets::Hint as _;
 use std::collections::BTreeSet;
 
 use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -195,8 +196,8 @@ impl App {
                 changed |= row(ui, "Motion", &PERF_MOTION, &mut t.perf.motion);
                 changed |= row(ui, "Trigger sync", &PERF_SYNC, &mut t.perf.sync);
                 ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut t.perf.queue, "Queue").on_hover_text("A new clip waits for the playing one to end").changed();
-                    changed |= ui.checkbox(&mut t.perf.tolerant, "Tolerant").on_hover_text("A press that is a little late starts at once, inside the clip").changed();
+                    changed |= ui.checkbox(&mut t.perf.queue, "Queue").hint("A new clip waits for the playing one to end").changed();
+                    changed |= ui.checkbox(&mut t.perf.tolerant, "Tolerant").hint("A press that is a little late starts at once, inside the clip").changed();
                 });
                 changed |= row(ui, "Position sync", &PERF_SYNC, &mut t.perf.pos_sync);
             });
@@ -1723,11 +1724,11 @@ impl App {
                 }
             });
             for (t, label, hint) in TOOLS {
-                if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).on_hover_text(hint).clicked() {
+                if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.playlist.tool = t;
                 }
             }
-            if ui.selectable_label(self.playlist.stretch, RichText::new("Stretch").small()).on_hover_text("Stretch mode: dragging the end of an audio clip fits its sound to the new length (Shift+M)").clicked() {
+            if ui.selectable_label(self.playlist.stretch, RichText::new("Stretch").small()).hint("Stretch mode: dragging the end of an audio clip fits its sound to the new length (Shift+M)").clicked() {
                 self.playlist.stretch = !self.playlist.stretch;
             }
             ui.separator();
@@ -1737,7 +1738,7 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Snap");
+            .hint("Snap");
             ui.separator();
             let brush = match self.playlist.brush {
                 Some((ClipSrc::Pattern(p), _, _)) => self.song.pattern_name(p),

@@ -1,6 +1,7 @@
 //! The settings window (F10): MIDI devices, the sound card, general and file settings. What is chosen is
 //! kept in the settings file and felt at once.
 
+use crate::widgets::Hint as _;
 use eframe::egui::{self, RichText};
 
 use crate::{midi, record, App, TEXT_DIM};
@@ -65,7 +66,7 @@ impl App {
                 for (p, label) in [(Page::Midi, "MIDI"), (Page::Audio, "Audio"), (Page::General, "General"), (Page::File, "File")] {
                     ui.selectable_value(&mut self.prefs_win.page, p, label);
                 }
-                if ui.selectable_label(false, "Project").on_hover_text("Title, artist, comments and time signature of this song (F11)").clicked() {
+                if ui.selectable_label(false, "Project").hint("Title, artist, comments and time signature of this song (F11)").clicked() {
                     self.show_info = true;
                 }
             });
@@ -125,8 +126,8 @@ impl App {
             });
         })
         .response
-        .on_hover_text("Notes on this channel play the clips of the performance zone: each octave is a track, each key a clip");
-        changed |= ui.checkbox(&mut self.settings.midi_sync, "Send master sync").on_hover_text("The clock, start and stop go to every output that has a port number").changed();
+        .hint("Notes on this channel play the clips of the performance zone: each octave is a track, each key a clip");
+        changed |= ui.checkbox(&mut self.settings.midi_sync, "Send master sync").hint("The clock, start and stop go to every output that has a port number").changed();
         if cfg!(target_os = "linux") {
             ui.label(RichText::new("Each port in use is also a port of \"Breakfast Cereal Out\" that other programs can connect to.").color(TEXT_DIM).small());
         }
@@ -143,7 +144,7 @@ impl App {
         }
         for name in &ins {
             let mut on = !self.settings.midi_off.contains(name);
-            if ui.checkbox(&mut on, name).on_hover_text("Enable: notes, the wheel, the pedal and knobs of this device are listened to").changed() {
+            if ui.checkbox(&mut on, name).hint("Enable: notes, the wheel, the pedal and knobs of this device are listened to").changed() {
                 self.settings.midi_off.retain(|n| n != name);
                 if !on {
                     self.settings.midi_off.push(name.clone());
@@ -255,7 +256,7 @@ impl App {
         let mut drop = None;
         for (i, f) in self.settings.folders.iter().enumerate() {
             ui.horizontal(|ui| {
-                if ui.small_button("x").on_hover_text("Take this folder off the list").clicked() {
+                if ui.small_button("x").hint("Take this folder off the list").clicked() {
                     drop = Some(i);
                 }
                 ui.label(f.display().to_string());

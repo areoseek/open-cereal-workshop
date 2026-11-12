@@ -35,6 +35,7 @@ mod playlist;
 mod rack;
 mod widgets;
 
+use crate::widgets::Hint as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -1397,7 +1398,7 @@ impl App {
         let label = at.and_then(|i| list[i].file_stem()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Presets".into());
         let mut pick = None;
         ui.horizontal(|ui| {
-            if ui.small_button("Save").on_hover_text("Save these settings as a preset file").clicked() {
+            if ui.small_button("Save").hint("Save these settings as a preset file").clicked() {
                 self.save_preset = Some((ident.to_string(), generator));
             }
             if list.is_empty() {
@@ -1405,10 +1406,10 @@ impl App {
                 return;
             }
             let n = list.len();
-            if ui.small_button("<").on_hover_text("Previous preset").clicked() {
+            if ui.small_button("<").hint("Previous preset").clicked() {
                 pick = Some(list[at.map(|i| (i + n - 1) % n).unwrap_or(n - 1)].clone());
             }
-            if ui.small_button(">").on_hover_text("Next preset").clicked() {
+            if ui.small_button(">").hint("Next preset").clicked() {
                 pick = Some(list[at.map(|i| (i + 1) % n).unwrap_or(0)].clone());
             }
             ui.menu_button(format!("{label}  v"), |ui| {
@@ -1886,7 +1887,7 @@ impl App {
                         }
                         for (k, p) in self.settings.recent.clone().into_iter().enumerate() {
                             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.button(format!("{name}     Alt+{}", (k + 1) % 10)).on_hover_text(p.display().to_string()).clicked() {
+                            if ui.button(format!("{name}     Alt+{}", (k + 1) % 10)).hint(p.display().to_string()).clicked() {
                                 self.actions.push(Action::Open(p));
                                 ui.close_menu();
                             }
@@ -2024,48 +2025,54 @@ impl App {
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(&self.status).color(TEXT_DIM).small());
+                    // the hint bar: what the pointer rests on, or else the last thing that happened
+                    let hint = widgets::take_hint();
+                    if hint.is_empty() {
+                        ui.label(RichText::new(&self.status).color(TEXT_DIM).small());
+                    } else {
+                        ui.label(RichText::new(hint).color(TEXT).small());
+                    }
                 });
             });
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 let tr = self.handle.transport.clone();
                 let song_mode = tr.song_mode();
-                if ui.selectable_label(!song_mode, RichText::new("PAT").strong()).on_hover_text("Pattern mode (L)").clicked() {
+                if ui.selectable_label(!song_mode, RichText::new("PAT").strong()).hint("Pattern mode (L)").clicked() {
                     tr.set_song_mode(false);
                 }
-                if ui.selectable_label(song_mode, RichText::new("SONG").strong()).on_hover_text("Song mode (L)").clicked() {
+                if ui.selectable_label(song_mode, RichText::new("SONG").strong()).hint("Song mode (L)").clicked() {
                     tr.set_song_mode(true);
                 }
                 let playing = tr.playing();
-                if ui.add_sized([44.0, 24.0], egui::Button::new(RichText::new(if playing { "||" } else { ">" }).strong().color(if playing { GREEN } else { TEXT }))).on_hover_text("Play / stop (Space)").clicked() {
+                if ui.add_sized([44.0, 24.0], egui::Button::new(RichText::new(if playing { "||" } else { ">" }).strong().color(if playing { GREEN } else { TEXT }))).hint("Play / stop (Space)").clicked() {
                     if playing {
                         tr.set_playing(false);
                     } else {
                         self.play();
                     }
                 }
-                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("[]").strong())).on_hover_text("Stop").clicked() {
+                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("[]").strong())).hint("Stop").clicked() {
                     self.stop();
                 }
                 let rec = tr.recording();
-                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).on_hover_text("Record what you play into the current pattern (R)").clicked() {
+                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).hint("Record what you play into the current pattern (R)").clicked() {
                     tr.set_recording(!rec);
                 }
-                if ui.toggle_value(&mut self.rec_audio, "MIC").on_hover_text("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
+                if ui.toggle_value(&mut self.rec_audio, "MIC").hint("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
                     self.record_audio();
                 }
                 ui.separator();
                 let live = tr.tempo();
                 let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
-                let tempo_box = ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).on_hover_text("Tempo (right-click for more)");
+                let tempo_box = ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).hint("Tempo (right-click for more)");
                 if tempo_box.changed() {
                     self.song.tempo = tempo;
                     self.dirty = true;
                 }
                 let mut set_tempo = None;
                 tempo_box.context_menu(|ui| {
-                    if ui.button("Tap").on_hover_text("Click in time, four times or more").clicked() {
+                    if ui.button("Tap").hint("Click in time, four times or more").clicked() {
                         let now = std::time::Instant::now();
                         if self.taps.last().is_some_and(|t| now.duration_since(*t).as_secs_f32() > 2.5) {
                             self.taps.clear();
@@ -2118,27 +2125,27 @@ impl App {
                         tr.set_pattern(pat + 1);
                     }
                 }
-                if ui.button("+").on_hover_text("New pattern (F4)").clicked() {
+                if ui.button("+").hint("New pattern (F4)").clicked() {
                     self.new_pattern();
                 }
                 let mut met = tr.metronome();
-                if ui.toggle_value(&mut met, "Metro").on_hover_text("Metronome (Ctrl+M)").changed() {
+                if ui.toggle_value(&mut met, "Metro").hint("Metronome (Ctrl+M)").changed() {
                     tr.set_metronome(met);
                 }
                 let mut wait = tr.waiting();
-                if ui.toggle_value(&mut wait, "Wait").on_hover_text("Wait for input before the song starts (Ctrl+I)").changed() {
+                if ui.toggle_value(&mut wait, "Wait").hint("Wait for input before the song starts (Ctrl+I)").changed() {
                     tr.set_waiting(wait);
                 }
                 let mut count = tr.countdown();
-                if ui.toggle_value(&mut count, "3 2 1").on_hover_text("Count one bar in before recording (Ctrl+P)").changed() {
+                if ui.toggle_value(&mut count, "3 2 1").hint("Count one bar in before recording (Ctrl+P)").changed() {
                     tr.set_countdown(count);
                 }
-                ui.toggle_value(&mut self.rec_blend, "Blend").on_hover_text("Recorded notes are added to the ones already there (Ctrl+B)");
+                ui.toggle_value(&mut self.rec_blend, "Blend").hint("Recorded notes are added to the ones already there (Ctrl+B)");
                 let mut step_edit = tr.step_edit();
-                if ui.toggle_value(&mut step_edit, "Step").on_hover_text("Step editing: played notes are written one grid step after another (Ctrl+E)").changed() {
+                if ui.toggle_value(&mut step_edit, "Step").hint("Step editing: played notes are written one grid step after another (Ctrl+E)").changed() {
                     tr.set_step_edit(step_edit);
                 }
-                ui.toggle_value(&mut self.typing_keys, "Keys").on_hover_text("Typing keyboard to piano (Ctrl+T)");
+                ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T)");
                 ui.separator();
                 // time
                 let tick = tr.tick() as u32;
@@ -2154,24 +2161,24 @@ impl App {
                     format!("{:03}:{:02}:{:02}", first + tick / bar + 1, (tick % bar) / step + 1, tick % step)
                 };
                 let clock = ui.add(egui::Label::new(RichText::new(shown).monospace().size(18.0).color(GREEN)).sense(egui::Sense::click()));
-                if clock.on_hover_text(if self.time_secs { "Minutes : seconds : hundredths (click for bars)" } else { "Bar : step : tick (click for minutes and seconds)" }).clicked() {
+                if clock.hint(if self.time_secs { "Minutes : seconds : hundredths (click for bars)" } else { "Bar : step : tick (click for minutes and seconds)" }).clicked() {
                     self.time_secs = !self.time_secs;
                 }
                 // where the song stands, as a slider to drag
                 let total = if tr.song_mode() { self.song.length() } else { self.song.patterns.get(pat).map(|p| p.length(self.song.ppq * 4)).unwrap_or(0) }.max(1);
                 let mut at = (tr.tick() as f32 / total as f32).clamp(0.0, 1.0);
                 ui.spacing_mut().slider_width = 110.0;
-                if ui.add(egui::Slider::new(&mut at, 0.0..=1.0).show_value(false)).on_hover_text("Song position").changed() {
+                if ui.add(egui::Slider::new(&mut at, 0.0..=1.0).show_value(false)).hint("Song position").changed() {
                     tr.seek((at * total as f32) as u32);
                 }
                 ui.separator();
                 let mut master = tr.master();
                 ui.label(RichText::new("Master").color(TEXT_DIM));
-                if knob(ui, &mut master, 0.0, 1.25, 1.0, 22.0).on_hover_text("Main volume").changed() {
+                if knob(ui, &mut master, 0.0, 1.25, 1.0, 22.0).hint("Main volume").changed() {
                     tr.set_master(master);
                 }
                 let mut pitch = self.song.main_pitch as f32;
-                if knob(ui, &mut pitch, -1200.0, 1200.0, 0.0, 22.0).on_hover_text(format!("Main pitch: {:+} cents", self.song.main_pitch)).changed() {
+                if knob(ui, &mut pitch, -1200.0, 1200.0, 0.0, 22.0).hint(format!("Main pitch: {:+} cents", self.song.main_pitch)).changed() {
                     self.song.main_pitch = pitch.round() as i16;
                     self.dirty = true;
                 }
@@ -2183,14 +2190,14 @@ impl App {
                     (&mut self.show_mixer, "Mixer", "F9"),
                     (&mut self.show_browser, "Browser", "Alt+F8"),
                 ] {
-                    if ui.selectable_label(*flag, label).on_hover_text(tip).clicked() {
+                    if ui.selectable_label(*flag, label).hint(tip).clicked() {
                         *flag = !*flag;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                     ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
-                    ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).on_hover_text("Share of each block's time the sound engine needs");
+                    ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
                 });
             });
             ui.add_space(2.0);

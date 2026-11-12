@@ -1,6 +1,7 @@
 //! The channel settings window: sample treatment, envelopes and filter, and the miscellaneous note functions of
 //! the selected sampler channel.
 
+use crate::widgets::Hint as _;
 use egui::{Color32, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 use cereal_engine::flp::ChannelKind;
@@ -127,7 +128,7 @@ fn cap_knob_for(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, defau
         ui.spacing_mut().item_spacing.y = 1.0;
         ui.set_width(44.0);
         ui.vertical_centered(|ui| {
-            let r = knob(ui, v, min, max, default, 26.0).on_hover_text(hint(*v));
+            let r = knob(ui, v, min, max, default, 26.0).hint(hint(*v));
             if let Some(t) = target {
                 control_menu(&r, t);
             }
@@ -303,7 +304,7 @@ impl App {
                     let mut want = info.setting.clone();
                     section(ui, "SOUND BANK");
                     ui.horizontal(|ui| {
-                        if ui.button("Load...").on_hover_text("Pick a sound bank file (.sf2)").clicked() {
+                        if ui.button("Load...").hint("Pick a sound bank file (.sf2)").clicked() {
                             if let Some(f) = rfd::FileDialog::new().add_filter("Sound bank", &["sf2", "SF2"]).pick_file() {
                                 want.path = f.to_string_lossy().to_string();
                                 want.bank = 0;
@@ -372,7 +373,7 @@ impl App {
                             let name = if zs[0].name.is_empty() { key_name(*k) } else { zs[0].name.clone() };
                             let b = ui.add_sized([92.0, 44.0], egui::Button::new(RichText::new(name).small().color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })));
                             let tip = zs.iter().map(|z| format!("{}  (velocity {} to {})", z.path.rsplit(['/', '\\']).next().unwrap_or(""), z.vel_lo, z.vel_hi)).collect::<Vec<_>>().join("\n");
-                            if b.on_hover_text(format!("{}\n{}", key_name(*k), tip)).clicked() {
+                            if b.hint(format!("{}\n{}", key_name(*k), tip)).clicked() {
                                 hit = Some(*k);
                             }
                             if i % 4 == 3 {
@@ -402,7 +403,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         for i in 0..sl.cuts.len() {
                             let key = if sl.cuts[i].key >= 0 { sl.cuts[i].key } else { sl.base + i as i32 };
-                            if ui.small_button(format!("{}", i + 1)).on_hover_text(key_name(key.clamp(0, 127) as u8)).clicked() {
+                            if ui.small_button(format!("{}", i + 1)).hint(key_name(key.clamp(0, 127) as u8)).clicked() {
                                 hit = Some(key.clamp(0, 127) as u8);
                             }
                         }
@@ -459,12 +460,12 @@ impl App {
                 {
                     let c = &mut self.song.channels[ci];
                     ui.horizontal(|ui| {
-                        if ui.button("Open...").on_hover_text("Load a sample into this channel").clicked() {
+                        if ui.button("Open...").hint("Load a sample into this channel").clicked() {
                             pick = true;
                         }
                         let file = c.sample_path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
                         let missing = c.sample.is_none() && !c.sample_path.is_empty();
-                        ui.label(RichText::new(if file.is_empty() { "(no sample)".to_string() } else { file }).color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })).on_hover_text(c.sample_path.clone());
+                        ui.label(RichText::new(if file.is_empty() { "(no sample)".to_string() } else { file }).color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })).hint(c.sample_path.clone());
                     });
                     if let Some(s) = &c.sample {
                         draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
@@ -493,7 +494,7 @@ impl App {
                         }
                         ui.vertical(|ui| {
                             ui.set_width(70.0);
-                            changed |= ui.add(egui::DragValue::new(&mut f.stretch_beats).range(0.0..=1024.0).speed(0.05).custom_formatter(|v, _| if v <= 0.0 { "none".into() } else { format!("{v:.2} beats") })).on_hover_text("Length the sample is fitted to; none keeps its own length").changed();
+                            changed |= ui.add(egui::DragValue::new(&mut f.stretch_beats).range(0.0..=1024.0).speed(0.05).custom_formatter(|v, _| if v <= 0.0 { "none".into() } else { format!("{v:.2} beats") })).hint("Length the sample is fitted to; none keeps its own length").changed();
                             ui.label(RichText::new("TIME").small().color(TEXT_DIM));
                         });
                         ui.vertical(|ui| {
@@ -530,7 +531,7 @@ impl App {
                 let shown = *e;
                 draw_env(ui, &shown, on);
                 ui.horizontal(|ui| {
-                    if led(ui, on, 18.0).on_hover_text("Envelope on / off").clicked() {
+                    if led(ui, on, 18.0).hint("Envelope on / off").clicked() {
                         on = !on;
                         changed = true;
                     }
@@ -581,17 +582,17 @@ impl App {
                     changed |= cap_knob(ui, "VOL", &mut f.gain, 0.0, 4.0, 1.0, |v: f32| format!("x {:.2}", v));
                     ui.vertical(|ui| {
                         ui.set_width(60.0);
-                        changed |= ui.add(egui::DragValue::new(&mut key).range(0..=131).speed(0.1).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("Root note").changed();
+                        changed |= ui.add(egui::DragValue::new(&mut key).range(0..=131).speed(0.1).custom_formatter(|v, _| key_name(v as u8))).hint("Root note").changed();
                         ui.label(RichText::new("ROOT").small().color(TEXT_DIM));
                     });
                     changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
                     ui.vertical(|ui| {
-                        changed |= ui.checkbox(&mut f.add_to_key, "Add to key").on_hover_text("The root note's shift is added to the key of each note instead of to its pitch").changed();
+                        changed |= ui.checkbox(&mut f.add_to_key, "Add to key").hint("The root note's shift is added to the key of each note instead of to its pitch").changed();
                         ui.horizontal(|ui| {
                             let (mut lo, mut hi) = (f.key_lo.min(131), f.key_hi.min(131));
                             ui.label(RichText::new("KEY RANGE").small().color(TEXT_DIM));
-                            let a = ui.add(egui::DragValue::new(&mut lo).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("The lowest key this channel answers to. Right-click for every key");
-                            let b = ui.add(egui::DragValue::new(&mut hi).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).on_hover_text("The highest key this channel answers to. Right-click for every key");
+                            let a = ui.add(egui::DragValue::new(&mut lo).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).hint("The lowest key this channel answers to. Right-click for every key");
+                            let b = ui.add(egui::DragValue::new(&mut hi).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).hint("The highest key this channel answers to. Right-click for every key");
                             if a.changed() || b.changed() {
                                 f.key_lo = lo.min(hi);
                                 f.key_hi = if hi >= 131 { 256 } else { hi.max(lo) };
@@ -630,12 +631,12 @@ impl App {
                         if v >= cereal_engine::song::GATE_OFF { "Gate off".into() } else { format!("Gate {}:{:02}", v as u32, (v.fract() * 24.0) as u32) }
                     });
                     changed |= cap_knob(ui, "SHIFT", &mut f.shift, 0.0, 1.0, 0.0, |v: f32| format!("Shift 0:{:02}", (v * 24.0) as u32));
-                    changed |= ui.checkbox(&mut f.full_porta, "Full porta").on_hover_text("Portamento notes ignore the gate and play their whole length").changed();
+                    changed |= ui.checkbox(&mut f.full_porta, "Full porta").hint("Portamento notes ignore the gate and play their whole length").changed();
                 });
                 section(ui, "ARPEGGIATOR");
                 ui.horizontal(|ui| {
                     for (i, (face, tip)) in [("Off", "Off"), ("Up", "Up"), ("Down", "Down"), ("Up-Dn", "Up and down"), ("Up-Dn 2", "Up and down, lowest and highest twice"), ("Rnd", "Random")].iter().enumerate() {
-                        if ui.selectable_label(f.arp_dir == i as u8, *face).on_hover_text(*tip).clicked() {
+                        if ui.selectable_label(f.arp_dir == i as u8, *face).hint(*tip).clicked() {
                             f.arp_dir = i as u8;
                             changed = true;
                         }
@@ -646,12 +647,12 @@ impl App {
                     changed |= cap_knob(ui, "GATE", &mut f.arp_gate, 0.0, 1.0, 1.0, |v: f32| format!("Gate {:.0} %", v * 100.0));
                     ui.vertical(|ui| {
                         ui.set_width(50.0);
-                        changed |= ui.add(egui::DragValue::new(&mut f.arp_range).range(1..=10).speed(0.1)).on_hover_text("Range in octaves").changed();
+                        changed |= ui.add(egui::DragValue::new(&mut f.arp_range).range(1..=10).speed(0.1)).hint("Range in octaves").changed();
                         ui.label(RichText::new("RANGE").small().color(TEXT_DIM));
                     });
                     ui.vertical(|ui| {
                         ui.set_width(50.0);
-                        changed |= ui.add(egui::DragValue::new(&mut f.arp_repeat).range(1..=16).speed(0.1)).on_hover_text("Times each octave plays before the next").changed();
+                        changed |= ui.add(egui::DragValue::new(&mut f.arp_repeat).range(1..=16).speed(0.1)).hint("Times each octave plays before the next").changed();
                         ui.label(RichText::new("REPEAT").small().color(TEXT_DIM));
                     });
                     changed |= ui.checkbox(&mut f.arp_slide, "Slide").changed();
@@ -681,15 +682,15 @@ impl App {
                         ui.vertical(|ui| {
                             ui.set_width(50.0);
                             let is_key = name == "Key";
-                            changed |= ui.add(egui::DragValue::new(&mut t[0]).range(0.0..=127.0).speed(0.2).custom_formatter(move |v, _| if is_key { key_name(v as u8) } else { format!("{v:.0}") })).on_hover_text(tip).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut t[0]).range(0.0..=127.0).speed(0.2).custom_formatter(move |v, _| if is_key { key_name(v as u8) } else { format!("{v:.0}") })).hint(tip).changed();
                             ui.label(RichText::new("MID").small().color(TEXT_DIM));
                         });
                     });
                 }
                 section(ui, "ECHO DELAY / FAT MODE");
                 ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut f.echo_ping, "Ping pong").on_hover_text("The echo pan turns round when it reaches a side").changed();
-                    changed |= ui.checkbox(&mut f.echo_fat, "Fat mode").on_hover_text("Echoes swap from side to side").changed();
+                    changed |= ui.checkbox(&mut f.echo_ping, "Ping pong").hint("The echo pan turns round when it reaches a side").changed();
+                    changed |= ui.checkbox(&mut f.echo_fat, "Fat mode").hint("Echoes swap from side to side").changed();
                 });
                 ui.horizontal(|ui| {
                     changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
@@ -904,7 +905,7 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                         if i == sel {
                             b = b.stroke(egui::Stroke::new(1.5_f32, orange));
                         }
-                        let r = ui.add_sized([86.0, 46.0], b).on_hover_text(format!("{}\nLeft-click selects and plays, right-click only plays", key_name(key)));
+                        let r = ui.add_sized([86.0, 46.0], b).hint(format!("{}\nLeft-click selects and plays, right-click only plays", key_name(key)));
                         if r.clicked() {
                             sel = i;
                             lay = 0;
@@ -924,7 +925,7 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
             let int = |ui: &mut Ui, p: &mut Pad, at: usize, lo: i32, hi: i32, label: &str, tip: &str| {
                 let mut v = p.val(at);
                 ui.label(label);
-                if ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(0.3)).on_hover_text(tip).changed() {
+                if ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(0.3)).hint(tip).changed() {
                     p.put(at, v);
                 }
             };
@@ -934,7 +935,7 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                 if ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0)).changed() {
                     p.put_name(&name);
                 }
-                if ui.button("Clear pad").on_hover_text("Back to an empty pad on the same key").clicked() {
+                if ui.button("Clear pad").hint("Back to an empty pad on the same key").clicked() {
                     p.clear();
                 }
             });
@@ -943,37 +944,37 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                 int(ui, p, Pad::PAN, -64, 64, "Pan", "Left to right");
                 int(ui, p, Pad::PITCH, -1200, 1200, "Pitch", "Tunes every layer of the pad");
                 let mut on = p.scale_volume();
-                if ui.checkbox(&mut on, "Scale volume").on_hover_text("How hard a note is hit sets how loud the pad plays. Switch off to leave loudness to the layers alone").changed() {
+                if ui.checkbox(&mut on, "Scale volume").hint("How hard a note is hit sets how loud the pad plays. Switch off to leave loudness to the layers alone").changed() {
                     p.put_scale_volume(on);
                 }
             });
             ui.horizontal(|ui| {
                 let mut key = p.val(Pad::KEY);
                 ui.label("Key");
-                if ui.add(egui::DragValue::new(&mut key).range(0..=127).speed(0.15).custom_formatter(|x, _| key_name(x as u8))).on_hover_text("The note that plays this pad").changed() {
+                if ui.add(egui::DragValue::new(&mut key).range(0..=127).speed(0.15).custom_formatter(|x, _| key_name(x as u8))).hint("The note that plays this pad").changed() {
                     p.put(Pad::KEY, key);
                 }
                 for (at, label, tip) in [(Pad::CUT, "Cut", "The cut group this pad is in"), (Pad::CUT_BY, "By", "The group whose pads stop this one")] {
                     let mut v = p.val(at);
                     ui.label(label);
-                    if num_or_none(ui, &mut v, 99, 0).on_hover_text(tip).changed() {
+                    if num_or_none(ui, &mut v, 99, 0).hint(tip).changed() {
                         p.put(at, v);
                     }
                 }
                 let mut out = p.val(Pad::OUT);
                 ui.label("Output");
-                if ui.add(egui::DragValue::new(&mut out).range(0..=125).speed(0.15).custom_formatter(|x, _| if x < 1.0 { "--".into() } else { format!("{}", x as i32) })).on_hover_text("Mixer tracks above the channel's own track that this pad plays through").changed() {
+                if ui.add(egui::DragValue::new(&mut out).range(0..=125).speed(0.15).custom_formatter(|x, _| if x < 1.0 { "--".into() } else { format!("{}", x as i32) })).hint("Mixer tracks above the channel's own track that this pad plays through").changed() {
                     p.put(Pad::OUT, out);
                 }
             });
             section(ui, "LAYERS");
             lay = lay.min(p.layers.len().saturating_sub(1));
             ui.horizontal(|ui| {
-                if ui.button("Create").on_hover_text("Add an empty layer at the bottom").clicked() {
+                if ui.button("Create").hint("Add an empty layer at the bottom").clicked() {
                     p.layers.push(Layer::fresh());
                     lay = p.layers.len() - 1;
                 }
-                if ui.add_enabled(p.layers.len() > 1, egui::Button::new("Delete")).on_hover_text("Remove the selected layer").clicked() {
+                if ui.add_enabled(p.layers.len() > 1, egui::Button::new("Delete")).hint("Remove the selected layer").clicked() {
                     p.layers.remove(lay);
                     lay = lay.min(p.layers.len() - 1);
                 }
@@ -985,11 +986,11 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                     p.layers.swap(lay, lay + 1);
                     lay += 1;
                 }
-                if ui.button("Spread even").on_hover_text("Share the velocity range out among the layers with no overlap").clicked() {
+                if ui.button("Spread even").hint("Share the velocity range out among the layers with no overlap").clicked() {
                     p.spread_even();
                 }
                 let mut on = p.random_layers();
-                if ui.checkbox(&mut on, "Random layers").on_hover_text("Layers whose velocity ranges overlap take turns instead of sounding together").changed() {
+                if ui.checkbox(&mut on, "Random layers").hint("Layers whose velocity ranges overlap take turns instead of sounding together").changed() {
                     p.put_random_layers(on);
                 }
             });
@@ -1006,7 +1007,7 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                     let path = l.path();
                     let file = path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
                     let text = RichText::new(if file.is_empty() { "(load a sound)".to_string() } else { file }).color(if lost(&path) { red } else { TEXT });
-                    let r = ui.add_sized([200.0, 18.0], egui::Button::new(text)).on_hover_text(if lost(&path) { format!("Not found: {path}") } else { path.clone() });
+                    let r = ui.add_sized([200.0, 18.0], egui::Button::new(text)).hint(if lost(&path) { format!("Not found: {path}") } else { path.clone() });
                     if r.clicked() {
                         if let Some(f) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
                             l.put_path(&f.to_string_lossy());
@@ -1029,7 +1030,7 @@ fn pad_kit_panel(ui: &mut Ui, map: &cereal_engine::zones::Map) -> (Option<Vec<u8
                             l.put(Layer::VEL_LO, v);
                         }
                     }
-                    if ui.small_button("Play").on_hover_text("Sound the pad at the middle of this layer's velocity range").clicked() {
+                    if ui.small_button("Play").hint("Sound the pad at the middle of this layer's velocity range").clicked() {
                         hit = Some((key, (l.val(Layer::VEL_LO) + l.val(Layer::VEL_HI)) as f32 / 200.0));
                     }
                     ui.end_row();
@@ -1058,13 +1059,13 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
         ui.label("Channel");
         ui.add(egui::DragValue::new(&mut chan).range(1..=16).speed(0.1));
         set.chan = (chan - 1).clamp(0, 15) as u8;
-        ui.label("Patch").on_hover_text("The program the device is switched to; none leaves it alone");
+        ui.label("Patch").hint("The program the device is switched to; none leaves it alone");
         num_or_none(ui, &mut set.patch, 127, 1);
         ui.label("Bank");
-        num_or_none(ui, &mut set.bank[0], 127, 0).on_hover_text("Coarse");
-        num_or_none(ui, &mut set.bank[1], 127, 0).on_hover_text("Fine");
+        num_or_none(ui, &mut set.bank[0], 127, 0).hint("Coarse");
+        num_or_none(ui, &mut set.bank[1], 127, 0).hint("Fine");
         let mut port = set.port as i32;
-        ui.label("Port").on_hover_text(if cfg!(windows) { "Port N plays through the Nth MIDI output device of the system" } else { "Each port in use shows up as a port of the client \"Breakfast Cereal Out\"; connect it to a synth or an interface" });
+        ui.label("Port").hint(if cfg!(windows) { "Port N plays through the Nth MIDI output device of the system" } else { "Each port in use shows up as a port of the client \"Breakfast Cereal Out\"; connect it to a synth or an interface" });
         ui.add(egui::DragValue::new(&mut port).range(0..=255).speed(0.1));
         set.port = port.clamp(0, 255) as u8;
         let lit = crate::midi::SENT.load(std::sync::atomic::Ordering::Relaxed);
@@ -1077,12 +1078,12 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
         ui.painter().circle_filled(r.center(), 4.0, if now - at < 0.15 { orange } else { Color32::from_rgb(60, 60, 66) });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut set.by_color, "Map note color to MIDI channel").on_hover_text("Each note goes out on the channel of its piano roll colour, counted from the channel above");
-        ui.checkbox(&mut set.send_mix, "Send pan, volume and pitch").on_hover_text("The channel's volume, pan and pitch wheel go out as controllers 7 and 10 and pitch bend");
-        if ui.button("Reset").on_hover_text("Sends the reset-all-controllers message (CC 121)").clicked() {
+        ui.checkbox(&mut set.by_color, "Map note color to MIDI channel").hint("Each note goes out on the channel of its piano roll colour, counted from the channel above");
+        ui.checkbox(&mut set.send_mix, "Send pan, volume and pitch").hint("The channel's volume, pan and pitch wheel go out as controllers 7 and 10 and pitch bend");
+        if ui.button("Reset").hint("Sends the reset-all-controllers message (CC 121)").clicked() {
             transport.send_midi(Msg::new(set.port, &[0xb0 | set.chan, 121, 0]));
         }
-        if ui.button("Deactivate all").on_hover_text("Switches every knob off; their set-up is kept").clicked() {
+        if ui.button("Deactivate all").hint("Switches every knob off; their set-up is kept").clicked() {
             for c in set.ctls.iter_mut() {
                 c.on = false;
             }
@@ -1092,12 +1093,12 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
     ui.horizontal(|ui| {
         for p in 0..8 {
             let used = set.ctls.iter().any(|c| c.slot as usize / 9 == p && c.on);
-            if ui.selectable_label(page == p, RichText::new(format!("{}", p + 1)).color(if used { orange } else { TEXT })).on_hover_text(set.pages[p].clone()).clicked() {
+            if ui.selectable_label(page == p, RichText::new(format!("{}", p + 1)).color(if used { orange } else { TEXT })).hint(set.pages[p].clone()).clicked() {
                 page = p;
                 sel = None;
             }
         }
-        ui.add(egui::TextEdit::singleline(&mut set.pages[page]).desired_width(180.0)).on_hover_text("Page name");
+        ui.add(egui::TextEdit::singleline(&mut set.pages[page]).desired_width(180.0)).hint("Page name");
     });
     ui.horizontal(|ui| {
         for col in 0..9 {
@@ -1107,7 +1108,7 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
                 let c = set.ctl(slot).cloned();
                 let (lo, hi) = c.as_ref().map(|c| (c.lo.min(c.hi), c.hi.max(c.lo))).unwrap_or((0, 127));
                 let mut v = set.values[slot] as f32;
-                let r = knob(ui, &mut v, lo as f32, hi.max(lo + 1) as f32, lo as f32, 34.0).on_hover_text(match &c {
+                let r = knob(ui, &mut v, lo as f32, hi.max(lo + 1) as f32, lo as f32, 34.0).hint(match &c {
                     Some(c) if !c.name.is_empty() => format!("{}: {}", c.name, set.values[slot]),
                     _ => format!("{}", set.values[slot]),
                 });
@@ -1122,7 +1123,7 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
                     None => ("-".to_string(), false),
                 };
                 let label = ui.add(egui::Label::new(RichText::new(text).small().color(if on { orange } else if sel == Some(slot) { TEXT } else { TEXT_DIM })).truncate().sense(Sense::click()));
-                if label.on_hover_text("Click to switch this knob on or off; right-click the knob to set it up").clicked() {
+                if label.hint("Click to switch this knob on or off; right-click the knob to set it up").clicked() {
                     match set.ctls.iter_mut().find(|c| c.slot as usize == slot) {
                         Some(c) => c.on = !c.on,
                         None => sel = Some(slot),
@@ -1333,19 +1334,19 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                             })
                             .collect();
                         ui.painter().add(egui::Shape::line(pts, Stroke::new(1.2_f32, ink)));
-                        if resp.on_hover_text(*name).clicked() && !on {
+                        if resp.hint(*name).clicked() && !on {
                             g.p[base + 1] = i as f32;
                             changed = true;
                         }
                     }
                     let inv = &mut g.p[21 + k];
-                    if ui.selectable_label(*inv != 0.0, "INV").on_hover_text("Invert this oscillator").clicked() {
+                    if ui.selectable_label(*inv != 0.0, "INV").hint("Invert this oscillator").clicked() {
                         *inv = if *inv != 0.0 { 0.0 } else { 1.0 };
                         changed = true;
                     }
                     if k == 2 {
                         let am = &mut g.p[24];
-                        if ui.selectable_label(*am != 0.0, "AM").on_hover_text("Oscillator 3 shapes the level of the other two").clicked() {
+                        if ui.selectable_label(*am != 0.0, "AM").hint("Oscillator 3 shapes the level of the other two").clicked() {
                             *am = if *am != 0.0 { 0.0 } else { 1.0 };
                             changed = true;
                         }
@@ -1545,7 +1546,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                     }
                 }
                 let mut on = g.p[kit::KIT + 12] >= 0.5;
-                if ui.toggle_value(&mut on, "Ceiling").on_hover_text("Holds the output of the kit under full level").changed() {
+                if ui.toggle_value(&mut on, "Ceiling").hint("Holds the output of the kit under full level").changed() {
                     g.p[kit::KIT + 12] = if on { 1.0 } else { 0.0 };
                     changed = true;
                 }
@@ -1567,7 +1568,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                         pad = k;
                     }
                     let mut key = g.p[at + 4].round().clamp(0.0, 127.0) as u8;
-                    if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v < 1.0 { "no key".into() } else { key_name(v as u8) })).on_hover_text("The key that strikes this pad").changed() {
+                    if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v < 1.0 { "no key".into() } else { key_name(v as u8) })).hint("The key that strikes this pad").changed() {
                         g.p[at + 4] = key as f32;
                         changed = true;
                     }
@@ -1580,18 +1581,18 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                     }
                     for (i, label, tip) in [(2usize, "M", "Mute"), (3, "S", "Solo")] {
                         let mut on = g.p[at + i] >= 0.5;
-                        if ui.toggle_value(&mut on, label).on_hover_text(tip).changed() {
+                        if ui.toggle_value(&mut on, label).hint(tip).changed() {
                             g.p[at + i] = if on { 1.0 } else { 0.0 };
                             changed = true;
                         }
                     }
                     let mut cut = kit::cut(&g.raw, k);
-                    if ui.add(egui::DragValue::new(&mut cut).range(0..=16).prefix("cut ")).on_hover_text("Pads of one cut group stop each other. 0 is none.").changed() {
+                    if ui.add(egui::DragValue::new(&mut cut).range(0..=16).prefix("cut ")).hint("Pads of one cut group stop each other. 0 is none.").changed() {
                         kit::set_cut(&mut g.raw, k, cut);
                         changed = true;
                     }
                     let mut off = kit::out_offset(&g.raw, k);
-                    if ui.add(egui::DragValue::new(&mut off).range(-98..=98).prefix("track ")).on_hover_text("Mixer track offset. Kept in the file; pads are not sent to their own tracks yet.").changed() {
+                    if ui.add(egui::DragValue::new(&mut off).range(-98..=98).prefix("track ")).hint("Mixer track offset. Kept in the file; pads are not sent to their own tracks yet.").changed() {
                         kit::set_out_offset(&mut g.raw, k, off);
                         changed = true;
                     }
@@ -1606,7 +1607,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                     kit::set_name(&mut g.raw, pad, &name);
                     changed = true;
                 }
-                if ui.button("Load drum...").on_hover_text("Put a saved drum of your own on this pad").clicked() {
+                if ui.button("Load drum...").hint("Put a saved drum of your own on this pad").clicked() {
                     if let Some(p) = rfd::FileDialog::new().add_filter("Saved drum", &["dmpatch", "fst"]).pick_file() {
                         let bytes = if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
                             match cereal_engine::preset::read(&p).ok().and_then(|f| f.unit()) {
@@ -1641,7 +1642,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                     changed = true;
                 }
                 let mut key = kit::pat_key(&g.raw, pat).unwrap_or(127);
-                if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v >= 127.0 { "no key".into() } else { key_name(v as u8) })).on_hover_text("Hold this key to run the pattern").changed() {
+                if ui.add(egui::DragValue::new(&mut key).range(0..=127).custom_formatter(|v, _| if v >= 127.0 { "no key".into() } else { key_name(v as u8) })).hint("Hold this key to run the pattern").changed() {
                     kit::set_pat_key(&mut g.raw, pat, (key < 127).then_some(key));
                     changed = true;
                 }
@@ -1669,7 +1670,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                                     ui.add_space(4.0);
                                 }
                                 let (on, hard) = kit::step(&g.raw, pat, k, i);
-                                let r = ui.add_sized([15.0, 16.0], egui::SelectableLabel::new(on, "")).on_hover_text(format!("Step {}: strength {hard}. Scroll over it to change the strength.", i + 1));
+                                let r = ui.add_sized([15.0, 16.0], egui::SelectableLabel::new(on, "")).hint(format!("Step {}: strength {hard}. Scroll over it to change the strength.", i + 1));
                                 if r.clicked() {
                                     kit::set_step(&mut g.raw, pat, k, i, !on, hard);
                                     changed = true;
@@ -1716,7 +1717,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
                         }
                     }
                 });
-                if ui.button("Load...").on_hover_text("Pick a sample file of your own for the layer").clicked() {
+                if ui.button("Load...").hint("Pick a sample file of your own for the layer").clicked() {
                     if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aiff", "wv"]).pick_file() {
                         set_sample_path(&mut g.raw, &p.to_string_lossy());
                         changed = true;

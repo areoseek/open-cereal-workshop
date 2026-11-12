@@ -1,5 +1,6 @@
 //! The editor window of an effect slot: one knob per setting, laid out from the unit's table.
 
+use crate::widgets::Hint as _;
 use cereal_engine::fx::{self, Kind};
 use egui::{Color32, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
@@ -171,11 +172,11 @@ impl App {
             }
             let s = &mut self.song.inserts[ins].slots[si];
             ui.horizontal(|ui| {
-                if led(ui, s.enabled, 12.0).on_hover_text("Effect on / off").clicked() {
+                if led(ui, s.enabled, 12.0).hint("Effect on / off").clicked() {
                     s.enabled = !s.enabled;
                     changed = true;
                 }
-                let r = knob(ui, &mut s.mix, 0.0, 1.0, 1.0, 20.0).on_hover_text(format!("Mix level: {:.0} %", s.mix * 100.0));
+                let r = knob(ui, &mut s.mix, 0.0, 1.0, 1.0, 20.0).hint(format!("Mix level: {:.0} %", s.mix * 100.0));
                 control_menu(&r, cereal_engine::song::Target::SlotMix(ins, slot));
                 changed |= r.changed();
                 ui.label(RichText::new("Mix").small().color(TEXT_DIM));
@@ -264,14 +265,14 @@ impl App {
                 ui.horizontal(|ui| {
                     let dir = if f.p[1] > 7500.0 { 2 } else if f.p[1] < 2500.0 { 0 } else { 1 };
                     for (k, label, tip) in [(0, "<<", "Play backwards"), (1, "||", "Pause"), (2, ">>", "Play forwards")] {
-                        if ui.selectable_label(dir == k, RichText::new(label).small()).on_hover_text(tip).clicked() {
+                        if ui.selectable_label(dir == k, RichText::new(label).small()).hint(tip).clicked() {
                             f.p[1] = k as f32 * 5000.0;
                             changed = true;
                         }
                     }
                     for (i, label, tip) in [(6, "Hold", "Stop the record turning by itself, to move it by the position alone"), (8, "Mute", "Silence the record")] {
                         let mut on = f.p[i] >= 5000.0;
-                        if ui.checkbox(&mut on, RichText::new(label).small()).on_hover_text(tip).changed() {
+                        if ui.checkbox(&mut on, RichText::new(label).small()).hint(tip).changed() {
                             f.p[i] = if on { 10000.0 } else { 0.0 };
                             changed = true;
                         }
@@ -372,7 +373,7 @@ impl App {
                                     if r.changed() && *v != before {
                                         changed = true;
                                     }
-                                    r.on_hover_text(format!("{name}: {}", *v as i32));
+                                    r.hint(format!("{name}: {}", *v as i32));
                                     ui.label(RichText::new(name).small().color(TEXT_DIM));
                                 });
                             });
@@ -481,7 +482,7 @@ impl App {
                                     if r.changed() && *v != before {
                                         changed = true;
                                     }
-                                    r.on_hover_text(format!("{name}: {}", *v as i32));
+                                    r.hint(format!("{name}: {}", *v as i32));
                                     ui.label(RichText::new(name).small().color(TEXT_DIM));
                                 });
                             });
@@ -555,7 +556,7 @@ impl App {
                                 if r.changed() && *v != before {
                                     changed = true;
                                 }
-                                r.on_hover_text(format!("{name}: {}", *v as i32));
+                                r.hint(format!("{name}: {}", *v as i32));
                                 ui.label(RichText::new(name).small().color(TEXT_DIM));
                             });
                         });
@@ -641,7 +642,7 @@ impl App {
                                     changed = true;
                                 }
                                 control_menu(&r, cereal_engine::song::Target::SlotParam(ins, slot, k as u16));
-                                r.on_hover_text(hint(d.kind, k, p.name, *v));
+                                r.hint(hint(d.kind, k, p.name, *v));
                                 ui.label(RichText::new(label).small().color(TEXT_DIM));
                             });
                         });
@@ -756,7 +757,7 @@ fn clock_ui(ui: &mut Ui, tick: f64, ppq: u32, tempo: f32, per_bar: u32) {
     let id = ui.id().with("clockmode");
     let mut as_time: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(420.0, 120.0), egui::Sense::click());
-    if resp.on_hover_text("Click to change between bar : beat : tick and minutes : seconds").clicked() {
+    if resp.hint("Click to change between bar : beat : tick and minutes : seconds").clicked() {
         as_time = !as_time;
         ui.data_mut(|d| d.insert_temp(id, as_time));
     }
@@ -1016,11 +1017,11 @@ fn notes_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     } else {
         let mut at = n.shown();
         ui.horizontal(|ui| {
-            if ui.add_enabled(at > 0, egui::Button::new("<")).on_hover_text("Previous page").clicked() {
+            if ui.add_enabled(at > 0, egui::Button::new("<")).hint("Previous page").clicked() {
                 at -= 1;
             }
             ui.label(format!("Page {} of {}", at + 1, n.pages.len()));
-            if ui.add_enabled(at + 1 < n.pages.len(), egui::Button::new(">")).on_hover_text("Next page").clicked() {
+            if ui.add_enabled(at + 1 < n.pages.len(), egui::Button::new(">")).hint("Next page").clicked() {
                 at += 1;
             }
             if ui.button("Add page").clicked() {
@@ -1103,7 +1104,7 @@ pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
         }
     };
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut editing, "Edit board").on_hover_text("Move, resize, restyle, add and remove the controls. Turn it off to play them.");
+        ui.checkbox(&mut editing, "Edit board").hint("Move, resize, restyle, add and remove the controls. Turn it off to play them.");
         if editing {
             for (w, label) in [(What::Knob, "Knob"), (What::Slider, "Slider"), (What::Button, "Button"), (What::Check, "Switch"), (What::Digits, "Number"), (What::Pad, "Pad"), (What::Label, "Label"), (What::Bevel, "Frame")] {
                 if ui.small_button(format!("+ {label}")).clicked() {
@@ -1335,7 +1336,7 @@ fn board_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32, full: bool) -> (bool, Optio
                     let a = ang(v);
                     pt.line_segment([r.center() + Vec2::new(a.cos(), a.sin()) * rad * 0.35, r.center() + Vec2::new(a.cos(), a.sin()) * rad * 0.85], Stroke::new((2.0 * s).max(1.5), Color32::from_gray(235)));
                 }
-                resp.on_hover_text(format!("{}: {:.0} %", c.name, v * 100.0));
+                resp.hint(format!("{}: {:.0} %", c.name, v * 100.0));
             }
             What::Slider => {
                 let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
@@ -1359,7 +1360,7 @@ fn board_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32, full: bool) -> (bool, Optio
                 };
                 pt.rect_filled(fill, 2.0, main);
                 pt.rect_filled(knob.intersect(area), 2.0, Color32::from_gray(225));
-                resp.on_hover_text(format!("{}: {:.0} %", c.name, v * 100.0));
+                resp.hint(format!("{}: {:.0} %", c.name, v * 100.0));
             }
             What::Button | What::Check => {
                 let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
@@ -1389,7 +1390,7 @@ fn board_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32, full: bool) -> (bool, Optio
                         pt.text(r.center(), egui::Align2::CENTER_CENTER, &c.caption, egui::FontId::proportional((c.font.abs() * s).clamp(7.0, 24.0)), col(c.text_color, Color32::from_gray(20)));
                     }
                 }
-                resp.on_hover_text(c.name.clone());
+                resp.hint(c.name.clone());
             }
             What::Pad => {
                 let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
@@ -1403,7 +1404,7 @@ fn board_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32, full: bool) -> (bool, Optio
                 pt.line_segment([Pos2::new(at.x, r.top()), Pos2::new(at.x, r.bottom())], Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
                 pt.line_segment([Pos2::new(r.left(), at.y), Pos2::new(r.right(), at.y)], Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
                 pt.circle_filled(at, (6.0 * s).max(3.0), Color32::from_gray(235));
-                resp.on_hover_text(format!("{}: X {:.0} %, Y {:.0} %", c.name, x * 100.0, y * 100.0));
+                resp.hint(format!("{}: X {:.0} %, Y {:.0} %", c.name, x * 100.0, y * 100.0));
             }
             What::Other => {
                 pt.rect_stroke(r, 2.0, Stroke::new(1.0_f32, Color32::from_white_alpha(30)), egui::StrokeKind::Inside);
@@ -1487,7 +1488,7 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
                             ui.vertical_centered(|ui| {
                                 let r = knob(ui, &mut v, p.min as f32, p.max as f32, p.def as f32, 26.0);
                                 v = v.round();
-                                r.on_hover_text(hint(kind, k, p.name, v));
+                                r.hint(hint(kind, k, p.name, v));
                                 ui.label(RichText::new(p.name).small().color(TEXT_DIM));
                             });
                         });
@@ -1549,14 +1550,14 @@ pub fn note_unit_ui(ui: &mut Ui, ident: &str, block: &mut Vec<u8>) -> bool {
                             let v = v as i32;
                             format!("{}{:+}", NOTE[v.rem_euclid(12) as usize], v.div_euclid(12))
                         }).custom_parser(|t| t.trim().parse::<f64>().ok()));
-                        if r.on_hover_text("Drag to change the key it plays; right-click to take it out").secondary_clicked() {
+                        if r.hint("Drag to change the key it plays; right-click to take it out").secondary_clicked() {
                             drop = Some(j);
                         }
                     }
                     if let Some(j) = drop {
                         row.remove(j);
                     }
-                    if row.len() < 64 && ui.small_button("+").on_hover_text("Play one more key").clicked() {
+                    if row.len() < 64 && ui.small_button("+").hint("Play one more key").clicked() {
                         row.push(k as i16);
                     }
                 });

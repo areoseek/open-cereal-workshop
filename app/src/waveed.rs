@@ -1,5 +1,6 @@
 //! The wave recorder: records the sound passing its mixer slot, shows it, and edits it.
 
+use crate::widgets::Hint as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -109,7 +110,7 @@ impl WaveEd {
         }
         ui.horizontal(|ui| {
             let label = if recording { RichText::new("Stop recording").color(Color32::from_rgb(240, 110, 90)) } else { RichText::new("Record") };
-            if ui.button(label).on_hover_text("Record the sound arriving at this slot. New sound joins the end of the take.").clicked() {
+            if ui.button(label).hint("Record the sound arriving at this slot. New sound joins the end of the take.").clicked() {
                 if recording {
                     tr.record_slot(None);
                     self.on_play = false;
@@ -118,9 +119,9 @@ impl WaveEd {
                     tr.record_slot(Some(slot));
                 }
             }
-            ui.checkbox(&mut self.on_play, "with the song").on_hover_text("Start recording when the song starts and stop when it stops");
+            ui.checkbox(&mut self.on_play, "with the song").hint("Start recording when the song starts and stop when it stops");
             ui.separator();
-            if ui.button("▶ Play").on_hover_text("Play the marked stretch, or everything").clicked() {
+            if ui.button("▶ Play").hint("Play the marked stretch, or everything").clicked() {
                 let (a, b) = self.range();
                 let (a, b) = if self.sel.1 == self.sel.0 && self.sel.0 < self.frames.len() { (self.sel.0, self.frames.len()) } else { (a, b) };
                 if b > a {
@@ -155,7 +156,7 @@ impl WaveEd {
                     }));
                 }
             }
-            ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(120.0)).on_hover_text("Name of the take");
+            ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(120.0)).hint("Name of the take");
         });
         let has = !self.frames.is_empty();
         let mut edit: Option<u8> = None;
@@ -175,15 +176,15 @@ impl WaveEd {
                     (11, "Centre", "Take out a standing offset"),
                     (12, "Swap sides", "Left and right change places"),
                 ] {
-                    if ui.button(name).on_hover_text(tip).clicked() {
+                    if ui.button(name).hint(tip).clicked() {
                         edit = Some(k);
                     }
                 }
-                if ui.button("Amplify").on_hover_text("Make the marked stretch louder or softer by the amount beside").clicked() {
+                if ui.button("Amplify").hint("Make the marked stretch louder or softer by the amount beside").clicked() {
                     edit = Some(13);
                 }
                 ui.add(egui::DragValue::new(&mut self.amp_db).range(-48.0..=48.0).speed(0.1).suffix(" dB"));
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).hint("Ctrl+Z").clicked() {
                     edit = Some(20);
                 }
             });
@@ -360,13 +361,13 @@ impl WaveEd {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(has && !recording, |ui| {
                 let (a, b) = self.range();
-                if ui.button("Send to playlist").on_hover_text("Save the marked stretch (or everything) beside the project and place it as an audio clip").clicked() {
+                if ui.button("Send to playlist").hint("Save the marked stretch (or everything) beside the project and place it as an audio clip").clicked() {
                     act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate) {
                         Ok(p) => WaveAct::ToPlaylist(p),
                         Err(e) => WaveAct::Status(e),
                     });
                 }
-                if ui.button("Send to a new channel").on_hover_text("Save the marked stretch (or everything) beside the project and load it into a new sampler channel").clicked() {
+                if ui.button("Send to a new channel").hint("Save the marked stretch (or everything) beside the project and load it into a new sampler channel").clicked() {
                     act = Some(match save_take(dir, &self.name, &self.frames[a..b], self.rate) {
                         Ok(p) => WaveAct::ToChannel(p),
                         Err(e) => WaveAct::Status(e),

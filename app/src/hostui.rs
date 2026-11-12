@@ -1,5 +1,6 @@
 //! Plug-ins from other makers: the settings panel we draw for one, and the menus that add them.
 
+use crate::widgets::Hint as _;
 use crate::widgets::*;
 use cereal_engine::host::{self, Instance};
 use eframe::egui::{self, RichText, Ui};
@@ -18,7 +19,7 @@ pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str, target: &dyn Fn(u16
     let fail_id = ui.id().with(("host-window", Arc::as_ptr(inst) as usize));
     if inst.has_window() {
         let open = inst.window_open();
-        if ui.button(if open { "Close its window" } else { "Open its window" }).on_hover_text("The plug-in's own editor, in a window of its own").clicked() {
+        if ui.button(if open { "Close its window" } else { "Open its window" }).hint("The plug-in's own editor, in a window of its own").clicked() {
             if open {
                 inst.hide_window();
             } else {
@@ -96,7 +97,7 @@ pub fn menu(ui: &mut Ui, instruments: bool) -> Option<Arc<Instance>> {
     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
         for f in list {
             let r = ui.button(&f.name);
-            let r = if f.vendor.is_empty() { r } else { r.on_hover_text(&f.vendor) };
+            let r = if f.vendor.is_empty() { r } else { r.hint(&f.vendor) };
             if r.clicked() {
                 got = Instance::open(&f.path, &f.id);
                 ui.close_menu();
@@ -104,7 +105,7 @@ pub fn menu(ui: &mut Ui, instruments: bool) -> Option<Arc<Instance>> {
         }
     });
     ui.separator();
-    if ui.button("Look again").on_hover_text("Scan the plug-in folders again").clicked() {
+    if ui.button("Look again").hint("Scan the plug-in folders again").clicked() {
         host::forget();
     }
     got

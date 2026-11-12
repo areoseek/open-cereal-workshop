@@ -1,5 +1,6 @@
 //! The channel rack: one row per channel with its step sequencer.
 
+use crate::widgets::Hint as _;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
 use cereal_engine::flp::ChannelKind;
@@ -86,7 +87,7 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text("Channel group on show (Page Up / Page Down)");
+                .hint("Channel group on show (Page Up / Page Down)");
                 if let Some(p) = pick {
                     self.song.cur_group = p;
                     self.dirty = true;
@@ -100,7 +101,7 @@ impl App {
                         }
                         ui.close_menu();
                     }
-                    if ui.add_enabled(cur.is_some_and(|g| self.song.groups[g] != "Unsorted"), egui::Button::new("Delete group")).on_hover_text("Its channels go to Unsorted").clicked() {
+                    if ui.add_enabled(cur.is_some_and(|g| self.song.groups[g] != "Unsorted"), egui::Button::new("Delete group")).hint("Its channels go to Unsorted").clicked() {
                         if let Some(g) = cur {
                             self.song.delete_group(g);
                             self.dirty = true;
@@ -114,13 +115,13 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text("Group options");
+                .hint("Group options");
             });
         }
         self.rack.sel.retain(|c| *c < self.song.channels.len());
         egui::TopBottomPanel::bottom("rack_graph").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.selectable_label(self.rack.graph, "Graph editor").on_hover_text("The selected channel's steps as bars: drag to set each step's property").clicked() {
+                if ui.selectable_label(self.rack.graph, "Graph editor").hint("The selected channel's steps as bars: drag to set each step's property").clicked() {
                     self.rack.graph = !self.rack.graph;
                 }
                 if self.rack.graph {
@@ -176,7 +177,7 @@ impl App {
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(220.0 + nsteps as f32 * (STEP_W + 3.0), 5.0), Sense::click());
                     let picked = self.sel_chan == ci || self.rack.sel.contains(&ci);
                     ui.painter().rect_filled(rect, 1.0, rgb(self.song.channels[ci].color).gamma_multiply(if picked { 1.0 } else { 0.7 }));
-                    if resp.on_hover_text(self.song.channels[ci].name.clone()).clicked() {
+                    if resp.hint(self.song.channels[ci].name.clone()).clicked() {
                         self.song.channels[ci].zipped = false;
                         self.sel_chan = ci;
                         self.dirty = true;
@@ -185,7 +186,7 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     let on = self.song.channels[ci].enabled;
-                    let r = led(ui, on, 16.0).on_hover_text("Mute / solo (right-click)");
+                    let r = led(ui, on, 16.0).hint("Mute / solo (right-click)");
                     if r.clicked() {
                         self.song.channels[ci].enabled = !on;
                         self.dirty = true;
@@ -194,12 +195,12 @@ impl App {
                         self.solo_channel(ci);
                     }
                     let c = &mut self.song.channels[ci];
-                    let r = knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).on_hover_text("Channel panning");
+                    let r = knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).hint("Channel panning");
                     control_menu(&r, cereal_engine::song::Target::ChanPan(ci));
                     if r.changed() {
                         self.dirty = true;
                     }
-                    let r = knob(ui, &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, 18.0).on_hover_text("Channel volume");
+                    let r = knob(ui, &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, 18.0).hint("Channel volume");
                     control_menu(&r, cereal_engine::song::Target::ChanVolume(ci));
                     if r.changed() {
                         self.dirty = true;
@@ -207,7 +208,7 @@ impl App {
                     let n_ins = self.song.inserts.len().saturating_sub(1);
                     let mut ins = c.insert;
                     let dv = egui::DragValue::new(&mut ins).range(0..=n_ins).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "---".into() } else { format!("{v:.0}") });
-                    if !self.rack.hide_selectors && ui.add_sized([30.0, STEP_H - 4.0], dv).on_hover_text("Target mixer track").changed() {
+                    if !self.rack.hide_selectors && ui.add_sized([30.0, STEP_H - 4.0], dv).hint("Target mixer track").changed() {
                         c.insert = ins;
                         self.dirty = true;
                     }
@@ -260,7 +261,7 @@ impl App {
                         }
                     }
                     let hover = if missing { format!("Missing sample: {}", c.sample_path) } else if !c.sample_path.is_empty() { c.sample_path.clone() } else { c.plugin.clone() };
-                    let resp = if hover.is_empty() { resp } else { resp.on_hover_text(hover) };
+                    let resp = if hover.is_empty() { resp } else { resp.hint(hover) };
                     resp.context_menu(|ui| {
                         if ui.button("Piano roll").clicked() {
                             self.sel_chan = ci;
@@ -357,7 +358,7 @@ impl App {
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("  +  ").strong()).on_hover_text("Add a sampler channel").clicked() {
+                if ui.button(RichText::new("  +  ").strong()).hint("Add a sampler channel").clicked() {
                     self.song.channels.push(Chan::default());
                     self.sel_chan = self.song.channels.len() - 1;
                     self.dirty = true;
@@ -379,7 +380,7 @@ impl App {
                             self.dirty = true;
                         }
                     });
-                    if ui.button("MIDI Sender").on_hover_text("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
+                    if ui.button("MIDI Sender").hint("A silent channel whose notes and knobs go out as MIDI to other programs and hardware").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::midiout::IDENT.into();
                         c.name = "MIDI Sender".into();
@@ -391,7 +392,7 @@ impl App {
                         self.dirty = true;
                         ui.close_menu();
                     }
-                    if ui.button("Envelope Sender").on_hover_text("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
+                    if ui.button("Envelope Sender").hint("A silent channel whose notes run envelopes into the controls linked to it").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::fm::ENV_SENDER.into();
                         c.name = "Envelope Sender".into();
@@ -403,7 +404,7 @@ impl App {
                         self.dirty = true;
                         ui.close_menu();
                     }
-                    if ui.button("Key Controller").on_hover_text("A silent channel whose notes move the controls linked to it").clicked() {
+                    if ui.button("Key Controller").hint("A silent channel whose notes move the controls linked to it").clicked() {
                         let mut c = Chan::instrument(cereal_engine::synth::Kind::Quiet);
                         c.plugin = cereal_engine::synth::KEY_SENDER.into();
                         c.name = "Key Controller".into();
@@ -433,7 +434,7 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text("Add a channel playing a built-in instrument");
+                .hint("Add a channel playing a built-in instrument");
                 ui.label(RichText::new("Drop a sample from the browser onto a channel name to load it.").color(TEXT_DIM).small());
             });
         });

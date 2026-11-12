@@ -26,6 +26,34 @@ pub const STEP_B: Color32 = Color32::from_rgb(112, 88, 88);
 pub const STEP_A_ON: Color32 = Color32::from_rgb(205, 214, 219);
 pub const STEP_B_ON: Color32 = Color32::from_rgb(232, 200, 196);
 
+thread_local! {
+    static HINT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// A control's hint: shown beside the pointer after a moment, and at once in the hint bar under the menus.
+pub trait Hint {
+    fn hint(self, text: impl Into<egui::WidgetText>) -> Self;
+}
+
+impl Hint for Response {
+    fn hint(self, text: impl Into<egui::WidgetText>) -> Self {
+        let text = text.into();
+        if self.hovered() {
+            HINT.with(|h| {
+                let mut h = h.borrow_mut();
+                h.clear();
+                h.push_str(text.text().lines().next().unwrap_or(""));
+            });
+        }
+        self.on_hover_text(text)
+    }
+}
+
+/// The hint the pointer last rested on, taken once a frame by the hint bar.
+pub fn take_hint() -> String {
+    HINT.with(|h| std::mem::take(&mut *h.borrow_mut()))
+}
+
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }

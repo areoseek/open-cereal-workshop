@@ -1,5 +1,6 @@
 //! The mixer: one strip per insert, the master first.
 
+use crate::widgets::Hint as _;
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::widgets::*;
@@ -102,11 +103,11 @@ impl App {
                                     });
                                     let ins = &mut self.song.inserts[i];
                                     let before = (ins.volume, ins.pan, ins.enabled);
-                                    if led(ui, ins.enabled, 14.0).on_hover_text("Mute").clicked() {
+                                    if led(ui, ins.enabled, 14.0).hint("Mute").clicked() {
                                         ins.enabled = !ins.enabled;
                                         self.dirty = true;
                                     }
-                                    let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).on_hover_text("Panning");
+                                    let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).hint("Panning");
                                     control_menu(&r, cereal_engine::song::Target::InsertPan(i));
                                     if r.changed() {
                                         self.dirty = true;
@@ -131,7 +132,7 @@ impl App {
                                         self.dirty = true;
                                     }
                                     let db = 20.0 * cereal_engine::law::fader_gain(ins.volume).max(1e-6).log10();
-                                    r.on_hover_text(if ins.volume <= 0.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") });
+                                    r.hint(if ins.volume <= 0.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") });
                                     let now = (ins.volume, ins.pan, ins.enabled);
                                     if now != before && self.mixer_sel.contains(&i) {
                                         // the other selected tracks follow by the same amount
@@ -155,12 +156,12 @@ impl App {
                                         let c = rect.center();
                                         let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
                                         ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
-                                        if resp.on_hover_text(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
+                                        if resp.hint(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
                                             route = Some((src, i, !routed));
                                         }
                                         if routed {
                                             let mut lv = self.song.inserts[src].send_level(i);
-                                            if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).on_hover_text(format!("Send level {:.0} %", lv * 100.0)).changed() {
+                                            if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).hint(format!("Send level {:.0} %", lv * 100.0)).changed() {
                                                 self.song.inserts[src].set_send_level(i, lv);
                                                 self.dirty = true;
                                             }
@@ -241,7 +242,7 @@ impl App {
                             });
                         });
                         if filled {
-                            resp.on_hover_text("Click to open, click the light to switch on or off, right-click for more");
+                            resp.hint("Click to open, click the light to switch on or off, right-click for more");
                         }
                     }
                     if let Some(a) = act {
@@ -317,7 +318,7 @@ impl App {
                             });
                         })
                         .response
-                        .on_hover_text("The sound card input heard on this track. It passes the track's effects, so a recorder in a slot takes it down.");
+                        .hint("The sound card input heard on this track. It passes the track's effects, so a recorder in a slot takes it down.");
                     }
                     ui.add_space(4.0);
                     // the track's own equaliser: gain on top, frequency and width under it
@@ -330,15 +331,15 @@ impl App {
                                 ui.vertical(|ui| {
                                     let band = &mut ins.eq[b];
                                     let hz = band.hz();
-                                    changed |= knob(ui, &mut band.gain_db, -18.0, 18.0, 0.0, 22.0).on_hover_text(format!("{} gain {:+.1} dB", ["Low", "Mid", "High"][b], band.gain_db)).changed();
-                                    changed |= knob(ui, &mut band.freq, 0.0, 1.0, def[b].freq, 16.0).on_hover_text(format!("Frequency {hz:.0} Hz")).changed();
-                                    changed |= knob(ui, &mut band.q, 0.0, 1.0, def[b].q, 16.0).on_hover_text("Width").changed();
+                                    changed |= knob(ui, &mut band.gain_db, -18.0, 18.0, 0.0, 22.0).hint(format!("{} gain {:+.1} dB", ["Low", "Mid", "High"][b], band.gain_db)).changed();
+                                    changed |= knob(ui, &mut band.freq, 0.0, 1.0, def[b].freq, 16.0).hint(format!("Frequency {hz:.0} Hz")).changed();
+                                    changed |= knob(ui, &mut band.q, 0.0, 1.0, def[b].q, 16.0).hint("Width").changed();
                                 });
                             }
                             ui.vertical(|ui| {
-                                changed |= knob(ui, &mut ins.sep, -1.0, 1.0, 0.0, 22.0).on_hover_text(format!("Stereo separation {:+.0} %", -ins.sep * 100.0)).changed();
-                                changed |= ui.selectable_label(ins.invert, RichText::new("INV").small()).on_hover_text("Reverse polarity").clicked().then(|| ins.invert = !ins.invert).is_some();
-                                changed |= ui.selectable_label(ins.swap, RichText::new("SWAP").small()).on_hover_text("Swap left and right").clicked().then(|| ins.swap = !ins.swap).is_some();
+                                changed |= knob(ui, &mut ins.sep, -1.0, 1.0, 0.0, 22.0).hint(format!("Stereo separation {:+.0} %", -ins.sep * 100.0)).changed();
+                                changed |= ui.selectable_label(ins.invert, RichText::new("INV").small()).hint("Reverse polarity").clicked().then(|| ins.invert = !ins.invert).is_some();
+                                changed |= ui.selectable_label(ins.swap, RichText::new("SWAP").small()).hint("Swap left and right").clicked().then(|| ins.swap = !ins.swap).is_some();
                             });
                         });
                     }

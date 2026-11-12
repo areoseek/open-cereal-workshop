@@ -15,6 +15,7 @@
 //! semitone, Ctrl+Up/Down octave, Ctrl+Q quantise, Ctrl+L legato, Ctrl+U chop, Ctrl+G glue, Alt+M / Shift+Alt+M
 //! mute / unmute. Tool letters work while the typing keyboard is off (Ctrl+T), as in the reference.
 
+use crate::widgets::Hint as _;
 use std::collections::BTreeSet;
 
 use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -1183,7 +1184,7 @@ impl App {
                 }
             });
             for (t, label, hint) in TOOLS {
-                if ui.selectable_label(self.piano.tool == t, RichText::new(label).small()).on_hover_text(hint).clicked() {
+                if ui.selectable_label(self.piano.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.piano.tool = t;
                 }
             }
@@ -1194,11 +1195,11 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Snap");
-            if ui.selectable_label(self.piano.slide, RichText::new("Slide").small()).on_hover_text("Slide (S): notes drawn next bend the sounding notes to their pitch").clicked() {
+            .hint("Snap");
+            if ui.selectable_label(self.piano.slide, RichText::new("Slide").small()).hint("Slide (S): notes drawn next bend the sounding notes to their pitch").clicked() {
                 self.piano.slide = !self.piano.slide;
             }
-            if ui.selectable_label(self.piano.porta, RichText::new("Porta").small()).on_hover_text("Portamento (O): notes drawn next glide in from the note before").clicked() {
+            if ui.selectable_label(self.piano.porta, RichText::new("Porta").small()).hint("Portamento (O): notes drawn next glide in from the note before").clicked() {
                 self.piano.porta = !self.piano.porta;
             }
             let cur = self.piano.color;
@@ -1245,8 +1246,8 @@ impl App {
                 });
             })
             .response
-            .on_hover_text("Scale highlighting");
-            if ui.selectable_label(self.piano.ghosts, RichText::new("Ghosts").small()).on_hover_text("Show the other channels' notes behind").clicked() {
+            .hint("Scale highlighting");
+            if ui.selectable_label(self.piano.ghosts, RichText::new("Ghosts").small()).hint("Show the other channels' notes behind").clicked() {
                 self.piano.ghosts = !self.piano.ghosts;
             }
             ui.separator();

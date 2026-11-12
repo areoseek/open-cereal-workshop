@@ -5,6 +5,7 @@
 //! out of it into this program's data folder on their own disk. An already installed copy can be used in place
 //! instead. Nothing is bundled or uploaded, and their use of those files stays under the maker's licence.
 
+use crate::widgets::Hint as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
@@ -380,7 +381,7 @@ impl App {
                             ui.label(RichText::new(f.display().to_string()).monospace().size(11.0));
                         });
                     }
-                    if ui.button("Choose the installed folder...").on_hover_text("The folder that holds the Data folder").clicked() {
+                    if ui.button("Choose the installed folder...").hint("The folder that holds the Data folder").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().set_title("Choose your installed copy").pick_folder() {
                             match install_root(&dir) {
                                 Some(root) => pick = Some(root),
@@ -397,10 +398,10 @@ impl App {
             ui.add_space(10.0);
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Not now").on_hover_text("Ask again next time the program starts").clicked() {
+                if ui.button("Not now").hint("Ask again next time the program starts").clicked() {
                     close = true;
                 }
-                if ui.button("Do not ask again").on_hover_text("You can still do this later from Options").clicked() {
+                if ui.button("Do not ask again").hint("You can still do this later from Options").clicked() {
                     self.settings.never_ask = true;
                     let _ = self.settings.save();
                     close = true;
