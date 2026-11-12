@@ -40,6 +40,7 @@ jobs:
           mkdir out
           cp "target/release/${{ matrix.bin }}" LICENSE README.md out/
           cp -r docs out/docs
+          cp -r packaging out/packaging
       - uses: actions/upload-artifact@v4
         with:
           name: breakfast-cereal-${{ matrix.name }}

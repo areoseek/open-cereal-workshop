@@ -3632,8 +3632,17 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result {
     let open = std::env::args().nth(1).map(PathBuf::from);
+    // our own picture for the window and the task bar
+    let icon = image::load_from_memory(include_bytes!("../assets/icon.png")).ok().map(|i| {
+        let i = i.to_rgba8();
+        egui::IconData { width: i.width(), height: i.height(), rgba: i.into_raw() }
+    });
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_maximized(true).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Breakfast Cereal DAW").with_app_id("breakfast-cereal");
+    if let Some(i) = icon {
+        viewport = viewport.with_icon(i);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_maximized(true).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Breakfast Cereal DAW"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

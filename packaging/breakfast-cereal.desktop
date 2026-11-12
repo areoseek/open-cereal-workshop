@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Breakfast Cereal DAW
+GenericName=Music Workstation
+Comment=Pattern-based music workstation
+Exec=breakfast-cereal %f
+Icon=breakfast-cereal
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Sequencer;
+MimeType=application/x-breakfast-cereal-project;
+StartupWMClass=breakfast-cereal
