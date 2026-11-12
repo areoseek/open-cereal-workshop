@@ -803,7 +803,7 @@ pub static DEFS: &[Def] = &[
         fixed: &[(0, 1)],
         params: &[p("Input", 4, 0, 1024, 338), p("Feedback", 8, 0, 1024, 512), p("Cutoff", 12, 0, 1024, 1024), p("Tempo", 16, 0, 1024, 0), p("Steps", 20, 1, 16, 3), p("Mode", 24, 0, 1024, 0)],
     },
-    Def { kind: Kind::SendTap, ident: "Fruity Send", title: "Send Tap", size: 16, fixed: &[], params: &[p("Pan", 0, -128, 127, 0), p("Dry", 4, 0, 256, 256), p("Volume", 8, 0, 256, 256), p("Send to", 12, -1, 125, -1)] },
+    Def { kind: Kind::SendTap, ident: "Fruity Send", title: "Send Tap", size: 16, fixed: &[], params: &[p("Pan", 0, -128, 127, 0), p("Dry", 4, 0, 256, 256), p("Volume", 8, 0, 256, 256), p("Send to", 12, 0, 125, 0)] },
     Def {
         kind: Kind::Squeeze,
         ident: "Fruity Squeeze",
@@ -2871,16 +2871,19 @@ impl Unit {
                 }
             }
             Kind::SoftClip => {
-                let t = (p[0] / 127.0).clamp(0.01, 0.999);
-                let post = p[1] / 128.0;
+                // Measured: straight up to the threshold, then an exponential approach to
+                // full scale; the output level follows (11^v - 1) / 10 and the result is
+                // clipped at full scale.
+                let t = (p[0] / 128.0).clamp(0.0, 0.9999);
+                let post = (11f32.powf(p[1] / 128.0) - 1.0) / 10.0;
                 let room = 1.0 - t;
                 for f in io.iter_mut() {
                     for x in f.iter_mut() {
                         let a = x.abs();
                         if a > t {
-                            *x = x.signum() * (t + room * ((a - t) / room).tanh());
+                            *x = (t + room * (1.0 - (-(a - t) / room).exp())).copysign(*x);
                         }
-                        *x *= post;
+                        *x = (*x * post).clamp(-1.0, 1.0);
                     }
                 }
             }
@@ -2916,28 +2919,45 @@ impl Unit {
                 }
             }
             Kind::Enhancer => {
+                // All laws measured against reference renders.
                 let (pl, pr) = balance(p[0] / 128.0);
-                let g = p[1] / 256.0;
-                let side = 1.0 - p[2] / 96.0;
-                let off = (p[3].abs() / 1000.0 * sr).min(self.buf.len() as f32 - 2.0) as usize;
+                let g = (11f32.powf(p[1] / 256.0) - 1.0) / 10.0;
+                // Separation: each side takes c of the other, then both drop by c/2.
+                let c = 0.75 * p[2] / 96.0;
+                let keep = 1.0 - c * 0.5;
+                // Delay of one side: exponential in the knob, 18750 samples at 44.1 kHz at full.
+                let r = (p[3].abs() / 500.0).min(1.0);
+                let off = ((851.2f64.powf(r as f64) - 1.0) / 850.2 * 18750.0 * sr as f64 / 44100.0).round() as usize;
+                let off = off.min(self.buf.len().saturating_sub(2));
                 let left_late = p[3] < 0.0;
+                let pan_first = p[4] >= 0.5;
                 let inv = p[5] as i32;
                 let n = self.buf.len();
                 for f in io.iter_mut() {
-                    self.buf[self.pos] = *f;
+                    let (mut l, mut r) = (f[0], f[1]);
+                    if pan_first {
+                        l *= pl;
+                        r *= pr;
+                    }
+                    let (a, b) = ((l + c * r) * keep, (r + c * l) * keep);
+                    l = a;
+                    r = b;
+                    if !pan_first {
+                        l *= pl;
+                        r *= pr;
+                    }
+                    self.buf[self.pos] = [l, r];
                     if off > 0 {
                         let d = self.buf[(self.pos + n - off) % n];
                         if left_late {
-                            f[0] = d[0];
+                            l = d[0];
                         } else {
-                            f[1] = d[1];
+                            r = d[1];
                         }
                     }
                     self.pos = (self.pos + 1) % n;
-                    let m = (f[0] + f[1]) * 0.5;
-                    let s = (f[0] - f[1]) * 0.5 * side;
-                    let mut l = (m + s) * pl * g;
-                    let mut r = (m - s) * pr * g;
+                    l *= g;
+                    r *= g;
                     if inv == 1 {
                         l = -l;
                     } else if inv == 2 {
@@ -3732,7 +3752,7 @@ impl Unit {
                 let (l, r) = balance(p[0] / 128.0);
                 let (dry, vol) = (p[1] / 256.0, p[2] / 256.0);
                 self.tap.clear();
-                if p[3] >= 0.0 {
+                if p[3] >= 1.0 {
                     self.tap.extend(io.iter().map(|f| [f[0] * l * vol, f[1] * r * vol]));
                 }
                 for f in io.iter_mut() {

@@ -3687,7 +3687,8 @@ impl Player {
                     } else if u.1.fx.kind == fx::Kind::SendTap {
                         // takes the sound off at this point of the chain and adds it to one of the tracks this one is routed to
                         u.1.process(&mut bus[..n], &cx);
-                        let k = u.1.fx.p[3] as i32;
+                        // 0 is "none"; 1 is the first track this one is routed to
+                        let k = u.1.fx.p[3] as i32 - 1;
                         let ok = |d: usize| d != 0 && d != i && d < ni;
                         let to = ins.sends.iter().copied().find(|&d| ok(d) && ins.sends.iter().filter(|&&e| ok(e) && e < d).count() as i32 == k);
                         if let Some(d) = to {
