@@ -999,6 +999,43 @@ impl Song {
     pub fn in_view(&self, chan: usize) -> bool {
         self.cur_group.filter(|g| *g < self.groups.len()).is_none_or(|g| self.group_of(chan) == g)
     }
+    fn group_members(&self, g: usize) -> Vec<usize> {
+        (0..self.channels.len()).filter(|&i| self.group_of(i) == g).collect()
+    }
+    /// Give a rack group another name (taking the name of another group joins the two). Returns where it now is.
+    pub fn rename_group(&mut self, g: usize, name: &str) -> Option<usize> {
+        if g >= self.groups.len() || name.is_empty() {
+            return None;
+        }
+        let (members, shown) = (self.group_members(g), self.cur_group == Some(g));
+        if members.is_empty() {
+            self.groups[g] = name.to_string();
+            return Some(g);
+        }
+        let at = self.group_channels(&members, name);
+        if shown {
+            self.cur_group = Some(at);
+        }
+        Some(at)
+    }
+    /// Take a rack group away; its channels go to the catch-all group.
+    pub fn delete_group(&mut self, g: usize) {
+        if g >= self.groups.len() || self.groups[g] == "Unsorted" {
+            return;
+        }
+        let members = self.group_members(g);
+        self.cur_group = None;
+        if members.is_empty() {
+            self.groups.remove(g);
+            for c in &mut self.channels {
+                if c.group > g {
+                    c.group -= 1;
+                }
+            }
+        } else {
+            self.group_channels(&members, "Unsorted");
+        }
+    }
     /// File the given channels under a group of this name, made if it is not there yet; the list stays in name order.
     pub fn group_channels(&mut self, chans: &[usize], name: &str) -> usize {
         // settle everyone's group first, so adding a name cannot move a channel that had none

@@ -19,6 +19,41 @@ pub struct State {
     pub(crate) sel: std::collections::BTreeSet<usize>,
     /// The name being typed for a new group of the selected channels.
     pub(crate) group_name: Option<String>,
+    /// The group that the name window renames, when it is not making a new one.
+    group_edit: Option<usize>,
+    /// The graph editor under the channels: open or not, and which property of the steps it shows.
+    graph: bool,
+    graph_kind: usize,
+}
+
+const GRAPH: [&str; 7] = ["Note pitch", "Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y"];
+const GRAPH_H: f32 = 64.0;
+
+/// A step's property as a share of the graph's height, and back.
+fn graph_get(n: &cereal_engine::song::Note, kind: usize) -> f32 {
+    match kind {
+        0 => n.key as f32 / 131.0,
+        1 => n.vel / 1.28,
+        2 => n.release,
+        3 => n.fine_cents / 2400.0 + 0.5,
+        4 => n.pan * 0.5 + 0.5,
+        5 => n.mod_x * 0.5 + 0.5,
+        _ => n.mod_y * 0.5 + 0.5,
+    }
+    .clamp(0.0, 1.0)
+}
+fn graph_set(n: &mut cereal_engine::song::Note, kind: usize, f: f32) {
+    // the two-sided ones catch on their middle
+    let mid = |f: f32| if (f - 0.5).abs() < 0.04 { 0.0 } else { f * 2.0 - 1.0 };
+    match kind {
+        0 => n.key = (f * 131.0).round() as _,
+        1 => n.vel = f * 1.28,
+        2 => n.release = f,
+        3 => n.fine_cents = (mid(f) * 1200.0).round(),
+        4 => n.pan = mid(f),
+        5 => n.mod_x = mid(f),
+        _ => n.mod_y = mid(f),
+    }
 }
 
 const STEP_W: f32 = 15.0;
@@ -56,9 +91,80 @@ impl App {
                     self.song.cur_group = p;
                     self.dirty = true;
                 }
+                let cur = self.song.cur_group.filter(|g| *g < self.song.groups.len());
+                ui.menu_button("...", |ui| {
+                    if ui.add_enabled(cur.is_some(), egui::Button::new("Rename group...")).clicked() {
+                        if let Some(g) = cur {
+                            self.rack.group_edit = Some(g);
+                            self.rack.group_name = Some(self.song.groups[g].clone());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(cur.is_some_and(|g| self.song.groups[g] != "Unsorted"), egui::Button::new("Delete group")).on_hover_text("Its channels go to Unsorted").clicked() {
+                        if let Some(g) = cur {
+                            self.song.delete_group(g);
+                            self.dirty = true;
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Group selected channels...        Alt+G").clicked() {
+                        self.rack.group_edit = None;
+                        self.rack.group_name = Some(String::new());
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_text("Group options");
             });
         }
         self.rack.sel.retain(|c| *c < self.song.channels.len());
+        egui::TopBottomPanel::bottom("rack_graph").frame(egui::Frame::NONE).show_separator_line(false).show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.rack.graph, "Graph editor").on_hover_text("The selected channel's steps as bars: drag to set each step's property").clicked() {
+                    self.rack.graph = !self.rack.graph;
+                }
+                if self.rack.graph {
+                    egui::ComboBox::from_id_salt("rack_graph_kind").width(110.0).selected_text(GRAPH[self.rack.graph_kind.min(6)]).show_ui(ui, |ui| {
+                        for (i, name) in GRAPH.iter().enumerate() {
+                            ui.selectable_value(&mut self.rack.graph_kind, i, *name);
+                        }
+                    });
+                    ui.label(RichText::new(self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default()).color(TEXT_DIM));
+                }
+            });
+            if self.rack.graph {
+                let (chan, kind) = (self.sel_chan as u16, self.rack.graph_kind.min(6));
+                let two_sided = kind >= 3;
+                egui::ScrollArea::horizontal().id_salt("rack_graph_scroll").show(ui, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(234.0 + nsteps as f32 * (STEP_W + 3.0), GRAPH_H), Sense::click_and_drag());
+                    let area = Rect::from_min_max(Pos2::new(rect.left() + 234.0, rect.top()), rect.max);
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(area, 2.0, GRID_DARK);
+                    if two_sided {
+                        p.line_segment([area.left_center(), area.right_center()], Stroke::new(1.0_f32, LINE_SOFT));
+                    }
+                    let drag = resp.interact_pointer_pos().filter(|pp| area.contains(*pp) && (resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on()));
+                    let hit = drag.map(|pp| (((pp.x - area.left()) / (STEP_W + 3.0)) as u32, ((area.bottom() - pp.y) / area.height()).clamp(0.0, 1.0)));
+                    for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == chan && n.pos % step == 0) {
+                        let s = n.pos / step;
+                        if s as usize >= nsteps {
+                            continue;
+                        }
+                        if let Some((hs, f)) = hit {
+                            if hs == s {
+                                graph_set(n, kind, f);
+                                self.dirty = true;
+                            }
+                        }
+                        let x = area.left() + s as f32 * (STEP_W + 3.0);
+                        let y = area.bottom() - graph_get(n, kind) * area.height();
+                        let foot = if two_sided { area.center().y } else { area.bottom() };
+                        let bar = Rect::from_min_max(Pos2::new(x, y.min(foot)), Pos2::new(x + STEP_W, y.max(foot).max(y.min(foot) + 2.0)));
+                        p.rect_filled(bar, 1.0, ACCENT);
+                    }
+                });
+            }
+        });
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
             for ci in 0..self.song.channels.len() {
@@ -345,10 +451,14 @@ impl App {
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let name = name.trim();
                     if !name.is_empty() {
-                        let t = self.rack_targets();
-                        let g = self.song.group_channels(&t, name);
-                        self.song.cur_group = Some(g);
-                        self.rack.sel.clear();
+                        if let Some(g) = self.rack.group_edit {
+                            self.song.rename_group(g, name);
+                        } else {
+                            let t = self.rack_targets();
+                            let g = self.song.group_channels(&t, name);
+                            self.song.cur_group = Some(g);
+                            self.rack.sel.clear();
+                        }
                         self.dirty = true;
                     }
                     keep = false;
@@ -359,6 +469,8 @@ impl App {
             });
             if keep {
                 self.rack.group_name = Some(name);
+            } else {
+                self.rack.group_edit = None;
             }
         }
         if let Some((ci, mut name)) = self.rack.rename.take() {
