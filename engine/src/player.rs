@@ -4390,7 +4390,7 @@ mod tests {
         s.channels[0].insert = 1;
         s.channels[1].insert = 2;
         let first_and_last = |fake: Vec<(usize, usize)>| {
-            let (mut h, mut p) = new_player(s.clone(), 48_000.0);
+            let (h, mut p) = new_player(s.clone(), 48_000.0);
             p.comp.fake = fake;
             h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
             h.send(Cmd::NoteOn { chan: 1, key: 60, vel: 1.0 });
