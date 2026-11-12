@@ -116,5 +116,10 @@ pub fn menu(ui: &mut Ui, instruments: bool) -> Option<Arc<Instance>> {
     if ui.button("Look again").hint("Scan the plug-in folders again").clicked() {
         host::forget();
     }
+    let failed = host::failed();
+    if !failed.is_empty() {
+        let names: Vec<String> = failed.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
+        ui.label(RichText::new(format!("{} could not be opened and {} left out.", if names.len() == 1 { names[0].clone() } else { format!("{} plug-in files", names.len()) }, if names.len() == 1 { "is" } else { "are" })).small().color(TEXT_DIM)).hint(names.join(", "));
+    }
     got
 }

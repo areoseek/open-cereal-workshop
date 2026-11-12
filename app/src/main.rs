@@ -3689,6 +3689,18 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // asked to look inside one plug-in file for a running copy of ourselves: answer and leave
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|a| a == "--scan-plugin") {
+        if let Some(file) = args.next() {
+            print!("{}", cereal_engine::host::scan_report(Path::new(&file)));
+        }
+        std::process::exit(0);
+    }
+    if let Ok(me) = std::env::current_exe() {
+        let memory = setup::settings_path().and_then(|p| p.parent().map(|d| d.join("plugins.txt")));
+        cereal_engine::host::scan_with(&me, memory.as_deref());
+    }
     let open = std::env::args().nth(1).map(PathBuf::from);
     // our own picture for the window and the task bar
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png")).ok().map(|i| {

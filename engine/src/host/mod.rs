@@ -196,11 +196,160 @@ pub fn add_folder(dir: &Path) {
     }
 }
 
-/// Drop the list of installed plug-ins, so the next look scans the folders again.
+/// Drop the list of installed plug-ins, so the next look scans the folders again. Files that failed the
+/// last time are tried once more.
 pub fn forget() {
     if let Ok(mut k) = KNOWN.lock() {
         *k = None;
     }
+    RETRY.store(true, Relaxed);
+}
+
+/// A program that looks inside one plug-in file for us (`<program> --scan-plugin <file>`), and the file the
+/// answers are remembered in. With these set, a plug-in that crashes or hangs while it is being looked at
+/// only loses its own place in the list.
+static SCANNER: Mutex<Option<(PathBuf, Option<PathBuf>)>> = Mutex::new(None);
+static FAILED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static RETRY: AtomicBool = AtomicBool::new(false);
+
+pub fn scan_with(program: &Path, remember_in: Option<&Path>) {
+    if let Ok(mut s) = SCANNER.lock() {
+        *s = Some((program.to_path_buf(), remember_in.map(Path::to_path_buf)));
+    }
+}
+
+/// The files that could not be looked into at the last scan.
+pub fn failed() -> Vec<PathBuf> {
+    FAILED.lock().map(|f| f.clone()).unwrap_or_default()
+}
+
+fn one_line(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ")
+}
+
+/// What the scanning program prints for one file: a line per plug-in, then "ok".
+pub fn scan_report(path: &Path) -> String {
+    let mut out = String::new();
+    for f in inside(path) {
+        out += &format!("{}\t{}\t{}\t{}\n", one_line(&f.id), one_line(&f.name), one_line(&f.vendor), f.instrument as u8);
+    }
+    out + "ok\n"
+}
+
+fn read_report(path: &Path, text: &str) -> Option<Vec<Found>> {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.pop() != Some("ok") {
+        return None;
+    }
+    lines
+        .into_iter()
+        .map(|l| {
+            let mut p = l.split('\t');
+            Some(Found { path: path.to_path_buf(), id: p.next()?.into(), name: p.next()?.into(), vendor: p.next()?.into(), instrument: p.next()? == "1" })
+        })
+        .collect()
+}
+
+/// Run the scanning program on one file. None when it crashed, hung or made no sense.
+fn scan_apart(program: &Path, file: &Path) -> Option<Vec<Found>> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program).arg("--scan-plugin").arg(file).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut pipe = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        pipe.read_to_string(&mut s).ok().map(|_| s)
+    });
+    let began = std::time::Instant::now();
+    let done = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) if began.elapsed().as_secs() < 30 => std::thread::sleep(std::time::Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let text = reader.join().ok().flatten()?;
+    done.then(|| read_report(file, &text)).flatten()
+}
+
+/// A file's age and size, to tell whether a remembered answer still holds.
+fn stamp(file: &Path) -> String {
+    let m = std::fs::metadata(file).ok();
+    let age = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    format!("{age}:{}", m.map_or(0, |m| m.len()))
+}
+
+/// The remembered answers: file, stamp, and its plug-ins (None for a file that failed).
+type Memory = HashMap<PathBuf, (String, Option<Vec<Found>>)>;
+
+fn read_memory(text: &str) -> Memory {
+    let mut out = Memory::new();
+    let mut cur: Option<PathBuf> = None;
+    for l in text.lines() {
+        if let Some(rest) = l.strip_prefix("F\t") {
+            let mut p = rest.split('\t');
+            let (Some(path), Some(st), Some(state)) = (p.next(), p.next(), p.next()) else { continue };
+            let path = PathBuf::from(path);
+            out.insert(path.clone(), (st.to_string(), (state == "ok").then(Vec::new)));
+            cur = Some(path);
+        } else if let (Some(rest), Some(path)) = (l.strip_prefix("P\t"), &cur) {
+            let mut p = rest.split('\t');
+            let (Some(id), Some(name), Some(vendor), Some(inst)) = (p.next(), p.next(), p.next(), p.next()) else { continue };
+            if let Some((_, Some(list))) = out.get_mut(path) {
+                list.push(Found { path: path.clone(), id: id.into(), name: name.into(), vendor: vendor.into(), instrument: inst == "1" });
+            }
+        }
+    }
+    out
+}
+
+fn write_memory(mem: &Memory) -> String {
+    let mut files: Vec<_> = mem.iter().collect();
+    files.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = String::new();
+    for (path, (st, list)) in files {
+        out += &format!("F\t{}\t{st}\t{}\n", one_line(&path.to_string_lossy()), if list.is_some() { "ok" } else { "bad" });
+        for f in list.iter().flatten() {
+            out += &format!("P\t{}\t{}\t{}\t{}\n", one_line(&f.id), one_line(&f.name), one_line(&f.vendor), f.instrument as u8);
+        }
+    }
+    out
+}
+
+fn scan_all(program: &Path, remember_in: Option<&Path>) -> Vec<Found> {
+    let retry = RETRY.swap(false, Relaxed);
+    let old = remember_in.and_then(|p| std::fs::read_to_string(p).ok()).map(|t| read_memory(&t)).unwrap_or_default();
+    let mut new = Memory::new();
+    let mut failed = vec![];
+    let mut out = vec![];
+    for file in files() {
+        let st = stamp(&file);
+        let got = match old.get(&file) {
+            Some((was, list)) if *was == st && (list.is_some() || !retry) => list.clone(),
+            _ => scan_apart(program, &file),
+        };
+        match &got {
+            Some(list) => out.extend(list.iter().cloned()),
+            None => failed.push(file.clone()),
+        }
+        new.insert(file, (st, got));
+    }
+    if let Some(p) = remember_in {
+        if new != old {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(p, write_memory(&new));
+        }
+    }
+    if let Ok(mut f) = FAILED.lock() {
+        *f = failed;
+    }
+    out
 }
 
 /// Every installed plug-in. The folders are scanned the first time this is asked.
@@ -208,7 +357,11 @@ pub fn known() -> Arc<Vec<Found>> {
     if let Some(k) = KNOWN.lock().ok().and_then(|k| k.clone()) {
         return k;
     }
-    let list = Arc::new(files().iter().flat_map(|f| inside(f)).collect::<Vec<_>>());
+    let scanner = SCANNER.lock().ok().and_then(|s| s.clone());
+    let list = Arc::new(match scanner {
+        Some((program, memory)) => scan_all(&program, memory.as_deref()),
+        None => files().iter().flat_map(|f| inside(f)).collect::<Vec<_>>(),
+    });
     if let Ok(mut k) = KNOWN.lock() {
         *k = Some(list.clone());
     }
@@ -1358,6 +1511,25 @@ pub(crate) fn test_install(dir: &Path, kind: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_answers_are_remembered_and_read_back() {
+        let file = PathBuf::from("/x/My Synth.clap");
+        let found = vec![Found { path: file.clone(), id: "a.b".into(), name: "My\tSynth".into(), vendor: "".into(), instrument: true }];
+        let report = format!("{}\t{}\t\t1\nok\n", "a.b", one_line("My\tSynth"));
+        let back = read_report(&file, &report).unwrap();
+        assert_eq!(back[0].name, "My Synth");
+        assert_eq!((back[0].id.as_str(), back[0].instrument), ("a.b", true));
+        // a report cut short by a crash is no answer
+        assert!(read_report(&file, "a.b\tMy Synth\t\t1\n").is_none());
+        assert!(read_report(&file, "").is_none());
+        let mut mem = Memory::new();
+        mem.insert(file.clone(), ("5:9".into(), Some(back.clone())));
+        mem.insert(PathBuf::from("/x/broken.vst3"), ("1:2".into(), None));
+        mem.insert(PathBuf::from("/x/empty.clap"), ("3:4".into(), Some(vec![])));
+        assert_eq!(read_memory(&write_memory(&mem)), mem);
+        let _ = found;
+    }
 
     #[test]
     fn a_copy_gets_a_plugin_of_its_own_with_the_same_settings() {
