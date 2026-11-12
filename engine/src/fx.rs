@@ -179,7 +179,7 @@ pub static DEFS: &[Def] = &[
         title: "Compressor",
         size: 36,
         fixed: &[(0, 3), (28, 1)],
-        params: &[p("Threshold", 4, -600, 0, 0), p("Ratio", 8, 10, 300, 10), p("Gain", 12, -300, 300, 0), p("Attack", 16, 0, 4000, 10), p("Release", 20, 1, 4000, 200), p("Type", 24, 0, 7, 0)],
+        params: &[p("Threshold", 4, -600, 0, 0), p("Ratio", 8, 4, 300, 10), p("Gain", 12, -300, 300, 0), p("Attack", 16, 0, 4000, 10), p("Release", 20, 1, 4000, 200), p("Type", 24, 0, 7, 0)],
     },
     Def {
         kind: Kind::Shaper,
@@ -3117,35 +3117,121 @@ impl Unit {
                 }
             }
             Kind::Comp => {
-                let thr = p[0] / 10.0;
-                let ratio = (p[1] / 10.0).max(1.0);
-                let makeup = db(p[2] / 10.0);
-                let att = (-1.0 / ((p[3] / 10.0).max(0.05) * 0.001 * sr)).exp();
-                let rel = (-1.0 / (p[4].max(1.0) * 0.001 * sr)).exp();
-                // types: hard, medium, vintage, soft, then the same four with a slower "R" release
-                let knee = match p[5] as i32 % 4 {
-                    0 => 0.0,
+                // measured against renders: 64 samples of delay, a 3 Hz high-pass, a peak detector that falls
+                // over about a millisecond, the gain smoothed as a plain factor, and a look-ahead limiter last
+                let thr = (p[0] / 10.0) as f64;
+                let slope = 1.0 / (p[1] as f64 / 10.0).max(0.4) - 1.0;
+                let makeup = 10f64.powf(p[2] as f64 / 200.0);
+                let srd = sr as f64;
+                let coef = |ms: f64| if ms <= 0.0 { 1.0 } else { 1.0 - (-std::f64::consts::LN_10 / (ms * 0.001 * srd)).exp() };
+                let ka = coef(p[3] as f64 / 10.0);
+                let kr = coef((p[4] as f64).max(1.0));
+                let kd = coef(1.0);
+                let ty = (p[5] as i32).clamp(0, 7) % 4;
+                let half = match ty {
                     1 => 6.0,
-                    2 => 10.0,
-                    _ => 16.0,
+                    3 => 15.0,
+                    _ => 0.0,
                 };
+                // the vintage curve: a cubic from 7 dB under the threshold, held at its top
+                let vint = {
+                    let sv = (-slope).clamp(0.5, 0.9667);
+                    let pts = [0.5, 0.75, 0.9, 0.9667];
+                    let lag = |v: [f64; 4]| {
+                        let mut y = 0.0;
+                        for i in 0..4 {
+                            let mut w = v[i];
+                            for j in 0..4 {
+                                if j != i {
+                                    w *= (sv - pts[j]) / (pts[i] - pts[j]);
+                                }
+                            }
+                            y += w;
+                        }
+                        y * -slope
+                    };
+                    let a = lag([0.0915, 0.0998, 0.1108, 0.1234]);
+                    let b = lag([0.04316, 0.04314, 0.04213, 0.03960]);
+                    let c = lag([-0.001068, -0.000979, -0.000842, -0.000669]);
+                    let top = if c.abs() > 1e-12 { (-2.0 * b - (4.0 * b * b - 12.0 * a * c).max(0.0).sqrt()) / (6.0 * c) } else { 0.0 };
+                    (a, b, c, top)
+                };
+                let hp = (-2.0 * std::f64::consts::PI * 3.0 / srd).exp();
+                let hg = (1.0 + hp) / 2.0;
+                const LAG: usize = 64;
+                const CEIL: f64 = 0.988;
+                if self.buf.len() != LAG * 2 {
+                    // the second half keeps one minus the limiter's recent targets for its smoothing window
+                    self.buf = vec![[0.0; 2]; LAG * 2];
+                    self.pos = 0;
+                }
+                let hold = (160.0 * srd / 44100.0) as f32;
+                let rise = 4.6e-6 * (44100.0 / srd).powi(2);
                 for f in io.iter_mut() {
-                    let peak = f[0].abs().max(f[1].abs()).max(1e-9);
-                    let lv = 20.0 * peak.log10();
-                    let over = lv - thr;
-                    let red = if knee > 0.0 && over.abs() < knee / 2.0 {
-                        (1.0 / ratio - 1.0) * (over + knee / 2.0).powi(2) / (2.0 * knee)
+                    let mut x = [0f64; 2];
+                    for ch in 0..2 {
+                        let v = f[ch] as f64;
+                        let y = hg * (v - z[ch] as f64) + hp * z[2 + ch] as f64;
+                        z[ch] = f[ch];
+                        z[2 + ch] = y as f32;
+                        x[ch] = y;
+                    }
+                    let v = x[0].abs().max(x[1].abs());
+                    let mut e = z[4] as f64;
+                    e = if v > e { v } else { e + (v - e) * kd };
+                    z[4] = e as f32;
+                    let over = 20.0 * e.max(1e-9).log10() - thr;
+                    let red = if ty == 2 {
+                        let o = (over + 7.0).clamp(0.0, vint.3.max(0.0));
+                        -(vint.0 * o + vint.1 * o * o + vint.2 * o * o * o)
+                    } else if half > 0.0 && over.abs() < half {
+                        slope * (over + half).powi(2) / (4.0 * half)
                     } else if over > 0.0 {
-                        (1.0 / ratio - 1.0) * over
+                        slope * over
                     } else {
                         0.0
                     };
-                    // z[0] holds the smoothed reduction in dB (negative)
-                    let c = if red < z[0] { att } else { rel };
-                    z[0] = red + (z[0] - red) * c;
-                    let g = db(z[0]) * makeup;
-                    f[0] *= g;
-                    f[1] *= g;
+                    let target = 10f64.powf(red / 20.0);
+                    // z[5] holds one minus the smoothed gain so silence starts at unity
+                    let mut g = 1.0 - z[5] as f64;
+                    g += (target - g) * if target < g { ka } else { kr };
+                    z[5] = (1.0 - g) as f32;
+                    let c = [x[0] * g * makeup, x[1] * g * makeup];
+                    // limiter: the peak is held, the gain drops ahead of it and comes back slowly at first
+                    let pk = c[0].abs().max(c[1].abs()) as f32;
+                    if pk >= z[7] {
+                        z[7] = pk;
+                        z[8] = 0.0;
+                    } else {
+                        z[8] += 1.0;
+                        if z[8] > hold {
+                            z[7] = pk;
+                            z[8] = 0.0;
+                        }
+                    }
+                    let want = if z[7] as f64 > CEIL { CEIL / z[7] as f64 } else { 1.0 };
+                    let mut l = 1.0 - z[6] as f64;
+                    if want <= l + 1e-6 {
+                        l = want;
+                        z[9] = 0.0;
+                    } else {
+                        z[9] += 1.0;
+                        l += (want - l) * (rise * z[9] as f64).min(1.0);
+                    }
+                    z[6] = (1.0 - l) as f32;
+                    self.buf[LAG + self.pos][0] = z[6];
+                    let mut acc = 0.0;
+                    for k in 0..LAG {
+                        let age = (self.pos + LAG - k) % LAG;
+                        let w = (age as f64 - 3.5).min(LAG as f64 - 0.5 - age as f64).clamp(0.0, 12.0) / 12.0;
+                        acc += w * self.buf[LAG + k][0] as f64;
+                    }
+                    let l = 1.0 - acc / 48.0;
+                    let d = self.buf[self.pos];
+                    self.buf[self.pos] = [c[0] as f32, c[1] as f32];
+                    self.pos = (self.pos + 1) % LAG;
+                    f[0] = (d[0] as f64 * l) as f32;
+                    f[1] = (d[1] as f64 * l) as f32;
                 }
             }
             Kind::Shaper => {
