@@ -198,6 +198,8 @@ pub(crate) struct App {
     /// MIDI keyboards and pads.
     midi: midi::MidiIn,
     sel_insert: usize,
+    /// Mixer tracks selected besides the one that has the keys; faders, pans and mutes move together.
+    mixer_sel: std::collections::BTreeSet<usize>,
     rack: rack::State,
     piano: pianoroll::State,
     playlist: playlist::State,
@@ -349,6 +351,7 @@ impl App {
             sel_chan: 0,
             midi,
             sel_insert: 0,
+            mixer_sel: Default::default(),
             rack: Default::default(),
             piano: Default::default(),
             playlist: Default::default(),
@@ -1446,6 +1449,8 @@ impl App {
         self.song = self.history[self.hist_at].clone();
         self.sel_chan = self.sel_chan.min(self.song.channels.len().saturating_sub(1));
         self.sel_insert = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
+        let tracks = self.song.inserts.len();
+        self.mixer_sel.retain(|i| *i < tracks);
         let tr = &self.handle.transport;
         tr.set_pattern(tr.pattern().min(self.song.patterns.len().saturating_sub(1)));
         self.unsaved = true;

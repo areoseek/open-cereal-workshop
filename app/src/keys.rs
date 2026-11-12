@@ -418,6 +418,8 @@ impl App {
                     }
                 }
                 Key::S if m.shift && !repeat => self.state_ask = Some(crate::StateAsk::SaveTrack(i)),
+                Key::A if !repeat => self.mixer_sel = (1..n.saturating_sub(1).max(1)).collect(),
+                Key::D if !repeat => self.mixer_sel.clear(),
                 _ => return false,
             }
             return true;
@@ -450,8 +452,16 @@ impl App {
             return false;
         }
         match key {
-            Key::ArrowLeft => self.sel_insert = i.saturating_sub(1),
-            Key::ArrowRight => self.sel_insert = (i + 1).min(n - 1),
+            Key::ArrowLeft | Key::ArrowRight => {
+                let to = if key == Key::ArrowLeft { i.saturating_sub(1) } else { (i + 1).min(n - 1) };
+                if m.shift {
+                    self.mixer_sel.insert(i);
+                    self.mixer_sel.insert(to);
+                } else {
+                    self.mixer_sel.clear();
+                }
+                self.sel_insert = to;
+            }
             Key::F2 if !repeat && i > 0 => self.rename_insert = Some((i, self.song.inserts[i].name.clone())),
             Key::S if !repeat && !self.typing_keys => self.solo_insert(i, false),
             _ => return false,

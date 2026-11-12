@@ -20,6 +20,7 @@ enum SlotAct {
 impl App {
     pub(crate) fn mixer_ui(&mut self, ui: &mut Ui) {
         let n = self.song.inserts.len();
+        self.mixer_sel.retain(|i| *i < n);
         if self.peaks.len() != n {
             self.peaks = vec![(0.0, 0.0); n];
         }
@@ -47,7 +48,7 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     ui.horizontal_top(|ui| {
                         for i in 0..n {
-                            let selected = self.sel_insert == i;
+                            let selected = self.sel_insert == i || self.mixer_sel.contains(&i);
                             let name = self.song.insert_name(i);
                             let frame = egui::Frame::new().fill(if selected { PANEL.lerp_to_gamma(Color32::WHITE, 0.08) } else { PANEL }).inner_margin(3.0).corner_radius(3.0);
                             let inner = frame.show(ui, |ui| {
@@ -61,7 +62,22 @@ impl App {
                                     ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
                                     ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, &name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
                                     if resp.clicked() {
-                                        self.sel_insert = i;
+                                        let m = ui.input(|x| x.modifiers);
+                                        if m.command {
+                                            // add this track to the selection, or drop it
+                                            if !self.mixer_sel.remove(&i) {
+                                                self.mixer_sel.insert(self.sel_insert);
+                                                self.mixer_sel.insert(i);
+                                                self.sel_insert = i;
+                                            }
+                                        } else if m.shift {
+                                            let (a, b) = (self.sel_insert.min(i), self.sel_insert.max(i));
+                                            self.mixer_sel.extend(a..=b);
+                                            self.sel_insert = i;
+                                        } else {
+                                            self.mixer_sel.clear();
+                                            self.sel_insert = i;
+                                        }
                                     }
                                     if resp.hovered() {
                                         self.wheel_over = Some(crate::keys::WheelMove::Insert(i, false));
@@ -77,6 +93,7 @@ impl App {
                                         }
                                     });
                                     let ins = &mut self.song.inserts[i];
+                                    let before = (ins.volume, ins.pan, ins.enabled);
                                     if led(ui, ins.enabled, 14.0).on_hover_text("Mute").clicked() {
                                         ins.enabled = !ins.enabled;
                                         self.dirty = true;
@@ -94,6 +111,18 @@ impl App {
                                     }
                                     let db = 20.0 * cereal_engine::law::fader_gain(ins.volume).max(1e-6).log10();
                                     r.on_hover_text(if ins.volume <= 0.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") });
+                                    let now = (ins.volume, ins.pan, ins.enabled);
+                                    if now != before && self.mixer_sel.contains(&i) {
+                                        // the other selected tracks follow by the same amount
+                                        for k in self.mixer_sel.iter().copied().filter(|k| *k != i && *k < n) {
+                                            let s = &mut self.song.inserts[k];
+                                            s.volume = (s.volume + now.0 - before.0).clamp(0.0, 1.25);
+                                            s.pan = (s.pan + now.1 - before.1).clamp(-1.0, 1.0);
+                                            if now.2 != before.2 {
+                                                s.enabled = now.2;
+                                            }
+                                        }
+                                    }
                                     let dot = if used[i] > 0 { GREEN } else { PANEL_DARK };
                                     let (rect, _) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 8.0), Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 3.0, dot);

@@ -112,7 +112,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Alt+L | Select the channel that plays into this track | yes |
 | F2 | Rename the track | yes |
 | Ctrl+Shift+S | Save the track's state | yes |
-| Ctrl+A, Ctrl+Shift+click | Select all, add to the selection | no (one track is selected at a time) |
+| Ctrl+A / Ctrl+D | Select all the tracks / only the one with the keys | yes |
+| Ctrl+click, Shift+click a name plate, Shift+Left / Right | Add to the selection, select the run up to it; the selected tracks' faders, pans and mutes move together | yes |
 | Alt+R | Render the armed tracks to audio files | no |
 | Alt+W | Wave view | no |
 | Shift+wheel on a track's name plate | Move that track left / right | yes |
