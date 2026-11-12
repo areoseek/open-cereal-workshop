@@ -970,20 +970,204 @@ fn formula_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     changed
 }
 
-/// A control board: every stored control drawn where it sits, and played with the mouse.
+/// Where a drawn board sits on the screen: its area, the board point at its corner, and its scale.
+struct BoardAt {
+    area: egui::Rect,
+    x0: f32,
+    y0: f32,
+    s: f32,
+}
+
+/// A control board with its editing bar: played with the mouse, or, with editing on, rearranged with it.
 pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
     use cereal_engine::surface::{self, What};
-    let Some(raw) = f.raw.clone() else { return false };
-    let controls = surface::controls(&raw);
-    if controls.is_empty() {
-        ui.label(RichText::new("This board has no controls on it yet.").small().color(TEXT_DIM));
+    if f.raw.is_none() {
         return false;
     }
+    let id = ui.id().with(("board edit", ui.next_auto_id()));
+    let (mut editing, mut sel): (bool, Option<usize>) = ui.data(|d| d.get_temp(id)).unwrap_or((std::env::var_os("CEREAL_BOARD_EDIT").is_some(), Some(0)));
+    let mut changed = false;
+    // an edit works on the block with the current positions written in, and the positions are read back from it
+    let mut apply = |f: &mut fx::Fx, edit: &dyn Fn(&[u8]) -> Vec<u8>| {
+        let now = surface::encode(&f.p, f.raw.as_ref().map(|r| &r[..]));
+        let new = edit(&now);
+        if let Some(p) = surface::decode(&new) {
+            f.p = p;
+            f.raw = Some(std::sync::Arc::new(new));
+            changed = true;
+        }
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut editing, "Edit board").on_hover_text("Move, resize, restyle, add and remove the controls. Turn it off to play them.");
+        if editing {
+            for (w, label) in [(What::Knob, "Knob"), (What::Slider, "Slider"), (What::Button, "Button"), (What::Check, "Switch"), (What::Digits, "Number"), (What::Pad, "Pad"), (What::Label, "Label"), (What::Bevel, "Frame")] {
+                if ui.small_button(format!("+ {label}")).clicked() {
+                    let n = f.raw.as_ref().map_or(0, |r| surface::controls(r).len());
+                    let at = (16.0 + (n % 8) as f32 * 12.0, 16.0 + (n % 8) as f32 * 12.0);
+                    apply(f, &|b| surface::add(b, w, at));
+                    sel = Some(n);
+                }
+            }
+        }
+    });
+    if !editing {
+        let (moved, _) = board_ui(ui, f, max_w, false);
+        ui.data_mut(|d| d.insert_temp(id, (editing, None::<usize>)));
+        return moved || changed;
+    }
+    let geo = ui.add_enabled_ui(false, |ui| board_ui(ui, f, max_w, true).1).inner;
+    let raw = f.raw.clone().unwrap();
+    let controls = surface::controls(&raw);
+    sel = sel.filter(|&i| i < controls.len());
+    if let Some(g) = geo {
+        let pt = ui.painter_at(g.area);
+        let snap = |v: f32| (v / 2.0).round() * 2.0;
+        // a click on bare board lets go of the chosen control
+        if ui.interact(g.area, id.with("bare"), Sense::click()).clicked() {
+            sel = None;
+        }
+        for (n, c) in controls.iter().enumerate() {
+            let r = egui::Rect::from_min_size(g.area.min + Vec2::new((c.rect[0] - g.x0) * g.s, (c.rect[1] - g.y0) * g.s), Vec2::new(c.rect[2].max(4.0) * g.s, c.rect[3].max(4.0) * g.s));
+            let resp = ui.interact(r, id.with(("move", n)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
+            if resp.clicked() || resp.drag_started() {
+                sel = Some(n);
+            }
+            if resp.dragged() {
+                let d = resp.drag_delta() / g.s;
+                if d != Vec2::ZERO {
+                    let acc: Vec2 = ui.data(|m| m.get_temp(id.with("carry"))).unwrap_or(Vec2::ZERO) + d;
+                    let step = Vec2::new(snap(acc.x), snap(acc.y));
+                    ui.data_mut(|m| m.insert_temp(id.with("carry"), acc - step));
+                    if step != Vec2::ZERO {
+                        let rect = [(c.rect[0] + step.x).max(0.0), (c.rect[1] + step.y).max(0.0), c.rect[2], c.rect[3]];
+                        apply(f, &|b| surface::set_rect(b, n, rect));
+                    }
+                }
+            }
+            if sel == Some(n) {
+                pt.rect_stroke(r, 0.0, Stroke::new(1.0_f32, ACCENT), egui::StrokeKind::Outside);
+                // the corner that sizes it
+                let h = egui::Rect::from_center_size(r.max, Vec2::splat(9.0));
+                let hr = ui.interact(h, id.with(("size", n)), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+                pt.rect_filled(h, 1.0, ACCENT);
+                if hr.dragged() {
+                    let d = hr.drag_delta() / g.s;
+                    let acc: Vec2 = ui.data(|m| m.get_temp(id.with("carry"))).unwrap_or(Vec2::ZERO) + d;
+                    let step = Vec2::new(snap(acc.x), snap(acc.y));
+                    ui.data_mut(|m| m.insert_temp(id.with("carry"), acc - step));
+                    if step != Vec2::ZERO {
+                        let rect = [c.rect[0], c.rect[1], (c.rect[2] + step.x).max(6.0), (c.rect[3] + step.y).max(6.0)];
+                        apply(f, &|b| surface::set_rect(b, n, rect));
+                    }
+                }
+            }
+        }
+    }
+    if ui.input(|i| !i.pointer.any_down()) {
+        ui.data_mut(|m| m.insert_temp(id.with("carry"), Vec2::ZERO));
+    }
+    // the chosen control's own settings
+    if let Some((n, c)) = sel.and_then(|n| controls.get(n).map(|c| (n, c))) {
+        let mut gone = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Name").small().color(TEXT_DIM));
+            let mut name = c.name.clone();
+            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(110.0)).changed() {
+                apply(f, &|b| surface::set_name(b, n, &name));
+            }
+            if matches!(c.what, What::Label | What::Button | What::Check) {
+                ui.label(RichText::new("Text").small().color(TEXT_DIM));
+                let mut cap = c.caption.clone();
+                if ui.add(egui::TextEdit::singleline(&mut cap).desired_width(110.0)).changed() {
+                    apply(f, &|b| surface::set_look(b, n, "Caption", &cap));
+                }
+                let mut size = c.font.abs();
+                if ui.add(egui::DragValue::new(&mut size).range(6.0..=96.0).speed(0.25).prefix("size ")).changed() {
+                    let v = format!("{}", size.round() as i32);
+                    apply(f, &|b| surface::set_look(b, n, "QuickFont.Height", &v));
+                }
+            }
+            if c.what != What::Other {
+                let mut rgb = if c.what == What::Label { c.text_color } else { c.color }.unwrap_or([240, 160, 60]);
+                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                    let v = (rgb[0] as u32 | (rgb[1] as u32) << 8 | (rgb[2] as u32) << 16).to_string();
+                    apply(f, &|b| surface::set_look(b, n, surface::color_key(c.what), &v));
+                }
+            }
+            match c.what {
+                What::Button => {
+                    let mut stays = c.stays;
+                    if ui.checkbox(&mut stays, "Stays down").changed() {
+                        apply(f, &|b| surface::set_look(b, n, "StayDown", if stays { "True" } else { "False" }));
+                    }
+                }
+                What::Slider => {
+                    let mut up = c.upright;
+                    if ui.checkbox(&mut up, "Upright").changed() {
+                        apply(f, &|b| surface::set_look(b, n, "Orientation", if up { "trVertical" } else { "trHorizontal" }));
+                    }
+                }
+                What::Digits => {
+                    let (mut lo, mut hi) = c.range;
+                    let a = ui.add(egui::DragValue::new(&mut lo).prefix("from ")).changed();
+                    let z = ui.add(egui::DragValue::new(&mut hi).prefix("to ")).changed();
+                    if a || z {
+                        let (lo, hi) = (format!("{}", lo.round() as i64), format!("{}", hi.round() as i64));
+                        apply(f, &|b| surface::set_look(&surface::set_look(b, n, "Min", &lo), n, "Max", &hi));
+                    }
+                }
+                _ => {}
+            }
+            let mut rect = c.rect;
+            let mut moved = false;
+            for (k, pre) in ["x ", "y ", "w ", "h "].iter().enumerate() {
+                moved |= ui.add(egui::DragValue::new(&mut rect[k]).range(if k < 2 { 0.0 } else { 6.0 }..=8192.0).prefix(*pre)).changed();
+            }
+            if moved {
+                apply(f, &|b| surface::set_rect(b, n, rect));
+            }
+            if ui.small_button("To front").clicked() {
+                apply(f, &|b| surface::raise(b, n));
+                sel = Some(controls.len() - 1);
+            }
+            gone = ui.small_button("Remove").clicked() || ui.input(|i| i.key_pressed(egui::Key::Delete)) && !ui.ctx().wants_keyboard_input();
+        });
+        if gone {
+            apply(f, &|b| surface::remove(b, n));
+            sel = None;
+        }
+    } else {
+        ui.horizontal(|ui| {
+            let (w, h) = surface::size(&raw);
+            let (mut bw, mut bh) = (w, h);
+            ui.label(RichText::new("Board").small().color(TEXT_DIM));
+            let a = ui.add(egui::DragValue::new(&mut bw).range(64.0..=4096.0).prefix("w ")).changed();
+            let z = ui.add(egui::DragValue::new(&mut bh).range(48.0..=4096.0).prefix("h ")).changed();
+            if a || z {
+                apply(f, &|b| surface::set_size(b, bw, bh));
+            }
+            ui.label(RichText::new("Click a control to choose it; drag it to move it, drag its corner to size it.").small().color(TEXT_DIM));
+        });
+    }
+    ui.data_mut(|d| d.insert_temp(id, (editing, sel)));
+    changed
+}
+
+/// The board itself: every stored control drawn where it sits, and played with the mouse. `full` shows the
+/// whole board at its stored size instead of only the part the controls take up.
+fn board_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32, full: bool) -> (bool, Option<BoardAt>) {
+    use cereal_engine::surface::{self, What};
+    let Some(raw) = f.raw.clone() else { return (false, None) };
+    let controls = surface::controls(&raw);
+    if controls.is_empty() && !full {
+        ui.label(RichText::new("This board has no controls on it yet.").small().color(TEXT_DIM));
+        return (false, None);
+    }
     // the part of the board the controls take up, with a little air round it
-    let x0 = controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[0])) - 8.0;
-    let y0 = controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[1])) - 8.0;
-    let bw = controls.iter().fold(64.0f32, |m, c| m.max(c.rect[0] + c.rect[2] - x0 + 8.0));
-    let bh = controls.iter().fold(32.0f32, |m, c| m.max(c.rect[1] + c.rect[3] - y0 + 8.0));
+    let (x0, y0) = if full { (0.0, 0.0) } else { (controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[0])) - 8.0, controls.iter().fold(f32::MAX, |m, c| m.min(c.rect[1])) - 8.0) };
+    let (fw, fh) = if full { surface::size(&raw) } else { (64.0, 32.0) };
+    let bw = controls.iter().fold(fw, |m, c| m.max(c.rect[0] + c.rect[2] - x0 + 8.0));
+    let bh = controls.iter().fold(fh, |m, c| m.max(c.rect[1] + c.rect[3] - y0 + 8.0));
     let s = (max_w / bw).min(1.0);
     let (area, _) = ui.allocate_exact_size(Vec2::new(bw * s, bh * s), Sense::hover());
     let pt = ui.painter_at(area);
@@ -1121,7 +1305,7 @@ pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
             }
         }
     }
-    changed
+    (changed, Some(BoardAt { area, x0, y0, s }))
 }
 
 /// The equaliser's response picture with a handle per band. Returns true when a handle moved a setting.
@@ -1146,7 +1330,7 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     ui.set_max_width(520.0);
     // the boards first: they are what the bay is played from
     for i in 0..sub.nodes.len() {
-        if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface && !g.p.is_empty()) {
+        if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface) {
             let mut board = sub.nodes[i].fx.clone().unwrap();
             if surface_ui(ui, &mut board, 520.0) {
                 std::sync::Arc::make_mut(sub).nodes[i].fx = Some(board);
