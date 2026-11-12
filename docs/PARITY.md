@@ -141,7 +141,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] VFX Keyboard Splitter (sixteen zones with key and velocity lines, transpose, absolute; which switch is Random is a guess; no editing window yet)
 - [~] VFX Key Mapper (rows of targets, the five several-target modes, glide; offset and the glide's length are estimated; no editing window yet)
 - [~] VFX Level Scaler (centre, multiply, random amount per level; which numbers are tension and offset, and the random modes, are estimated; only velocity, pan and fine pitch reach the built-in instruments; no editing window yet)
-- [~] VFX Script
+- [~] VFX Script (the stored program runs in the Python 3 found on the machine, against our own stand-in for its host module: it hears notes, their ends and every tick, and the notes it plays, bends and ends reach the instrument behind its socket; knobs are read from the preset; a program runs only after the user has let that very text run, stock ones of the user's own content excepted. Open: output controllers go nowhere until the bay wires setting cables; drawn panels are not rebuilt, their controls only answer by name; no editing window; a script is not started until its first note; machines without Python pass notes through)
 - [~] VFX Sequencer (notes pass straight through: the demo holds no stored block of it to learn the layout from)
 - [~] Vintage Chorus (built as Bucket Chorus; noise not run)
 - [~] Vintage Phaser (built as Stone Phaser; four stages, sweep range, feedback, speed and stereo phase; its echo, noise, colour and drive sections are not run and several setting positions are guesses)

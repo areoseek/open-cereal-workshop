@@ -189,6 +189,8 @@ pub(crate) struct App {
     show_info: bool,
     pub(crate) prefs_win: settings::State,
     show_about: bool,
+    /// Note scripts the user said "not now" to since the program started.
+    script_later: Vec<String>,
     render: Option<RenderOpts>,
     rec_held: Vec<(u16, u8, f64, f32)>,
     /// Record sound from the input device too while recording runs.
@@ -255,6 +257,7 @@ const TYPING: [(Key, u8); 30] = [
 impl App {
     fn new(open: Option<PathBuf>) -> Self {
         let settings = setup::Settings::load();
+        setup::load_trusted_scripts(&settings.content);
         record::set_input(&settings.audio_in);
         midi::set_prefs(midi::Prefs { off: settings.midi_off.clone(), out: settings.midi_out.clone(), sync: settings.midi_sync });
         let mut made = None;
@@ -321,6 +324,7 @@ impl App {
             show_info: false,
             prefs_win: Default::default(),
             show_about: false,
+            script_later: Vec::new(),
             render: None,
             rec_held: Vec::new(),
             rec_audio: false,
@@ -1844,6 +1848,34 @@ impl App {
             ui.label(RichText::new(&self.audio).color(TEXT_DIM).small());
         });
         self.show_about = open;
+        self.script_ask(ctx);
+    }
+
+    /// A project's note script is somebody's program: it runs only once the user has said this very text may.
+    fn script_ask(&mut self, ctx: &egui::Context) {
+        let Some(source) = cereal_engine::script::waiting().into_iter().find(|s| !self.script_later.contains(s)) else { return };
+        let title = cereal_engine::script::ScriptDef { source: source.clone(), params: String::new() }.title();
+        let mut run = false;
+        let mut later = false;
+        egui::Window::new("Note script").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label(if title.is_empty() { "This project carries a note script.".to_string() } else { format!("This project carries a note script: {title}") });
+            ui.label("A note script is a small Python program that plays notes. It runs with your own rights on this machine, like any program you start. Let it run only if you trust where the project came from. Until then its notes pass through unchanged.");
+            ui.collapsing("Read the script", |ui| {
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&source).monospace().small()).wrap());
+                });
+            });
+            ui.horizontal(|ui| {
+                run = ui.button("Let it run").clicked();
+                later = ui.button("Not now").clicked();
+            });
+        });
+        if run {
+            setup::trust_script(&source);
+        } else if later {
+            self.script_later.push(source);
+        }
     }
 }
 

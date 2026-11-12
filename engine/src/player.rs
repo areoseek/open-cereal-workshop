@@ -94,6 +94,33 @@ struct MidiSeen {
 }
 
 /// One arpeggiator run: all held notes of a channel, or one note spelling its own chord.
+/// A note a script was handed and has not been told the end of yet.
+struct ScriptHeld {
+    hid: u32,
+    key: u8,
+    live: bool,
+    /// Frames until it ends, for a note of known length.
+    left: Option<u64>,
+}
+
+/// A note script at work in front of one instrument of a bay.
+struct ScriptRun {
+    serial: u32,
+    chan: u16,
+    li: usize,
+    /// Where in the chain of note units it stands, and the socket this instrument's cable leaves it by.
+    at: usize,
+    port: u32,
+    def: Arc<crate::script::ScriptDef>,
+    inst: crate::script::Inst,
+    /// Note lines not yet due, with the frames each still waits.
+    wait: Vec<(u32, String)>,
+    held: Vec<ScriptHeld>,
+    /// The part of a tick left over from the last block.
+    acc: f64,
+    next: u32,
+}
+
 struct ArpRun {
     chan: u16,
     key: Option<u8>,
@@ -372,6 +399,9 @@ impl Handle {
             driven: Vec::with_capacity(64),
             env_runs: Vec::new(),
             arps: Vec::new(),
+            scripts: Vec::new(),
+            script_emit: None,
+            script_serial: 0,
             midi_wait: Vec::with_capacity(64),
             midi_live: Vec::new(),
             host_wait: Vec::with_capacity(64),
@@ -527,6 +557,8 @@ fn click(rate: f32, hz: f32) -> Arc<Sample> {
 
 /// Frames between envelope and filter updates.
 const CTL: u32 = 32;
+/// A script's velocity against ours: its 0..1 is the stored 0..128, of which our 1.0 is 100.
+const SCRIPT_VEL: f32 = 100.0 / 128.0;
 
 #[derive(Default)]
 struct Voice {
@@ -588,6 +620,11 @@ struct Voice {
     mo_beat: f32,
     mo: [f32; 3],
     mo_inc: f32,
+    /// The script note this voice is, 0 for none, and what the script has since done to it: octaves, loudness over what it started at less one, pan.
+    script: u64,
+    sc: [f32; 3],
+    /// The pitch a script's note started at, in keys.
+    sc_key: f32,
     sr: f32,
     /// Frames sounded, and frames since the note was let go.
     t: u32,
@@ -682,8 +719,8 @@ impl Voice {
             self.mo[1] = mv.octaves;
             self.mo[2] = mv.pan.clamp(-1.0, 1.0);
         }
-        if self.bend != 0.0 || self.hand != 0.0 || self.slide != 0.0 || self.mo[1] != 0.0 {
-            self.step_now *= ((self.bend + self.hand + self.slide + self.mo[1]) as f64).exp2();
+        if self.bend != 0.0 || self.hand != 0.0 || self.slide != 0.0 || self.mo[1] != 0.0 || self.sc[0] != 0.0 {
+            self.step_now *= ((self.bend + self.hand + self.slide + self.mo[1] + self.sc[0]) as f64).exp2();
         }
         if self.fon {
             let mut x = self.fcut;
@@ -807,11 +844,12 @@ impl Voice {
             if self.fon {
                 s = self.filter(s);
             }
-            let g = self.level * self.env_now * (1.0 - self.mo[0]);
+            let g = self.level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
-            out[0] += s[0] * self.gl * g * (1.0 - self.mo[2]).min(1.0);
-            out[1] += s[1] * self.gr * g * (1.0 + self.mo[2]).min(1.0);
+            let side = self.mo[2] + self.sc[2];
+            out[0] += s[0] * self.gl * g * (1.0 - side).clamp(0.0, 1.0);
+            out[1] += s[1] * self.gr * g * (1.0 + side).clamp(0.0, 1.0);
             self.t += 1;
             if self.releasing {
                 self.rel_t += 1;
@@ -846,6 +884,11 @@ pub struct Player {
     env_runs: Vec<EnvRun>,
     /// Arpeggiators at work: the notes each holds and where it is in its run.
     arps: Vec<ArpRun>,
+    /// Note scripts at work.
+    scripts: Vec<ScriptRun>,
+    /// Set while a script's own note is being started: the instrument it is for, the first note unit after the script, the voice's tag.
+    script_emit: Option<(usize, usize, u64)>,
+    script_serial: u32,
     /// MIDI messages on their way out, with the frames each still waits.
     midi_wait: Vec<(u64, crate::midiout::Msg)>,
     /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
@@ -976,6 +1019,141 @@ impl Player {
         } else {
             (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9)
         }
+    }
+
+    /// The running script in front of this instrument, started if it is not running yet. `None` when it may not or cannot run.
+    fn script_run(&mut self, chan: u16, li: usize, at: usize, port: u32, def: &Arc<crate::script::ScriptDef>) -> Option<usize> {
+        if let Some(i) = self.scripts.iter().position(|r| r.chan == chan && r.li == li && r.at == at && (Arc::ptr_eq(&r.def, def) || r.def == *def)) {
+            self.scripts[i].port = port;
+            return Some(i);
+        }
+        let inst = crate::script::Inst::new(def)?;
+        // one script to a place: whatever stood here before has been taken out or changed
+        let mut gone = Vec::new();
+        self.scripts.retain(|r| {
+            let stay = !(r.chan == chan && r.li == li);
+            if !stay {
+                gone.push(r.serial);
+            }
+            stay
+        });
+        for v in self.voices.iter_mut().filter(|v| v.active && v.script != 0 && gone.contains(&((v.script >> 32) as u32))) {
+            v.let_go();
+        }
+        self.script_serial += 1;
+        self.scripts.push(ScriptRun { serial: self.script_serial, chan, li, at, port, def: def.clone(), inst, wait: Vec::new(), held: Vec::new(), acc: 0.0, next: 0 });
+        Some(self.scripts.len() - 1)
+    }
+
+    /// Every script forgets the notes it holds and lets its own go.
+    fn hush_scripts(&mut self) {
+        for r in self.scripts.iter_mut() {
+            r.wait.clear();
+            r.held.clear();
+            r.inst.step("x");
+        }
+        for v in self.voices.iter_mut().filter(|v| v.active && v.script != 0) {
+            v.let_go();
+        }
+    }
+
+    /// Let every note script live through the next `n` frames: it hears the notes that start and end in them
+    /// and each tick that passes, and the notes it plays, bends and ends are done to the instrument behind it.
+    fn run_scripts(&mut self, song: &Song, n: usize) {
+        if self.scripts.is_empty() {
+            return;
+        }
+        use crate::script::Out;
+        let tpf = self.now_tpf(song);
+        let tempo = self.transport.tempo();
+        let mut runs = std::mem::take(&mut self.scripts);
+        let mut text = String::with_capacity(256);
+        runs.retain_mut(|r| {
+            // a script taken out of the song, or changed, stops and takes its notes with it
+            let here = song.channels.get(r.chan as usize).and_then(|ch| {
+                let b = ch.bay()?;
+                let node = if r.li == 0 { b.lead } else { b.layers.get(r.li - 1)?.0 };
+                let chain = &b.fx.sub.as_ref()?.shape.iter().find(|s| s.0 == node)?.1;
+                match &chain.get(r.at)?.shaper {
+                    crate::noteshape::Shaper::Script(d) => Some(Arc::ptr_eq(d, &r.def) || **d == *r.def),
+                    _ => None,
+                }
+            });
+            if here != Some(true) {
+                let tag = r.serial;
+                for v in self.voices.iter_mut().filter(|v| v.active && v.script != 0 && (v.script >> 32) as u32 == tag) {
+                    v.let_go();
+                }
+                return false;
+            }
+            let before = r.acc;
+            r.acc += n as f64 * tpf;
+            let whole = r.acc.floor();
+            r.acc -= whole;
+            text.clear();
+            let _ = std::fmt::Write::write_fmt(&mut text, format_args!("c {} {} {:?} -", song.ppq.max(1), self.was_playing as u8, tempo));
+            r.wait.retain_mut(|(d, line)| {
+                if (*d as usize) < n {
+                    text.push('\n');
+                    text.push_str(line);
+                    false
+                } else {
+                    *d -= n as u32;
+                    true
+                }
+            });
+            let _ = std::fmt::Write::write_fmt(&mut text, format_args!("\nt {}", whole as u64));
+            r.held.retain_mut(|h| match h.left {
+                Some(l) if l < n as u64 => {
+                    let _ = std::fmt::Write::write_fmt(&mut text, format_args!("\nr {}", h.hid));
+                    false
+                }
+                Some(l) => {
+                    h.left = Some(l - n as u64);
+                    true
+                }
+                None => true,
+            });
+            let top = (r.serial as u64) << 32;
+            // a tick of the block, as the frame of it that tick falls on
+            let frame = |k: u32| if k == 0 { 0 } else { (((k as f64 - before) / tpf).max(0.0) as usize).min(n.saturating_sub(1)) };
+            for o in r.inst.step(&text) {
+                match o {
+                    Out::On(k, vid, v) => {
+                        if v.output.max(0) as u32 != r.port {
+                            continue;
+                        }
+                        let pitch = (v.note + v.fine).clamp(0.0, 131.0);
+                        let key = pitch.round();
+                        let note = Note { chan: r.chan, key: key as u8, fine_cents: (pitch - key) * 100.0, vel: (v.vel / SCRIPT_VEL).max(0.0), pan: v.pan.clamp(-1.0, 1.0), mod_x: v.fcut.clamp(-1.0, 1.0), mod_y: v.fres.clamp(-1.0, 1.0), color: v.color, ..Default::default() };
+                        self.script_emit = Some((r.li, r.at + 1, top | vid as u64));
+                        self.note_on_depth(song, &note, frame(k) as u32, None, false, 0);
+                        self.script_emit = None;
+                    }
+                    Out::Change(_, vid, v) => {
+                        let tag = top | vid as u64;
+                        for x in self.voices.iter_mut().filter(|x| x.active && x.script == tag) {
+                            x.sc[0] = (v.note + v.fine - x.sc_key) / 12.0;
+                            let to = law::velocity_gain((v.vel / SCRIPT_VEL).max(0.0));
+                            x.sc[1] = if x.note_gain > 1e-6 { to / x.note_gain - 1.0 } else { 0.0 };
+                            x.sc[2] = v.pan.clamp(-1.0, 1.0) - x.note_pan;
+                        }
+                    }
+                    Out::Off(k, vid) => {
+                        let tag = top | vid as u64;
+                        let at = frame(k) as u64;
+                        for x in self.voices.iter_mut().filter(|x| x.active && x.script == tag && !x.releasing) {
+                            x.remaining = Some(x.delay as u64 + at);
+                        }
+                    }
+                    Out::Ctl(..) | Out::Err(_) => {}
+                }
+            }
+            true
+        });
+        // a script may have been started by a note another script played
+        runs.append(&mut self.scripts);
+        self.scripts = runs;
     }
 
     /// Let every arpeggiator play the notes that fall in the next `n` frames.
@@ -1149,13 +1327,15 @@ impl Player {
         if !ch.enabled || n.muted {
             return;
         }
+        // a script's own note has been through all this already
+        let emit = self.script_emit;
         // keys outside the channel's region are not for it
-        if (n.key as u32) < ch.smp.key_lo || n.key as u32 > ch.smp.key_hi {
+        if emit.is_none() && ((n.key as u32) < ch.smp.key_lo || n.key as u32 > ch.smp.key_hi) {
             return;
         }
         // an instrument has no recording to repitch: its root key moves the keys it is sent
         let moved;
-        let n = match root_shift(ch) {
+        let n = match if emit.is_some() { 0 } else { root_shift(ch) } {
             0 => n,
             by => {
                 moved = Note { key: (n.key as i32 + by).clamp(0, 131) as u8, ..n.clone() };
@@ -1405,7 +1585,8 @@ impl Player {
                 let (pl, pr) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
                 let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + n.fine_cents) / 1200.0);
                 let min_len = (sr * 0.12) as u64;
-                let remaining = if live { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
+                // a script ends its own notes
+                let remaining = if live || emit.is_some() { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
                 let layers = ch.bay().map_or(&[][..], |b| &b.layers[..]);
                 if let Some(glide) = ch.gen.as_ref().filter(|_| layers.is_empty()).and_then(|g| g.mono()) {
                     // one voice at a time: a note that arrives while another is held bends that one to its
@@ -1444,6 +1625,37 @@ impl Player {
                     b.fx.sub.as_ref()?.shape.iter().find(|s| s.0 == node).map(|s| &s.1[..])
                 });
                 let plain = crate::noteshape::Ev::of(n);
+                let chain = match emit {
+                    Some((to, from, _)) => {
+                        if to != li {
+                            continue;
+                        }
+                        chain.map(|c| &c[from.min(c.len())..])
+                    }
+                    None => {
+                        if let Some((si, def)) = chain.and_then(crate::noteshape::script_at) {
+                            let c = chain.unwrap_or(&[]);
+                            if let Some(ri) = self.script_run(n.chan, li, si, c[si].port, &def) {
+                                // the script is handed the note, and what sounds is up to it
+                                let before = crate::noteshape::apply(&c[..si], plain, n.chan, &mut self.seed, &mut self.shape_turn);
+                                let r = &mut self.scripts[ri];
+                                for ev in before {
+                                    r.next += 1;
+                                    let vel = (ev.vel * ev.gain * SCRIPT_VEL).clamp(0.0, 1.0);
+                                    r.wait.push((delay, format!("n {} {:?} {:?} {:?} {:?} {:?} {} 0", r.next, ev.key as f32 + ev.fine_cents / 100.0, vel, ev.pan, ev.mod_x, ev.mod_y, ev.color)));
+                                    let left = match len_frames {
+                                        Some(f) => Some(f.max(1) + delay as u64),
+                                        None if live => None,
+                                        None => Some(delay as u64 + (sr * 0.25) as u64),
+                                    };
+                                    r.held.push(ScriptHeld { hid: r.next, key: n.key, live: live && len_frames.is_none(), left });
+                                }
+                                continue;
+                            }
+                        }
+                        chain
+                    }
+                };
                 let evs = match chain {
                     Some(c) => crate::noteshape::apply(c, plain, n.chan, &mut self.seed, &mut self.shape_turn),
                     None => vec![plain],
@@ -1470,6 +1682,10 @@ impl Player {
                 v.color = ev.color;
                 v.mo_beat = 60.0 / self.transport.tempo().max(1.0);
                 v.motion = motion.clone();
+                if let Some((_, _, tag)) = emit {
+                    v.script = tag;
+                    v.sc_key = n.key as f32 + n.fine_cents / 100.0;
+                }
                 if let Some(g) = g {
                     // a built-in instrument: its own oscillators, shaped by the channel's envelopes and filter
                     // settings a clip or an event is driving stand in for the stored ones from this note on
@@ -1525,6 +1741,10 @@ impl Player {
         }
         for r in self.env_runs.iter_mut().filter(|r| r.chan == chan && r.key == key && r.rel.is_none()) {
             r.rel = Some(r.t);
+        }
+        for h in self.scripts.iter_mut().filter(|r| r.chan == chan).flat_map(|r| r.held.iter_mut()).filter(|h| h.live && h.key == key) {
+            h.live = false;
+            h.left = Some(0);
         }
         if let Some(ch) = song.channels.get(chan as usize) {
             if ch.kind == ChannelKind::Layer {
@@ -1686,6 +1906,7 @@ impl Player {
 
     fn silence(&mut self, fast: bool) {
         self.arps.clear();
+        self.hush_scripts();
         self.midi_hush();
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });
         for v in self.voices.iter_mut().filter(|v| v.active && !v.preview) {
@@ -1737,6 +1958,7 @@ impl Player {
                 }
                 Cmd::Panic => {
                     self.arps.clear();
+                    self.hush_scripts();
                     self.midi_hush();
                     for v in self.voices.iter_mut() {
                         v.active = false;
@@ -2465,6 +2687,7 @@ impl Player {
             let want = (total - done).min(BLOCK);
             let n = self.advance(&song, want).clamp(1, want);
             self.run_arps(&song, n);
+            self.run_scripts(&song, n);
             self.run_midi(&song, n);
             self.mix(&song, &mut out[done * channels..(done + n) * channels], channels);
             done += n;
@@ -2580,6 +2803,54 @@ mod tests {
         let (moved, after) = run(true);
         assert!(plain > 50.0 && (moved / plain - 2.0).abs() < 0.2, "{plain} rises, then {moved}");
         assert!(after < 1e-3, "still sounding at {after}");
+    }
+
+    #[test]
+    fn a_script_in_a_bay_plays_its_own_notes_for_the_ones_it_is_handed() {
+        if crate::pyrt::get().is_none() {
+            eprintln!("no Python on this machine: skipped");
+            return;
+        }
+        let rises = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32;
+        let peak = |b: &[f32]| b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        // an octave up while the key is down; `bend` ticks in, the note is bent a further octave up; the second socket stays silent
+        let source = |bend: u32, socket: u32| format!("import flvfx\nt0 = {{}}\ndef onTriggerVoice(v):\n    o = flvfx.Voice(v)\n    o.note += 12\n    o.output = {socket}\n    v.o = o\n    o.trigger()\ndef onTick():\n    for o in flvfx.context.voices:\n        t0[id(o)] = t0.get(id(o), 0) + 1\n        if {bend} and t0[id(o)] == {bend}:\n            o.note += 12\ndef onReleaseVoice(v):\n    v.o.release()\n");
+        let run = |src: Option<String>| {
+            let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+            ch.plugin = crate::song::BAY.to_string();
+            let mut patch = crate::fxpatch::decode(&crate::fxpatch::fresh()).unwrap();
+            if let Some(src) = src {
+                use crate::noteshape::{Link, Shaper};
+                crate::script::allow(&src);
+                let def = crate::script::ScriptDef { source: src, params: String::new() };
+                patch.shape.push((0, vec![Link { shaper: Shaper::Script(Arc::new(def)), port: 0, node: 1 }]));
+            }
+            ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![] });
+            let mut song = Song::new();
+            song.channels = vec![ch];
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            let mut a = vec![0.0; 12_000 * 2];
+            p.render(&mut a, 2);
+            let mut b = vec![0.0; 12_000 * 2];
+            p.render(&mut b, 2);
+            h.send(Cmd::NoteOff { chan: 0, key: 60 });
+            let mut c = vec![0.0; 24_000 * 2];
+            p.render(&mut c, 2);
+            p.render(&mut c, 2);
+            (rises(&a), rises(&b), peak(&b), peak(&c))
+        };
+        let plain = run(None);
+        let up = run(Some(source(0, 0)));
+        assert!((up.0 / plain.0 - 2.0).abs() < 0.1 && (up.1 / plain.1 - 2.0).abs() < 0.1, "{plain:?} {up:?}");
+        // the script's note lasts as long as the key, and no longer
+        assert!(up.2 > plain.2 * 0.5 && up.3 < 1e-4, "{plain:?} {up:?}");
+        // 140 a minute at 96 to the beat is 224 ticks a second: 56 ticks is the end of the first quarter second
+        let bent = run(Some(source(56, 0)));
+        assert!((bent.0 / plain.0 - 2.0).abs() < 0.15 && (bent.1 / plain.1 - 4.0).abs() < 0.2, "{plain:?} {bent:?}");
+        // a note sent out of a socket nothing is plugged into is not heard
+        let other = run(Some(source(0, 1)));
+        assert!(other.2 < 1e-6, "{other:?}");
     }
 
     #[test]

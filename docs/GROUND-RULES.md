@@ -37,3 +37,13 @@ themselves and reads the content files out of it on their machine. An installed 
   the user: they bring the file.
 - The wording shown to the user must say plainly that the files are theirs to obtain and that the original
   licence still applies to them. We make no promise about what that licence permits.
+
+## Note scripts
+
+A project or preset can carry a note script: a Python program. We run it in the Python the user has
+installed, found at run time (nothing of Python is built in or shipped), against a host module that is
+our own code (`engine/src/flvfx_shim.py`), written from the public description of the interface.
+A script is somebody's program and gets the user's rights, so it runs only after the user has let that
+exact text run; the application asks, shows the text, and remembers the answer. Setting
+`CEREAL_NO_SCRIPTS` turns scripts off altogether, and `CEREAL_PYTHON_LIB` names the library to use.
+The stock scripts themselves are never copied into the repository.

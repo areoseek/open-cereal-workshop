@@ -88,6 +88,8 @@ pub enum Shaper {
     Levels([Level; 6]),
     /// Moves the notes passing through for as long as they sound.
     Motion(std::sync::Arc<Motion>),
+    /// A program that plays its own notes for the ones it is handed; the player runs it.
+    Script(std::sync::Arc<crate::script::ScriptDef>),
 }
 
 /// A shaper on the way to an instrument, the output of it the cable leaves by, and which held unit it is.
@@ -157,6 +159,7 @@ impl Shaper {
                 Some(Shaper::Levels(levels))
             }
             "vfx envelope" => Motion::decode(b).map(|m| Shaper::Motion(std::sync::Arc::new(m))),
+            "vfx script" => crate::script::ScriptDef::decode(b).map(|d| Shaper::Script(std::sync::Arc::new(d))),
             _ => None,
         }
     }
@@ -238,7 +241,7 @@ pub fn apply(chain: &[Link], n: Ev, chan: u16, seed: &mut u32, turns: &mut Turns
                         next.push(Ev { color: colour[c], ..e });
                     }
                 }
-                Shaper::Motion(_) => next.push(e),
+                Shaper::Motion(_) | Shaper::Script(_) => next.push(e),
                 Shaper::Levels(l) => {
                     let two = |v: f32, l: &Level, seed: &mut u32| l.map(v * 0.5 + 0.5, roll(seed)) * 2.0 - 1.0;
                     next.push(Ev {
@@ -386,6 +389,14 @@ impl Motion {
 }
 
 /// The note mover nearest the instrument on a chain, when it has anything switched on.
+/// Where in a chain the first script stands, and the script.
+pub fn script_at(chain: &[Link]) -> Option<(usize, std::sync::Arc<crate::script::ScriptDef>)> {
+    chain.iter().enumerate().find_map(|(i, l)| match &l.shaper {
+        Shaper::Script(d) => Some((i, d.clone())),
+        _ => None,
+    })
+}
+
 pub fn motion_of(chain: &[Link]) -> Option<std::sync::Arc<Motion>> {
     chain.iter().rev().find_map(|l| match &l.shaper {
         Shaper::Motion(m) if m.moving() => Some(m.clone()),

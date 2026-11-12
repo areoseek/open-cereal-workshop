@@ -61,6 +61,53 @@ fn settings_path() -> Option<PathBuf> {
     Some(base.join("breakfast-cereal").join("settings.txt"))
 }
 
+/// Where the note scripts the user has let run are kept, one text to a file.
+fn scripts_dir() -> Option<PathBuf> {
+    Some(settings_path()?.parent()?.join("scripts-allowed"))
+}
+
+/// Tell the engine which note scripts the user let run on earlier days.
+pub fn load_trusted_scripts(content: &[PathBuf]) {
+    let mut set = std::collections::HashSet::new();
+    // the stock scripts of the content the user brought in themselves need no asking
+    fn walk(d: &Path, depth: u8, set: &mut std::collections::HashSet<String>) {
+        for f in std::fs::read_dir(d).into_iter().flatten().flatten().map(|f| f.path()) {
+            if f.is_dir() {
+                if depth < 4 {
+                    walk(&f, depth + 1, set);
+                }
+            } else if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("fst")) {
+                if let Some(d) = cereal_engine::preset::read(&f).ok().and_then(|p| cereal_engine::script::ScriptDef::decode(&p.state)) {
+                    if !d.source.is_empty() {
+                        set.insert(d.source);
+                    }
+                }
+            }
+        }
+    }
+    for root in content {
+        walk(&root.join("Patches/Plugin presets/Effects/VFX Script"), 0, &mut set);
+    }
+    if let Some(list) = scripts_dir().and_then(|d| std::fs::read_dir(d).ok()) {
+        for f in list.flatten() {
+            if let Ok(text) = std::fs::read_to_string(f.path()) {
+                set.insert(text);
+            }
+        }
+    }
+    cereal_engine::script::set_trust(cereal_engine::script::Trust::These(set));
+}
+
+/// Let a note script run, today and from now on.
+pub fn trust_script(source: &str) {
+    cereal_engine::script::allow(source);
+    let Some(dir) = scripts_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(source, &mut h);
+    let _ = std::fs::write(dir.join(format!("{:016x}.py", std::hash::Hasher::finish(&h))), source);
+}
+
 impl Settings {
     pub fn load() -> Self {
         let mut s = Self::default();
