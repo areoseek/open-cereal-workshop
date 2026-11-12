@@ -178,6 +178,7 @@ pub(crate) struct App {
     pl_max: bool,
     /// The window for picking an instrument to add (F8).
     show_picker: bool,
+    show_project: bool,
     /// Hold the song back until the first note is played, when play is pressed with recording armed.
     wait_input: bool,
     wheel_acc: f32,
@@ -342,6 +343,7 @@ impl App {
             raise: None,
             pl_max: false,
             show_picker: false,
+            show_project: false,
             wait_input: false,
             wheel_acc: 0.0,
             script: testkeys::Script::from_env(),
@@ -1510,6 +1512,19 @@ impl App {
         self.dirty = true;
     }
 
+    /// Ctrl+F8: everything the project holds, to pick what is drawn next.
+    fn project_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_project {
+            return;
+        }
+        let mut open = true;
+        let mut picked = false;
+        egui::Window::new("Project picker").open(&mut open).collapsible(false).default_size([320.0, 420.0]).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| picked = self.project_list(ui));
+        });
+        self.show_project = open && !picked;
+    }
+
     /// F8: the instruments there are, to pick one for a new channel.
     fn picker_ui(&mut self, ctx: &egui::Context) {
         if !self.show_picker {
@@ -1653,6 +1668,7 @@ impl App {
                         tr.set_metronome(!tr.metronome());
                     }
                     Key::H => self.handle.send(Cmd::Panic),
+                    Key::F8 if !repeat => self.show_project = !self.show_project,
                     Key::P => {
                         let tr = &self.handle.transport;
                         tr.set_countdown(!tr.countdown());
@@ -1694,7 +1710,9 @@ impl App {
                 }
                 Key::Tab if !repeat => self.cycle_windows(modifiers.shift),
                 Key::Escape if !repeat && !ctx.memory(|m| m.any_popup_open()) => {
-                    if self.show_picker {
+                    if self.show_project {
+                        self.show_project = false;
+                    } else if self.show_picker {
                         self.show_picker = false;
                     } else if self.pl_max {
                         self.pl_max = false;
@@ -2255,6 +2273,7 @@ impl eframe::App for App {
         }
         self.show_mixer = open;
         self.picker_ui(ctx);
+        self.project_ui(ctx);
         if let Some((i, mut name)) = self.rename_insert.take() {
             let mut keep = true;
             egui::Window::new("Rename mixer track").collapsible(false).resizable(false).show(ctx, |ui| {

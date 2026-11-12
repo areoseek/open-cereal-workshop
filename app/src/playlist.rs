@@ -206,6 +206,48 @@ impl App {
         }
     }
 
+    /// Every pattern, audio clip and automation clip of the project; a click makes it the thing to draw. True when one was picked.
+    pub(crate) fn project_list(&mut self, ui: &mut Ui) -> bool {
+        let pat = self.handle.transport.pattern();
+        let ppq = self.song.ppq as f32;
+        let bar = self.song.bar();
+        let mut picked = false;
+            let brush = self.playlist.brush.map(|b| b.0).unwrap_or(ClipSrc::Pattern(pat));
+            ui.label(RichText::new("Patterns").small().color(TEXT_DIM));
+            for p in 0..self.song.patterns.len() {
+                let name = if self.song.patterns[p].name.is_empty() { format!("Pattern {}", p + 1) } else { self.song.patterns[p].name.clone() };
+                if ui.selectable_label(brush == ClipSrc::Pattern(p), name).clicked() {
+                    self.handle.transport.set_pattern(p);
+                    self.playlist.brush = None;
+                    self.playlist.brush_pat = p;
+                picked = true;
+                }
+            }
+            for (title, audio) in [("Audio", true), ("Automation", false)] {
+                let list: Vec<usize> = (0..self.song.channels.len()).filter(|&c| if audio { self.song.channels[c].kind == cereal_engine::flp::ChannelKind::AudioClip } else { self.song.channels[c].auto.is_some() }).collect();
+                if list.is_empty() {
+                    continue;
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new(title).small().color(TEXT_DIM));
+                for c in list {
+                    let src = if audio { ClipSrc::Audio(c) } else { ClipSrc::Automation(c) };
+                    if ui.selectable_label(brush == src, self.song.channels[c].name.clone()).clicked() {
+                        // as long as a clip of it that is already there, else the sound's own length, else four bars
+                        let ch = &self.song.channels[c];
+                        let own = ch.sample.as_ref().filter(|_| audio).map(|s| {
+                            let beats = if ch.smp.stretch_beats > 0.0 { ch.smp.stretch_beats * ch.smp.stretch_mul } else { s.seconds() * self.song.tempo / 60.0 };
+                            (beats * ppq).ceil() as u32
+                        });
+                        let len = self.song.clips.iter().find(|k| k.src == src).map(|k| k.len).or(own).unwrap_or(bar * 4).max(1);
+                        self.playlist.brush = Some((src, len, 0));
+                    picked = true;
+                    }
+                }
+            }
+        picked
+    }
+
     pub(crate) fn playlist_ui(&mut self, ui: &mut Ui) {
         self.pl_whole_groups();
         let pat = self.handle.transport.pattern();
@@ -225,37 +267,7 @@ impl App {
         if self.playlist.picker {
             egui::SidePanel::left("pl_picker").resizable(true).default_width(150.0).frame(egui::Frame::NONE.inner_margin(4.0)).show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("pl_picker_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    let brush = self.playlist.brush.map(|b| b.0).unwrap_or(ClipSrc::Pattern(pat));
-                    ui.label(RichText::new("Patterns").small().color(TEXT_DIM));
-                    for p in 0..self.song.patterns.len() {
-                        let name = if self.song.patterns[p].name.is_empty() { format!("Pattern {}", p + 1) } else { self.song.patterns[p].name.clone() };
-                        if ui.selectable_label(brush == ClipSrc::Pattern(p), name).clicked() {
-                            self.handle.transport.set_pattern(p);
-                            self.playlist.brush = None;
-                            self.playlist.brush_pat = p;
-                        }
-                    }
-                    for (title, audio) in [("Audio", true), ("Automation", false)] {
-                        let list: Vec<usize> = (0..self.song.channels.len()).filter(|&c| if audio { self.song.channels[c].kind == cereal_engine::flp::ChannelKind::AudioClip } else { self.song.channels[c].auto.is_some() }).collect();
-                        if list.is_empty() {
-                            continue;
-                        }
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(title).small().color(TEXT_DIM));
-                        for c in list {
-                            let src = if audio { ClipSrc::Audio(c) } else { ClipSrc::Automation(c) };
-                            if ui.selectable_label(brush == src, self.song.channels[c].name.clone()).clicked() {
-                                // as long as a clip of it that is already there, else the sound's own length, else four bars
-                                let ch = &self.song.channels[c];
-                                let own = ch.sample.as_ref().filter(|_| audio).map(|s| {
-                                    let beats = if ch.smp.stretch_beats > 0.0 { ch.smp.stretch_beats * ch.smp.stretch_mul } else { s.seconds() * self.song.tempo / 60.0 };
-                                    (beats * ppq).ceil() as u32
-                                });
-                                let len = self.song.clips.iter().find(|k| k.src == src).map(|k| k.len).or(own).unwrap_or(bar * 4).max(1);
-                                self.playlist.brush = Some((src, len, 0));
-                            }
-                        }
-                    }
+                    self.project_list(ui);
                 });
             });
         }

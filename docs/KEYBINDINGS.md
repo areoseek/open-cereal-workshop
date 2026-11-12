@@ -206,7 +206,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Alt+P | Picker panel: the patterns, audio clips and automation clips at the left of the playlist; a click picks what is drawn next | yes |
-| Ctrl+F8 | Project picker | no |
+| Ctrl+F8 | Project picker | yes |
 | Shift+M | Stretch mode: dragging an audio clip's end fits the sound to the new length, pitch kept | yes |
 | Shift+wheel on a track name | Move the track up / down | yes |
 | Shift+Alt+wheel | Nudge the clip under the pointer by the snap value | yes |
