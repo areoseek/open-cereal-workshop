@@ -193,6 +193,23 @@ pub fn env_at(p: &[f32], e: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// The points of envelope `e`, each as (place across the bands, level).
+pub fn env_points(p: &[f32], e: usize) -> Option<Vec<[f32; 2]>> {
+    let (o, n) = env_at(p, e)?;
+    Some((0..n).map(|i| [p[o + i * 2], p[o + i * 2 + 1]]).collect())
+}
+
+/// Give envelope `e` new points. False when the settings hold no such envelope or the points are unusable.
+pub fn set_env_points(p: &mut Vec<f32>, e: usize, pts: &[[f32; 2]]) -> bool {
+    let Some((o, n)) = env_at(p, e) else { return false };
+    if pts.is_empty() || pts.len() > 4096 {
+        return false;
+    }
+    p[o - 1] = pts.len() as f32;
+    p.splice(o..o + n * 2, pts.iter().flat_map(|q| [q[0], q[1].clamp(0.0, 1.0)]));
+    true
+}
+
 /// The level of envelope `e` at `t` (0..=1 across the bands).
 pub fn env_level(p: &[f32], e: usize, t: f32) -> f32 {
     let Some((o, n)) = env_at(p, e) else { return DEF_ENV[e.min(NENV - 1)][0] };
@@ -1038,5 +1055,20 @@ mod tests {
         let open = level(true, &mut st);
         let shut = level(false, &mut st);
         assert!(open > 0.5 && shut < open * 0.05, "{open} {shut}");
+    }
+
+    #[test]
+    fn a_drawn_line_goes_into_the_block_and_comes_back() {
+        let mut p = decode(&fresh()).unwrap();
+        let pts = [[0.0, 0.2], [0.25, 0.9], [1.0, 0.4]];
+        assert!(set_env_points(&mut p, 3, &pts));
+        assert_eq!(env_points(&p, 3).unwrap(), pts);
+        assert!((env_level(&p, 3, 0.125) - 0.55).abs() < 1e-5);
+        // the lines after it are still where they were
+        assert_eq!(env_points(&p, 12).unwrap(), [[0.0, 0.0], [1.0, 1.0]]);
+        let block = encode(&p, Some(&fresh()));
+        let q = decode(&block).unwrap();
+        assert_eq!(env_points(&q, 3).unwrap(), pts);
+        assert_eq!(q, p);
     }
 }

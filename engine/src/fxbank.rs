@@ -13,7 +13,7 @@ pub const PER: usize = 17;
 pub const LISTED: usize = HEAD + BANKS * PER;
 /// Drawn lines in one bank: the shaper, then for each of eight targets ten patterns, a slow oscillator and
 /// three mappings (pad X, pad Y, input follower).
-const LINES: usize = 113;
+pub const LINES: usize = 113;
 const TARGETS: usize = 8;
 const WS_N: usize = 257;
 const PAT_N: usize = 257;
@@ -153,6 +153,45 @@ pub fn encode(p: &[f32], base: Option<&[u8]>) -> Vec<u8> {
     let mut out = base[..4].to_vec();
     out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
     out
+}
+
+/// Drawn line `k` of the block (banks follow each other, `LINES` each) as points. Lines stored in an older
+/// point layout come back with straight stretches.
+pub fn line(state: &[u8], k: usize) -> Option<crate::fm::Curve> {
+    use crate::fm::{Curve, Pt};
+    let d = inflate(state.get(4..)?)?;
+    let l = lines(&d)?;
+    let (head, n, _, end) = *l.get(k)?;
+    if let Some(c) = Curve::read_at(&d, head) {
+        return Some(c);
+    }
+    let int = |o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let size = (end - 20 - head - 12) / n;
+    let mut c = Curve::default();
+    for i in 0..n {
+        let o = head + 12 + i * size;
+        let f = |o: usize| f32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+        c.pts.push(Pt { x: if i == 0 { 0.0 } else { f(o) }, y: f(o + 4).clamp(0.0, 1.0), ..Default::default() });
+    }
+    c.flags = int(end - 20)?;
+    c.decay = int(end - 12)?;
+    c.loop_start = int(end - 8)?;
+    c.sustain = int(end - 4)?;
+    Some(c)
+}
+
+/// The block with line `k` replaced.
+pub fn set_line(state: &[u8], k: usize, c: &crate::fm::Curve) -> Option<Vec<u8>> {
+    let mut d = inflate(state.get(4..)?)?;
+    let head = lines(&d)?.get(k)?.0;
+    if !crate::fm::Curve::replace_at(&mut d, head, c) {
+        return None;
+    }
+    // the block still has to read as a whole
+    lines(&d)?;
+    let mut out = state[..4].to_vec();
+    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
+    Some(out)
 }
 
 /// A fresh block: bank 1 on as a plain low-pass, every line level.
@@ -392,6 +431,20 @@ mod tests {
         q[HEAD + PER + 14] = 1.0;
         let again = decode(&encode(&q, Some(&block))).unwrap();
         assert_eq!(again[..LISTED], q[..LISTED]);
+        // every line can be read, and a redrawn one lands where it belongs without moving the others
+        for k in 0..BANKS * LINES {
+            assert!(line(&block, k).is_some(), "line {k}");
+        }
+        let k = LINES + 1 + 2 * 14 + 12;
+        let mut c = line(&block, k).unwrap();
+        assert_eq!(c.pts.len(), 2);
+        c.pts[1].y = 0.25;
+        let edited = set_line(&block, k, &c).unwrap();
+        assert_eq!(line(&edited, k).unwrap().pts[1].y, 0.25);
+        assert_eq!(line(&edited, k + 1), line(&block, k + 1).map(|mut n| { n.span = line(&edited, k + 1).unwrap().span; n }));
+        let r = decode(&edited).unwrap();
+        assert_eq!(r[..LISTED], p[..LISTED]);
+        assert_ne!(r, p);
         // the default low-pass lets a low tone through and holds a high one back
         let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
         let level = |hz: f32| {

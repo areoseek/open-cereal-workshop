@@ -468,6 +468,35 @@ impl App {
                     let x = rect.left() + y * rect.width();
                     pt.line_segment([egui::pos2(x, rect.bottom()), egui::pos2(x, rect.bottom() - g * rect.height())], egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 190, 230)));
                 }
+                // the lines across the bands: pick one and draw it
+                let which_id = egui::Id::new(("vocline", ins, slot));
+                let mut which: usize = ui.data(|d| d.get_temp(which_id)).unwrap_or(0).min(vc::NENV - 1);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Line across the bands").small().color(TEXT_DIM));
+                    egui::ComboBox::from_id_salt(("voclinepick", ins, slot)).width(140.0).selected_text(RichText::new(vc::ENV_NAMES[which]).small()).show_ui(ui, |ui| {
+                        for (i, name) in vc::ENV_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut which, i, *name);
+                        }
+                    });
+                });
+                ui.data_mut(|d| d.insert_temp(which_id, which));
+                if let Some(pts) = vc::env_points(&f.p, which) {
+                    use cereal_engine::fm::{Curve, Pt};
+                    let mut c = Curve::default();
+                    let mut last = 0.0;
+                    for q in &pts {
+                        c.pts.push(Pt { x: (q[0] - last).max(0.0), y: q[1], ..Default::default() });
+                        last = q[0];
+                    }
+                    let done = ui.push_id(("vocenv", ins, slot, which), |ui| crate::curve::curve_editor(ui, &mut c, crate::curve::Line::Mapping, 110.0)).inner;
+                    if done {
+                        let mut x = 0.0;
+                        let now: Vec<[f32; 2]> = c.pts.iter().enumerate().map(|(i, q)| { if i > 0 { x += q.x.max(0.0); } [x, q.y] }).collect();
+                        if vc::set_env_points(&mut f.p, which, &now) {
+                            changed = true;
+                        }
+                    }
+                }
             }
             if f.kind == Kind::OldVoc {
                 use cereal_engine::fxvoc::classic as cv;
@@ -867,15 +896,45 @@ fn lines_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
             ui.data_mut(|d| d.insert_temp(id, k));
             vec![(k, String::new())]
         }
+        Kind::Bank => {
+            let id = ui.id().with("bankline");
+            let (mut bank, mut what, mut art): (usize, usize, usize) = ui.data(|d| d.get_temp(id)).unwrap_or((0, 0, 0));
+            const WHAT: [&str; 9] = ["Shaper", "Pan", "Volume", "Cutoff", "Resonance", "Low", "Band", "High", "Shaper mix"];
+            const ART: [&str; 14] = ["Pattern 1", "Pattern 2", "Pattern 3", "Pattern 4", "Pattern 5", "Pattern 6", "Pattern 7", "Pattern 8", "Pattern 9", "Pattern 10", "Slow wave", "From pad X", "From pad Y", "From input level"];
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Line of bank").small().color(TEXT_DIM));
+                for b in 0..cereal_engine::fxbank::BANKS {
+                    ui.selectable_value(&mut bank, b, format!("{}", b + 1));
+                }
+                egui::ComboBox::from_id_salt(id.with("what")).width(100.0).selected_text(RichText::new(WHAT[what]).small()).show_ui(ui, |ui| {
+                    for (i, name) in WHAT.iter().enumerate() {
+                        ui.selectable_value(&mut what, i, *name);
+                    }
+                });
+                if what > 0 {
+                    egui::ComboBox::from_id_salt(id.with("art")).width(120.0).selected_text(RichText::new(ART[art]).small()).show_ui(ui, |ui| {
+                        for (i, name) in ART.iter().enumerate() {
+                            ui.selectable_value(&mut art, i, *name);
+                        }
+                    });
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(id, (bank, what, art)));
+            let k = bank * cereal_engine::fxbank::LINES + if what == 0 { 0 } else { 1 + (what - 1) * 14 + art };
+            vec![(k, String::new())]
+        }
         _ => vec![(0, "Shape".to_string())],
     };
+    let is_bank = f.kind == Kind::Bank;
+    let timed = move |k: usize| is_bank && { let r = k % cereal_engine::fxbank::LINES; r > 0 && (r - 1) % 14 < 11 };
     for (k, name) in shown {
         if !name.is_empty() {
             ui.label(RichText::new(name).small().color(TEXT_DIM));
         }
         ui.push_id(("line", k), |ui| match f.line(k) {
             Some(mut c) => {
-                if crate::curve::curve_editor(ui, &mut c, crate::curve::Line::Mapping, 150.0) {
+                let kind = if timed(k) { crate::curve::Line::Envelope } else { crate::curve::Line::Mapping };
+                if crate::curve::curve_editor(ui, &mut c, kind, 150.0) {
                     changed |= f.set_line(k, &c);
                 }
             }

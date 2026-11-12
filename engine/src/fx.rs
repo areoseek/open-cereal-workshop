@@ -1840,7 +1840,7 @@ impl Fx {
             return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         if d.kind == Kind::Bank {
-            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
+            return crate::fxbank::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())), ext: None });
         }
         if d.kind == Kind::Patch {
             return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None, ext: None });
@@ -2154,17 +2154,30 @@ impl Fx {
             Kind::Maxi => 4,
             Kind::Warp => 2 * WARP_SLOTS,
             Kind::Xyz => 6,
+            Kind::Bank => crate::fxbank::BANKS * crate::fxbank::LINES,
             _ => 0,
         }
     }
     /// Drawn line `k` as points. None for a line stored the old way, which has to be drawn afresh.
     pub fn line(&self, k: usize) -> Option<crate::fm::Curve> {
         let block = self.encode(None);
+        if self.kind == Kind::Bank {
+            return crate::fxbank::line(&block, k);
+        }
         crate::fm::Curve::read_at(&block, *self.line_heads(&block).get(k)?)
     }
     /// Put an edited (or newly drawn) line in place of line `k`.
     pub fn set_line(&mut self, k: usize, c: &crate::fm::Curve) -> bool {
         let mut block = self.encode(None);
+        if self.kind == Kind::Bank {
+            return match crate::fxbank::set_line(&block, k, c).and_then(|b| Self::decode(def(self.kind).ident, &b)) {
+                Some(new) => {
+                    *self = new;
+                    true
+                }
+                None => false,
+            };
+        }
         let Some(&head) = self.line_heads(&block).get(k) else { return false };
         if !crate::fm::Curve::replace_at(&mut block, head, c) {
             return false;
