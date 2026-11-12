@@ -962,9 +962,9 @@ pub static DEFS: &[Def] = &[
         params: &[
             p("Mode", 24, 0, 3, 0),
             p("Input", 28, 0, 10000, 0),
-            p("Ceiling", 32, 0, 10000, 10000),
+            p("Linking", 32, 0, 10000, 10000),
             p("Amount", 36, 0, 10000, 10000),
-            p("Linking", 40, 0, 10000, 9912),
+            p("Ceiling", 40, 0, 10000, 9912),
             p("Envelope", 48, 0, 4, 2),
             p("Hardness", 52, 0, 9, 7),
         ],
@@ -4411,41 +4411,42 @@ impl Unit {
                 }
             }
             Kind::Finisher => {
-                // two stages: a clean gain rider holds the level near the ceiling, and a shaper takes off what
-                // the rider lets through; the mode and the amount decide how the work is split between them
-                let mode = p[0] as i32;
-                let drive = db(p[1] / 10000.0 * 24.0);
-                let ceil = db((p[2] / 10000.0 - 1.0) * 24.0);
-                let amt = (p[3] / 10000.0).clamp(0.0, 1.0);
-                let link = (p[4] / 10000.0).clamp(0.0, 1.0);
+                // a look-ahead gain rider holds the level at the ceiling; the hardness lets it give part of the
+                // reduction back, and a two-slope curve then folds those peaks under the ceiling
+                let drive = db(p[1] / 10000.0 * 24.0 - 0.75);
+                let link = (p[2] / 10000.0).clamp(0.0, 1.0);
+                // the limit itself is fixed; the last knob is a plain gain after it
+                let out = db((p[4] / 10000.0 - 1.0) * 25.45);
+                let ceil = 1.0f32;
                 let order = p[5].clamp(0.0, 4.0);
-                let hard = (p[6] / 9.0).clamp(0.0, 1.0);
-                let over = db(match mode {
-                    0 => hard * 3.0 * amt,
-                    1 => hard * 6.0 * amt,
-                    2 => hard * 6.0 * amt,
-                    _ => amt * 24.0,
-                });
-                let att_ms = if mode == 2 { 0.3 + 4.0 * amt } else { 0.3 };
-                let att = 1.0 - (-1.0 / (att_ms * 0.001 * sr)).exp();
+                let lift = 1.0 + (p[6] / 9.0).clamp(0.0, 1.0).powf(9.2);
+                const KNEE: f32 = 0.57;
+                let look = (139.0 * sr / 44100.0).round() as usize;
+                if self.buf.len() != look + 1 || self.lines.len() != 2 || self.lines[0].len() != look + 1 {
+                    self.buf = vec![[0.0; 2]; look + 1];
+                    self.lines = vec![vec![0.0; look + 1]; 2];
+                    self.pos = 0;
+                }
+                let att = 1.0 - (-6.0 / look as f32).exp();
                 let rel = 1.0 - (-1.0 / ((0.05 + 0.05 * order) * sr)).exp();
-                let knee = hard.min(0.999);
                 for f in io.iter_mut() {
                     let x = [f[0] * drive, f[1] * drive];
                     let both = x[0].abs().max(x[1].abs());
+                    let late = self.buf[self.pos];
+                    self.buf[self.pos] = x;
                     for c in 0..2 {
-                        let pk = x[c].abs() + (both - x[c].abs()) * link;
-                        let want = if pk > over { over / pk } else { 1.0 };
-                        // z holds the reduction in force: down fast, back up slowly
-                        let g = &mut z[c];
-                        let have = 1.0 - *g;
+                        self.lines[c][self.pos] = x[c].abs() + (both - x[c].abs()) * link;
+                        let pk = self.lines[c].iter().copied().fold(0.0, f32::max);
+                        let (want, give) = if pk > ceil { (ceil / pk, lift.min(pk / ceil)) } else { (1.0, 1.0) };
+                        // z holds the reduction in force: down within the look-ahead, back up slowly
+                        let have = 1.0 - z[c];
                         let next = if want < have { have + (want - have) * att } else { have + (want - have) * rel };
-                        *g = 1.0 - next;
-                        let y = x[c] * next;
-                        let a = y.abs();
-                        let shaped = if a <= knee { a } else if hard >= 0.999 { 1.0 } else { knee + (1.0 - knee) * ((a - knee) / (1.0 - knee)).tanh() };
-                        f[c] = y.signum() * shaped.min(1.0) * ceil;
+                        z[c] = 1.0 - next;
+                        let u = (late[c] * next * give / ceil).abs();
+                        let shaped = if u <= KNEE || give <= 1.0 { u } else { KNEE + (u - KNEE) * (1.0 - KNEE) / (give - KNEE) };
+                        f[c] = late[c].signum() * shaped.min(1.0) * ceil * out;
                     }
+                    self.pos = (self.pos + 1) % (look + 1);
                 }
             }
             Kind::LowLift => {
@@ -5609,7 +5610,7 @@ mod tests {
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
-            if matches!(d.kind, Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
+            if matches!(d.kind, Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
@@ -5728,8 +5729,11 @@ mod tests {
         fx.p[1] = 7500.0;
         let out = run(fx, sine, 44100);
         let peak = out.iter().map(|f| f[0].abs()).fold(0.0, f32::max);
-        assert!(peak <= 1.0001 && peak > 0.8, "peak {peak}");
+        assert!(peak <= 0.98 && peak > 0.8, "peak {peak}");
         assert!(rms(&out[22050..]) > 0.5);
+        // at rest it takes a little under 1 dB off and is otherwise clean
+        let level = rms(&run(Fx::new(Kind::Finisher), sine, 8192)[4096..]) / rms(&(4096..8192).map(sine).collect::<Vec<_>>());
+        assert!((level - 0.894).abs() < 0.01, "level {level}");
     }
 
     #[test]

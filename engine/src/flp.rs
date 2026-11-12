@@ -1477,7 +1477,9 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
     }
     // Old projects (four send tracks, 100 to 103) wire every insert to the send tracks and write a
     // level only once its knob has been turned up: without any, those knobs are at zero.
-    if n == 105 && !send_levels {
+    // Such a project saved again by a later version keeps the same wiring on a longer mixer, still without levels.
+    let old_wiring = n > 105 && inserts[1..100].iter().all(|ins| (100..104).all(|d| ins.routes.get(d).copied().unwrap_or(false)));
+    if (n == 105 || old_wiring) && !send_levels {
         for ins in inserts[..100].iter_mut() {
             for dest in 100..104 {
                 if ins.routes.get(dest).copied().unwrap_or(false) {
