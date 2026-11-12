@@ -1101,6 +1101,30 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
         set.chan = (chan - 1).clamp(0, 15) as u8;
         ui.label("Patch").hint("The program the device is switched to; none leaves it alone");
         num_or_none(ui, &mut set.patch, 127, 1);
+        let chan0 = set.chan;
+        ui.menu_button(RichText::new(cereal_engine::midiout::gm_name(chan0, set.patch).unwrap_or("Names")).small(), |ui| {
+            if chan0 == 9 {
+                for (n, name) in cereal_engine::midiout::GM_KITS {
+                    if ui.selectable_label(set.patch == n, name).clicked() {
+                        set.patch = n;
+                        ui.close_menu();
+                    }
+                }
+            } else {
+                for (f, fam) in cereal_engine::midiout::GM_FAMILIES.iter().enumerate() {
+                    ui.menu_button(*fam, |ui| {
+                        for n in f * 8..f * 8 + 8 {
+                            if ui.selectable_label(set.patch == n as i32, format!("{}  {}", n + 1, cereal_engine::midiout::GM[n])).clicked() {
+                                set.patch = n as i32;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+            }
+        })
+        .response
+        .hint("The General MIDI names; channel 10 lists the drum kits");
         ui.label("Bank");
         num_or_none(ui, &mut set.bank[0], 127, 0).hint("Coarse");
         num_or_none(ui, &mut set.bank[1], 127, 0).hint("Fine");
