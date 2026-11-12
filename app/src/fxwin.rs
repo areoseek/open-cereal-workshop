@@ -574,6 +574,10 @@ impl App {
                 });
                 ui.data_mut(|m| m.insert_temp(id, page));
                 shown = (0..head).chain(head + page * per..head + (page + 1) * per).collect();
+                if f.kind == Kind::EchoBank {
+                    // slopes and grain sit after the eight sections in the settings list
+                    shown.extend(165 + page * 4..169 + page * 4);
+                }
                 cut = names[page].len() + 1;
             }
             let rows = shown.len().div_ceil(per_row);

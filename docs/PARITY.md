@@ -80,7 +80,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Delay (built as Plain Echo; own-tempo scale and filter law are estimates)
 - [~] Fruity Delay 2 (built, approximate)
 - [~] Fruity Delay 3 (built, approximate)
-- [~] Fruity Delay Bank (built as Echo Bank; grain, shelf filters and filter gains not run)
+- [~] Fruity Delay Bank (built as Echo Bank; shelf and bell filters with their gain, the three slopes, separation and grain run; the grain envelope and separation laws are estimates)
 - [~] Fruity Fast Dist (built, approximate)
 - [~] Fruity Fast LP (built, approximate)
 - [~] Fruity Filter (built, approximate)

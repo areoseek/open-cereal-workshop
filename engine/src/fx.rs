@@ -1351,6 +1351,38 @@ pub static DEFS: &[Def] = &[
             p("8 modes", 776, 0, 0x0000_0301, 256),
             p("8 switches", 788, 0, 0x0101_0101, 0x0100_0000),
             p("Layout", 0, 15, 16, 16),
+            p("1 slope", 540, 0, 2, 0),
+            p("1 echo slope", 548, 0, 2, 0),
+            p("1 grain", 556, 0, 4096, 0),
+            p("1 grain shape", 560, -32768, 32768, 0),
+            p("2 slope", 572, 0, 2, 0),
+            p("2 echo slope", 580, 0, 2, 0),
+            p("2 grain", 588, 0, 4096, 0),
+            p("2 grain shape", 592, -32768, 32768, 0),
+            p("3 slope", 604, 0, 2, 0),
+            p("3 echo slope", 612, 0, 2, 0),
+            p("3 grain", 620, 0, 4096, 0),
+            p("3 grain shape", 624, -32768, 32768, 0),
+            p("4 slope", 636, 0, 2, 0),
+            p("4 echo slope", 644, 0, 2, 0),
+            p("4 grain", 652, 0, 4096, 0),
+            p("4 grain shape", 656, -32768, 32768, 0),
+            p("5 slope", 668, 0, 2, 0),
+            p("5 echo slope", 676, 0, 2, 0),
+            p("5 grain", 684, 0, 4096, 0),
+            p("5 grain shape", 688, -32768, 32768, 0),
+            p("6 slope", 700, 0, 2, 0),
+            p("6 echo slope", 708, 0, 2, 0),
+            p("6 grain", 716, 0, 4096, 0),
+            p("6 grain shape", 720, -32768, 32768, 0),
+            p("7 slope", 732, 0, 2, 0),
+            p("7 echo slope", 740, 0, 2, 0),
+            p("7 grain", 748, 0, 4096, 0),
+            p("7 grain shape", 752, -32768, 32768, 0),
+            p("8 slope", 764, 0, 2, 0),
+            p("8 echo slope", 772, 0, 2, 0),
+            p("8 grain", 780, 0, 4096, 0),
+            p("8 grain shape", 784, -32768, 32768, 0),
         ],
     },
     Def { kind: Kind::Curve, ident: "Fruity WaveShaper", title: "Curve Shaper", size: 102, fixed: &[], params: &[p("Pre", 4, 0, 256, 128), p("Mix", 8, 0, 128, 128), p("Post", 12, 0, 128, 128)] },
@@ -2557,6 +2589,11 @@ impl Unit {
             Kind::EchoBank => {
                 for _ in 0..8 {
                     u.lines.push(vec![0.0; ((sr * 2.0) as usize + 8) * 2]);
+                    u.lpos.push(0);
+                }
+                // filter memories: per bank two filters, three stages, two sides; then the grain clocks
+                u.lines.push(vec![0.0; 8 * 24]);
+                for _ in 0..8 {
                     u.lpos.push(0);
                 }
             }
@@ -4375,16 +4412,24 @@ impl Unit {
                 }
             }
             Kind::EchoBank => {
-                if p.len() < 165 || self.lines.len() < 8 {
+                if p.len() < 197 || self.lines.len() < 9 || self.lpos.len() < 16 {
                     return;
                 }
+                let (rings, mem) = self.lines.split_at_mut(8);
+                let mem = &mut mem[0];
                 let (dry, wet, input) = (p[0] / 128.0, p[1] / 128.0, p[2] / 128.0);
-                let len = self.lines[0].len() / 2;
+                let len = rings[0].len() / 2;
                 struct Bank {
                     on: bool,
                     pan_in: (f32, f32),
                     filt: (i32, f32, f32, bool),
                     echo_filt: (i32, f32, f32),
+                    // stages, and the level a shelf or bell lifts or cuts to
+                    shape: [(usize, f32); 2],
+                    // how far the sides are pulled together (above nought) or pushed apart
+                    sep: f32,
+                    // grain length in frames (0 = whole) and the bend of its envelope
+                    grain: (usize, f32),
                     fb: f32,
                     mode: i32,
                     pan_fb: (f32, f32),
@@ -4407,6 +4452,12 @@ impl Unit {
                         pan_in: (il * q[1] / 128.0, ir * q[1] / 128.0),
                         filt: (q[16] as i32, svf_g(hz(q[2]), sr), damp(q[3]), modes & 1 != 0),
                         echo_filt: (q[17] as i32, svf_g(hz(q[10]), sr), damp(q[11])),
+                        shape: [(1 + (p[165 + b * 4] as usize).min(2), 0.1 + q[4].clamp(0.0, 200.0) / 200.0 * 1.9), (1 + (p[166 + b * 4] as usize).min(2), 0.1 + q[12].clamp(0.0, 200.0) / 200.0 * 1.9)],
+                        sep: (q[5] / 128.0).clamp(-1.0, 1.0),
+                        grain: {
+                            let div = (p[167 + b * 4] / 256.0).round();
+                            (if div >= 1.0 { ((t / div) as usize).max(8) } else { 0 }, (p[168 + b * 4] / 32768.0).clamp(-1.0, 1.0))
+                        },
                         fb: (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995),
                         mode: (modes >> 8) & 0xff,
                         pan_fb: balance(q[7] / 128.0),
@@ -4415,13 +4466,23 @@ impl Unit {
                         next: if b < 7 { q[15] / 128.0 } else { 0.0 },
                     }
                 });
-                // filter kinds 1 to 4: low, band, notch, high; the shelving kinds pass
-                let pick = |kind: i32, (lp, bp, hp): (f32, f32, f32), x: f32, k: f32| match kind {
+                // filter kinds 1 to 7: low, band, notch, high, low shelf, bell, high shelf
+                let pick = |kind: i32, (lp, bp, hp): (f32, f32, f32), x: f32, k: f32, lift: f32| match kind {
                     1 => lp,
                     2 => bp * k,
                     3 => lp + hp,
                     4 => hp,
+                    5 => x + (lift - 1.0) * lp,
+                    6 => x + (lift - 1.0) * bp * k,
+                    7 => x + (lift - 1.0) * hp,
                     _ => x,
+                };
+                let run = |m: &mut [f32], kind: i32, g: f32, k: f32, (stages, lift): (usize, f32), x: f32| {
+                    let mut x = x;
+                    for st in 0..stages {
+                        x = pick(kind, svf(&mut m[st * 2..], x, g, k), x, k, lift);
+                    }
+                    x
                 };
                 for f in io.iter_mut() {
                     let x = [f[0] * input, f[1] * input];
@@ -4432,14 +4493,26 @@ impl Unit {
                             carry = [0.0; 2];
                             continue;
                         }
-                        let z = &mut z[b * 8..b * 8 + 8];
-                        let line = &mut self.lines[b];
+                        let z = &mut mem[b * 24..b * 24 + 24];
+                        let line = &mut rings[b];
                         let pos = self.lpos[b];
                         let mut s = [x[0] * k.pan_in.0 + carry[0], x[1] * k.pan_in.1 + carry[1]];
-                        if (1..=4).contains(&k.filt.0) && !k.filt.3 {
+                        if (1..=7).contains(&k.filt.0) && !k.filt.3 {
                             for c in 0..2 {
-                                s[c] = pick(k.filt.0, svf(&mut z[c * 2..], s[c], k.filt.1, k.filt.2), s[c], k.filt.2);
+                                s[c] = run(&mut z[c * 6..], k.filt.0, k.filt.1, k.filt.2, k.shape[0], s[c]);
                             }
+                        }
+                        if k.sep != 0.0 {
+                            let (mid, side) = ((s[0] + s[1]) * 0.5, (s[0] - s[1]) * 0.5 * (1.0 - k.sep));
+                            s = [mid + side, mid - side];
+                        }
+                        if k.grain.0 > 0 {
+                            // each echo is cut into equal pieces, every piece under its own rise and fall
+                            let at = self.lpos[8 + b] % k.grain.0;
+                            self.lpos[8 + b] = (at + 1) % k.grain.0;
+                            let ph = at as f32 / k.grain.0 as f32;
+                            let env = (1.0 - (2.0 * ph - 1.0).abs()).powf(4f32.powf(k.grain.1));
+                            s = [s[0] * env, s[1] * env];
                         }
                         let e = [line[((pos + len - k.time[0]) % len) * 2], line[((pos + len - k.time[1]) % len) * 2 + 1]];
                         let mut back = match k.mode {
@@ -4447,18 +4520,18 @@ impl Unit {
                             2 | 3 => [e[1] * k.fb, e[0] * k.fb],
                             _ => [e[0] * k.fb, e[1] * k.fb],
                         };
-                        if (1..=4).contains(&k.echo_filt.0) {
+                        if (1..=7).contains(&k.echo_filt.0) {
                             for c in 0..2 {
-                                back[c] = pick(k.echo_filt.0, svf(&mut z[4 + c * 2..], back[c], k.echo_filt.1, k.echo_filt.2), back[c], k.echo_filt.2);
+                                back[c] = run(&mut z[12 + c * 6..], k.echo_filt.0, k.echo_filt.1, k.echo_filt.2, k.shape[1], back[c]);
                             }
                         }
                         line[pos * 2] = (s[0] + back[0] * k.pan_fb.0).clamp(-16.0, 16.0);
                         line[pos * 2 + 1] = (s[1] + back[1] * k.pan_fb.1).clamp(-16.0, 16.0);
                         self.lpos[b] = (pos + 1) % len;
                         let mut o = e;
-                        if (1..=4).contains(&k.filt.0) && k.filt.3 {
+                        if (1..=7).contains(&k.filt.0) && k.filt.3 {
                             for c in 0..2 {
-                                o[c] = pick(k.filt.0, svf(&mut z[c * 2..], o[c], k.filt.1, k.filt.2), o[c], k.filt.2);
+                                o[c] = run(&mut z[c * 6..], k.filt.0, k.filt.1, k.filt.2, k.shape[0], o[c]);
                             }
                         }
                         sum[0] += o[0] * k.pan_out.0;
@@ -5296,6 +5369,31 @@ mod tests {
         let out = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 44100);
         let at = out.iter().skip(1).position(|f| f[0].abs() > 0.5).map(|i| i + 1);
         assert!(at.is_some_and(|i| i > 1000), "{at:?}");
+        // a low shelf turned right down in front of the echoes thins a low tone, and a steeper low-pass far below
+        // the tone removes more of it than a gentle one
+        let wet = |set: &dyn Fn(&mut Fx)| {
+            let mut fx = Fx::new(Kind::EchoBank);
+            fx.p[0] = 0.0;
+            set(&mut fx);
+            rms(&run(fx, sine, 88200)[44100..])
+        };
+        let flat = wet(&|_| {});
+        let shelf = wet(&|f| {
+            f.p[4 + 16] = 5.0;
+            f.p[4 + 2] = 65536.0;
+        });
+        assert!(flat > 0.01 && shelf < 0.3 * flat, "{flat} {shelf}");
+        let low = |slope: f32| {
+            wet(&|f| {
+                f.p[4 + 16] = 1.0;
+                f.p[4 + 2] = 12000.0;
+                f.p[165] = slope;
+            })
+        };
+        assert!(low(2.0) < 0.5 * low(0.0), "{} {}", low(0.0), low(2.0));
+        // grain: the echoes come out chopped, so quieter overall
+        let chopped = wet(&|f| f.p[167] = 2048.0);
+        assert!(chopped < 0.8 * flat && chopped > 0.2 * flat, "{flat} {chopped}");
 
         // equaliser: a 18 dB bell at the tone's frequency makes it much louder, a low-pass far below removes it
         let mut fx = Fx::new(Kind::Eq);
