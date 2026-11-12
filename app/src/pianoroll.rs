@@ -177,6 +177,8 @@ pub struct State {
     pub(crate) time_sel: Option<(u32, u32)>,
     lane: Lane,
     ghosts: bool,
+    /// The key strip shows every note's name instead of a keyboard.
+    names: bool,
     /// Selected notes, as indices into the pattern's note list.
     pub sel: BTreeSet<usize>,
     sel_for: (usize, u16),
@@ -214,6 +216,7 @@ impl Default for State {
             time_sel: None,
             lane: Lane::Vel,
             ghosts: true,
+            names: false,
             sel: BTreeSet::new(),
             sel_for: (usize::MAX, 0),
             clip: vec![],
@@ -1069,6 +1072,7 @@ impl App {
             Key::Y => self.piano.tool = Tool::Playback,
             Key::S => self.piano.slide = !self.piano.slide,
             Key::O => self.piano.porta = !self.piano.porta,
+            Key::M => self.piano.names = !self.piano.names,
             _ => return false,
         }
         true
@@ -1243,9 +1247,13 @@ impl App {
         }
 
         // scrolling and zoom
+        let mut alt_wheel = 0.0_f32;
         if resp.hovered() {
             let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
-            if zoom != 1.0 {
+            if mods.alt && !mods.shift && zoom == 1.0 {
+                // Alt+wheel turns the property of the note under the pointer
+                alt_wheel = scroll.y + scroll.x;
+            } else if zoom != 1.0 {
                 let old = self.piano.zoom;
                 self.piano.zoom = (old * zoom).clamp(0.02, 12.0);
                 if let Some(pp) = pointer {
@@ -1394,6 +1402,27 @@ impl App {
                 lp.circle_filled(Pos2::new(x, y), 2.5, col);
             }
         }
+        if alt_wheel != 0.0 {
+            if let Some((i, _)) = hit {
+                let step = alt_wheel / 400.0;
+                let sel = &self.piano.sel;
+                let all = sel.contains(&i);
+                for (j, n) in self.song.patterns[pat].notes.iter_mut().enumerate() {
+                    if j != i && !(all && sel.contains(&j) && n.chan == chan) {
+                        continue;
+                    }
+                    match which {
+                        Lane::Vel => n.vel = (n.vel + step * 1.28).clamp(0.0, 1.28),
+                        Lane::Pan => n.pan = (n.pan + step * 2.0).clamp(-1.0, 1.0),
+                        Lane::Fine => n.fine_cents = (n.fine_cents + step * 2400.0).round().clamp(-1200.0, 1200.0),
+                        Lane::Release => n.release = (n.release + step).clamp(0.0, 1.0),
+                        Lane::ModX => n.mod_x = (n.mod_x + step * 2.0).clamp(-1.0, 1.0),
+                        Lane::ModY => n.mod_y = (n.mod_y + step * 2.0).clamp(-1.0, 1.0),
+                    }
+                    self.dirty = true;
+                }
+            }
+        }
 
         // play head
         if !self.handle.transport.song_mode() {
@@ -1431,9 +1460,20 @@ impl App {
             let y = y_of(key);
             let r = Rect::from_min_max(Pos2::new(keys.left(), y), Pos2::new(keys.right(), y + KEY_H));
             let sounding = self.piano.sounding.map(|s| s.1 as i32 == key).unwrap_or(false);
-            let fill = if sounding { ACCENT } else if is_black(key) { Color32::from_gray(38) } else { Color32::from_gray(225) };
+            let names = self.piano.names;
+            let fill = if sounding {
+                ACCENT
+            } else if names {
+                Color32::from_gray(if is_black(key) { 46 } else { 62 })
+            } else if is_black(key) {
+                Color32::from_gray(38)
+            } else {
+                Color32::from_gray(225)
+            };
             kp.rect_filled(r.shrink2(Vec2::new(0.0, 0.5)), 0.0, fill);
-            if key % 12 == 0 {
+            if names {
+                kp.text(r.right_center() - Vec2::new(4.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", NAMES[key as usize % 12], key / 12), FontId::proportional(9.5), Color32::from_gray(215));
+            } else if key % 12 == 0 {
                 kp.text(r.right_center() - Vec2::new(4.0, 0.0), Align2::RIGHT_CENTER, format!("C{}", key / 12), FontId::proportional(10.0), Color32::from_gray(60));
             }
         }

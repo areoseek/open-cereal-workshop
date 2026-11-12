@@ -156,7 +156,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+drag, Shift+drag a note | Rectangle select, drag a copy | yes |
 | Double-click a note | Note properties | yes |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
-| M | Keyboard / note names view | no |
+| M | Keyboard / note names view | yes |
 | Alt+B, Alt+N | Note helpers, waveform helper | no |
 | Alt+G / Shift+G | Ungroup / group the selected notes; a group is picked, moved and copied as one | yes |
 | Ctrl+I | Write the lane's current value | no |
@@ -164,7 +164,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Shift+Ctrl+V | Paste from the MIDI clipboard | no |
 | Shift+M, Shift+N | Random groups, chord stamp off | no |
-| Alt+wheel | Change the property of the note under the pointer | no |
+| Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
 | Right Shift+click | Slice, and its variants | no |
 
 ## Playlist
