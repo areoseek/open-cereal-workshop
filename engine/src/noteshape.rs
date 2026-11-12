@@ -165,6 +165,116 @@ impl Shaper {
     }
 }
 
+fn set_int(b: &mut [u8], at: usize, v: i32) {
+    if let Some(d) = b.get_mut(at..at + 4) {
+        d.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+impl Shaper {
+    /// The block again with this shaper's settings written over the one it was read from. Only what differs
+    /// from the block is touched, so an unedited unit goes back byte for byte. Drawn lines are not written
+    /// here: they are replaced in the block itself (see `line_heads`).
+    pub fn encode(&self, ident: &str, base: &[u8]) -> Option<Vec<u8>> {
+        let was = Shaper::decode(ident, base)?;
+        let mut out = base.to_vec();
+        match (self, &was) {
+            (Shaper::Keys { on, offset, mode, glide, rows }, Shaper::Keys { on: on0, offset: offset0, mode: mode0, glide: glide0, rows: rows0 }) => {
+                if on != on0 {
+                    set_int(&mut out, 4, *on as i32);
+                }
+                if offset != offset0 {
+                    set_int(&mut out, 12, *offset);
+                }
+                if mode != mode0 {
+                    set_int(&mut out, 16, *mode as i32);
+                }
+                if glide != glide0 {
+                    set_int(&mut out, 20, (*glide * 24.0).round() as i32);
+                }
+                if rows != rows0 {
+                    let end = 24 + rows0.iter().map(|r| 4 + 2 * r.len()).sum::<usize>();
+                    let mut v = out[..24].to_vec();
+                    for r in rows {
+                        v.extend((r.len().min(64) as i32).to_le_bytes());
+                        for t in r.iter().take(64) {
+                            v.extend(t.to_le_bytes());
+                        }
+                    }
+                    v.extend_from_slice(base.get(end..)?);
+                    out = v;
+                }
+            }
+            (Shaper::Zones(z), Shaper::Zones(z0)) => {
+                let heads = Shaper::line_heads(ident, base);
+                for (k, (a, b)) in z.iter().zip(z0).enumerate() {
+                    // the transpose and the switches follow the zone's second line
+                    let c = crate::fm::Curve::read_at(base, *heads.get(2 * k + 1)?)?;
+                    let at = c.span.1;
+                    if a.transpose != b.transpose {
+                        set_int(&mut out, at, a.transpose);
+                    }
+                    if a.absolute != b.absolute {
+                        *out.get_mut(at + 4)? = a.absolute as u8;
+                    }
+                    if a.random != b.random {
+                        *out.get_mut(at + 5)? = a.random as u8;
+                    }
+                }
+            }
+            (Shaper::Colours { port, colour }, Shaper::Colours { port: p0, colour: c0 }) => {
+                for k in 0..16 {
+                    if port[k] != p0[k] {
+                        set_int(&mut out, 4 + 4 * k, port[k] as i32);
+                    }
+                    if colour[k] != c0[k] {
+                        set_int(&mut out, 68 + 4 * k, colour[k] as i32);
+                    }
+                }
+            }
+            (Shaper::Levels(l), Shaper::Levels(l0)) => {
+                for (k, (a, b)) in l.iter().zip(l0).enumerate() {
+                    let at = 29 + 24 * k;
+                    let f = |v: f32| (v * 8192.0).round() as i32;
+                    for (j, (x, y)) in [(a.centre, b.centre), (a.multiply, b.multiply), (a.tension, b.tension), (a.offset, b.offset), (a.random, b.random)].into_iter().enumerate() {
+                        if x != y {
+                            set_int(&mut out, at + 4 * j, f(x));
+                        }
+                    }
+                    if a.mode != b.mode {
+                        set_int(&mut out, at + 20, a.mode as i32);
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// Where the drawn lines of a unit's block start, for the line editor: the splitter's key and velocity
+    /// lines, zone after zone.
+    pub fn line_heads(ident: &str, b: &[u8]) -> Vec<usize> {
+        let mut heads = Vec::new();
+        if ident.eq_ignore_ascii_case("vfx keyboard splitter") {
+            let Some(&flag) = b.get(2) else { return heads };
+            let mut at = if flag & 0x10 != 0 { 5 } else { 4 };
+            let mut sink = Vec::new();
+            for _ in 0..16 {
+                for count in [KEYS + 1, 129] {
+                    heads.push(at);
+                    sink.clear();
+                    match crate::fx::drawn_table_n(b, at, count, &mut sink) {
+                        Some(next) => at = next,
+                        None => return heads,
+                    }
+                }
+                at += 7;
+            }
+        }
+        heads
+    }
+}
+
 /// Whose turn it is where a remapper hands its targets out one at a time: (channel, held unit, key row) and
 /// the count so far.
 pub type Turns = Vec<((u16, usize, u8), usize)>;
@@ -407,6 +517,61 @@ pub fn motion_of(chain: &[Link]) -> Option<std::sync::Arc<Motion>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_note_units_go_back_into_their_blocks() {
+        // a key remapper: head, twelve rows, and bytes after them that must survive
+        let mut b = Vec::new();
+        for v in [1i32, 1, 0, 0, 0, 24] {
+            b.extend(v.to_le_bytes());
+        }
+        for k in 0..12i16 {
+            b.extend(1i32.to_le_bytes());
+            b.extend(k.to_le_bytes());
+        }
+        b.extend([9u8, 8, 7]);
+        let id = "VFX Key Mapper";
+        let mut s = Shaper::decode(id, &b).unwrap();
+        assert_eq!(s.encode(id, &b).unwrap(), b, "untouched goes back as it came");
+        if let Shaper::Keys { mode, rows, glide, .. } = &mut s {
+            *mode = 3;
+            *glide = 2.0;
+            rows[0] = vec![0, 4, 7];
+            rows[5].clear();
+        }
+        let out = s.encode(id, &b).unwrap();
+        assert_eq!(Shaper::decode(id, &out).unwrap(), s);
+        assert_eq!(&out[out.len() - 3..], &[9, 8, 7]);
+
+        // a level scaler: only the number that moved changes
+        let mut b = vec![0u8; 29 + 24 * 6];
+        for k in 0..6 {
+            b[29 + 24 * k + 4..29 + 24 * k + 8].copy_from_slice(&8192i32.to_le_bytes());
+            b[29 + 24 * k + 20..29 + 24 * k + 24].copy_from_slice(&1i32.to_le_bytes());
+        }
+        let id = "VFX Level Scaler";
+        let mut s = Shaper::decode(id, &b).unwrap();
+        if let Shaper::Levels(l) = &mut s {
+            l[3].random = 0.25;
+            l[0].mode = 2;
+        }
+        let out = s.encode(id, &b).unwrap();
+        assert_eq!(Shaper::decode(id, &out).unwrap(), s);
+        assert_eq!(out.iter().zip(&b).filter(|(x, y)| x != y).count(), 2);
+
+        // a colour router
+        let mut b = vec![0u8; 4 + 128];
+        for k in 0..16 {
+            b[68 + 4 * k] = k as u8;
+        }
+        let id = "VFX Color Mapper";
+        let mut s = Shaper::decode(id, &b).unwrap();
+        if let Shaper::Colours { port, colour } = &mut s {
+            port[2] = 5;
+            colour[2] = 9;
+        }
+        assert_eq!(Shaper::decode(id, &s.encode(id, &b).unwrap()).unwrap(), s);
+    }
 
     fn part(base: f32, amount: f32, pts: &[(f32, f32)], sustain: i32, lfo: bool) -> MotionPart {
         let mut env = crate::fm::Curve::flat(0.5);

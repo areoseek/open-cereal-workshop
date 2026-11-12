@@ -24,9 +24,24 @@ pub struct Node {
     pub name: String,
     /// Our unit for it, when we have one.
     pub fx: Option<Fx>,
+    /// The stored block of a unit that works on notes, as it stands now; the note cables read from it.
+    pub notes: Option<Vec<u8>>,
 }
 
 impl Patch {
+    /// Put an edited block in place for the note unit `i` and let every cable through it follow.
+    pub fn set_note_block(&mut self, i: usize, block: Vec<u8>) -> bool {
+        let Some(node) = self.nodes.get_mut(i) else { return false };
+        let Some(shaper) = crate::noteshape::Shaper::decode(&node.ident, &block) else { return false };
+        node.notes = Some(block);
+        for (_, chain) in &mut self.shape {
+            for l in chain.iter_mut().filter(|l| l.node == i) {
+                l.shaper = shaper.clone();
+            }
+        }
+        true
+    }
+
     /// The same units cabled the same way, whatever their settings are.
     pub fn same_wiring(&self, o: &Patch) -> bool {
         self.nodes.len() == o.nodes.len()
@@ -196,8 +211,11 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
                     }
                 }
                 // one unit goes by a longer name here than in a project's own slots
-                let mut node = Node { ident, name, fx: None };
+                let mut node = Node { ident, name, fx: None, notes: None };
                 node.fx = node.fx_before(block);
+                if node.fx.as_ref().is_none_or(|f| f.kind == crate::fx::Kind::Thru) && crate::noteshape::Shaper::decode(&node.ident, block).is_some() {
+                    node.notes = Some(block.to_vec());
+                }
                 nodes.push(node);
                 blocks.push(block);
             }
@@ -359,7 +377,10 @@ pub fn encode(p: &Patch, base: Option<&[u8]>) -> Vec<u8> {
             let d = &g[q];
             match node.and_then(|n| n.fx.as_ref().map(|f| (n, f))) {
                 Some((n, f)) if j == 5005 && n.fx_before(d).as_ref() != Some(f) => put(&mut body, j, &f.encode(Some(d))),
-                _ => put(&mut body, j, d),
+                _ => match node.and_then(|n| n.notes.as_deref()).filter(|_| j == 5005) {
+                    Some(mine) => put(&mut body, j, mine),
+                    None => put(&mut body, j, d),
+                },
             }
         }
         put(&mut out, 0, &body);
@@ -590,8 +611,8 @@ mod tests {
 
     fn bay(senders: usize) -> Patch {
         use crate::fx::Kind;
-        let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)) }).collect();
-        nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)) });
+        let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)), notes: None }).collect();
+        nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)), notes: None });
         let c = |a, b| Cable { from: a, to: b, level: 1.0 };
         Patch {
             cables: vec![c(End::Bay, End::Node(senders)), c(End::Node(senders), End::Bay)],
@@ -722,6 +743,61 @@ mod tests {
         }
         eprintln!("{bays} bays, {from_board} cables from boards, {short} from outputs the board does not hold");
         assert!(bays > 50 && from_board > 500 && short * 50 < from_board);
+    }
+
+    /// With CEREAL_FLP_CORPUS set: the note units held in the stock instrument bays go back into their
+    /// blocks as they came, and an edited one is saved inside the bay and read back.
+    #[test]
+    fn stock_note_units_survive_editing() {
+        use crate::noteshape::Shaper;
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Generators/Patcher")];
+        let (mut units, mut edited, mut lines, mut bays) = (0, 0, 0, 0);
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(f) = crate::preset::read(&path).ok() else { continue };
+                let Some((mut p, _, _)) = read(&f.state, true) else { continue };
+                bays += 1;
+                assert_eq!(encode(&p, Some(&f.state)), f.state, "{}", path.display());
+                for i in 0..p.nodes.len() {
+                    let Some(block) = p.nodes[i].notes.clone() else { continue };
+                    let ident = p.nodes[i].ident.clone();
+                    let Some(mut s) = Shaper::decode(&ident, &block) else { continue };
+                    units += 1;
+                    if !matches!(s, Shaper::Motion(_) | Shaper::Script(_)) {
+                        assert_eq!(s.encode(&ident, &block).as_deref(), Some(&block[..]), "{} unit {i}", path.display());
+                    }
+                    for &h in &Shaper::line_heads(&ident, &block) {
+                        if let Some(c) = crate::fm::Curve::read_at(&block, h) {
+                            let mut b = block.clone();
+                            assert!(crate::fm::Curve::replace_at(&mut b, h, &c));
+                            assert_eq!(Shaper::decode(&ident, &b), Shaper::decode(&ident, &block), "{} unit {i} line at {h}", path.display());
+                            lines += 1;
+                        }
+                    }
+                    match &mut s {
+                        Shaper::Keys { mode, .. } => *mode = (*mode + 1) % 5,
+                        Shaper::Zones(z) => z[0].transpose += 1,
+                        Shaper::Colours { colour, .. } => colour[0] = (colour[0] + 1) % 16,
+                        Shaper::Levels(l) => l[0].offset += 0.125,
+                        _ => continue,
+                    }
+                    let new = s.encode(&ident, &block).unwrap();
+                    assert!(p.set_note_block(i, new));
+                    let saved = encode(&p, Some(&f.state));
+                    let back = read(&saved, true).unwrap().0;
+                    assert_eq!(Shaper::decode(&ident, back.nodes[i].notes.as_ref().unwrap()), Some(s), "{} unit {i}", path.display());
+                    edited += 1;
+                }
+            }
+        }
+        eprintln!("{bays} bays, {units} note units, {edited} edited and read back, {lines} lines put back");
+        assert!(edited > 3);
     }
 
     #[test]

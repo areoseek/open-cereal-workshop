@@ -262,6 +262,20 @@ impl App {
                         moved = true;
                     }
                 }
+                // the units on the note cables, each with its settings
+                for i in 0..sub.nodes.len() {
+                    if sub.nodes[i].notes.is_none() {
+                        continue;
+                    }
+                    let ident = sub.nodes[i].ident.clone();
+                    let head = format!("{}. {}", i + 1, crate::fxwin::note_unit_title(&ident));
+                    egui::CollapsingHeader::new(RichText::new(head).small()).id_salt(("chanbaynote", ci, i)).show(ui, |ui| {
+                        let mut block = sub.nodes[i].notes.clone().unwrap();
+                        if crate::fxwin::note_unit_ui(ui, &ident, &mut block) && std::sync::Arc::make_mut(sub).set_note_block(i, block) {
+                            moved = true;
+                        }
+                    });
+                }
             }
             if moved {
                 self.dirty = true;

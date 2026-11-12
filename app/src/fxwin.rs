@@ -1342,6 +1342,17 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
         for at in 0..sub.order.len() {
             let i = sub.order[at];
             let head = format!("{}. {}", i + 1, title(&sub.nodes[i]));
+            if sub.nodes[i].notes.is_some() {
+                let head = format!("{}. {}", i + 1, note_unit_title(&sub.nodes[i].ident));
+                egui::CollapsingHeader::new(RichText::new(head).small()).id_salt(("baynote", i)).show(ui, |ui| {
+                    let ident = sub.nodes[i].ident.clone();
+                    let mut block = sub.nodes[i].notes.clone().unwrap();
+                    if note_unit_ui(ui, &ident, &mut block) && std::sync::Arc::make_mut(sub).set_note_block(i, block) {
+                        changed = true;
+                    }
+                });
+                continue;
+            }
             let Some(kind) = sub.nodes[i].fx.as_ref().map(|g| g.kind) else {
                 ui.label(RichText::new(head).small());
                 continue;
@@ -1385,6 +1396,168 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
         }
     });
     changed
+}
+
+/// Our names for the units that work on notes.
+pub fn note_unit_title(ident: &str) -> &'static str {
+    match ident.to_ascii_lowercase().as_str() {
+        "vfx key mapper" => "Key Remapper",
+        "vfx keyboard splitter" => "Keyboard Zones",
+        "vfx color mapper" => "Colour Router",
+        "vfx level scaler" => "Level Scaler",
+        "vfx envelope" => "Note Mover",
+        "vfx script" => "Note Script",
+        _ => "Note unit",
+    }
+}
+
+/// The settings of a unit that works on notes, edited in its stored block. True when the block changed.
+pub fn note_unit_ui(ui: &mut Ui, ident: &str, block: &mut Vec<u8>) -> bool {
+    use cereal_engine::noteshape::{Shaper, KEYS};
+    const NOTE: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let Some(mut s) = Shaper::decode(ident, block) else { return false };
+    let before = s.clone();
+    let mut lines = false;
+    match &mut s {
+        Shaper::Keys { on, offset, mode, glide, rows } => {
+            ui.horizontal(|ui| {
+                ui.checkbox(on, "On");
+                ui.label("Offset");
+                ui.add(egui::DragValue::new(offset).range(-12..=12));
+                ui.label("Several targets");
+                const MODES: [&str; 5] = ["All", "All, one loudness", "One at random", "Next up", "Next down"];
+                egui::ComboBox::from_id_salt("km_mode").selected_text(MODES[*mode as usize % 5]).show_ui(ui, |ui| {
+                    for (k, n) in MODES.iter().enumerate() {
+                        ui.selectable_value(mode, k as u8, *n);
+                    }
+                });
+                ui.label("Glide");
+                ui.add(egui::DragValue::new(glide).range(0.0..=64.0).speed(0.05).suffix(" steps"));
+            });
+            // one row per key of the octave: the keys it plays, counted from the octave's first key
+            for (k, row) in rows.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_sized([26.0, 16.0], egui::Label::new(RichText::new(NOTE[k]).small()));
+                    let mut drop = None;
+                    for (j, t) in row.iter_mut().enumerate() {
+                        let r = ui.add(egui::DragValue::new(t).range(-48..=60).custom_formatter(|v, _| {
+                            let v = v as i32;
+                            format!("{}{:+}", NOTE[v.rem_euclid(12) as usize], v.div_euclid(12))
+                        }).custom_parser(|t| t.trim().parse::<f64>().ok()));
+                        if r.on_hover_text("Drag to change the key it plays; right-click to take it out").secondary_clicked() {
+                            drop = Some(j);
+                        }
+                    }
+                    if let Some(j) = drop {
+                        row.remove(j);
+                    }
+                    if row.len() < 64 && ui.small_button("+").on_hover_text("Play one more key").clicked() {
+                        row.push(k as i16);
+                    }
+                });
+            }
+        }
+        Shaper::Zones(zones) => {
+            let id = ui.id().with("zone-pick");
+            let mut pick: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0).min(zones.len().saturating_sub(1));
+            ui.horizontal_wrapped(|ui| {
+                for k in 0..zones.len() {
+                    let used = zones[k].keys.iter().any(|v| *v > 0.0);
+                    let text = RichText::new(format!("{}", k + 1)).small();
+                    if ui.selectable_label(pick == k, if used { text.strong() } else { text.color(TEXT_DIM) }).clicked() {
+                        pick = k;
+                    }
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(id, pick));
+            if let Some(z) = zones.get_mut(pick) {
+                ui.horizontal(|ui| {
+                    ui.label("Transpose");
+                    ui.add(egui::DragValue::new(&mut z.transpose).range(-48..=48).suffix(" keys"));
+                    ui.checkbox(&mut z.absolute, "Absolute velocity");
+                    ui.checkbox(&mut z.random, "Random");
+                });
+                let heads = Shaper::line_heads(ident, block);
+                for (which, label) in [(0usize, format!("Keys (C0 at the left, {KEYS} keys across): how much of the zone each key gets")), (1, "Velocity: what each velocity becomes".to_string())] {
+                    ui.label(RichText::new(label).small().color(TEXT_DIM));
+                    let Some(&head) = heads.get(2 * pick + which) else { continue };
+                    match cereal_engine::fm::Curve::read_at(block, head) {
+                        Some(mut c) => {
+                            ui.push_id(("zone-line", pick, which), |ui| {
+                                if crate::curve::curve_editor(ui, &mut c, crate::curve::Line::Mapping, 90.0) && cereal_engine::fm::Curve::replace_at(block, head, &c) {
+                                    lines = true;
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(RichText::new("stored the old way; not editable here").small().color(TEXT_DIM));
+                        }
+                    }
+                }
+            }
+        }
+        Shaper::Colours { port, colour } => {
+            egui::Grid::new("colour-router").spacing([6.0, 2.0]).show(ui, |ui| {
+                ui.label(RichText::new("Colour").small().color(TEXT_DIM));
+                ui.label(RichText::new("Leaves by").small().color(TEXT_DIM));
+                ui.label(RichText::new("As colour").small().color(TEXT_DIM));
+                ui.end_row();
+                for k in 0..16 {
+                    ui.label(RichText::new(format!("{}", k + 1)).small());
+                    let mut p = port[k] as i32 + 1;
+                    ui.add(egui::DragValue::new(&mut p).range(1..=16).prefix("output "));
+                    port[k] = (p - 1) as u8;
+                    let mut c = colour[k] as i32 + 1;
+                    ui.add(egui::DragValue::new(&mut c).range(1..=16));
+                    colour[k] = (c - 1) as u8;
+                    ui.end_row();
+                }
+            });
+        }
+        Shaper::Levels(levels) => {
+            const NAMES: [&str; 6] = ["Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y"];
+            const MODES: [&str; 3] = ["Add", "Both ways", "Take away"];
+            egui::Grid::new("level-scaler").spacing([6.0, 2.0]).show(ui, |ui| {
+                for h in ["", "Centre", "Multiply", "Tension", "Offset", "Random", ""] {
+                    ui.label(RichText::new(h).small().color(TEXT_DIM));
+                }
+                ui.end_row();
+                for (k, l) in levels.iter_mut().enumerate() {
+                    ui.label(RichText::new(NAMES[k]).small());
+                    let pc = |ui: &mut Ui, v: &mut f32, lo: f32, hi: f32| {
+                        let mut x = *v * 100.0;
+                        if ui.add(egui::DragValue::new(&mut x).range(lo..=hi).speed(0.5).suffix(" %").max_decimals(1)).changed() {
+                            *v = x / 100.0;
+                        }
+                    };
+                    pc(ui, &mut l.centre, 0.0, 100.0);
+                    pc(ui, &mut l.multiply, -400.0, 400.0);
+                    pc(ui, &mut l.tension, -100.0, 100.0);
+                    pc(ui, &mut l.offset, -100.0, 100.0);
+                    pc(ui, &mut l.random, 0.0, 100.0);
+                    egui::ComboBox::from_id_salt(("ls_mode", k)).width(80.0).selected_text(MODES[l.mode as usize % 3]).show_ui(ui, |ui| {
+                        for (j, n) in MODES.iter().enumerate() {
+                            ui.selectable_value(&mut l.mode, j as u8, *n);
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        }
+        Shaper::Motion(_) => {
+            ui.label(RichText::new("Its lines and slow waves play as stored; they are not editable here yet.").small().color(TEXT_DIM));
+        }
+        Shaper::Script(_) => {
+            ui.label(RichText::new("The program and its knobs are shown in the channel's own window.").small().color(TEXT_DIM));
+        }
+    }
+    if s != before {
+        if let Some(b) = s.encode(ident, block) {
+            *block = b;
+            return true;
+        }
+    }
+    lines
 }
 
 fn eq_curve(ui: &mut Ui, f: &mut fx::Fx) -> bool {
