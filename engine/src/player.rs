@@ -2022,6 +2022,12 @@ impl Player {
                             g.set_travel(e.2 as usize, e.3);
                         }
                         g.tone()
+                    } else if g.kind == crate::synth::Kind::String && (n.mod_x != 0.0 || n.mod_y != 0.0) && g.p.len() >= 2 {
+                        // the plucked string takes each note's two piano roll offsets as decay and colour
+                        let mut g = g.clone();
+                        g.p[0] = (g.p[0] + n.mod_x * 128.0).clamp(0.0, 128.0);
+                        g.p[1] = (g.p[1] + n.mod_y * 128.0).clamp(0.0, 128.0);
+                        g.tone()
                     } else {
                         g.tone()
                     };
