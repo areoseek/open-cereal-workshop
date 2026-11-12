@@ -242,6 +242,9 @@ pub(crate) struct App {
     taps: Vec<std::time::Instant>,
     /// When unsaved work was last put in the backup folder (or there was none to put).
     auto_at: std::time::Instant,
+    /// Something that would throw unsaved work away is waiting for an answer.
+    ask_leave: Option<Leave>,
+    quit_ok: bool,
     /// The notes this recording pass wrote, which a pass that does not blend must not wipe again.
     rec_new: Vec<(u32, u16, u8)>,
     /// Where step editing writes next, and how many keys are down.
@@ -426,6 +429,8 @@ impl App {
             time_secs: false,
             taps: Vec::new(),
             auto_at: std::time::Instant::now(),
+            ask_leave: None,
+            quit_ok: false,
             rec_new: Vec::new(),
             step_at: None,
             step_down: 0,
@@ -896,6 +901,74 @@ impl App {
                 self.unsaved = false;
             }
             Err(e) => self.status = format!("Save failed: {e}"),
+        }
+    }
+
+    /// Do something that replaces the project, asking first when there is unsaved work.
+    fn leave(&mut self, what: Leave) {
+        if self.unsaved {
+            self.ask_leave = Some(what);
+        } else {
+            self.leave_now(what);
+        }
+    }
+
+    fn leave_now(&mut self, what: Leave) {
+        match what {
+            Leave::Close => self.quit_ok = true,
+            Leave::New => self.new_project(),
+            Leave::OpenDialog => self.open_dialog(),
+            Leave::Open(p) => self.open(&p),
+            Leave::Template(p) => {
+                self.open(&p);
+                // a template is a start, not the file being worked on
+                self.path = None;
+                self.status = "New project from a template".into();
+            }
+        }
+    }
+
+    /// The question asked before unsaved work is thrown away, and the window's close button.
+    fn leave_window(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_ok && self.unsaved {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_leave = Some(Leave::Close);
+        }
+        if self.quit_ok {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        let Some(what) = self.ask_leave.take() else { return };
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "this project".into());
+        let mut answer = None;
+        egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label(format!("Save changes to {name}?"));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Yes").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    answer = Some(0);
+                }
+                if ui.button("No").clicked() {
+                    answer = Some(1);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(2);
+                }
+            });
+        });
+        match answer {
+            Some(0) => {
+                self.save(false);
+                // a save that did not go through (the file box was closed) calls the whole thing off
+                if !self.unsaved {
+                    self.leave_now(what);
+                }
+            }
+            Some(1) => {
+                self.unsaved = false;
+                self.leave_now(what);
+            }
+            Some(_) => {}
+            None => self.ask_leave = Some(what),
         }
     }
 
@@ -1857,7 +1930,7 @@ impl App {
                     Ok(s) => self.handle.send(Cmd::Preview(s)),
                     Err(e) => self.status = e,
                 },
-                Action::Open(p) => self.open(&p),
+                Action::Open(p) => self.leave(Leave::Open(p)),
                 Action::LoadSample(p, into) => self.load_sample(&p, into),
                 Action::LoadPreset(p, to) => self.load_preset(&p, to),
                 Action::LoadScore(p, to) => self.load_score(&p, to),
@@ -2151,7 +2224,7 @@ impl App {
                     Key::Z if modifiers.alt => self.undo(),
                     Key::Z => self.undo_toggle(),
                     Key::N => self.save_new_version(),
-                    Key::O => self.open_dialog(),
+                    Key::O => self.leave(Leave::OpenDialog),
                     Key::S => self.save(modifiers.shift),
                     Key::R if modifiers.shift => {
                         self.export();
@@ -2299,7 +2372,7 @@ impl App {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("FILE", |ui| {
                     if ui.button("New").clicked() {
-                        self.new_project();
+                        self.leave(Leave::New);
                         ui.close_menu();
                     }
                     ui.menu_button("New from template", |ui| {
@@ -2330,17 +2403,14 @@ impl App {
                             for (name, path) in list {
                                 if ui.button(name).clicked() {
                                     ui.close_menu();
-                                    self.open(&path);
-                                    // a template is a start, not the file being worked on
-                                    self.path = None;
-                                    self.status = "New project from a template".into();
+                                    self.leave(Leave::Template(path));
                                 }
                             }
                         });
                     });
                     if ui.button("Open...               Ctrl+O").clicked() {
                         ui.close_menu();
-                        self.open_dialog();
+                        self.leave(Leave::OpenDialog);
                     }
                     if ui.button("Save                   Ctrl+S").clicked() {
                         ui.close_menu();
@@ -3161,6 +3231,15 @@ impl App {
 }
 
 /// Choices in the rendering window.
+/// Things that replace the project or end the program.
+enum Leave {
+    Close,
+    New,
+    OpenDialog,
+    Open(PathBuf),
+    Template(PathBuf),
+}
+
 struct RenderOpts {
     flac: bool,
     /// 0 for the lossless formats above, 1 MP3, 2 Ogg Vorbis.
@@ -3489,6 +3568,7 @@ impl eframe::App for App {
         self.small_windows(ctx);
         self.run_actions();
         self.autosave_tick(ctx);
+        self.leave_window(ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
         }
