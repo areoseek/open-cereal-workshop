@@ -3683,14 +3683,25 @@ impl Unit {
                 self.out = [o; 3];
             }
             Kind::FreeFilter => {
-                // seven shapes on one two-pole stage: low, band, high pass, notch, low shelf, bell, high shelf
-                let kind = ((p[0] / 100.0) as i32).clamp(1, 7);
-                let hz = (3.966 + 0.00683 * p[1] - 1.22e-6 * p[1] * p[1]).exp();
-                let q = 0.707 * 20f32.powf(p[2] / 1024.0);
-                let a = 10f32.powf((p[3] / 676.0 - 1.0) * 36.0 / 40.0);
-                let w = TAU * (hz / sr).clamp(0.0002, 0.49);
+                // seven shapes on one two-pole stage: low, band, high pass, notch, low shelf, bell, high shelf.
+                // Laws measured from renders: frequency 10 Hz..16 kHz on a base-101 curve, resonance linear
+                // 0.1..19 for the pass shapes and 0.1..100 (exponential) for the bell, shelf slope 0.1..2,
+                // gain -18..+18 dB, and a 4 Hz blocker behind the stage.
+                let kind = ((p[0] / 100.0).round() as i32).clamp(1, 7);
+                let r = (p[1] / 1024.0).clamp(0.0, 1.0) as f64;
+                let hz = 10.0 + 159.9 * (101f64.powf(r) - 1.0);
+                let qr = (p[2] / 1024.0).clamp(0.0, 1.0) as f64;
+                let a = 10f64.powf((p[3] as f64 / 1024.0 * 36.0 - 18.0) / 40.0);
+                let w = std::f64::consts::TAU * (hz / sr as f64).clamp(0.00002, 0.49);
                 let (sn, c) = w.sin_cos();
-                let al = sn / (2.0 * q);
+                let al = match kind {
+                    5 | 7 => {
+                        let s = 0.1 + 1.9 * qr;
+                        sn / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).max(0.0).sqrt()
+                    }
+                    6 => sn / (2.0 * 0.1 * 1000f64.powf(qr)),
+                    _ => sn / (2.0 * (0.1 + 18.89 * qr)),
+                };
                 let k = 2.0 * a.sqrt() * al;
                 let (b0, b1, b2, a0, a1, a2) = match kind {
                     1 => ((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0, 1.0 + al, -2.0 * c, 1.0 - al),
@@ -3715,10 +3726,16 @@ impl Unit {
                         (a + 1.0) - (a - 1.0) * c - k,
                     ),
                 };
-                let co = [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+                let co = [(b0 / a0) as f32, (b1 / a0) as f32, (b2 / a0) as f32, (a1 / a0) as f32, (a2 / a0) as f32];
+                let hp = 1.0 - 5.78e-4 * 44100.0 / sr;
                 for f in io.iter_mut() {
-                    f[0] = biquad(&co, &mut z[0..2], f[0]);
-                    f[1] = biquad(&co, &mut z[2..4], f[1]);
+                    for ch in 0..2 {
+                        let y = biquad(&co, &mut z[ch * 2..ch * 2 + 2], f[ch]);
+                        let o = y - z[4 + ch] + hp * z[6 + ch];
+                        z[4 + ch] = y;
+                        z[6 + ch] = o;
+                        f[ch] = o;
+                    }
                 }
             }
             Kind::OldDelay => {
@@ -5491,6 +5508,7 @@ mod tests {
         // low pass far below the tone removes it; a high pass there leaves it alone
         let mut fx = Fx::new(Kind::FreeFilter);
         fx.p[1] = 80.0;
+        fx.p[2] = 300.0;
         assert!(rms(&run(fx.clone(), sine, 16384)[8192..]) < 0.03);
         fx.p[0] = 300.0;
         assert!((rms(&run(fx, sine, 16384)[8192..]) - 0.3535).abs() < 0.02);
