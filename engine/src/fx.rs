@@ -1177,6 +1177,9 @@ pub static DEFS: &[Def] = &[
             p("Mid level", 52, -1800, 1800, 0),
             p("High level", 56, -1800, 1800, 0),
             p("Mutes", 84, 0, 63, 0),
+            p("Low to", 60, 0, 125, 0),
+            p("Mid to", 64, 0, 125, 0),
+            p("High to", 68, 0, 125, 0),
         ],
     },
     Def {
@@ -4383,7 +4386,16 @@ impl Unit {
                 let level = |v: f32, bit: i32| if v <= -1800.0 || mutes & bit != 0 { 0.0 } else { db(v / 100.0) };
                 let (l_lo, l_mid, l_hi) = (level(p[6], 8), level(p[7], 16), level(p[8], 32));
                 const Q: f32 = std::f32::consts::SQRT_2;
-                for f in io.iter_mut() {
+                // a band given its own way out leaves the track here; the mixer carries it on from `tap`, which
+                // holds the low, mid and high bands one after the other
+                let away = [p.get(10).is_some_and(|v| *v >= 1.0), p.get(11).is_some_and(|v| *v >= 1.0), p.get(12).is_some_and(|v| *v >= 1.0)];
+                let n = io.len();
+                self.tap.clear();
+                if away.iter().any(|a| *a) {
+                    self.tap.resize(n * 3, [0.0; 2]);
+                }
+                let tap = &mut self.tap;
+                for (i, f) in io.iter_mut().enumerate() {
                     for c in 0..2 {
                         let z = &mut z[c * 20..c * 20 + 20];
                         let x = f[c];
@@ -4395,8 +4407,16 @@ impl Unit {
                             z[16] += (low - z[16]) * a_lo;
                             low = z[16];
                         }
+                        let mut part = |band: usize, v: f32| {
+                            if away[band] {
+                                tap[band * n + i][c] = v;
+                                0.0
+                            } else {
+                                v
+                            }
+                        };
                         if !three {
-                            f[c] = low * l_lo + (x - low) * l_hi;
+                            f[c] = part(0, low * l_lo) + part(2, (x - low) * l_hi);
                             continue;
                         }
                         let mut high = x;
@@ -4407,7 +4427,7 @@ impl Unit {
                             z[17] += (high - z[17]) * a_hi;
                             high -= z[17];
                         }
-                        f[c] = low * l_lo + (x - low - high) * l_mid + high * l_hi;
+                        f[c] = part(0, low * l_lo) + part(1, (x - low - high) * l_mid) + part(2, high * l_hi);
                     }
                 }
             }
@@ -5358,6 +5378,16 @@ mod tests {
         let mut cut = fx;
         cut.p[7] = -1800.0;
         assert!(rms(&run(cut, sine, 16384)[8192..]) < 0.5 * rms(&plain[8192..16384]));
+        // a band sent its own way leaves the track and waits in the tap
+        let mut gone = Fx::new(Kind::BandSplit);
+        gone.p[10] = 1.0;
+        gone.p[11] = 1.0;
+        gone.p[12] = 1.0;
+        assert_eq!(Fx::decode("Frequency Splitter", &gone.encode(None)).unwrap(), gone);
+        let mut u = Unit::new(gone, 44100.0);
+        let mut io: Vec<[f32; 2]> = (0..4096).map(sine).collect();
+        u.process(&mut io, &Ctx { sr: 44100.0, step: 5512.5, clock: Default::default() });
+        assert!(rms(&io) < 1e-6 && u.tap.len() == 4096 * 3 && rms(&u.tap) > 0.05);
 
         // bucket chorus: sounds, stays bounded
         let out = run(Fx::new(Kind::BucketChorus), sine, 16384);

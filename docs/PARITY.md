@@ -66,7 +66,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] EQUO (built as Morph Equaliser: 31 bands, eight curves with morph, master curve, per-band pan, shift, smoothing; mix knob not located in the block, band gain law and shift range estimated, sends and curve drawing missing)
 - [~] FL Studio Mobile Rack FX (opens as Mobile Modules FX and keeps its block; passes sound through)
 - [~] Frequency Shifter (built as Hertz Shifter: shift, ring mode, sidebands per side, feedback, phase offset, width; the frequency law is fitted to one known point, the tempo range and the side input are estimates)
-- [~] Frequency Splitter (built as Band Splitter; main output only, band sends not run)
+- [~] Frequency Splitter (built as Band Splitter; each band can leave for one of the tracks this one is routed to; where the file keeps that choice is an estimate, no example sets it)
 - [~] Fruity 7 Band EQ (built as Seven Band EQ; band centres and widths are estimates)
 - [~] Fruity Balance (built, approximate)
 - [~] Fruity Bass Boost (built as Bass Lift; frequency and amount scales estimated)

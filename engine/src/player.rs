@@ -2729,6 +2729,21 @@ impl Player {
                                 self.dirty[d] = true;
                             }
                         }
+                    } else if u.1.fx.kind == fx::Kind::BandSplit && u.1.fx.p.len() >= 13 && u.1.fx.p[10..13].iter().any(|v| *v >= 1.0) {
+                        // bands with their own way out go to the tracks this one is routed to, counted from the first
+                        u.1.process(&mut bus[..n], &cx);
+                        let ok = |d: usize| d != 0 && d != i && d < ni;
+                        for band in 0..3 {
+                            let k = u.1.fx.p[10 + band] as i32 - 1;
+                            let to = ins.sends.iter().copied().find(|&d| ok(d) && ins.sends.iter().filter(|&&e| ok(e) && e < d).count() as i32 == k);
+                            if let (Some(d), true) = (to, k >= 0 && u.1.tap.len() >= n * 3) {
+                                for (o, f) in self.buses[d][..n].iter_mut().zip(&u.1.tap[band * n..(band + 1) * n]) {
+                                    o[0] += f[0];
+                                    o[1] += f[1];
+                                }
+                                self.dirty[d] = true;
+                            }
+                        }
                     } else if s.mix >= 1.0 {
                         u.1.process(&mut bus[..n], &cx);
                     } else {
