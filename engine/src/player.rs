@@ -94,6 +94,11 @@ pub struct Transport {
     /// The last stretch of what went out, both sides as one, for the scope in the toolbar.
     out_scope: Vec<AtomicU32>,
     out_scope_at: AtomicUsize,
+    /// The last minutes of what went out, each frame as two 16-bit halves.
+    out_log: Vec<AtomicU32>,
+    out_log_at: AtomicUsize,
+    out_log_n: AtomicUsize,
+    out_log_rate: AtomicU32,
     voices: AtomicUsize,
     tempo: AtomicU32,
     metronome: AtomicBool,
@@ -279,6 +284,10 @@ impl Transport {
             midi: Mutex::new(Vec::with_capacity(256)),
             out_scope: (0..OUT_SCOPE).map(|_| AtomicU32::new(0)).collect(),
             out_scope_at: AtomicUsize::new(0),
+            out_log: (0..OUT_LOG).map(|_| AtomicU32::new(0)).collect(),
+            out_log_at: AtomicUsize::new(0),
+            out_log_n: AtomicUsize::new(0),
+            out_log_rate: AtomicU32::new(48_000),
             tap_want: AtomicU32::new(u32::MAX),
             tap: Mutex::new(Tap { buf: vec![[0.0; 2]; TAP_LEN], at: 0, count: 0, rate: 48_000.0 }),
             rec_want: AtomicU32::new(u32::MAX),
@@ -486,6 +495,22 @@ impl Transport {
         let at = self.out_scope_at.load(Relaxed);
         out.clear();
         out.extend((0..OUT_SCOPE).map(|k| f32::from_bits(self.out_scope[(at + k) % OUT_SCOPE].load(Relaxed))));
+    }
+    /// The last `secs` of what went out (less if less is kept), left and right in turn, and its rate.
+    pub fn audio_log(&self, secs: f32) -> (Vec<f32>, u32) {
+        let rate = self.out_log_rate.load(Relaxed);
+        let n = ((secs * rate as f32) as usize).min(self.out_log_n.load(Relaxed));
+        let at = self.out_log_at.load(Relaxed);
+        let mut out = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            let w = self.out_log[(at + OUT_LOG - n + k) % OUT_LOG].load(Relaxed);
+            out.push((w >> 16) as u16 as i16 as f32 / 32767.0);
+            out.push(w as u16 as i16 as f32 / 32767.0);
+        }
+        (out, rate)
+    }
+    pub fn clear_audio_log(&self) {
+        self.out_log_n.store(0, Relaxed);
     }
     pub fn watch_slot(&self, at: Option<(usize, u16)>) {
         self.tap_want.store(at.map(|(i, s)| (i as u32) << 6 | (s as u32 & 63)).unwrap_or(u32::MAX), Relaxed);
@@ -1138,6 +1163,8 @@ impl Hold {
 
 /// Frames the toolbar scope looks back over.
 pub const OUT_SCOPE: usize = 2048;
+/// Frames of output kept for the audio logger: two minutes at 48 kHz.
+pub const OUT_LOG: usize = 120 * 48_000;
 
 /// Making up for plug-ins whose sound comes out late: every other way into a mixer track is held back by
 /// as much, so that all of them meet in time.
@@ -3689,6 +3716,15 @@ impl Player {
                 at = (at + 1) % OUT_SCOPE;
             }
             tr.out_scope_at.store(at, Relaxed);
+            let mut at = tr.out_log_at.load(Relaxed);
+            let half = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16 as u16 as u32;
+            for f in out.chunks_exact(channels) {
+                tr.out_log[at].store(half(f[0]) << 16 | half(f[channels - 1]), Relaxed);
+                at = (at + 1) % OUT_LOG;
+            }
+            tr.out_log_at.store(at, Relaxed);
+            tr.out_log_n.store((tr.out_log_n.load(Relaxed) + out.len() / channels).min(OUT_LOG), Relaxed);
+            tr.out_log_rate.store(self.sr as u32, Relaxed);
         }
     }
 

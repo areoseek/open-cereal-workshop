@@ -1165,6 +1165,32 @@ impl App {
     }
 
     /// Put a sound on the playlist as an audio clip, on its own new channel.
+    /// The audio logger: the last two minutes of output, silence at its ends taken off, saved beside the
+    /// project and laid on the playlist.
+    fn dump_audio_log(&mut self) {
+        let (mut log, rate) = self.handle.transport.audio_log(120.0);
+        let loud = |f: &[f32]| f.iter().any(|v| v.abs() > 0.0005);
+        let last = log.chunks_exact(2).rposition(loud).map(|i| i + 1).unwrap_or(0);
+        log.truncate(last * 2);
+        let first = log.chunks_exact(2).position(loud).unwrap_or(0);
+        log.drain(..first * 2);
+        if log.is_empty() {
+            self.status = "Nothing has been heard yet".into();
+            return;
+        }
+        let dir = record::folder(self.path.as_deref());
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let path = dir.join(format!("Audio log {stamp}.wav"));
+        let done = std::fs::create_dir_all(&dir).and_then(|_| std::fs::File::create(&path)).and_then(|f| cereal_engine::wav::write_pcm16(std::io::BufWriter::new(f), &log, rate, 2));
+        match done {
+            Ok(()) => {
+                self.add_audio_clip(&path, 0, None);
+                self.status = format!("{:.1} s of sound laid on the playlist", log.len() as f32 / 2.0 / rate as f32);
+            }
+            Err(e) => self.status = format!("The audio log could not be saved: {e}"),
+        }
+    }
+
     pub(crate) fn add_audio_clip(&mut self, path: &Path, pos: u32, track: Option<u16>) {
         let smp = match self.lib.load_path(path) {
             Ok(s) => s,
@@ -2329,6 +2355,16 @@ impl App {
                             if !self.handle.transport.playing() {
                                 self.play();
                             }
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Audio logger", |ui| {
+                        if ui.button("Dump audio log to the playlist").hint("What came out of the program in the last two minutes becomes an audio clip").clicked() {
+                            self.dump_audio_log();
+                            ui.close_menu();
+                        }
+                        if ui.button("Clear log").clicked() {
+                            self.handle.transport.clear_audio_log();
                             ui.close_menu();
                         }
                     });
