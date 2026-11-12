@@ -886,7 +886,7 @@ impl App {
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
         if self.render.is_none() {
-            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode() });
+            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false });
         }
     }
 
@@ -899,7 +899,70 @@ impl App {
         };
         let default = self.path.as_ref().map(|p| p.with_extension(ext)).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| format!("untitled.{ext}"));
         let Some(path) = rfd::FileDialog::new().add_filter(label, &[ext]).set_file_name(default).save_file() else { return };
-        let buf = cereal_engine::render_song(&self.song, o.rate as f32, o.song, self.handle.transport.pattern(), o.tail);
+        let range = if !o.range {
+            None
+        } else if o.song {
+            self.playlist.time_sel
+        } else {
+            self.piano.time_sel
+        };
+        let job = cereal_engine::RenderJob { rate: o.rate as f32, song_mode: o.song, pattern: self.handle.transport.pattern(), tail: if o.tail_mode == 0 { 0.0 } else { o.tail }, range, stems: o.split, stem: None };
+        let mut done = cereal_engine::render_job(&self.song, &job);
+        if o.tail_mode == 2 {
+            done.wrap();
+        }
+        let chans: u16 = if o.mono { 1 } else { 2 };
+        let shape = |v: &mut Vec<f32>| {
+            if o.mono && o.lossy != 0 {
+                // the lossy writers take two channels: both carry the merged sound
+                for f in v.chunks_exact_mut(2) {
+                    let m = (f[0] + f[1]) * 0.5;
+                    f[0] = m;
+                    f[1] = m;
+                }
+            } else if o.mono {
+                *v = v.chunks_exact(2).map(|f| (f[0] + f[1]) * 0.5).collect();
+            }
+            if o.dither && o.lossy == 0 && o.bits == 16 {
+                // triangular noise one step wide hides the staircase of 16 bits
+                let mut s = 0x2545_f491u32;
+                let mut rnd = || {
+                    s ^= s << 13;
+                    s ^= s >> 17;
+                    s ^= s << 5;
+                    s as f32 / u32::MAX as f32
+                };
+                for x in v.iter_mut() {
+                    *x += (rnd() - rnd()) / 32768.0;
+                }
+            }
+        };
+        // every sounding mixer track gets a file of its own beside the main one
+        if o.split && o.lossy == 0 {
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            for (i, mut v) in std::mem::take(&mut done.stems) {
+                if i == 0 {
+                    continue;
+                }
+                shape(&mut v);
+                let name: String = self.song.insert_name(i).chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+                let p = path.with_file_name(format!("{stem}_{name}.{ext}"));
+                let r = std::fs::File::create(&p).and_then(|f| {
+                    let w = std::io::BufWriter::new(f);
+                    if o.flac {
+                        cereal_engine::flac::write(w, &v, o.rate, chans, o.bits.min(24) as u32)
+                    } else {
+                        wav::write(w, &v, o.rate, chans, o.bits)
+                    }
+                });
+                if let Err(e) = r {
+                    self.status = format!("Export failed: {e}");
+                    return;
+                }
+            }
+        }
+        let mut buf = done.mix;
+        shape(&mut buf);
         if o.lossy != 0 {
             let made = if o.lossy == 1 { cereal_engine::lossy::mp3(&buf, o.rate, o.kbps) } else { cereal_engine::lossy::ogg(&buf, o.rate, o.quality) };
             self.status = match made.and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string())) {
@@ -911,11 +974,21 @@ impl App {
         let r = std::fs::File::create(&path).and_then(|f| {
             let w = std::io::BufWriter::new(f);
             if o.flac {
-                cereal_engine::flac::write(w, &buf, o.rate, 2, o.bits.min(24) as u32)
+                cereal_engine::flac::write(w, &buf, o.rate, chans, o.bits.min(24) as u32)
             } else {
-                wav::write(w, &buf, o.rate, 2, o.bits)
+                wav::write(w, &buf, o.rate, chans, o.bits)
             }
         });
+        if r.is_ok() && o.marks && o.song && !o.flac {
+            // the time markers, as cue points a sound editor shows (placed by the song's tempo at its start)
+            let from = range.map(|r| r.0).unwrap_or(0);
+            let per_tick = 60.0 / self.song.tempo.max(1.0) as f64 / self.song.ppq.max(1) as f64 * o.rate as f64;
+            let marks: Vec<cereal_engine::waveed::Mark> = self.song.markers.iter().filter(|m| m.pos >= from && range.is_none_or(|r| m.pos < r.1)).map(|m| cereal_engine::waveed::Mark { at: ((m.pos - from) as f64 * per_tick) as usize, len: 0, name: m.name.clone() }).collect();
+            if let Ok(mut bytes) = std::fs::read(&path) {
+                cereal_engine::waveed::write_marks(&mut bytes, &marks);
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
         self.status = match r {
             Ok(()) => format!("Exported {}", path.display()),
             Err(e) => format!("Export failed: {e}"),
@@ -1131,7 +1204,31 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("Tail");
-                ui.add(egui::Slider::new(&mut o.tail, 0.0..=20.0).suffix(" s"));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.tail_mode, 0, "Cut remainder").hint("Stop dead at the end");
+                    ui.selectable_value(&mut o.tail_mode, 1, "Leave remainder").hint("Let echoes and releases ring out after the end");
+                    ui.selectable_value(&mut o.tail_mode, 2, "Wrap remainder").hint("Lay what rings past the end over the start, for a loop without a gap");
+                });
+                ui.end_row();
+                if o.tail_mode != 0 {
+                    ui.label("Longest tail");
+                    ui.add(egui::Slider::new(&mut o.tail, 0.0..=20.0).suffix(" s"));
+                    ui.end_row();
+                }
+                ui.label("Channels");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.mono, false, "Stereo");
+                    ui.selectable_value(&mut o.mono, true, "Mono").hint("Left and right merged");
+                });
+                ui.end_row();
+                ui.label("Options");
+                ui.vertical(|ui| {
+                    let picked = if o.song { self.playlist.time_sel.is_some() } else { self.piano.time_sel.is_some() };
+                    ui.add_enabled(picked, egui::Checkbox::new(&mut o.range, "Only the time selection")).hint("Render just the stretch picked on the ruler");
+                    ui.add_enabled(o.lossy == 0, egui::Checkbox::new(&mut o.split, "Split mixer tracks")).hint("Also write one file for every mixer track that sounds, named after the track");
+                    ui.add_enabled(o.lossy == 0 && !o.flac && o.song, egui::Checkbox::new(&mut o.marks, "Save playlist markers")).hint("Time markers go into the WAV file as cue points");
+                    ui.add_enabled(o.lossy == 0 && o.bits == 16, egui::Checkbox::new(&mut o.dither, "Dithering")).hint("A whisper of noise that hides the steps of 16 bits");
+                });
                 ui.end_row();
             });
             ui.add_space(6.0);
@@ -2970,6 +3067,16 @@ struct RenderOpts {
     rate: u32,
     tail: f32,
     song: bool,
+    /// What becomes of sound ringing past the end: 0 cut, 1 left on the end, 2 wrapped over the start.
+    tail_mode: u8,
+    /// One file for every mixer track that sounds.
+    split: bool,
+    mono: bool,
+    /// Only the stretch picked on the ruler.
+    range: bool,
+    /// Time markers go into the WAV file as cue points.
+    marks: bool,
+    dither: bool,
 }
 
 impl eframe::App for App {

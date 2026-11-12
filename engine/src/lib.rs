@@ -123,6 +123,53 @@ pub fn render_track(song: &Song, sample_rate: f32, song_mode: bool, pattern: usi
 }
 
 fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32, stem: Option<usize>) -> Vec<f32> {
+    let job = RenderJob { rate: sample_rate, song_mode, pattern, tail, range: None, stems: false, stem };
+    render_job(song, &job).mix
+}
+
+/// What to render: the song or one pattern, perhaps only a stretch of it (in ticks), with every mixer track kept apart if asked.
+#[derive(Clone, Debug, Default)]
+pub struct RenderJob {
+    pub rate: f32,
+    pub song_mode: bool,
+    pub pattern: usize,
+    /// Seconds allowed for sounds still ringing after the end.
+    pub tail: f32,
+    pub range: Option<(u32, u32)>,
+    pub stems: bool,
+    pub stem: Option<usize>,
+}
+
+/// A finished render: interleaved stereo, the frames before the tail, and each sounding mixer track's own sound.
+pub struct Rendered {
+    pub mix: Vec<f32>,
+    pub main: usize,
+    pub stems: Vec<(usize, Vec<f32>)>,
+}
+
+impl Rendered {
+    /// Fold the tail back over the start, so the file loops without a gap; every part comes out `main` frames long.
+    pub fn wrap(&mut self) {
+        let main = self.main;
+        let fold = |v: &mut Vec<f32>| {
+            if main == 0 {
+                return;
+            }
+            for k in main * 2..v.len() {
+                let x = v[k];
+                v[(k - main * 2) % (main * 2)] += x;
+            }
+            v.truncate(main * 2);
+        };
+        fold(&mut self.mix);
+        for s in self.stems.iter_mut() {
+            fold(&mut s.1);
+        }
+    }
+}
+
+pub fn render_job(song: &Song, job: &RenderJob) -> Rendered {
+    let (sample_rate, song_mode, pattern, tail, stem) = (job.rate, job.song_mode, job.pattern, job.tail, job.stem);
     // hosted plug-ins are lent to the render and handed back as they were
     let hosted: Vec<_> = song.hosted().into_iter().map(|i| (i.rate(), i)).collect();
     for (_, i) in &hosted {
@@ -132,6 +179,8 @@ fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, t
     let (h, mut p) = new_player(song.clone(), sample_rate);
     p.set_offline(true);
     p.stem = stem;
+    p.stem_all = job.stems;
+    h.transport.set_range(job.range);
     h.transport.set_song_mode(song_mode);
     h.transport.set_pattern(pattern);
     h.transport.set_looping(false);
@@ -146,6 +195,7 @@ fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, t
         out.resize(at + 2 * 1024, 0.0);
         p.render(&mut out[at..], 2);
     }
+    let main = out.len() / 2;
     let mut extra = 0;
     while p.busy() && extra < max_tail {
         let at = out.len();
@@ -159,18 +209,43 @@ fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, t
             i.activate(*r);
         }
     }
+    let frames = out.len() / 2;
     if stem.is_some() {
-        let frames = out.len() / 2;
         p.stem_buf.resize(frames, [0.0; 2]);
-        return p.stem_buf.iter().flat_map(|f| [f[0], f[1]]).collect();
+        out = p.stem_buf.iter().flat_map(|f| [f[0], f[1]]).collect();
     }
-    out
+    let stems = std::mem::take(&mut p.stems)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, v)| v.iter().any(|f| f[0] != 0.0 || f[1] != 0.0))
+        .map(|(i, mut v)| {
+            v.resize(frames, [0.0; 2]);
+            (i, v.iter().flat_map(|f| [f[0], f[1]]).collect())
+        })
+        .collect();
+    Rendered { mix: out, main, stems }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn a_render_job_keeps_tracks_apart_and_wraps_the_tail() {
+        let mut r = Rendered { mix: vec![1.0, 1.0, 0.0, 0.0, 0.5, 0.25], main: 2, stems: vec![(1, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0])] };
+        r.wrap();
+        assert_eq!(r.mix, vec![1.5, 1.25, 0.0, 0.0]);
+        assert_eq!(r.stems[0].1, vec![1.0, 1.0, 0.0, 0.0]);
+        // an empty song: nothing sounds, so no track is kept, and a picked stretch sets the length
+        let song = Song::default();
+        let ppq = song.ppq;
+        let job = RenderJob { rate: 44_100.0, song_mode: true, pattern: 0, tail: 0.0, range: Some((0, ppq * 4)), stems: true, stem: None };
+        let done = render_job(&song, &job);
+        assert!(done.stems.is_empty());
+        let want = (4.0 * 60.0 / song.tempo as f64 * 44_100.0) as usize;
+        assert!(done.main >= want && done.main < want + 2048, "{} vs {want}", done.main);
+    }
 
     #[test]
     fn a_track_render_holds_only_that_track() {
@@ -188,6 +263,11 @@ mod tests {
         let peak = |b: &[f32]| b.iter().fold(0f32, |a, v| a.max(v.abs()));
         assert!(peak(&one) > 0.1, "the track the channel plays into is heard");
         assert!(peak(&two) == 0.0, "another track is silent");
+        // all tracks in one pass: the same sound, and only the tracks that sounded
+        let all = render_job(&s, &RenderJob { rate: 48_000.0, song_mode: false, pattern: 0, tail: 0.5, range: None, stems: true, stem: None });
+        let got: Vec<usize> = all.stems.iter().map(|t| t.0).collect();
+        assert_eq!(got, vec![0, 1]);
+        assert_eq!(all.stems[1].1, one);
     }
 
     #[test]

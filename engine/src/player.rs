@@ -624,6 +624,9 @@ impl Handle {
             eq: vec![],
             stem: None,
             stem_buf: Vec::new(),
+            stem_all: false,
+            stems: Vec::new(),
+            stem_frames: 0,
             fx: vec![],
             driven: Vec::with_capacity(64),
             env_runs: Vec::new(),
@@ -1349,6 +1352,10 @@ pub struct Player {
     /// A mixer track whose sound after its fader is kept in `stem_buf`, for rendering tracks to files.
     pub stem: Option<usize>,
     pub stem_buf: Vec<[f32; 2]>,
+    /// Every mixer track's sound after its fader is kept in `stems` (a track that never sounded stays empty).
+    pub stem_all: bool,
+    pub stems: Vec<Vec<[f32; 2]>>,
+    pub stem_frames: usize,
     song: Arc<ArcSwap<Song>>,
     transport: Arc<Transport>,
     cmds: Arc<Mutex<Vec<Cmd>>>,
@@ -3523,6 +3530,8 @@ impl Player {
                 self.comp.settle(n, &mut self.buses, &mut self.dirty);
             }
         }
+        let stem_base = self.stem_frames;
+        self.stem_frames += n;
         for &i in &song.mix_order {
             // a sender that needs no sound to work keeps its track running
             let sender = i < ni && song.inserts[i].slots.iter().any(|s| s.fx.as_ref().is_some_and(|f| matches!(f.kind, fx::Kind::Formula | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Deck)));
@@ -3739,6 +3748,13 @@ impl Player {
                 }
                 if self.stem == Some(i) {
                     self.stem_buf.extend_from_slice(&bus[..n]);
+                }
+                if self.stem_all {
+                    if self.stems.len() <= i {
+                        self.stems.resize_with(i + 1, Vec::new);
+                    }
+                    self.stems[i].resize(stem_base, [0.0; 2]);
+                    self.stems[i].extend_from_slice(&bus[..n]);
                 }
                 if let Some(m) = self.transport.peaks.get(i) {
                     for c in 0..2 {
