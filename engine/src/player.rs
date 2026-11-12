@@ -104,6 +104,8 @@ pub struct Transport {
     metronome: AtomicBool,
     recording: AtomicBool,
     countdown: AtomicBool,
+    click_kind: std::sync::atomic::AtomicU8,
+    count_bars: std::sync::atomic::AtomicU8,
     /// Notes played by hand are written down one grid step at a time while the song stands still.
     step_edit: AtomicBool,
     /// Play is pressed, and the song starts with the first note played by hand.
@@ -270,6 +272,8 @@ impl Transport {
             metronome: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
+            click_kind: std::sync::atomic::AtomicU8::new(0),
+            count_bars: std::sync::atomic::AtomicU8::new(1),
             step_edit: AtomicBool::new(false),
             range: AtomicU64::new(0),
             waiting: AtomicBool::new(false),
@@ -334,6 +338,20 @@ impl Transport {
     }
     pub fn set_countdown(&self, on: bool) {
         self.countdown.store(on, Relaxed);
+    }
+    /// The metronome's sound, one of `CLICK_KINDS`.
+    pub fn click_kind(&self) -> u8 {
+        self.click_kind.load(Relaxed)
+    }
+    pub fn set_click_kind(&self, k: u8) {
+        self.click_kind.store(k.min(CLICK_KINDS.len() as u8 - 1), Relaxed);
+    }
+    /// Bars counted in before recording.
+    pub fn count_bars(&self) -> u8 {
+        self.count_bars.load(Relaxed).max(1)
+    }
+    pub fn set_count_bars(&self, n: u8) {
+        self.count_bars.store(n.clamp(1, 8), Relaxed);
     }
     /// The stretch of time that plays round and round in place of the whole song or pattern.
     pub fn range(&self) -> Option<(u32, u32)> {
@@ -669,7 +687,7 @@ impl Handle {
             born: 0,
             ov: Overrides::default(),
             tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
-            clicks: [click(sample_rate, 1760.0), click(sample_rate, 880.0)],
+            clicks: std::array::from_fn(|k| [click(sample_rate, k, true), click(sample_rate, k, false)]),
         }
     }
 }
@@ -806,10 +824,57 @@ struct SlotNow {
     mix: f32,
 }
 
-/// A short decaying blip for the metronome.
-fn click(rate: f32, hz: f32) -> Arc<Sample> {
-    let n = (rate * 0.03) as usize;
-    let data: Vec<f32> = (0..n).map(|i| (i as f32 / rate * hz * std::f32::consts::TAU).sin() * (1.0 - i as f32 / n as f32).powi(2) * 0.6).collect();
+/// The metronome's sounds by name, all made here.
+pub const CLICK_KINDS: [&str; 4] = ["Beep", "Tick", "Hi-hat", "Cowbell"];
+
+/// A short sound for the metronome: one of `CLICK_KINDS`, the bar's first beat marked out from the others.
+fn click(rate: f32, kind: usize, first: bool) -> Arc<Sample> {
+    let tau = std::f32::consts::TAU;
+    let mut seed = 0x9e37_79b9u32;
+    let mut noise = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as f32 / u32::MAX as f32 * 2.0 - 1.0
+    };
+    let data: Vec<f32> = match kind {
+        1 => {
+            // a dry tick: a few milliseconds of noise through a resonance
+            let n = (rate * 0.012) as usize;
+            let hz = if first { 2600.0 } else { 1800.0 };
+            (0..n).map(|i| {
+                let t = i as f32 / rate;
+                let fall = (1.0 - i as f32 / n as f32).powi(3);
+                ((t * hz * tau).sin() * 0.6 + noise() * 0.4) * fall * if first { 0.8 } else { 0.55 }
+            }).collect()
+        }
+        2 => {
+            // noise with the low end taken off, falling away
+            let n = (rate * if first { 0.07 } else { 0.04 }) as usize;
+            let mut last = 0.0;
+            (0..n).map(|i| {
+                let x = noise();
+                let high = x - last;
+                last = x;
+                high * (1.0 - i as f32 / n as f32).powi(3) * if first { 0.5 } else { 0.35 }
+            }).collect()
+        }
+        3 => {
+            // two square tones a fifth and a bit apart
+            let n = (rate * 0.14) as usize;
+            let up = if first { 1.5 } else { 1.0 };
+            (0..n).map(|i| {
+                let t = i as f32 / rate;
+                let sq = |hz: f32| if (t * hz).fract() < 0.5 { 1.0 } else { -1.0 };
+                (sq(540.0 * up) + sq(800.0 * up)) * 0.5 * (-(t * 30.0)).exp() * 0.4
+            }).collect()
+        }
+        _ => {
+            let n = (rate * 0.03) as usize;
+            let hz = if first { 1760.0 } else { 880.0 };
+            (0..n).map(|i| (i as f32 / rate * hz * tau).sin() * (1.0 - i as f32 / n as f32).powi(2) * 0.6).collect()
+        }
+    };
     Arc::new(Sample::from_mono("click", rate as u32, &data))
 }
 
@@ -1435,7 +1500,7 @@ pub struct Player {
     /// Ticks per frame at the tempo of the block being played.
     tpf: f64,
     /// Metronome sounds: bar, beat.
-    clicks: [Arc<Sample>; 2],
+    clicks: [[Arc<Sample>; 2]; 4],
 }
 
 /// How many keys a channel's root key moves the notes it is sent: none for channels that play a recording
@@ -2975,7 +3040,7 @@ impl Player {
             }
             self.chase = true;
             self.ov.clear();
-            self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 } else { 0.0 };
+            self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 * tr.count_bars() as f64 } else { 0.0 };
         }
         if !playing && self.was_playing {
             self.silence(false);
@@ -2988,17 +3053,19 @@ impl Player {
             return n;
         }
         if self.count_in > 0.0 {
-            // one bar of clicks while the song waits where it is
+            // a bar or more of clicks while the song waits where it is
             let tpf = (song.tempo.max(1.0) as f64 * song.ppq as f64 / 60.0 / self.sr as f64).max(1e-9);
             let n = n.min(((self.count_in / tpf).ceil() as usize).max(1));
             let beat = (song.ppq * 4 / song.time_sig.1.max(1) as u32).max(1) as f64;
-            let bar = song.bar() as f64;
+            let one = song.bar() as f64;
+            let bar = one * tr.count_bars() as f64;
             let t0 = bar - self.count_in;
             let t1 = t0 + n as f64 * tpf;
             let mut b = (t0 / beat - 1e-9).ceil().max(0.0) * beat;
+            let kind = tr.click_kind() as usize % 4;
             while b < t1 && b < bar - 0.5 {
                 let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                let smp = self.clicks[if b < 0.5 { 0 } else { 1 }].clone();
+                let smp = self.clicks[kind][if b % one < 0.5 { 0 } else { 1 }].clone();
                 self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
                 b += beat;
             }
@@ -3123,7 +3190,7 @@ impl Player {
             let mut b = from + ((t0 - from) / beat).ceil() * beat;
             let click = |me: &mut Self, at: f64, first: bool| {
                 let delay = (((at - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                let smp = me.clicks[if first { 0 } else { 1 }].clone();
+                let smp = me.clicks[me.transport.click_kind() as usize % 4][if first { 0 } else { 1 }].clone();
                 me.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
             };
             while b < t1 && b < until - 0.5 {

@@ -387,6 +387,8 @@ impl App {
         }
         let midi = midi::MidiIn::start(handle.sender());
         midi::start_out(handle.transport.clone());
+        handle.transport.set_click_kind(settings.click_kind);
+        handle.transport.set_count_bars(settings.count_bars.max(1));
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -2986,17 +2988,39 @@ impl App {
                     self.new_pattern();
                 }
                 let mut met = tr.metronome();
-                if ui.toggle_value(&mut met, "Metro").hint("Metronome (Ctrl+M)").changed() {
+                let r = ui.toggle_value(&mut met, "Metro").hint("Metronome (Ctrl+M); right-click picks its sound");
+                if r.changed() {
                     tr.set_metronome(met);
                 }
+                r.context_menu(|ui| {
+                    for (k, name) in cereal_engine::player::CLICK_KINDS.iter().enumerate() {
+                        if ui.radio(tr.click_kind() as usize == k, *name).clicked() {
+                            tr.set_click_kind(k as u8);
+                            self.settings.click_kind = k as u8;
+                            let _ = self.settings.save();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 let mut wait = tr.waiting();
                 if ui.toggle_value(&mut wait, "Wait").hint("Wait for input before the song starts (Ctrl+I)").changed() {
                     tr.set_waiting(wait);
                 }
                 let mut count = tr.countdown();
-                if ui.toggle_value(&mut count, "3 2 1").hint("Count one bar in before recording (Ctrl+P)").changed() {
+                let r = ui.toggle_value(&mut count, "3 2 1").hint("Count in before recording (Ctrl+P); right-click picks how many bars");
+                if r.changed() {
                     tr.set_countdown(count);
                 }
+                r.context_menu(|ui| {
+                    for n in [1u8, 2, 4] {
+                        if ui.radio(tr.count_bars() == n, if n == 1 { "1 bar".to_string() } else { format!("{n} bars") }).clicked() {
+                            tr.set_count_bars(n);
+                            self.settings.count_bars = n;
+                            let _ = self.settings.save();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.toggle_value(&mut self.rec_blend, "Blend").hint("Recorded notes are added to the ones already there (Ctrl+B)");
                 let mut step_edit = tr.step_edit();
                 if ui.toggle_value(&mut step_edit, "Step").hint("Step editing: played notes are written one grid step after another (Ctrl+E)").changed() {
