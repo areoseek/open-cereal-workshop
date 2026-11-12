@@ -713,7 +713,82 @@ impl App {
         self.status = "New project".into();
     }
 
+    /// FILE > Export > Zipped loop package: the project and the sounds it uses in one archive.
+    fn export_package(&mut self) {
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".into());
+        let Some(path) = rfd::FileDialog::new().add_filter("Zipped loop package", &["zip"]).set_file_name(format!("{name}.zip")).save_file() else { return };
+        let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let made = cereal_engine::package(&mut self.song, self.flp.as_ref(), &name, &self.lib, dir.as_deref());
+        self.status = match made.and_then(|(bytes, n)| std::fs::write(&path, bytes).map(|_| n).map_err(|e| e.to_string())) {
+            Ok(n) => format!("Packed the project and {n} sound files into {}", path.display()),
+            Err(e) => format!("Packing failed: {e}"),
+        };
+    }
+
+    /// FILE > Export > Project bones: every channel and used mixer track as a preset file and every pattern's
+    /// notes as score files, in folders inside one picked folder.
+    fn export_bones(&mut self) {
+        let Some(root) = rfd::FileDialog::new().set_title("Folder for the project bones").pick_folder() else { return };
+        let clean = |s: &str| -> String { s.chars().map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c }).collect::<String>().trim().to_string() };
+        let mut n = 0;
+        let mut put = |dir: &str, name: String, bytes: Vec<u8>| -> Result<(), String> {
+            let d = root.join(dir);
+            std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            let to = d.join(name);
+            std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+            n += 1;
+            Ok(())
+        };
+        let mut go = || -> Result<(), String> {
+            for (i, c) in self.song.channels.iter().enumerate() {
+                if let Ok(b) = cereal_engine::preset::write_channel(c) {
+                    put("Channels", format!("{:02} {}.fst", i + 1, clean(&c.name)), b)?;
+                }
+            }
+            for (i, ins) in self.song.inserts.iter().enumerate() {
+                if i > 0 && ins.slots.is_empty() && ins.name.is_empty() {
+                    continue;
+                }
+                if let Ok(b) = cereal_engine::preset::write_track(ins) {
+                    let name = if i == 0 { "Master".to_string() } else if ins.name.is_empty() { format!("Insert {i}") } else { clean(&ins.name) };
+                    put("Mixer", format!("{i:03} {name}.fst"), b)?;
+                }
+            }
+            for (pi, p) in self.song.patterns.iter().enumerate() {
+                let pname = if p.name.is_empty() { format!("Pattern {}", pi + 1) } else { clean(&p.name) };
+                for (ci, c) in self.song.channels.iter().enumerate() {
+                    let notes: Vec<&cereal_engine::song::Note> = p.notes.iter().filter(|x| x.chan as usize == ci).collect();
+                    if !notes.is_empty() {
+                        put("Scores", format!("{pname} - {}.fsc", clean(&c.name)), cereal_engine::score::write(&notes, self.song.ppq))?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        let done = go();
+        self.status = match done {
+            Ok(()) => format!("Wrote {n} files of project bones into {}", root.display()),
+            Err(e) => format!("Project bones failed: {e}"),
+        };
+    }
+
     fn open(&mut self, path: &Path) {
+        // a zipped package is unpacked into a folder of its own name beside it, then opened from there
+        let unpacked;
+        let path = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            match cereal_engine::unpack(path, &path.with_extension("")) {
+                Ok(p) => {
+                    unpacked = p;
+                    unpacked.as_path()
+                }
+                Err(e) => {
+                    self.status = format!("Could not open {}: {e}", path.display());
+                    return;
+                }
+            }
+        } else {
+            path
+        };
         self.stop();
         self.handle.send(Cmd::Panic);
         self.lib.missing.clear();
@@ -741,7 +816,7 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        let mut d = rfd::FileDialog::new().add_filter("Project files", &["flp"]);
+        let mut d = rfd::FileDialog::new().add_filter("Project files", &["flp", "zip"]);
         if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
             d = d.set_directory(dir);
         }
@@ -2010,6 +2085,14 @@ impl App {
                         ui.close_menu();
                         self.import_midi_dialog();
                     }
+                    if ui.button("Export zipped loop package...").clicked() {
+                        ui.close_menu();
+                        self.export_package();
+                    }
+                    if ui.button("Export project bones...").clicked() {
+                        ui.close_menu();
+                        self.export_bones();
+                    }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2549,7 +2632,7 @@ impl eframe::App for App {
         // files dropped on the window
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         for p in dropped {
-            if p.extension().map(|e| e.eq_ignore_ascii_case("flp")).unwrap_or(false) {
+            if p.extension().map(|e| e.eq_ignore_ascii_case("flp") || e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
                 self.actions.push(Action::Open(p));
             } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fsc")) {
                 self.actions.push(Action::LoadScore(p, None));

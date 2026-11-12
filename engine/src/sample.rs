@@ -170,6 +170,8 @@ pub struct Library {
     cache: HashMap<PathBuf, Arc<Sample>>,
     by_name: Option<HashMap<String, PathBuf>>,
     pub missing: Vec<String>,
+    /// Every file a stored path has led to, in the order first asked for.
+    pub used: Vec<PathBuf>,
 }
 
 fn split_parts(stored: &str) -> Vec<&str> {
@@ -208,6 +210,14 @@ impl Library {
 
     /// Turn a stored path into a file on this machine, if one can be found.
     pub fn resolve(&mut self, stored: &str, project_dir: Option<&Path>) -> Option<PathBuf> {
+        let found = self.resolve_quiet(stored, project_dir)?;
+        if !self.used.contains(&found) {
+            self.used.push(found.clone());
+        }
+        Some(found)
+    }
+
+    fn resolve_quiet(&mut self, stored: &str, project_dir: Option<&Path>) -> Option<PathBuf> {
         if stored.is_empty() {
             return None;
         }

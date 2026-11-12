@@ -52,6 +52,7 @@ pub mod guitar;
 pub mod wavpack;
 pub mod metal;
 pub mod zones;
+pub mod zipfile;
 pub mod preset;
 pub mod sample;
 pub mod save;
@@ -71,6 +72,41 @@ pub fn load_flp(path: &Path, lib: &mut Library) -> Result<(Song, flp::Flp), Stri
     let f = flp::parse(&bytes)?;
     let song = Song::from_flp(&f, lib, path.parent());
     Ok((song, f))
+}
+
+/// A project as one archive: the project file and every sound file it leads to, side by side. `roots` is a
+/// library that knows the same folders as the one in use; returns the archive and how many sounds went in.
+pub fn package(song: &mut Song, base: Option<&flp::Flp>, name: &str, roots: &Library, project_dir: Option<&Path>) -> Result<(Vec<u8>, usize), String> {
+    let (bytes, f) = save::save(song, base)?;
+    let mut lib = Library::default();
+    lib.factory_roots = roots.factory_roots.clone();
+    lib.user_roots = roots.user_roots.clone();
+    lib.search_dirs = roots.search_dirs.clone();
+    let _ = Song::from_flp(&f, &mut lib, project_dir);
+    let mut entries = vec![(format!("{name}.flp"), bytes)];
+    for p in &lib.used {
+        let Some(file) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if entries.iter().any(|(n, _)| n.eq_ignore_ascii_case(&file)) {
+            continue;
+        }
+        entries.push((file, std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?));
+    }
+    Ok((zipfile::write(&entries), entries.len() - 1))
+}
+
+/// Unpack a project archive into `into` (made if need be) and name the project file that was in it.
+pub fn unpack(archive: &Path, into: &Path) -> Result<std::path::PathBuf, String> {
+    let bytes = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let files = zipfile::read(&bytes, 8 << 30)?;
+    let project = files.iter().map(|(n, _)| n).filter(|n| n.to_lowercase().ends_with(".flp")).min_by_key(|n| n.matches('/').count()).cloned().ok_or("there is no project file in the archive")?;
+    for (name, data) in &files {
+        let to = into.join(name);
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::write(&to, data).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    Ok(into.join(project))
 }
 
 /// Render a song offline into interleaved stereo at `sample_rate`. In song mode the whole playlist is rendered;
