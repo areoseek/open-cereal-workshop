@@ -43,6 +43,7 @@ pub mod keys;
 pub mod slicer;
 pub mod beep;
 pub mod conv;
+pub mod convset;
 pub mod drumbank;
 pub mod grain;
 pub mod guitar;

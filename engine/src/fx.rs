@@ -665,9 +665,17 @@ pub static DEFS: &[Def] = &[
         kind: Kind::Conv,
         ident: "Fruity Convolver",
         title: "Impulse Reverb",
-        size: 24,
+        size: 482,
         fixed: &[(0, 14), (20, 1)],
-        params: &[p("Dry", 4, 0, 1000, 1000), p("Wet", 8, 0, 1000, 500), p("Input separation", 12, -1000, 1000, 0), p("Wet separation", 16, -1000, 1000, 0)],
+        params: &[p("Dry", 4, 0, 1000, 1000), p("Wet", 8, 0, 1000, 500), p("Input separation", 12, -1000, 1000, 0),
+            p("Wet separation", 16, -1000, 1000, 0),
+            // kept after the impulse, wherever that ends: see `convset`
+            p("Normalize", CONV_AFTER, 0, 1, 1),
+            p("Delay", CONV_AFTER + 4, 0, 1000, 0),
+            p("Self-convolve", CONV_AFTER + 8, 0, 1000, 0),
+            p("Stretch", CONV_AFTER + 12, -1000, 1000, 0),
+            p("Equalise", CONV_AFTER + 16, 0, 1000, 1000),
+        ],
     },
     Def { kind: Kind::Patch, ident: "Patcher", title: "Patch Bay", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Rack, ident: "Distructor", title: "Drive Rack", size: 958, fixed: &[], params: &[] },
@@ -1736,6 +1744,9 @@ pub struct Fx {
     pub ext: Option<crate::host::Hosted>,
 }
 
+/// Stand-in offset for settings that have no fixed place in their block.
+const CONV_AFTER: usize = 1 << 30;
+
 /// An impulse and the stored path it came from (empty when the block carried the sound itself).
 #[derive(Debug, Clone)]
 pub struct Ir {
@@ -1906,6 +1917,7 @@ impl Fx {
             Kind::Comp => 28,
             Kind::Reverb => 56,
             Kind::Plush => 165,
+            Kind::Conv => 22,
             _ => need,
         };
         if state.len() < least {
@@ -1952,9 +1964,14 @@ impl Fx {
             }
         }
         let mut ir = None;
+        let mut conv_tail = None;
         if d.kind == Kind::Conv {
             if let Some((_, Some(w), _, _)) = conv_parts(state) {
                 ir = crate::sample::Sample::decode(state[w].to_vec(), "wav").ok().map(|s| Ir { smp: std::sync::Arc::new(s), path: String::new() });
+            }
+            if let Some((t, tail)) = conv_tail_of(state) {
+                p[4..].copy_from_slice(&t.read(tail));
+                conv_tail = Some(std::sync::Arc::new(state.to_vec()));
             }
         }
         if d.kind == Kind::Xyz {
@@ -1962,7 +1979,7 @@ impl Fx {
                 drawn_table_n(state, head, XYZ_N, &mut p)?;
             }
         }
-        let raw = matches!(d.kind, Kind::Curve | Kind::Warp | Kind::Xyz).then(|| std::sync::Arc::new(state.to_vec()));
+        let raw = matches!(d.kind, Kind::Curve | Kind::Warp | Kind::Xyz).then(|| std::sync::Arc::new(state.to_vec())).or(conv_tail);
         Some(Self { kind: d.kind, p, ir, sub: None, raw, ext: None })
     }
 
@@ -2027,15 +2044,19 @@ impl Fx {
                         v.extend_from_slice(&b[rest..]);
                         v
                     }
+                    // a block cut off before the impulse gets the rest
+                    _ if b.len() == 20 => [b, &[1, 0][..], &crate::convset::fresh(0.0)].concat(),
                     _ => b.to_vec(),
                 }
             }
             Some(b) => b.to_vec(),
-            None if self.kind == Kind::Conv && self.ir.as_ref().is_some_and(|i| !i.path.is_empty()) => {
+            None if self.kind == Kind::Conv => {
                 let mut v = vec![0u8; 20];
                 v[0] = 14;
                 v.push(1);
-                conv_path(&mut v, &self.ir.as_ref().unwrap().path);
+                let ir = self.ir.as_ref().filter(|i| !i.path.is_empty());
+                conv_path(&mut v, ir.map_or("", |i| &i.path));
+                v.extend_from_slice(&crate::convset::fresh(ir.map_or(0.0, |i| i.smp.seconds() as f64)));
                 v
             }
             None if self.kind == Kind::Curve => curve_fresh(),
@@ -2069,8 +2090,21 @@ impl Fx {
                 }
             }
         }
+        if self.kind == Kind::Conv && self.p.len() >= 4 + crate::convset::EXTRA {
+            if let Some((t, at)) = conv_tail_of(&out).map(|(t, tail)| (t, out.len() - tail.len())) {
+                t.write(&mut out[at..], &self.p[4..]);
+            }
+        }
         out
     }
+}
+
+/// The part of an impulse reverb block after the impulse, when it is laid out as we know it.
+fn conv_tail_of(state: &[u8]) -> Option<(crate::convset::Tail, &[u8])> {
+    let (_, _, _, rest) = conv_parts(state)?;
+    let tail = &state[rest..];
+    let version = u32::from_le_bytes(state.get(..4)?.try_into().ok()?);
+    crate::convset::parse(tail, version).map(|t| (t, tail))
 }
 
 fn conv_path(v: &mut Vec<u8>, path: &str) {
@@ -2562,7 +2596,10 @@ impl Unit {
             }
             Kind::Conv => {
                 if let Some(ir) = &u.fx.ir {
-                    let k = crate::conv::Kernel::new(&ir.smp, sr, 512, true);
+                    let extra = u.fx.p.get(4..4 + crate::convset::EXTRA).unwrap_or(&crate::convset::EXTRA_DEF);
+                    let tail = u.fx.raw.as_ref().and_then(|b| conv_tail_of(b)).map(|t| t.0);
+                    let shaped = crate::convset::shape(&ir.smp, extra, tail.as_ref());
+                    let k = crate::conv::Kernel::new(&shaped, sr, 512, extra[0] >= 0.5);
                     u.conv = Some(Box::new(crate::conv::State::new(std::sync::Arc::new(k))));
                 }
             }
@@ -5476,7 +5513,7 @@ mod tests {
         block.extend_from_slice(&[9, 8, 7, 6]);
         assert_eq!(sample_named_in("Fruity Convolver", &block).as_deref(), Some("a.wav"));
         let mut fx = Fx::decode("Fruity Convolver", &block).unwrap();
-        assert_eq!(fx.p, vec![0.0, 1000.0, 0.0, 0.0]);
+        assert_eq!(fx.p, vec![0.0, 1000.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1000.0]);
         assert_eq!(fx.encode(Some(&block)), block);
         let mut h = vec![0f32; 2000];
         h[0] = 1.0;
@@ -5488,6 +5525,30 @@ mod tests {
         let y = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 2000);
         let g = y[0][0];
         assert!(g > 0.5 && (y[1500][0] - g).abs() < 1e-3 && y[700][0].abs() < 1e-4, "{g} {}", y[1500][0]);
+    }
+    #[test]
+    fn the_impulse_reverb_keeps_its_reshaping_settings() {
+        let mut fx = Fx::new(Kind::Conv);
+        let mut h = vec![0f32; 2000];
+        h[0] = 1.0;
+        fx.ir = Some(Ir { smp: std::sync::Arc::new(crate::sample::Sample::from_mono("h", 44_100, &h)), path: "h.wav".into() });
+        fx.p[0] = 0.0;
+        fx.p[1] = 1000.0;
+        fx.p[4..].copy_from_slice(&[0.0, 10.0, 0.0, 0.0, 1000.0]);
+        let block = fx.encode(None);
+        let back = Fx::decode("Fruity Convolver", &block).unwrap();
+        assert_eq!(back.p, fx.p);
+        assert!(back.raw.is_some());
+        // a stored block takes a moved setting and nothing else changes
+        let mut moved = back.clone();
+        moved.p[7] = -250.0;
+        let again = moved.encode(Some(&block));
+        assert_eq!(again.len(), block.len());
+        assert_eq!(Fx::decode("Fruity Convolver", &again).unwrap().p[7], -250.0);
+        assert_eq!(again.iter().zip(&block).filter(|(a, b)| a != b).count(), 4);
+        // ten thousandths of a second of delay: the click comes out 441 frames late
+        let y = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 1000);
+        assert!(y[441][0] > 0.9 && y[0][0].abs() < 1e-4 && y[440][0].abs() < 1e-4, "{} {}", y[441][0], y[0][0]);
     }
     #[test]
     fn the_three_axis_pad_reads_its_block_and_follows_at_its_own_pace() {

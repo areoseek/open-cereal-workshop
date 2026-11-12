@@ -75,7 +75,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Center (built as Centre)
 - [~] Fruity Chorus (built, approximate)
 - [~] Fruity Compressor (built, approximate)
-- [~] Fruity Convolver (ours: Impulse Reverb; convolution with the named or held impulse, dry/wet, separation; delay, stretch, EQ and envelopes not yet)
+- [~] Fruity Convolver (ours: Impulse Reverb; convolution with the named or held impulse, dry/wet, separation, normalize, delay, self-convolution, stretch, the drawn pan/volume/separation envelopes and the equaliser curve read and applied; scales of delay and stretch and the place of each of the last settings are estimates, no shipped setting moves them; envelope and equaliser drawing, impulse recording and reported latency not yet)
 - [~] Fruity dB Meter (Level Meter: peak and average level of each side of the sound on its track; its saved display options are not read)
 - [~] Fruity Delay (built as Plain Echo; own-tempo scale and filter law are estimates)
 - [~] Fruity Delay 2 (built, approximate)

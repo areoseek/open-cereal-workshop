@@ -2657,7 +2657,7 @@ impl Player {
             if ins.enabled && (!ins.slots.is_empty() || !self.fx[i].is_empty()) {
                 let units = &mut self.fx[i];
                 let want = ins.slots.iter().filter(|s| s.fx.is_some());
-                if want.clone().count() != units.len() || want.clone().zip(units.iter()).any(|(s, u)| s.index != u.0 || s.fx.as_ref().map(|f| f.kind) != Some(u.1.fx.kind) || s.fx.as_ref().is_some_and(|f| f.ir != u.1.fx.ir)) {
+                if want.clone().count() != units.len() || want.clone().zip(units.iter()).any(|(s, u)| s.index != u.0 || s.fx.as_ref().map(|f| f.kind) != Some(u.1.fx.kind) || s.fx.as_ref().is_some_and(|f| f.ir != u.1.fx.ir || (f.kind == fx::Kind::Conv && (f.p.get(4..) != u.1.fx.p.get(4..) || f.raw != u.1.fx.raw)))) {
                     *units = want.map(|s| (s.index, fx::Unit::new(s.fx.clone().unwrap(), self.sr))).collect();
                 }
                 let mut tail = 0;
