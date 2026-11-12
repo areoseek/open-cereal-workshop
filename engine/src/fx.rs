@@ -1157,7 +1157,7 @@ pub static DEFS: &[Def] = &[
         title: "Pad Controller",
         size: 71,
         fixed: &[],
-        params: &[p("X", 4, 0, 65536, 32768), p("Y", 20, 0, 65536, 32768)],
+        params: &[p("X", 4, 0, 65536, 32768), p("Y", 20, 0, 65536, 32768), p("Speed", 36, 0, 4096, 2048), p("Acceleration", 40, 0, 4096, 1024)],
     },
     Def {
         kind: Kind::GrainShift,
@@ -3502,7 +3502,30 @@ impl Unit {
                     *f = out;
                 }
             }
-            Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Xy => {
+                // the dot chases where it was put: at once with the speed full up, otherwise closing in over a
+                // time the speed sets and picking up pace as fast as the acceleration allows
+                let dt = io.len() as f32 / cx.sr.max(1.0);
+                let (speed, accel) = (p.get(2).copied().unwrap_or(4096.0), p.get(3).copied().unwrap_or(4096.0));
+                let fresh = self.z[6] == 0.0;
+                self.z[6] = 1.0;
+                for a in 0..2 {
+                    let want = p[a] / 65536.0;
+                    if fresh || speed >= 4096.0 {
+                        self.z[a] = want;
+                        self.z[3 + a] = 0.0;
+                    } else {
+                        let time = xyz_time(2048.0, speed);
+                        let go = (want - self.z[a]) * (1.0 - (-dt / time).exp()) / dt.max(1e-6);
+                        let pick = time * 2.0 * (1.0 - accel / 4096.0).clamp(0.0, 1.0);
+                        let k = if pick > 1e-4 { 1.0 - (-dt / pick).exp() } else { 1.0 };
+                        self.z[3 + a] += (go - self.z[3 + a]) * k;
+                        self.z[a] = (self.z[a] + self.z[3 + a] * dt).clamp(0.0, 1.0);
+                    }
+                    self.out[a] = self.z[a];
+                }
+                self.out[2] = 0.0;
+            }
             Kind::Surface => {
                 for (o, v) in self.out.iter_mut().zip(p.iter()) {
                     *o = *v;
@@ -5691,4 +5714,34 @@ mod tests {
         assert!(u.out[2] > 0.99, "{}", u.out[2]);
     }
 
+}
+
+#[cfg(test)]
+mod pad_glide_tests {
+    use super::*;
+
+    #[test]
+    fn the_pad_dot_glides_to_a_new_place_and_jumps_with_the_speed_full_up() {
+        let cx = Ctx { sr: 48_000.0, step: 6000.0, clock: Default::default() };
+        let run = |speed: f32| {
+            let mut f = Fx::new(Kind::Xy);
+            f.p[2] = speed;
+            let mut u = Unit::new(f, cx.sr);
+            let mut io = vec![[0.0f32; 2]; 256];
+            u.process(&mut io, &cx);
+            u.fx.p[0] = 65536.0;
+            for _ in 0..20 {
+                u.process(&mut io, &cx);
+            }
+            let soon = u.sends(0).unwrap();
+            for _ in 0..600 {
+                u.process(&mut io, &cx);
+            }
+            (soon, u.sends(0).unwrap())
+        };
+        let (soon, late) = run(2048.0);
+        assert!(soon > 0.52 && soon < 0.95, "{soon}");
+        assert!(late > 0.99, "{late}");
+        assert!(run(4096.0).0 > 0.999);
+    }
 }
