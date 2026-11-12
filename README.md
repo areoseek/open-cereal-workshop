@@ -20,12 +20,19 @@ It opens and saves `.flp` project files. A project that is opened and saved with
 byte; edits are patched into the original file so settings we do not understand yet are kept.
 
 Current state
-- Channel rack with step sequencer, piano roll, playlist, mixer (inserts, sends, routing, track EQ), browser.
-- Sampler channels with envelopes, filter, time stretch, echo; layers; audio clips; automation clips.
-- Built-in instrument: Triple Osc. Other generators play through a plain stand-in voice and keep their settings.
-- Eighteen built-in effect units (EQ, limiter, reverb, compressor, delays, chorus, flanger, filters, distortion,
-  stereo tools). Other effects pass sound through and keep their settings.
-- WAV export, offline render example (`cargo run --release --example render -- in.flp out.wav`).
+- The windows: channel rack with step sequencer and graph editor, piano roll with its tools, playlist with
+  patterns, audio clips and automation clips, mixer (inserts, sends, routing, track EQ, ten effect slots),
+  browser, event editor, channel settings, project information, settings.
+- The keys and mouse moves of the reference program (docs/KEYBINDINGS.md).
+- Instruments and effects: every stock plug-in a project can name has a unit of our own that reads the same
+  stored settings, under a name of our own. How close each one is, and what is still an estimate, is listed
+  per unit in docs/PARITY.md.
+- Other makers' plug-ins: CLAP and VST3 hosting.
+- Audio and MIDI recording, MIDI keyboards and controllers with learned links, MIDI output, a built-in audio
+  editor.
+- Export to WAV, FLAC, MP3, Ogg Vorbis and MIDI, whole song, pattern, time selection or one file per mixer
+  track.
+- Autosave into a backup folder, and a question before unsaved work is thrown away.
 
 See docs/ROADMAP.md for what is left, docs/PARITY.md for coverage and for what is still approximate, and
 docs/GROUND-RULES.md for how the work is done.
