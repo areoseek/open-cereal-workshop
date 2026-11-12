@@ -204,6 +204,8 @@ pub(crate) struct App {
     show_browser: bool,
     /// The toolbar's output picture: the wave, or the level of each frequency.
     scope_bars: bool,
+    /// Toolbar parts taken off by the VIEW menu: the window buttons, the output monitor.
+    bar_hidden: [bool; 2],
     /// Minutes of hand-played keys the score log hands over.
     score_minutes: u32,
     scope_buf: Vec<f32>,
@@ -385,6 +387,7 @@ impl App {
             show_mixer: false,
             show_browser: true,
             scope_bars: false,
+            bar_hidden: [false; 2],
             score_minutes: 2,
             scope_buf: Vec::new(),
             typing_keys: true,
@@ -2253,6 +2256,31 @@ impl App {
                     ui.checkbox(&mut self.show_browser, "Browser            Alt+F8");
                     ui.checkbox(&mut self.show_info, "Project info       F11");
                     ui.checkbox(&mut self.show_events, "Event editor");
+                    ui.checkbox(&mut self.show_picker, "Plug-in picker     F8");
+                    ui.checkbox(&mut self.show_project, "Project picker    Ctrl+F8");
+                    ui.separator();
+                    ui.menu_button("Layout", |ui| {
+                        if ui.button("Arrange windows: default     Ctrl+Shift+H").clicked() {
+                            ui.ctx().memory_mut(|m| m.reset_areas());
+                            ui.close_menu();
+                        }
+                        if ui.button("Close all windows     F12").clicked() {
+                            self.close_all();
+                            ui.close_menu();
+                        }
+                        if ui.button("Show the main windows").hint("Playlist, channel rack, mixer and browser").clicked() {
+                            (self.show_playlist, self.show_rack, self.show_mixer, self.show_browser) = (true, true, true, true);
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Toolbars", |ui| {
+                        for (k, label) in ["Window buttons", "Output monitor"].into_iter().enumerate() {
+                            let mut on = !self.bar_hidden[k];
+                            if ui.checkbox(&mut on, label).changed() {
+                                self.bar_hidden[k] = !on;
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui.button("Close all windows     F12").clicked() {
                         self.close_all();
@@ -2659,18 +2687,23 @@ impl App {
                     self.dirty = true;
                 }
                 ui.separator();
-                for (flag, label, tip) in [
+                let buttons: &mut [(&mut bool, &str, &str)] = if self.bar_hidden[0] { &mut [] } else { &mut [
                     (&mut self.show_playlist, "Playlist", "F5"),
                     (&mut self.show_piano, "Piano roll", "F7"),
                     (&mut self.show_rack, "Channel rack", "F6"),
                     (&mut self.show_mixer, "Mixer", "F9"),
                     (&mut self.show_browser, "Browser", "Alt+F8"),
-                ] {
-                    if ui.selectable_label(*flag, label).hint(tip).clicked() {
-                        *flag = !*flag;
+                ] };
+                for (flag, label, tip) in buttons.iter_mut() {
+                    if ui.selectable_label(**flag, *label).hint(*tip).clicked() {
+                        **flag = !**flag;
                     }
                 }
+                let monitor = !self.bar_hidden[1];
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !monitor {
+                        return;
+                    }
                     let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                     ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
                     ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
