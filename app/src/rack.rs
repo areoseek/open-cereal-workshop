@@ -172,7 +172,24 @@ impl App {
                         let x = area.left() + s as f32 * pitch - 1.5;
                         p.line_segment([Pos2::new(x, area.top()), Pos2::new(x, area.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
                     }
-                    let at = resp.interact_pointer_pos().filter(|pp| area.contains(*pp));
+                    // two rows of switches stay at the top of the view: slide and portamento of each step
+                    let top = ui.clip_rect().top().max(rect.top());
+                    let switches = Rect::from_min_max(Pos2::new(rect.left(), top), Pos2::new(area.right(), top + 20.0));
+                    let on_switch = resp.interact_pointer_pos().filter(|pp| switches.contains(*pp));
+                    if let (Some(pp), true) = (on_switch, resp.clicked()) {
+                        let (s, porta) = (((pp.x - area.left()) / pitch).floor(), pp.y >= top + 10.0);
+                        if pp.x >= area.left() && (s as usize) < nsteps {
+                            for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == chan && n.pos / step == s as u32) {
+                                if porta {
+                                    n.porta = !n.porta;
+                                } else {
+                                    n.slide = !n.slide;
+                                }
+                                self.dirty = true;
+                            }
+                        }
+                    }
+                    let at = resp.interact_pointer_pos().filter(|pp| area.contains(*pp) && on_switch.is_none());
                     let cell = at.map(|pp| (((pp.x - area.left()) / pitch) as u32, (131 - ((pp.y - area.top()) / KEY_H) as i32).clamp(0, 131)));
                     if let Some((s, key)) = cell.filter(|c| (c.0 as usize) < nsteps) {
                         let pos = s * step;
@@ -194,6 +211,16 @@ impl App {
                         let x = area.left() + (n.pos / step) as f32 * pitch;
                         let y = row(n.key as i32);
                         p.rect_filled(Rect::from_min_max(Pos2::new(x, y), Pos2::new(x + STEP_W, y + KEY_H - 1.0)), 1.0, ACCENT);
+                    }
+                    p.rect_filled(switches, 0.0, PANEL_DARK);
+                    for (r, name) in ["Slide", "Porta"].iter().enumerate() {
+                        let y = top + r as f32 * 10.0;
+                        p.text(Pos2::new(area.left() - 46.0, y + 5.0), egui::Align2::RIGHT_CENTER, *name, egui::FontId::proportional(9.0), TEXT_DIM);
+                        for s in 0..nsteps {
+                            let x = area.left() + s as f32 * pitch;
+                            let on = self.song.patterns[pat].notes.iter().any(|n| n.chan == chan && n.pos / step == s as u32 && if r == 0 { n.slide } else { n.porta });
+                            p.rect_filled(Rect::from_min_max(Pos2::new(x, y + 1.0), Pos2::new(x + STEP_W, y + 9.0)), 1.0, if on { ACCENT } else { GRID_DARK });
+                        }
                     }
                 });
             }
