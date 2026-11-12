@@ -25,6 +25,8 @@ pub mod id {
     pub const LOOP_ACTIVE: u8 = 9;
     pub const SHUFFLE: u8 = 11;
     pub const TIMESIG_NUM: u8 = 17;
+    /// 1 when the playlist is in performance mode.
+    pub const PERFORMANCE: u8 = 31;
     pub const TIMESIG_BEAT: u8 = 18;
     pub const CHAN_ZIPPED: u8 = 20;
     pub const CHAN_GROUP: u8 = 145;
@@ -548,6 +550,17 @@ pub struct FlpTrack {
     pub color: u32,
     pub enabled: bool,
     pub height: f32,
+    /// Performance settings: what the track does after a clip (0 stay, 1 one shot, 2 march and wrap,
+    /// 3 march and stay, 4 march and stop, 5 random, 6 random without repeats), how a press acts
+    /// (0 retrigger, 1 hold and stop, 2 hold and motion, 3 latch), the trigger and position grids
+    /// (0 off, 1 quarter beat, 2 half beat, 3 beat, 4 two beats, 5 four beats, 6 automatic).
+    pub motion: u32,
+    pub press: u32,
+    pub trigger_sync: u32,
+    pub queued: bool,
+    pub tolerant: bool,
+    pub position_sync: u32,
+    pub grouped: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -642,6 +655,7 @@ pub struct Flp {
     pub comment: String,
     pub tempo: f32,
     pub time_sig: (u8, u8),
+    pub performance: bool,
     /// The channel rack's named groups, and the one on show (-1 for all).
     pub groups: Vec<String>,
     pub cur_group: i32,
@@ -787,6 +801,7 @@ impl Flp {
                 (id::CUR_GROUP, Value::Int(v)) => flp.cur_group = *v as i32,
                 (id::TEMPO_WORD, Value::Word(v)) if flp.tempo == 0.0 => flp.tempo = *v as f32,
                 (id::TIMESIG_NUM, Value::Byte(v)) => flp.time_sig.0 = *v,
+                (id::PERFORMANCE, Value::Byte(v)) => flp.performance = *v != 0,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
                 (id::MAIN_PITCH, Value::Word(v)) => flp.main_pitch = *v as i16,
                 (id::SHUFFLE, Value::Byte(v)) => flp.shuffle = *v,
@@ -842,7 +857,22 @@ impl Flp {
                         flp.arrangements.push(FlpArrangement { name: "Arrangement".into(), ..Default::default() });
                     }
                     let a = flp.arrangements.last_mut().unwrap();
-                    a.tracks.push(FlpTrack { index: u32at(d, 0), name: String::new(), color: u32at(d, 4), enabled: d.get(12).copied().unwrap_or(1) != 0, height: f32at(d, 13) });
+                    let perf = d.len() >= 47;
+                    let word = |o: usize| if perf { u32at(d, o) } else { 0 };
+                    a.tracks.push(FlpTrack {
+                        index: u32at(d, 0),
+                        name: String::new(),
+                        color: u32at(d, 4),
+                        enabled: d.get(12).copied().unwrap_or(1) != 0,
+                        height: f32at(d, 13),
+                        motion: word(22),
+                        press: word(26),
+                        trigger_sync: if perf { u32at(d, 30) } else { 5 },
+                        queued: word(34) != 0,
+                        tolerant: if perf { u32at(d, 38) != 0 } else { true },
+                        position_sync: word(42),
+                        grouped: perf && d[46] != 0,
+                    });
                 }
                 (id::TRACK_NAME, Value::Data(d)) => {
                     if let Some(t) = flp.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
@@ -1063,7 +1093,8 @@ impl Flp {
         // track numbering in playlist items is stored upside down; the track count tells us the top
         let ver = version_tuple(&flp.version);
         for a in &mut flp.arrangements {
-            let n = if !a.tracks.is_empty() { a.tracks.len() as u16 } else if ver >= (12, 9, 0, 0) { 500 } else { 199 };
+            // old projects list only some of their 199 tracks
+            let n = if ver < (12, 9, 0, 0) { 199 } else if !a.tracks.is_empty() { a.tracks.len() as u16 } else { 500 };
             for it in &mut a.items {
                 it.track = (n - 1).saturating_sub(it.track);
             }

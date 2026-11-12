@@ -651,13 +651,44 @@ pub struct Track {
     pub name: String,
     pub color: Color,
     pub enabled: bool,
+    pub perf: Perf,
+    /// Joined to the track above it (they are muted and triggered as one).
+    pub grouped: bool,
 }
 
 impl Default for Track {
     fn default() -> Self {
-        Self { name: String::new(), color: [72, 81, 86], enabled: true }
+        Self { name: String::new(), color: [72, 81, 86], enabled: true, perf: Perf::default(), grouped: false }
     }
 }
+
+/// How a playlist track behaves when its clips are played by hand in performance mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Perf {
+    /// 0 retrigger, 1 hold and stop, 2 hold and motion, 3 latch.
+    pub press: u8,
+    /// What follows a clip that has played through: 0 stay, 1 one shot, 2 march and wrap, 3 march and
+    /// stay, 4 march and stop, 5 random, 6 random without repeats.
+    pub motion: u8,
+    /// The grid a trigger waits for: 0 off, 1 quarter beat, 2 half beat, 3 beat, 4 two beats, 5 four beats,
+    /// 6 automatic (the clip's own length, four beats at most).
+    pub sync: u8,
+    /// Where in the clip a trigger starts: 0 its beginning, 1..=5 the grid as above, 6 the song position.
+    pub pos_sync: u8,
+    pub queue: bool,
+    /// A trigger that comes a little late starts at once, inside the clip, in place of waiting a whole grid step.
+    pub tolerant: bool,
+}
+
+impl Default for Perf {
+    fn default() -> Self {
+        Self { press: 0, motion: 0, sync: 5, pos_sync: 0, queue: false, tolerant: true }
+    }
+}
+
+pub const PERF_PRESS: [&str; 4] = ["Retrigger", "Hold & stop", "Hold & motion", "Latch"];
+pub const PERF_MOTION: [&str; 7] = ["Stay", "One shot", "March & wrap", "March & stay", "March & stop", "Random", "Exclusive random"];
+pub const PERF_SYNC: [&str; 7] = ["Off", "1/4 beat", "1/2 beat", "1 beat", "2 beats", "4 beats", "Auto"];
 
 #[derive(Debug, Clone, Default)]
 pub struct Slot {
@@ -802,6 +833,8 @@ pub struct Song {
     pub ppq: u32,
     pub tempo: f32,
     pub time_sig: (u8, u8),
+    /// The playlist's clips ahead of the start marker are played by hand.
+    pub performance: bool,
     /// Project swing, 0..=1.
     pub swing: f32,
     pub channels: Vec<Chan>,
@@ -919,6 +952,7 @@ impl Song {
             ppq: 96,
             tempo: 130.0,
             time_sig: (4, 4),
+            performance: false,
             swing: 0.0,
             channels: names.iter().map(|n| Chan { name: n.to_string(), ..Default::default() }).collect(),
             patterns: vec![Pattern::default()],
@@ -1653,7 +1687,7 @@ impl Song {
         let mut clips = vec![];
         if let Some(a) = f.arrangements.first() {
             if !a.tracks.is_empty() {
-                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled }).collect();
+                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped }).collect();
             }
             for it in &a.items {
                 let (src, offset) = match it.source {
@@ -1732,6 +1766,7 @@ impl Song {
             ppq,
             tempo: if f.tempo > 0.0 { f.tempo } else { 130.0 },
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
+            performance: f.performance,
             swing: (f.shuffle as f32 / 128.0).min(1.0),
             channels,
             patterns,

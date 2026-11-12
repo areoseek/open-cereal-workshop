@@ -407,6 +407,10 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
             ev.insert(after_version, Event::int(id::TEMPO, milli(song.tempo)));
         }
     }
+    if song.performance != base.performance {
+        set_or_insert(ev, 0..head_end, Event::byte(id::PERFORMANCE, song.performance as u8), after_version);
+    }
+    let head_end = ev.iter().position(|e| matches!(e.id, 64 | 65 | 99 | 233 | 236)).unwrap_or(ev.len());
     if song.time_sig != base.time_sig {
         set_or_insert(ev, 0..head_end, Event::byte(id::TIMESIG_NUM, song.time_sig.0), after_version);
         let head_end = ev.iter().position(|e| matches!(e.id, 64 | 65 | 99 | 233 | 236)).unwrap_or(ev.len());
@@ -1369,9 +1373,9 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
 
 fn track_count(flp: &Flp) -> u16 {
     match flp.arrangements.first() {
+        _ if flp.version_tuple() < (12, 9, 0, 0) => 199,
         Some(a) if !a.tracks.is_empty() => a.tracks.len() as u16,
-        _ if flp.version_tuple() >= (12, 9, 0, 0) => 500,
-        _ => 199,
+        _ => 500,
     }
 }
 
@@ -1577,6 +1581,15 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
             }
             if now.enabled != was.enabled && d.len() > 12 {
                 d[12] = now.enabled as u8;
+            }
+            if (now.perf != was.perf || now.grouped != was.grouped) && d.len() >= 47 {
+                put_u32(d, 22, now.perf.motion as u32);
+                put_u32(d, 26, now.perf.press as u32);
+                put_u32(d, 30, now.perf.sync as u32);
+                put_u32(d, 34, now.perf.queue as u32);
+                put_u32(d, 38, now.perf.tolerant as u32);
+                put_u32(d, 42, now.perf.pos_sync as u32);
+                d[46] = now.grouped as u8;
             }
         }
     }

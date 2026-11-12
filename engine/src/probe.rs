@@ -10,6 +10,12 @@ fn probe_project() {
     let mut lib = crate::sample::Library::new();
     let song = crate::song::Song::from_flp_with(&flp, Some(&mut lib), std::path::Path::new(&path).parent());
     println!("clips {} patterns {}", song.clips.len(), song.patterns.len());
+    for m in &song.markers {
+        println!("marker at {} kind {} {:?}", m.pos, m.kind, m.name);
+    }
+    for c in song.clips.iter().take(std::env::var("PROBE_CLIPS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)) {
+        println!("clip at {} len {} track {} {:?} offset {} group {}", c.pos, c.len, c.track, c.src, c.offset, c.group);
+    }
     println!("ppq {} tempo {:?}", song.ppq, song.tempo);
     for (i, c) in song.channels.iter().enumerate() {
         let g = c.gen.as_ref();
