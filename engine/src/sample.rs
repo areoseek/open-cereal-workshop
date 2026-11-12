@@ -137,7 +137,15 @@ impl Sample {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (bytes, ext) = match ogg_inside_wav(&bytes) {
-            Some(range) => (bytes[range].to_vec(), "ogg".to_string()),
+            Some(range) => (first_ogg_stream(&bytes[range]), "ogg".to_string()),
+            None => (bytes, ext),
+        };
+        let odd = odd_wav(&bytes);
+        let (bytes, ext) = match odd {
+            Some(Odd::Plain(s)) => {
+                return Ok(Self { name, ..s });
+            }
+            Some(Odd::Mp3(range)) => (bytes[range].to_vec(), "mp3".to_string()),
             None => (bytes, ext),
         };
         let mut s = Self::decode(bytes, &ext).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -233,6 +241,98 @@ fn ogg_inside_wav(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
     None
 }
 
+/// The pages of the first stream in a run of Ogg pages, up to its last page (some writers mix in empty
+/// pages of another stream, which a reader takes for a broken chain).
+fn first_ogg_stream(d: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    let mut p = 0;
+    let serial = d.get(14..18).map(|s| s.to_vec()).unwrap_or_default();
+    while p + 27 <= d.len() && &d[p..p + 4] == b"OggS" {
+        let segs = d[p + 26] as usize;
+        let Some(lace) = d.get(p + 27..p + 27 + segs) else { break };
+        let next = p + 27 + segs + lace.iter().map(|&l| l as usize).sum::<usize>();
+        if next > d.len() {
+            break;
+        }
+        if d[p + 14..p + 18] == serial[..] {
+            out.extend_from_slice(&d[p..next]);
+            if d[p + 5] & 4 != 0 {
+                break;
+            }
+        }
+        p = next;
+    }
+    if out.is_empty() { d.to_vec() } else { out }
+}
+
+enum Odd {
+    Plain(Sample),
+    Mp3(std::ops::Range<usize>),
+}
+
+/// WAV files the general reader turns away: plain or float samples behind a format chunk of an unusual
+/// length, and MP3 data in a WAV wrapper.
+fn odd_wav(bytes: &[u8]) -> Option<Odd> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut i = 12;
+    let mut fmt: Option<&[u8]> = None;
+    while i + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().ok()?) as usize;
+        let body = i + 8;
+        let end = body.saturating_add(size).min(bytes.len());
+        match &bytes[i..i + 4] {
+            b"fmt " => fmt = Some(&bytes[body..end]),
+            b"data" => {
+                let f = fmt?;
+                if f.len() < 16 {
+                    return None;
+                }
+                let tag = u16::from_le_bytes([f[0], f[1]]);
+                if tag == 0x55 {
+                    return Some(Odd::Mp3(body..end));
+                }
+                if !matches!(tag, 1 | 3) || matches!(f.len(), 16 | 18 | 40) {
+                    return None;
+                }
+                let ch = u16::from_le_bytes([f[2], f[3]]) as usize;
+                let rate = u32::from_le_bytes(f[4..8].try_into().ok()?);
+                let bits = u16::from_le_bytes([f[14], f[15]]) as usize;
+                let wide = bits / 8;
+                if ch == 0 || rate == 0 || !matches!((tag, bits), (1, 8 | 16 | 24 | 32) | (3, 32 | 64)) {
+                    return None;
+                }
+                let one = |b: &[u8]| -> f32 {
+                    match (tag, bits) {
+                        (1, 8) => (b[0] as f32 - 128.0) / 128.0,
+                        (1, 16) => i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0,
+                        (1, 24) => (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as f32 / 8_388_608.0,
+                        (1, 32) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0,
+                        (3, 32) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        _ => f64::from_le_bytes(b[..8].try_into().unwrap()) as f32,
+                    }
+                };
+                let frames: Vec<[f32; 2]> = bytes[body..end]
+                    .chunks_exact(wide * ch)
+                    .map(|f| {
+                        let l = one(&f[..wide]);
+                        let r = if ch > 1 { one(&f[wide..2 * wide]) } else { l };
+                        [l, r]
+                    })
+                    .collect();
+                if frames.is_empty() {
+                    return None;
+                }
+                return Some(Odd::Plain(Sample { name: String::new(), rate, mono: ch == 1, frames }));
+            }
+            _ => {}
+        }
+        i = body + size + (size & 1);
+    }
+    None
+}
+
 /// Finds and caches the sample files a project names. Project files store Windows paths, often starting with a
 /// placeholder for the original program's data folder; the library maps those onto real folders.
 #[derive(Default)]
@@ -304,6 +404,12 @@ impl Library {
             for r in &self.factory_roots {
                 tries.push((r.clone(), &parts[1..]));
             }
+        } else if first == "%flstudiodata%" {
+            // the early versions' name for the Data folder of the installation
+            for r in &self.factory_roots {
+                tries.push((r.join("Data"), &parts[1..]));
+                tries.push((r.clone(), &parts[1..]));
+            }
         } else if first == "%flstudiouserdata%" {
             for r in &self.user_roots {
                 tries.push((r.clone(), &parts[1..]));
@@ -325,8 +431,26 @@ impl Library {
                 }
             }
         }
-        // last resort: any file of the same name in the search folders and factory roots
         let name = parts.last()?.to_lowercase();
+        // a file of the same name anywhere under the project's folder (a zipped project keeps its files
+        // in folders of its own)
+        if let Some(d) = project_dir {
+            let mut stack = vec![(d.to_path_buf(), 0)];
+            while let Some((dir, depth)) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        if depth < 4 {
+                            stack.push((p, depth + 1));
+                        }
+                    } else if e.file_name().to_string_lossy().to_lowercase() == name {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        // last resort: any file of the same name in the search folders and factory roots
         if self.by_name.is_none() {
             let mut map = HashMap::new();
             let mut stack: Vec<PathBuf> = self.search_dirs.iter().chain(&self.factory_roots).chain(&self.user_roots).cloned().collect();
@@ -384,6 +508,48 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn page(serial: u32, flags: u8, body: &[u8]) -> Vec<u8> {
+        let mut p = b"OggS".to_vec();
+        p.push(0);
+        p.push(flags);
+        p.extend_from_slice(&[0u8; 8]);
+        p.extend_from_slice(&serial.to_le_bytes());
+        p.extend_from_slice(&[0u8; 8]);
+        p.push(1);
+        p.push(body.len() as u8);
+        p.extend_from_slice(body);
+        p
+    }
+
+    #[test]
+    fn stray_pages_of_another_stream_are_dropped() {
+        let (a, b, c) = (page(7, 2, b"one"), page(u32::MAX, 0, b""), page(7, 4, b"two"));
+        let all = [a.clone(), b.clone(), c.clone(), b].concat();
+        assert_eq!(first_ogg_stream(&all), [a, c].concat());
+    }
+
+    #[test]
+    fn a_wav_with_a_long_format_chunk_still_reads() {
+        let mut w = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        w.extend_from_slice(&20u32.to_le_bytes());
+        for v in [1u16, 1] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        w.extend_from_slice(&22050u32.to_le_bytes());
+        w.extend_from_slice(&44100u32.to_le_bytes());
+        for v in [2u16, 16, 0, 0] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&4u32.to_le_bytes());
+        w.extend_from_slice(&16384i16.to_le_bytes());
+        w.extend_from_slice(&(-16384i16).to_le_bytes());
+        let Some(Odd::Plain(s)) = odd_wav(&w) else { panic!("not read") };
+        assert_eq!((s.rate, s.mono, s.frames.len()), (22050, true, 2));
+        assert!((s.frames[0][0] - 0.5).abs() < 1e-3 && (s.frames[1][0] + 0.5).abs() < 1e-3);
+    }
+
 
     #[test]
     fn interpolation_hits_the_frames_and_blends_between() {

@@ -72,9 +72,15 @@ impl Map {
     /// Read an instrument's block by its file identifier.
     pub fn parse(ident: &str, state: &[u8]) -> Option<Self> {
         if ident.eq_ignore_ascii_case("FPC") {
-            pads(state)
+            match early_pads(state) {
+                Some(now) => pads(&now),
+                None => pads(state),
+            }
         } else if ident.eq_ignore_ascii_case("DirectWave") {
-            programs(state)
+            match early_programs(state) {
+                Some(now) => programs(&now),
+                None => programs(state),
+            }
         } else {
             None
         }
@@ -114,7 +120,15 @@ fn pieces(b: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     (at == b.len()).then_some(out)
 }
 
+/// Whether a text piece holds one byte per letter, as the early versions wrote it.
+fn narrow_text(b: &[u8]) -> bool {
+    !b.is_empty() && b.iter().all(|&c| c >= 0x20)
+}
+
 fn wide(b: &[u8]) -> String {
+    if narrow_text(b) {
+        return b.iter().map(|&c| c as char).collect();
+    }
     let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     String::from_utf16_lossy(&u).trim_end_matches('\0').to_string()
 }
@@ -231,7 +245,7 @@ impl Layer {
 
     pub fn put_path(&mut self, path: &str) {
         if let Some(p) = self.parts.iter_mut().find(|p| p.0 == 300) {
-            p.1 = to_wide(path);
+            p.1 = if narrow_text(&p.1) && path.is_ascii() { path.as_bytes().to_vec() } else { to_wide(path) };
         }
     }
 
@@ -293,7 +307,7 @@ impl Pad {
 
     pub fn put_name(&mut self, name: &str) {
         if let Some(p) = self.head.iter_mut().find(|p| p.0 == 101) {
-            p.1 = to_wide(name);
+            p.1 = if narrow_text(&p.1) && name.is_ascii() { name.as_bytes().to_vec() } else { to_wide(name) };
         }
     }
 
@@ -513,6 +527,170 @@ fn programs(state: &[u8]) -> Option<Map> {
         }
     }
     Some(Map { zones, bank: None, kit: None, tail })
+}
+
+/// The pad machine's block as versions before the pieces wrote it: the letters JB and a version, the pad
+/// count, then each pad in a row: level (0..127), pan, two switches, key, output offset, a byte, cut group,
+/// cut-by group, the name (a length byte, then letters), the layer count, each layer (path the same way,
+/// then level, pan, lowest and highest velocity, a switch, two bytes, a closing number) and two drawn lines
+/// (kind, sub-kind, point count, the points, eight spare bytes, seven closing numbers). Gives the same
+/// content laid out as pieces, so one reader serves both.
+fn early_pads(state: &[u8]) -> Option<Vec<u8>> {
+    if state.get(..2)? != b"JB" {
+        return None;
+    }
+    struct Cur<'a>(&'a [u8], usize);
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            let b = self.0.get(self.1..self.1.checked_add(n)?)?;
+            self.1 += n;
+            Some(b)
+        }
+        fn int(&mut self) -> Option<i32> {
+            Some(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        fn text(&mut self) -> Option<String> {
+            let n = self.take(1)?[0] as usize;
+            Some(self.take(n)?.iter().map(|&c| c as char).collect())
+        }
+    }
+    fn piece(id: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_le_bytes().to_vec();
+        out.extend((body.len() as u64).to_le_bytes());
+        out.extend(body);
+        out
+    }
+    let ints = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let mut c = Cur(state, 4);
+    let n = c.int()?;
+    if !(1..=128).contains(&n) {
+        return None;
+    }
+    let mut out = vec![3, 0xe4, 0x84, 0x1e];
+    out.extend(piece(1, &[]));
+    out.extend(piece(3, &[1]));
+    out.extend(piece(4, &[0; 32]));
+    for _ in 0..n {
+        let (level, pan) = (c.int()?, c.int()?);
+        let switches = c.take(2)?;
+        let (key, out_at) = (c.int()?, c.int()?);
+        c.take(1)?;
+        let (cut, cut_by) = (c.int()?, c.int()?);
+        let name = c.text()?;
+        let layers = c.int()?;
+        if !(0..128).contains(&key) || !(0..=64).contains(&layers) {
+            return None;
+        }
+        let mut set = [0i32; 16];
+        set[0] = (level.clamp(0, 127) * 128 + 63) / 127;
+        set[1] = pan;
+        set[2] = switches[0] as i32 | (switches[1] as i32) << 8;
+        set[3] = key;
+        set[4] = out_at;
+        set[5] = cut;
+        set[6] = cut_by;
+        let mut opt = [0i32; 8];
+        opt[0] = 1;
+        let mut pad = piece(100, &ints(&set));
+        pad.extend(piece(101, &to_wide(&name)));
+        pad.extend(piece(102, &ints(&opt)));
+        for _ in 0..layers {
+            let path = c.text()?;
+            let l = [c.int()?, c.int()?, c.int()?, c.int()?, c.int()?];
+            c.take(2)?;
+            let close = c.int()?;
+            let mut inner = piece(300, &to_wide(&path));
+            inner.extend(piece(301, &ints(&[l[0], l[1], l[2], l[3], l[4], 0, close])));
+            inner.extend(piece(302, &[]));
+            pad.extend(piece(105, &inner));
+        }
+        for which in 0..2 {
+            let (kind, sub, points) = (c.int()?, c.int()?, c.int()?);
+            if kind != 1 || !(0..=4096).contains(&points) {
+                return None;
+            }
+            let mut line = ints(&[kind, sub, points, 0]);
+            line.extend(c.take(points as usize * 24)?);
+            c.take(8)?;
+            line.extend(c.take(28)?);
+            pad.extend(piece(103, &ints(&[which, 0])));
+            pad.extend(piece(104, &line));
+        }
+        pad.extend(piece(106, &[]));
+        out.extend(piece(2, &pad));
+    }
+    Some(out)
+}
+
+/// The multi-sample player's block as versions before the pieces wrote it: fixed records. After 9992 bytes
+/// of general settings come 128 programs of 452 bytes (name 32, file 260, at 297 the switches of the echo,
+/// room and chorus, at 304 the zone count, from 388 the three units' knobs), each followed by its zones of
+/// 1698 bytes (name 32, path 260, at 292 the keys, at 300 frames, channels, sample width, a spare, rate, at
+/// 324 loop kind, start and end, at 346 the two filters, at 394 the level envelope, at 470 the free
+/// envelopes, at 502 the wobbles, at 538 the sends, at 1566 the sixteen links), and four closing bytes.
+/// Gives the same content laid out as pieces, so one reader serves both.
+fn early_programs(state: &[u8]) -> Option<Vec<u8>> {
+    const FIRST: usize = 9992;
+    const PROG: usize = 452;
+    const ZONE: usize = 1698;
+    if state.len() < FIRST + 128 * PROG + 4 {
+        return None;
+    }
+    let mut at = FIRST;
+    let mut progs = vec![];
+    for _ in 0..128 {
+        let head = state.get(at..at + PROG)?;
+        let n = u32::from_le_bytes(head[304..308].try_into().unwrap()) as usize;
+        let zones = state.get(at + PROG..(at + PROG).checked_add(n.checked_mul(ZONE)?)?)?;
+        progs.push((head, zones));
+        at += PROG + n * ZONE;
+    }
+    if at + 4 != state.len() {
+        return None;
+    }
+    fn piece(id: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_le_bytes().to_vec();
+        out.extend((body.len() as u64).to_le_bytes());
+        out.extend(body);
+        out
+    }
+    let text = |b: &[u8]| -> Vec<u8> { b.iter().copied().take_while(|&c| c != 0).collect() };
+    let mut out = state[..4].to_vec();
+    for (head, zones) in progs {
+        let mut prog = vec![];
+        // each unit: its switch, the lead bytes the pieces carry, then four knobs
+        for (id, switch, lead, knobs) in [(105u32, 297usize, 1usize, 388usize), (106, 298, 0, 404), (107, 299, 0, 420)] {
+            let mut b = vec![head[switch]];
+            b.extend(std::iter::repeat_n(0u8, lead));
+            b.extend(&head[knobs..knobs + 16]);
+            prog.extend(piece(id, &b));
+        }
+        for z in zones.chunks_exact(ZONE) {
+            let mut zone = piece(500, &z[292..297]);
+            zone.extend(piece(501, &text(&z[..32])));
+            zone.extend(piece(502, &text(&z[32..292])));
+            let mut facts = z[300..304].to_vec();
+            facts.extend([0u8; 4]);
+            facts.extend(&z[304..312]);
+            facts.extend(&z[316..320]);
+            facts.extend(&z[324..336]);
+            zone.extend(piece(503, &facts));
+            zone.extend(piece(506, &z[538..586]));
+            zone.extend(piece(507, &z[346..366]));
+            zone.extend(piece(507, &z[366..386]));
+            zone.extend(piece(509, &z[394..410]));
+            zone.extend(piece(514, &z[470..486]));
+            zone.extend(piece(514, &z[486..502]));
+            zone.extend(piece(515, &z[502..522]));
+            zone.extend(piece(515, &z[522..542]));
+            for l in z[1566..1694].chunks_exact(8) {
+                zone.extend(piece(516, l));
+            }
+            prog.extend(piece(3, &zone));
+        }
+        out.extend(piece(1, &prog));
+    }
+    Some(out)
 }
 
 #[cfg(test)]

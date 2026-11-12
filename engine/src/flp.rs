@@ -726,6 +726,41 @@ pub fn mixer_base(ver: (u32, u32, u32, u32)) -> usize {
     if ver >= (24, 2, 0, 0) { 448 } else { 128 }
 }
 
+/// Files from before the event that opens a mixer track: each track is its effects, then colour, name and
+/// input, closed by its output. Gives the first event of the first track and the last output event.
+pub fn old_mixer_span(ev: &[Event]) -> Option<(usize, usize)> {
+    if ev.iter().any(|e| e.id == id::INSERT_FLAGS) {
+        return None;
+    }
+    let first = ev.iter().position(|e| e.id == id::INSERT_OUTPUT)?;
+    let last = ev.iter().rposition(|e| e.id == id::INSERT_OUTPUT)?;
+    let mut start = first;
+    while start > 0 && matches!(ev[start - 1].id, id::PLUGIN_INTERNAL_NAME | id::NEW_PLUGIN | id::PLUGIN_NAME | id::PLUGIN_PARAMS | id::INSERT_COLOR | id::INSERT_NAME | id::INSERT_INPUT) {
+        start -= 1;
+    }
+    // a channel's own plug-in events may run straight into the mixer: a track's effects start at a plug-in name
+    while start < first && !matches!(ev[start].id, id::PLUGIN_INTERNAL_NAME | id::INSERT_COLOR | id::INSERT_NAME | id::INSERT_INPUT) {
+        start += 1;
+    }
+    Some((start, last))
+}
+
+/// A mixer value as the early versions store it: their own parameter number and scale.
+pub fn old_mixer_record(pid: u8, value: i32) -> Option<(u8, i32)> {
+    let cents = |v: i32| (v as f32 / 100.0).round() as i32;
+    Some(match pid {
+        0 | 1 => (pid, if pid == 1 { cents(value) } else { value }),
+        192 => (96, cents(value)),
+        193 => (97, cents(value)),
+        194 => (98, value),
+        208..=210 => (pid - 96, value),
+        216..=218 => (pid - 96, value),
+        224..=226 => (pid - 96, value),
+        129..=132 => (pid - 65, cents(value)),
+        _ => return None,
+    })
+}
+
 /// One point of an automation clip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoPoint {
@@ -791,8 +826,19 @@ impl Flp {
         // patterns carry markers of their own, written with the same events
         let mut in_pattern = false;
 
-        for e in &file.events {
+        let old_mixer = old_mixer_span(&file.events);
+        for (at, e) in file.events.iter().enumerate() {
             let text = |d: &[u8]| if unicode { utf16(d) } else { latin1(d) };
+            if let Some((a, b)) = old_mixer {
+                if at >= a && at <= b && !insert_open {
+                    scope = Scope::Insert;
+                    insert_open = true;
+                    slot = FlpSlot::default();
+                    slot_hint = None;
+                    let index = flp.inserts.len();
+                    flp.inserts.push(FlpInsert { index, ..Default::default() });
+                }
+            }
             match (e.id, &e.value) {
                 (id::VERSION, Value::Data(d)) => {
                     flp.version = latin1(d);
@@ -1116,7 +1162,41 @@ impl Flp {
             early_markers.append(&mut a.markers);
             a.markers = early_markers;
         }
-        apply_mixer_params(&mut flp.inserts, &mixer_params, mixer_base(ver));
+        if old_mixer.is_some() {
+            // the early mixer: every track plays into the master and can feed the four send tracks at its end
+            let n = flp.inserts.len();
+            for (i, ins) in flp.inserts.iter_mut().enumerate().skip(1) {
+                ins.routes = vec![false; n];
+                ins.routes[0] = true;
+                if n >= 6 && i < n - 4 {
+                    for d in n - 4..n {
+                        ins.routes[d] = true;
+                        ins.route_levels.push((d, 0));
+                    }
+                }
+            }
+            let mut now = Vec::with_capacity(mixer_params.len());
+            for r in mixer_params.chunks_exact(12) {
+                let value = u32at(r, 8) as i32;
+                let (pid, value) = match r[4] {
+                    0 => (0, value),
+                    1 => (1, value * 100),
+                    64..=67 => ((64 + n.saturating_sub(4) + (r[4] as usize - 64)).min(191) as u8, value * 100),
+                    96 => (192, value * 100),
+                    97 => (193, value * 100),
+                    98 => (194, value),
+                    112..=114 | 120..=122 | 128..=130 => (r[4] + 96, value),
+                    _ => continue,
+                };
+                now.extend_from_slice(&r[..4]);
+                now.push(pid);
+                now.extend_from_slice(&r[5..8]);
+                now.extend_from_slice(&value.to_le_bytes());
+            }
+            apply_mixer_params(&mut flp.inserts, &now, mixer_base(ver));
+        } else {
+            apply_mixer_params(&mut flp.inserts, &mixer_params, mixer_base(ver));
+        }
         for (i, e) in file.events.iter().enumerate() {
             if let (id::LINK, Value::Data(d)) = (e.id, &e.value) {
                 if d.len() >= 12 {

@@ -1889,6 +1889,10 @@ impl Fx {
             return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
+        if old_floats(d, state) {
+            let p = d.params.iter().enumerate().map(|(i, q)| wrapped_value(q, &state[i * 4..])).collect();
+            return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
+        }
         if d.kind == Kind::Notes {
             return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
@@ -2015,6 +2019,18 @@ impl Fx {
                 }
                 return out;
             }
+        }
+        if let Some(old) = base.filter(|b| old_floats(def(self.kind), b)) {
+            // a project from the early versions keeps its block of plain travels
+            let mut out = old.to_vec();
+            for (i, q) in def(self.kind).params.iter().enumerate() {
+                let o = i * 4;
+                if wrapped_value(q, &out[o..]) != self.p[i] && q.max != q.min {
+                    let x = (self.p[i] - q.min as f32) / (q.max - q.min) as f32;
+                    out[o..o + 4].copy_from_slice(&x.clamp(0.0, 1.0).to_le_bytes());
+                }
+            }
+            return out;
         }
         // a unit that carries its own block (drawn lines, perhaps edited) builds on that
         let base = self.raw.as_deref().map(|v| &v[..]).or(base);
@@ -2173,6 +2189,21 @@ fn wrapped(state: &[u8]) -> Option<(&'static Def, usize)> {
         return None;
     }
     Some((d, at + 4))
+}
+
+/// The early versions stored the stock effects as nothing but each knob's travel, 0 to 1, in the unit's own
+/// order: as many numbers as the unit has settings and no version number in front.
+fn old_floats(d: &Def, state: &[u8]) -> bool {
+    let n = d.params.len();
+    n > 0
+        && state.len() == n * 4
+        && state.len() != d.size
+        && state.chunks_exact(4).all(|b| {
+            let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            (0.0..=1.0).contains(&x)
+        })
+        // a current block starts with its version number; a travel that small would be a denormal
+        && !d.fixed.iter().any(|&(at, v)| at == 0 && state[..4] == (v as u32).to_le_bytes())
 }
 
 fn wrapped_value(q: &Param, raw: &[u8]) -> f32 {
@@ -5719,6 +5750,29 @@ mod tests {
 #[cfg(test)]
 mod pad_glide_tests {
     use super::*;
+
+    #[test]
+    fn blocks_from_the_early_versions_are_plain_travels() {
+        // ten knobs of the classic reverb, each 0 to 1
+        let vals = [0.0f32, 1.0, 0.28, 1.0, 1.0, 0.7, 0.0297, 1.0, 1.0, 0.2614];
+        let block: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let fx = Fx::decode("Fruity Reeverb", &block).expect("reads");
+        assert_eq!(fx.p[1], 65536.0);
+        assert_eq!(fx.p[2], 84.0);
+        assert_eq!(fx.p[5], 28.0);
+        // untouched, the block goes back as it came; a turned knob changes only its own number
+        assert_eq!(fx.encode(Some(&block)), block);
+        let mut turned = fx.clone();
+        turned.p[2] = 150.0;
+        let out = turned.encode(Some(&block));
+        assert_eq!(out.len(), block.len());
+        assert_eq!(&out[..8], &block[..8]);
+        assert_eq!(&out[12..], &block[12..]);
+        assert_eq!(Fx::decode("Fruity Reeverb", &out).unwrap().p[2], 150.0);
+        // a current block of the same unit still reads the current way
+        let now = Fx::new(Kind::OldReverb).encode(None);
+        assert_eq!(Fx::decode("Fruity Reeverb", &now).unwrap().p, Fx::new(Kind::OldReverb).p);
+    }
 
     #[test]
     fn the_pad_dot_glides_to_a_new_place_and_jumps_with_the_speed_full_up() {

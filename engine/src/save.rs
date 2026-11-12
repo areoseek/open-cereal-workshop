@@ -1217,7 +1217,7 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                 f.flags = if note.muted { f.flags | 0x2000 } else { f.flags & !0x2000 };
                 f.flags = if note.slide { f.flags | 0x0008 } else { f.flags & !0x0008 };
                 f.flags = if note.porta { f.flags | 0x0010 } else { f.flags & !0x0010 };
-                f.release = (note.release * 128.0).round().clamp(0.0, 128.0) as u8;
+                f.release = (note.release * 128.0).round().clamp(0.0, 255.0) as u8;
                 f.mod_x = (note.mod_x * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
                 f.mod_y = (note.mod_y * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
                 f.midi_channel = (f.midi_channel & !15) | (note.color & 15);
@@ -1646,7 +1646,7 @@ fn slot_spans(ev: &[Event], open: usize) -> Vec<(u16, std::ops::Range<usize>, bo
                     hint = Some(u32at(d, 4) as u16);
                 }
             }
-            id::INSERT_ROUTING | id::INSERT_OUTPUT | id::INSERT_FLAGS => {
+            id::INSERT_ROUTING | id::INSERT_OUTPUT | id::INSERT_FLAGS | id::INSERT_COLOR | id::INSERT_NAME | id::INSERT_INPUT => {
                 if plugin {
                     let idx = old(&out, hint.take());
                     out.push((idx, begin..i, false));
@@ -1671,7 +1671,13 @@ fn insert_look(ins: &crate::song::Insert, f: u32) -> u32 {
 }
 
 fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mixer_base: usize) {
-    let opens: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect();
+    // early files have no opening event: a track runs from the event after the last track's end to its own output
+    let old_span = flp::old_mixer_span(ev).filter(|(a, _)| *a > 0);
+    let old = old_span.is_some();
+    let opens: Vec<usize> = match old_span {
+        Some((a, b)) => std::iter::once(a - 1).chain(ev.iter().enumerate().filter(|(i, e)| e.id == id::INSERT_OUTPUT && *i < b).map(|(i, _)| i)).collect(),
+        None => ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect(),
+    };
     let mut records: Vec<(u8, u16, i32)> = vec![];
     // every slot's events as they stand in the file, so a moved slot takes its plugin with it untouched
     let mut groups: HashMap<(u16, u16), Vec<Event>> = HashMap::new();
@@ -1685,7 +1691,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
 
     for (k, &open) in opens.iter().enumerate().rev() {
         let (Some(now), Some(was)) = (song.inserts.get(k), base.inserts.get(k)) else { continue };
-        let mut close = open;
+        let mut close = open + old as usize;
         while close + 1 < ev.len() && ev[close].id != id::INSERT_OUTPUT && ev[close + 1].id != id::INSERT_FLAGS {
             close += 1;
         }
@@ -1723,13 +1729,13 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 e.value = Value::Int(now.audio_in as u32);
             }
         }
-        if (now.dock, now.separator, now.fx_on) != (was.dock, was.separator, was.fx_on) {
+        if !old && (now.dock, now.separator, now.fx_on) != (was.dock, was.separator, was.fx_on) {
             if let Value::Data(d) = &mut ev[open].value {
                 let f = u32at(d, 4);
                 put_u32(d, 4, insert_look(now, f));
             }
         }
-        if (now.invert, now.swap) != (was.invert, was.swap) {
+        if !old && (now.invert, now.swap) != (was.invert, was.swap) {
             if let Value::Data(d) = &mut ev[open].value {
                 let f = u32at(d, 4) & !(flp::INSERT_FLAG_INVERT | flp::INSERT_FLAG_SWAP);
                 put_u32(d, 4, f | if now.invert { flp::INSERT_FLAG_INVERT } else { 0 } | if now.swap { flp::INSERT_FLAG_SWAP } else { 0 });
@@ -1756,14 +1762,12 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                             put_u32(&mut head, 40, 136);
                             put_u32(&mut head, 44, 178);
                             put_u32(&mut head, 48, 270);
-                            vec![
-                                text_event(id::PLUGIN_INTERNAL_NAME, &s.plugin, unicode),
-                                Event::data(212, head),
-                                Event::int(155, 0),
-                                Event::int(id::COLOR, 0x565148),
-                                Event::byte(41, 0),
-                                Event::data(id::PLUGIN_PARAMS, s.fx.as_ref().map(|f| f.encode(None)).unwrap_or_default()),
-                            ]
+                            let mut g = vec![text_event(id::PLUGIN_INTERNAL_NAME, &s.plugin, unicode), Event::data(212, head)];
+                            if !old {
+                                g.extend([Event::int(155, 0), Event::int(id::COLOR, 0x565148), Event::byte(41, 0)]);
+                            }
+                            g.push(Event::data(id::PLUGIN_PARAMS, s.fx.as_ref().map(|f| f.encode(None)).unwrap_or_default()));
+                            g
                         }
                     };
                     for e in g.iter_mut() {
@@ -1782,7 +1786,9 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                     }
                     region.extend(g);
                 }
-                region.push(Event::word(id::SLOT_INDEX, idx));
+                if !old {
+                    region.push(Event::word(id::SLOT_INDEX, idx));
+                }
             }
             ev.splice(open + 1..slots_end.unwrap_or(open + 1), region);
             for idx in 0..n_slots as u16 {
@@ -1811,7 +1817,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         }
 
         // sends, inside the run
-        if now.sends != was.sends && k != 0 {
+        if now.sends != was.sends && k != 0 && !old {
             let i = (open..=close).find(|&i| ev[i].id == id::INSERT_ROUTING);
             let old_len = i.and_then(|i| ev[i].bytes().map(|b| b.len())).unwrap_or(0);
             let need = now.sends.iter().max().map(|m| m + 1).unwrap_or(1);
@@ -1827,13 +1833,31 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 }
             }
         }
-        if now.enabled != was.enabled {
+        if !old && now.enabled != was.enabled {
             if let Value::Data(d) = &mut ev[open].value {
                 let f = u32at(d, 4);
                 put_u32(d, 4, if now.enabled { f | flp::INSERT_FLAG_ENABLED } else { f & !flp::INSERT_FLAG_ENABLED });
             }
         }
 
+        if old {
+            // name and colour sit between the track's effects and its output
+            let close = (open + 1..ev.len()).find(|&i| ev[i].id == id::INSERT_OUTPUT).unwrap_or(ev.len());
+            let tail = (open + 1..close).find(|&i| matches!(ev[i].id, id::INSERT_COLOR | id::INSERT_NAME | id::INSERT_INPUT)).unwrap_or(close);
+            if now.name != was.name {
+                match (tail..close).find(|&i| ev[i].id == id::INSERT_NAME) {
+                    Some(i) => ev[i] = text_event(id::INSERT_NAME, &now.name, unicode),
+                    None => ev.insert(tail, text_event(id::INSERT_NAME, &now.name, unicode)),
+                }
+            }
+            if let (true, Some(c)) = (now.color != was.color, now.color) {
+                match (tail..close).find(|&i| ev[i].id == id::INSERT_COLOR) {
+                    Some(i) => ev[i].value = Value::Int(color_bits(c, 0)),
+                    None => ev.insert(tail, Event::int(id::INSERT_COLOR, color_bits(c, 0))),
+                }
+            }
+            continue;
+        }
         // name and colour sit in the few events just ahead of the one that opens the insert
         let mut pre = open;
         while pre > 0 && matches!(ev[pre - 1].id, 42 | 95 | 149 | 204) {
@@ -1878,6 +1902,14 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
     };
     if let Value::Data(d) = &mut ev[at].value {
         for (pid, cd, value) in records {
+            let (pid, value) = if old {
+                match flp::old_mixer_record(pid, value) {
+                    Some(r) => r,
+                    None => continue,
+                }
+            } else {
+                (pid, value)
+            };
             let hit = (0..d.len() / 12).find(|r| d[r * 12 + 4] == pid && u16at(d, r * 12 + 6) == cd);
             match hit {
                 Some(r) => put_u32(d, r * 12 + 8, value as u32),
@@ -2124,6 +2156,66 @@ mod tests {
     fn reload(bytes: &[u8]) -> (Song, Flp) {
         let f = flp::parse(bytes).expect("our own file parses");
         (Song::from_flp_with(&f, None, None), f)
+    }
+
+    /// The mixer of the early versions: no opening event, effects first, their own parameter numbers.
+    #[test]
+    fn the_early_mixer_reads_and_keeps_edits() {
+        let rec = |pid: u8, ins: u16, slot: u16, v: i32| {
+            let mut r = vec![0u8; 4];
+            r.push(pid);
+            r.push(0x1f);
+            r.extend_from_slice(&(((128 + ins) << 6) | slot).to_le_bytes());
+            r.extend_from_slice(&v.to_le_bytes());
+            r
+        };
+        let head = |ins: u32, slot: u32| {
+            let mut h = vec![0u8; 52];
+            put_u32(&mut h, 0, ins);
+            put_u32(&mut h, 4, slot);
+            h
+        };
+        let mut ev = vec![Event::data(id::VERSION, b"5.0.1\0".to_vec()), Event::data(233, vec![])];
+        for i in 0..6u32 {
+            if i == 1 {
+                ev.push(text_event(id::PLUGIN_INTERNAL_NAME, "Fruity Balance", false));
+                ev.push(Event::data(id::NEW_PLUGIN, head(1, 3)));
+                ev.push(Event::data(id::PLUGIN_PARAMS, vec![]));
+            }
+            ev.push(Event::int(id::INSERT_COLOR, 0x625d54));
+            ev.push(text_event(id::INSERT_NAME, if i == 2 { "Drums" } else { "" }, false));
+            ev.push(Event::int(id::INSERT_INPUT, u32::MAX));
+            ev.push(Event::int(id::INSERT_OUTPUT, 0));
+        }
+        let mut params = vec![];
+        params.extend(rec(1, 1, 3, 64));
+        params.extend(rec(96, 1, 0, 64));
+        params.extend(rec(97, 2, 0, -32));
+        params.extend(rec(64, 1, 0, 128));
+        ev.push(Event::data(id::MIXER_PARAMS, params));
+        let bytes = FlpFile { header: flp::Header { format: 0, channels: 0, ppq: 96 }, events: ev, trailer: vec![] }.to_bytes();
+        let (mut s, f) = reload(&bytes);
+        assert_eq!(s.inserts.len(), 6);
+        assert_eq!(s.inserts[2].name, "Drums");
+        assert_eq!((s.inserts[1].slots.len(), s.inserts[1].slots[0].index), (1, 3));
+        assert!((s.inserts[1].slots[0].mix - 0.5).abs() < 1e-6);
+        assert!((s.inserts[1].volume - 0.5).abs() < 1e-6);
+        assert!((s.inserts[2].pan + 0.5).abs() < 1e-6);
+        assert!(s.inserts[1].sends.contains(&2) && s.inserts[1].sends.contains(&0));
+        assert!((s.inserts[1].send_level(2) - 1.0).abs() < 1e-6 && s.inserts[1].send_level(3) == 0.0);
+        assert_eq!(to_bytes(&s, Some(&f)).unwrap(), bytes);
+
+        s.inserts[1].name = "Lead".into();
+        s.inserts[1].volume = 1.0;
+        s.inserts[1].slots[0].mix = 0.25;
+        s.inserts[3].pan = 0.25;
+        let out = to_bytes(&s, Some(&f)).unwrap();
+        let (r, f2) = reload(&out);
+        assert!(flp::old_mixer_span(&f2.file.events).is_some());
+        assert_eq!((r.inserts.len(), r.inserts[1].name.as_str(), r.inserts[2].name.as_str()), (6, "Lead", "Drums"));
+        assert!((r.inserts[1].volume - 1.0).abs() < 1e-6 && (r.inserts[3].pan - 0.25).abs() < 1e-6);
+        assert!((r.inserts[1].slots[0].mix - 0.25).abs() < 1e-6);
+        assert_eq!(r.inserts[1].slots[0].plugin, "Fruity Balance");
     }
 
     #[test]
