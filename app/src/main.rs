@@ -3732,6 +3732,8 @@ fn main() -> eframe::Result {
         "open-cereal-workshop",
         options,
         Box::new(move |cc| {
+            // our own colours whatever the desktop's light or dark setting says
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
             let mut v = egui::Visuals::dark();
             v.panel_fill = PANEL;
             v.window_fill = PANEL;
