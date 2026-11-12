@@ -109,7 +109,7 @@ pub struct Def {
 impl Def {
     /// Instruments we can play from a stored block but cannot yet make a fresh block for.
     pub fn arrives_only(&self) -> bool {
-        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Grain | Kind::Poly2 | Kind::Acid)
+        matches!(self.kind, Kind::Forge | Kind::Packs | Kind::Metal | Kind::MetalBank | Kind::Sub | Kind::DrumBank | Kind::Image | Kind::Quiet | Kind::Poly2 | Kind::Acid)
     }
 }
 
@@ -789,6 +789,9 @@ impl Gen {
         g.raw = g.encode(None);
         if kind == Kind::Travel {
             g.raw = crate::travel::fresh();
+        }
+        if kind == Kind::Grain {
+            g.raw = crate::grain::fresh();
         }
         if matches!(kind, Kind::Trio | Kind::Pocket | Kind::SawSyn) {
             g.p = crate::analog::plain(kind);

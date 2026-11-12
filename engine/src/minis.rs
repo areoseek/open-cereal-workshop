@@ -144,9 +144,7 @@ impl Voice {
             return Voice::Travel(Box::new(crate::travel::Voice::start(smp, ph, sr, vel, tempo())));
         }
         if let (Kind::Grain, Some((smp, set))) = (p.kind, &p.smp) {
-            // an empty settings list marks the unit that plays its sample at its own speed whatever the key
-            let dphase = if p.p.is_empty() && set.hold == 0.05 { C5 / sr } else { dphase };
-            return Voice::Grain(Box::new(crate::grain::Voice::start(smp, *set, sr, vel, dphase)));
+            return Voice::Grain(Box::new(crate::grain::Voice::start(smp, *set, sr, vel, dphase, key, tempo())));
         }
         match p.kind {
             Kind::Image | Kind::Quiet | Kind::Grain | Kind::Travel => Voice::Quiet,

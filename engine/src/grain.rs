@@ -22,6 +22,76 @@ pub struct Set {
     pub speed: f32,
     /// 0..1: how far each grain's start is scattered.
     pub rand: f32,
+    /// Starts over from the top once the wave runs out.
+    pub looped: bool,
+    /// The place in the wave stands still.
+    pub frozen: bool,
+    /// 0..1: where in the wave a note starts.
+    pub start: f32,
+    /// What the key played does: 0 pitch, 1 start place from C5 (start) to C7 (end), 2 start later by a step
+    /// for every key above C5, 3 start at a marked place (played as steps here).
+    pub key_to: u8,
+}
+
+/// The stored numbers, four bytes each: (name, place, lowest, highest, new). Places 9 to 14 are taken from the
+/// order of the manual's sections and the few presets that set them, so they are less sure than the first eight.
+pub const FIELDS: [(&str, usize, i32, i32, i32); 14] = [
+    ("Hold", 1, 10, 2000, 200),
+    ("Attack", 2, 5, 1000, 50),
+    ("Grain spacing", 3, 60, 1145, 611),
+    ("Wave spacing", 4, -1145, 1145, 611),
+    ("Pan", 5, 0, 256, 0),
+    ("Speed", 6, 0, 256, 180),
+    ("Depth", 7, 0, 256, 0),
+    ("Random", 8, 0, 256, 0),
+    ("Loop", 9, 0, 1, 0),
+    ("Hold place", 10, 0, 1, 0),
+    ("Start", 11, 0, 256, 0),
+    ("Transient hold", 12, 0, 256, 0),
+    ("Transients", 13, 0, 2, 0),
+    ("Key to", 14, 0, 3, 0),
+];
+
+pub const KEY_TO: [&str; 4] = ["Key to pitch", "Key to percent", "Key to step", "Key to transient"];
+pub const TRANSIENTS: [&str; 3] = ["Off", "Use regions", "Detect"];
+
+/// A new unit's block.
+pub fn fresh() -> Vec<u8> {
+    [2i32, 200, 50, 611, 611, 0, 180, 0, 0, 0, 0, 0].iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// Stored number `i`; nothing stored there reads as zero.
+pub fn get(state: &[u8], i: usize) -> i32 {
+    state.get(i * 4..i * 4 + 4).map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+}
+
+/// Sets stored number `i`, growing an older, shorter block to the newest layout first.
+pub fn put(state: &mut Vec<u8>, i: usize, v: i32) {
+    if state.len() < 60 {
+        if state.len() < 44 {
+            *state = fresh();
+        }
+        state.resize(60, 0);
+        state[..4].copy_from_slice(&5i32.to_le_bytes());
+    }
+    state[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// What a stored number says, for the hint bar.
+pub fn says(i: usize, v: i32) -> String {
+    let set = |place: usize| {
+        let mut b = fresh();
+        put(&mut b, place, v);
+        Set::parse(&b)
+    };
+    match i {
+        1 => format!("Hold: {:.1} ms", set(1).hold * 1000.0),
+        2 => format!("Attack: {:.1} ms", set(2).attack * 1000.0),
+        3 => format!("Grain spacing: {:.0} %", set(3).grain_spacing * 100.0),
+        4 => format!("Wave spacing: {:.0} %", set(4).wave_spacing * 100.0),
+        6 => format!("Speed: {:.2} Hz", set(6).speed),
+        _ => format!("{}: {:.0} %", FIELDS.iter().find(|f| f.1 == i).map_or("", |f| f.0), v as f32 / 2.56),
+    }
 }
 
 /// The two spacing knobs: 611 is even, and the stored presets named "twice as fast" and "twice as slow" sit
@@ -42,6 +112,10 @@ impl Set {
             speed: 0.05 * 400f32.powf((int(6).unwrap_or(180.0) / 256.0).clamp(0.0, 1.0)),
             depth: (int(7).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
             rand: (int(8).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
+            looped: int(9).unwrap_or(0.0) != 0.0,
+            frozen: int(10).unwrap_or(0.0) != 0.0,
+            start: (int(11).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
+            key_to: int(14).unwrap_or(0.0).clamp(0.0, 3.0) as u8,
         }
     }
 }
@@ -79,9 +153,25 @@ pub struct Voice {
 }
 
 impl Voice {
-    pub fn start(smp: &Arc<Sample>, set: Set, sr: f32, vel: f32, dphase: f32) -> Self {
+    pub fn start(smp: &Arc<Sample>, set: Set, sr: f32, vel: f32, dphase: f32, key: u8, tempo: f32) -> Self {
+        // a key that picks the starting place leaves the pitch alone
+        let dphase = if set.key_to == 0 { dphase } else { 261.6256 / sr };
         let step = (dphase * sr / 261.6256) as f64 * smp.rate as f64 / sr as f64;
-        let next_at = if set.wave_spacing < 0.0 { (smp.frames.len() as f64 - set.hold as f64 * smp.rate as f64).max(0.0) } else { 0.0 };
+        let n = smp.frames.len() as f64;
+        let up = (key as f64 - 60.0).max(0.0);
+        let from = set.start as f64 * n
+            + match set.key_to {
+                1 => (up / 24.0).min(1.0) * n,
+                2 | 3 => up * 15.0 / tempo.max(1.0) as f64 * smp.rate as f64,
+                _ => 0.0,
+            };
+        let next_at = if from > 0.0 {
+            if set.looped { from.rem_euclid(n.max(1.0)) } else { from }
+        } else if set.wave_spacing < 0.0 {
+            (n - set.hold as f64 * smp.rate as f64).max(0.0)
+        } else {
+            0.0
+        };
         Self { smp: smp.clone(), set, step, sr, grains: Default::default(), next_at, wait: 0.0, vel, done: smp.frames.is_empty(), fade: 1.0, fading: false, count: 0, lfo: 0.0, dice: 0x9e37_79b9 }
     }
 
@@ -94,6 +184,9 @@ impl Voice {
         let s = self.set;
         let n = self.smp.frames.len() as f64;
         if !self.done && self.wait <= 0.0 {
+            if s.looped && n >= 1.0 && (self.next_at < 0.0 || self.next_at >= n) {
+                self.next_at = self.next_at.rem_euclid(n);
+            }
             if self.next_at < 0.0 || self.next_at >= n {
                 self.done = true;
             } else if let Some(g) = self.grains.iter_mut().find(|g| !g.on) {
@@ -108,7 +201,9 @@ impl Voice {
                 self.wait += s.hold * s.grain_spacing * self.sr;
                 // one grain's worth of wave at the played pitch, pushed about by the slow wave
                 let push = 1.0 + s.depth * (self.lfo * std::f32::consts::TAU).sin();
-                self.next_at += (s.wave_spacing * push) as f64 * s.hold as f64 * self.sr as f64 * self.step;
+                if !s.frozen {
+                    self.next_at += (s.wave_spacing * push) as f64 * s.hold as f64 * self.sr as f64 * self.step;
+                }
             }
         }
         self.wait -= 1.0;
@@ -159,20 +254,42 @@ mod tests {
     fn even_spacing_plays_the_wave_through_and_a_negative_one_walks_back() {
         let set = Set::parse(&block(611));
         assert!((set.wave_spacing - 1.0).abs() < 1e-6 && (set.hold - 0.02).abs() < 1e-6);
-        let mut v = Voice::start(&ramp(), set, 44100.0, 1.0, 261.6256 / 44100.0);
+        let mut v = Voice::start(&ramp(), set, 44100.0, 1.0, 261.6256 / 44100.0, 60, 120.0);
         let out: Vec<f32> = (0..30000).map(|_| v.frame()[0]).collect();
         // the ramp comes out as a ramp, grain joins included
         for t in [5000usize, 12345, 29000] {
             assert!((out[t] - t as f32 / 44100.0).abs() < 0.02, "{t}: {}", out[t]);
         }
-        let mut v = Voice::start(&ramp(), Set::parse(&block(-611)), 44100.0, 1.0, 261.6256 / 44100.0);
+        let mut v = Voice::start(&ramp(), Set::parse(&block(-611)), 44100.0, 1.0, 261.6256 / 44100.0, 60, 120.0);
         let out: Vec<f32> = (0..30000).map(|_| v.frame()[0]).collect();
         assert!(out[2000] > 0.9 && out[25000] < 0.5);
         // twice the wave spacing runs out in half the time
-        let mut v = Voice::start(&ramp(), Set::parse(&block(1222)), 44100.0, 1.0, 261.6256 / 44100.0);
+        let mut v = Voice::start(&ramp(), Set::parse(&block(1222)), 44100.0, 1.0, 261.6256 / 44100.0, 60, 120.0);
         for _ in 0..26000 {
             v.frame();
         }
         assert_eq!(v.left(), 0.0);
+    }
+
+    #[test]
+    fn the_key_can_pick_the_starting_place_and_a_loop_goes_round() {
+        let mut b = fresh();
+        put(&mut b, 14, 1);
+        assert_eq!((b.len(), get(&b, 0), get(&b, 1), get(&b, 14)), (60, 5, 200, 1));
+        let set = Set::parse(&b);
+        assert_eq!(set.key_to, 1);
+        // C6 with the key picking the place starts half way along, at the wave's own pitch
+        let mut v = Voice::start(&ramp(), set, 44100.0, 1.0, 2.0 * 261.6256 / 44100.0, 72, 120.0);
+        let first = (0..400).map(|_| v.frame()[0]).fold(0.0f32, f32::max);
+        assert!((first - 0.5).abs() < 0.05, "{first}");
+        // looped, the grains never run out
+        put(&mut b, 14, 0);
+        put(&mut b, 9, 1);
+        let mut v = Voice::start(&ramp(), Set::parse(&b), 44100.0, 1.0, 261.6256 / 44100.0, 60, 120.0);
+        for _ in 0..44100 * 3 {
+            v.frame();
+        }
+        assert_eq!(v.left(), f32::MAX);
+        assert!(says(4, 611).contains("100 %"), "{}", says(4, 611));
     }
 }

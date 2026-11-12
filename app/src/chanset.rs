@@ -452,6 +452,29 @@ impl App {
                 } else if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                     changed |= key_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
                 } else {
+                    if ident.eq_ignore_ascii_case("Fruity Granulizer") {
+                        // the grain player works on the channel's own sample
+                        ui.horizontal(|ui| {
+                            if ui.button("Sample...").hint("Pick the sample the grains are cut from").clicked() {
+                                if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
+                                    match self.lib.load_path(&p) {
+                                        Ok(s) => {
+                                            let c = &mut self.song.channels[ci];
+                                            c.sample_path = p.to_string_lossy().to_string();
+                                            c.set_sample(Some(s.clone()));
+                                            if let Some(g) = c.gen.as_mut() {
+                                                g.smp = Some(s);
+                                            }
+                                            changed = true;
+                                        }
+                                        Err(e) => self.status = e,
+                                    }
+                                }
+                            }
+                            let c = &self.song.channels[ci];
+                            ui.label(RichText::new(c.sample_path.rsplit(['/', '\\']).next().unwrap_or("").to_string()).strong());
+                        });
+                    }
                     changed |= instrument_panel(ui, ci, self.song.channels[ci].gen.as_mut().unwrap());
                 }
             }
@@ -1737,9 +1760,61 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             }
         }
         Kind::Grain => {
-            let s = cereal_engine::grain::Set::parse(&g.raw);
-            ui.label(RichText::new(format!("Grains hold {:.0} ms, fade {:.0} ms, grain spacing {:.0} %, wave spacing {:.0} %", s.hold * 1000.0, s.attack * 1000.0, s.grain_spacing * 100.0, s.wave_spacing * 100.0)).strong());
-            ui.label(RichText::new("Plays the channel's sample as grains from the stored settings. Pan and depth effects, random start, transients and the knobs are still to come.").color(TEXT_DIM));
+            use cereal_engine::grain::{self, FIELDS, KEY_TO, TRANSIENTS};
+            let knobs = |ui: &mut Ui, raw: &mut Vec<u8>, places: &[usize]| {
+                let mut hit = false;
+                for &(name, place, lo, hi, new) in FIELDS.iter().filter(|f| places.contains(&f.1)) {
+                    let mut v = grain::get(raw, place) as f32;
+                    if cap_knob(ui, name, &mut v, lo as f32, hi as f32, new as f32, |v| grain::says(place, v.round() as i32)) {
+                        grain::put(raw, place, v.round() as i32);
+                        hit = true;
+                    }
+                }
+                hit
+            };
+            if let Some(s) = &g.smp {
+                draw_wave(ui, &s.frames, TEXT_DIM);
+            } else {
+                ui.label(RichText::new("No sample yet: pick one with the button above, or drop one on the channel.").color(TEXT_DIM));
+            }
+            section(ui, "GRAINS");
+            ui.horizontal(|ui| changed |= knobs(ui, &mut g.raw, &[2, 1, 3, 4]));
+            section(ui, "EFFECTS");
+            ui.horizontal(|ui| changed |= knobs(ui, &mut g.raw, &[5, 7, 6, 8]));
+            section(ui, "TIME");
+            ui.horizontal(|ui| {
+                for (place, label, tip) in [(9, "Loop", "Start over from the top once the wave runs out"), (10, "Hold", "Keep the place in the wave standing still")] {
+                    let mut on = grain::get(&g.raw, place) != 0;
+                    if ui.checkbox(&mut on, label).hint(tip).changed() {
+                        grain::put(&mut g.raw, place, on as i32);
+                        changed = true;
+                    }
+                }
+                let cur = (grain::get(&g.raw, 14).clamp(0, 3)) as usize;
+                egui::ComboBox::from_id_salt("grain_key").width(130.0).selected_text(KEY_TO[cur]).show_ui(ui, |ui| {
+                    for (i, name) in KEY_TO.iter().enumerate() {
+                        if ui.selectable_label(cur == i, *name).clicked() {
+                            grain::put(&mut g.raw, 14, i as i32);
+                            changed = true;
+                        }
+                    }
+                });
+                changed |= knobs(ui, &mut g.raw, &[11]);
+            });
+            section(ui, "TRANSIENTS");
+            ui.horizontal(|ui| {
+                changed |= knobs(ui, &mut g.raw, &[12]);
+                let cur = (grain::get(&g.raw, 13).clamp(0, 2)) as usize;
+                egui::ComboBox::from_id_salt("grain_trans").width(110.0).selected_text(TRANSIENTS[cur]).show_ui(ui, |ui| {
+                    for (i, name) in TRANSIENTS.iter().enumerate() {
+                        if ui.selectable_label(cur == i, *name).clicked() {
+                            grain::put(&mut g.raw, 13, i as i32);
+                            changed = true;
+                        }
+                    }
+                });
+                ui.label(RichText::new("kept with the project; grains are not lined up to transients yet").small().color(TEXT_DIM));
+            });
         }
         Kind::Travel => changed |= travel_panel(ui, g),
         Kind::Quiet => {
