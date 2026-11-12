@@ -82,6 +82,12 @@ pub struct State {
     clip: Vec<Clip>,
     /// What the draw and paint tools put down: the last clip touched, else the current pattern.
     brush: Option<(ClipSrc, u32, u32)>,
+    /// Stretch mode: dragging an audio clip's end fits the sound to the new length instead of showing more of it.
+    pub(crate) stretch: bool,
+    /// The picker panel at the left: every pattern, audio clip and automation clip, to pick what is drawn next.
+    pub(crate) picker: bool,
+    /// The clip length a stretch drag began from, by channel, and the beats the whole sound took then.
+    stretch_from: Option<(usize, u32, f32)>,
     brush_pat: usize,
     grid_line: u32,
     left_tick: u32,
@@ -93,7 +99,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -216,6 +222,43 @@ impl App {
             self.playlist.drag = None;
         }
         self.playlist_header(ui, pat);
+        if self.playlist.picker {
+            egui::SidePanel::left("pl_picker").resizable(true).default_width(150.0).frame(egui::Frame::NONE.inner_margin(4.0)).show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("pl_picker_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                    let brush = self.playlist.brush.map(|b| b.0).unwrap_or(ClipSrc::Pattern(pat));
+                    ui.label(RichText::new("Patterns").small().color(TEXT_DIM));
+                    for p in 0..self.song.patterns.len() {
+                        let name = if self.song.patterns[p].name.is_empty() { format!("Pattern {}", p + 1) } else { self.song.patterns[p].name.clone() };
+                        if ui.selectable_label(brush == ClipSrc::Pattern(p), name).clicked() {
+                            self.handle.transport.set_pattern(p);
+                            self.playlist.brush = None;
+                            self.playlist.brush_pat = p;
+                        }
+                    }
+                    for (title, audio) in [("Audio", true), ("Automation", false)] {
+                        let list: Vec<usize> = (0..self.song.channels.len()).filter(|&c| if audio { self.song.channels[c].kind == cereal_engine::flp::ChannelKind::AudioClip } else { self.song.channels[c].auto.is_some() }).collect();
+                        if list.is_empty() {
+                            continue;
+                        }
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(title).small().color(TEXT_DIM));
+                        for c in list {
+                            let src = if audio { ClipSrc::Audio(c) } else { ClipSrc::Automation(c) };
+                            if ui.selectable_label(brush == src, self.song.channels[c].name.clone()).clicked() {
+                                // as long as a clip of it that is already there, else the sound's own length, else four bars
+                                let ch = &self.song.channels[c];
+                                let own = ch.sample.as_ref().filter(|_| audio).map(|s| {
+                                    let beats = if ch.smp.stretch_beats > 0.0 { ch.smp.stretch_beats * ch.smp.stretch_mul } else { s.seconds() * self.song.tempo / 60.0 };
+                                    (beats * ppq).ceil() as u32
+                                });
+                                let len = self.song.clips.iter().find(|k| k.src == src).map(|k| k.len).or(own).unwrap_or(bar * 4).max(1);
+                                self.playlist.brush = Some((src, len, 0));
+                            }
+                        }
+                    }
+                });
+            });
+        }
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(Vec2::new(200.0, 120.0)), Sense::click_and_drag());
         let grid = Rect::from_min_max(rect.min + Vec2::new(HEAD_W, RULER_H), rect.max);
         let heads = Rect::from_min_max(Pos2::new(rect.left(), grid.top()), Pos2::new(grid.left(), rect.bottom()));
@@ -651,7 +694,27 @@ impl App {
                                     n.pos = (o.pos as i64 + dt_move) as u32;
                                     n.track = (o.track as i32 + dtr) as u16;
                                 }
-                                Mode::Right => n.len = (o.len as i64 + dt).max(g.min(beat) as i64) as u32,
+                                Mode::Right => {
+                                    n.len = (o.len as i64 + dt).max(g.min(beat) as i64) as u32;
+                                    if let (true, ClipSrc::Audio(ch)) = (self.playlist.stretch, o.src) {
+                                        if let Some(chan) = self.song.channels.get_mut(ch) {
+                                            let f = &mut chan.smp;
+                                            let was = match self.playlist.stretch_from {
+                                                Some((c, l, b)) if c == ch && l == o.len => b,
+                                                _ => {
+                                                    let own = chan.sample.as_ref().map(|s| s.seconds() * self.song.tempo / 60.0).unwrap_or(0.0);
+                                                    let b = if f.stretch_beats > 0.0 { f.stretch_beats } else { own / f.stretch_mul.max(1e-6) };
+                                                    self.playlist.stretch_from = Some((ch, o.len, b));
+                                                    b
+                                                }
+                                            };
+                                            if was > 0.0 {
+                                                f.stretch_beats = (was * n.len as f32 / o.len.max(1) as f32).max(0.01);
+                                                f.keep_pitch = true;
+                                            }
+                                        }
+                                    }
+                                }
                                 Mode::Left => {
                                     let d = dt.clamp(-(o.offset.min(o.pos) as i64), o.len as i64 - g.min(beat) as i64);
                                     n.pos = (o.pos as i64 + d) as u32;
@@ -1252,6 +1315,7 @@ impl App {
             match key {
                 Key::T if !m.shift && !repeat => self.add_marker(),
                 Key::T if !repeat => self.add_time_sig(),
+                Key::P if !repeat => self.playlist.picker = !self.playlist.picker,
                 Key::Slash => self.jump_marker(false),
                 Key::M => self.pl_mute(!m.shift),
                 Key::G if !repeat => self.pl_group(false),
@@ -1267,6 +1331,10 @@ impl App {
                 }
                 Key::C => {
                     self.pl_select_same();
+                    return true;
+                }
+                Key::M if !repeat => {
+                    self.playlist.stretch = !self.playlist.stretch;
                     return true;
                 }
                 Key::Q => {
@@ -1361,6 +1429,9 @@ impl App {
                 if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).on_hover_text(hint).clicked() {
                     self.playlist.tool = t;
                 }
+            }
+            if ui.selectable_label(self.playlist.stretch, RichText::new("Stretch").small()).on_hover_text("Stretch mode: dragging the end of an audio clip fits its sound to the new length (Shift+M)").clicked() {
+                self.playlist.stretch = !self.playlist.stretch;
             }
             ui.separator();
             egui::ComboBox::from_id_salt("pl_snap").width(74.0).selected_text(SNAPS[self.playlist.snap].0).show_ui(ui, |ui| {
