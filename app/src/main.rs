@@ -972,6 +972,15 @@ impl App {
                             senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): output {}", ch.name, c + 1, k + 1)));
                         }
                     }
+                    if ch.plugin.eq_ignore_ascii_case(cereal_engine::dash::IDENT) {
+                        if let Some(b) = ch.gen.as_ref().and_then(|g| cereal_engine::dash::Board::parse(&g.raw)) {
+                            for ctl in b.controls.iter() {
+                                if let Some(k) = ctl.out {
+                                    senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): {}", ch.name, c + 1, ctl.name)));
+                                }
+                            }
+                        }
+                    }
                     if ch.plugin.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                         for (k, o) in ["note", "velocity"].iter().enumerate() {
                             senders.push((cereal_engine::song::CtlLink::CHAN, c as u16, k as u16, format!("{} (channel {}): {o}", ch.name, c + 1)));

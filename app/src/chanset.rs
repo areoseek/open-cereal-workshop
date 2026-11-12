@@ -451,6 +451,8 @@ impl App {
                     changed |= midi_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw, &self.handle.transport);
                 } else if ident.eq_ignore_ascii_case(cereal_engine::synth::KEY_SENDER) {
                     changed |= key_sender_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
+                } else if ident.eq_ignore_ascii_case(cereal_engine::dash::IDENT) {
+                    changed |= board_panel(ui, &mut self.song.channels[ci].gen.as_mut().unwrap().raw);
                 } else {
                     if ident.eq_ignore_ascii_case("Fruity Granulizer") {
                         // the grain player works on the channel's own sample
@@ -1228,6 +1230,85 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
 fn num_or_none(ui: &mut Ui, v: &mut i32, max: i32, shift: i32) -> egui::Response {
     let r = ui.add(egui::DragValue::new(v).range(-1..=max).speed(0.15).custom_formatter(move |x, _| if x < 0.0 { "none".into() } else { format!("{}", x as i32 + shift) }).custom_parser(move |s| s.trim().parse::<f64>().ok().map(|x| x - shift as f64).or(Some(-1.0))));
     r
+}
+
+/// The older control board, drawn in our own look where the block places its controls.
+fn board_panel(ui: &mut Ui, raw: &mut [u8]) -> bool {
+    use cereal_engine::dash;
+    let Some(board) = dash::Board::parse(raw) else {
+        ui.label(RichText::new("This board's layout could not be read. The block is kept untouched.").color(TEXT_DIM));
+        return false;
+    };
+    let mut changed = false;
+    ui.label(RichText::new("Makes no sound. Each control sends its position to the controls linked to this channel, one output per control.").color(TEXT_DIM));
+    let (area, _) = ui.allocate_exact_size(egui::vec2(board.w as f32, board.h as f32), egui::Sense::hover());
+    let p = ui.painter_at(area);
+    p.rect_filled(area, 3.0, Color32::from_rgb(52, 56, 62));
+    p.rect_stroke(area, 3.0, egui::Stroke::new(1.0_f32, Color32::from_rgb(24, 26, 30)), egui::StrokeKind::Inside);
+    for (i, c) in board.controls.iter().enumerate() {
+        let r = egui::Rect::from_min_size(area.min + egui::vec2(c.rect[0] as f32, c.rect[1] as f32), egui::vec2(c.rect[2].max(4) as f32, c.rect[3].max(4) as f32));
+        let v = c.out.and_then(|o| dash::value(raw, o)).unwrap_or(0.0);
+        let id = ui.id().with(("board", i));
+        match c.kind {
+            1 | 2 => {
+                let resp = ui.interact(r, id, egui::Sense::click_and_drag()).hint(format!("{}: {:.0} %", c.name, v * 100.0));
+                let mut now = v;
+                if resp.dragged() {
+                    let span = if c.kind == 1 { r.height().max(r.width()).max(20.0) } else { 150.0 };
+                    let d = if c.kind == 1 && r.width() > r.height() { resp.drag_delta().x } else { -resp.drag_delta().y };
+                    now = (v + d / span).clamp(0.0, 1.0);
+                }
+                if resp.double_clicked() {
+                    now = 0.5;
+                }
+                if now != v {
+                    if let Some(o) = c.out {
+                        dash::set_value(raw, o, now);
+                        changed = true;
+                    }
+                }
+                if c.kind == 1 {
+                    // a slider: a slot with a cap, upright or lying down as its rectangle is
+                    let flat = r.width() > r.height();
+                    let slot = if flat { egui::Rect::from_center_size(r.center(), egui::vec2(r.width() - 6.0, 4.0)) } else { egui::Rect::from_center_size(r.center(), egui::vec2(4.0, r.height() - 6.0)) };
+                    p.rect_filled(slot, 2.0, Color32::from_rgb(20, 22, 26));
+                    let cap = if flat {
+                        egui::Rect::from_center_size(egui::pos2(r.left() + 5.0 + now * (r.width() - 10.0), r.center().y), egui::vec2(8.0, r.height().min(22.0)))
+                    } else {
+                        egui::Rect::from_center_size(egui::pos2(r.center().x, r.bottom() - 5.0 - now * (r.height() - 10.0)), egui::vec2(r.width().min(22.0), 8.0))
+                    };
+                    p.rect_filled(cap, 2.0, Color32::from_rgb(200, 204, 210));
+                    p.line_segment([cap.left_center(), cap.right_center()], egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 60, 66)));
+                } else {
+                    let rad = r.width().min(r.height()) * 0.5;
+                    p.circle_filled(r.center(), rad, Color32::from_rgb(34, 37, 42));
+                    p.circle_stroke(r.center(), rad, egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 124, 130)));
+                    let a = (-225.0 + now * 270.0_f32).to_radians();
+                    p.line_segment([r.center() + egui::vec2(a.cos(), a.sin()) * rad * 0.35, r.center() + egui::vec2(a.cos(), a.sin()) * rad * 0.9], egui::Stroke::new(2.0_f32, ACCENT));
+                }
+            }
+            4 => {
+                let resp = ui.interact(r, id, egui::Sense::click()).hint(format!("{}: {}", c.name, if v > 0.5 { "on" } else { "off" }));
+                if resp.clicked() {
+                    if let Some(o) = c.out {
+                        dash::set_value(raw, o, if v > 0.5 { 0.0 } else { 1.0 });
+                        changed = true;
+                    }
+                }
+                p.rect_filled(r, 2.0, if v > 0.5 { ACCENT } else { Color32::from_rgb(30, 33, 38) });
+                p.rect_stroke(r, 2.0, egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 124, 130)), egui::StrokeKind::Inside);
+            }
+            5 => {
+                p.text(r.left_top(), egui::Align2::LEFT_TOP, &c.name, egui::FontId::proportional((r.height() - 1.0).clamp(8.0, 14.0)), Color32::from_rgb(210, 212, 216));
+            }
+            _ => {
+                // the patch picker belongs to hardware lists we do not have: shown as an empty box
+                p.rect_filled(r, 2.0, Color32::from_rgb(24, 26, 30));
+                p.text(r.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, "(no patch list)", egui::FontId::proportional(10.0), TEXT_DIM);
+            }
+        }
+    }
+    changed
 }
 
 fn key_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>) -> bool {

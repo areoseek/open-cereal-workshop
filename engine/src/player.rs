@@ -628,6 +628,7 @@ impl Handle {
             driven: Vec::with_capacity(64),
             env_runs: Vec::new(),
             key_glides: Vec::new(),
+            board_sent: Vec::new(),
             arps: Vec::new(),
             scripts: Vec::new(),
             script_emit: None,
@@ -1367,6 +1368,8 @@ pub struct Player {
     env_runs: Vec<EnvRun>,
     /// Key senders with smoothing or a note-off value.
     key_glides: Vec<KeyGlide>,
+    /// What each link from a control board channel was last handed.
+    board_sent: Vec<f32>,
     /// Arpeggiators at work: the notes each holds and where it is in its run.
     arps: Vec<ArpRun>,
     /// Note scripts at work.
@@ -3410,6 +3413,30 @@ impl Player {
             self.env_runs.retain(|r| r.rel.is_none_or(|rel| r.t - rel <= (0..r.set.arts.len()).map(|a| r.set.tail(a, rel)).fold(0.0, f32::max) + dt));
         }
 
+        // control boards on channels: a control that was moved goes to what is linked
+        if self.board_sent.len() != song.ctl_links.len() {
+            self.board_sent.clear();
+            self.board_sent.resize(song.ctl_links.len(), f32::NAN);
+        }
+        {
+            let mut fitted = false;
+            for (i, l) in song.ctl_links.iter().enumerate() {
+                let Some(ch) = l.chan().and_then(|c| song.channels.get(c)) else { continue };
+                if !ch.plugin.eq_ignore_ascii_case(crate::dash::IDENT) {
+                    continue;
+                }
+                let Some(v) = ch.gen.as_ref().and_then(|g| crate::dash::value(&g.raw, l.out as usize)) else { continue };
+                if self.board_sent[i] != v {
+                    self.board_sent[i] = v;
+                    if !fitted {
+                        self.ov.fit(song);
+                        fitted = true;
+                    }
+                    self.ov.set(l.target, v);
+                }
+            }
+        }
+
         // key senders that glide: let finished notes go, move the value on and hand it to what is linked
         if !self.key_glides.is_empty() {
             let dt = n as f32 / self.sr;
@@ -4614,6 +4641,24 @@ mod tests {
         assert_eq!(crate::synth::key_sender_value(&raw, 110), 0.0);
         assert!((crate::synth::key_sender_value(&raw, 60) - 60.0 / 119.0).abs() < 1e-6);
         assert_eq!(crate::synth::key_sender_range(&raw), (0, 119));
+    }
+
+    #[test]
+    fn a_control_board_channel_moves_a_linked_control() {
+        let mut s = click_song();
+        let mut c = crate::song::Chan { name: "Board".into(), kind: ChannelKind::Plugin, plugin: crate::dash::IDENT.into(), ..Default::default() };
+        let mut raw = crate::dash::tests::block();
+        crate::dash::set_value(&mut raw, 0, 0.0);
+        c.gen = Some(crate::synth::Gen { raw, ..crate::synth::Gen::new(crate::synth::Kind::Quiet) });
+        s.channels.push(c);
+        let k = s.channels.len() - 1;
+        s.ctl_links.push(crate::song::CtlLink::from_chan(k, 0, Target::InsertVolume(0)));
+        let (h, mut p) = new_player(s, 48_000.0);
+        let mut buf = vec![0.0f32; 4096];
+        // the slider is at the bottom: the master fader it is linked to is shut
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        p.render(&mut buf, 2);
+        assert!(buf.iter().all(|x| x.abs() < 1e-6));
     }
 
     #[test]
