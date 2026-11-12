@@ -537,6 +537,10 @@ impl Overrides {
 struct EnvRun {
     chan: u16,
     key: u8,
+    /// The key the sender was handed, which note units in a bay may have moved.
+    sent: u8,
+    /// The held unit of the channel's bay that is the sender, when it is not the channel itself.
+    node: Option<usize>,
     vel: f32,
     rand: f32,
     /// Seconds since the note began, and when it was let go.
@@ -1372,8 +1376,8 @@ impl Player {
             if let Some(set) = ch.gen.as_ref().and_then(|g| crate::fm::Sender::parse(&g.raw)) {
                 self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let rand = (self.seed >> 8) as f32 / (1u32 << 24) as f32;
-                self.env_runs.retain(|r| r.chan != n.chan);
-                self.env_runs.push(EnvRun { chan: n.chan, key: n.key, vel: n.vel, rand, t: 0.0, rel: None, left: len_frames.map(|f| f + delay as u64), set });
+                self.env_runs.retain(|r| r.chan != n.chan || r.node.is_some());
+                self.env_runs.push(EnvRun { chan: n.chan, key: n.key, sent: n.key, node: None, vel: n.vel, rand, t: 0.0, rel: None, left: len_frames.map(|f| f + delay as u64), set });
             }
             return;
         }
@@ -1675,6 +1679,37 @@ impl Player {
                     None => vec![plain],
                 };
                 let motion = chain.and_then(crate::noteshape::motion_of);
+                // a sender held in the bay makes no sound: the notes that reach it set its outputs, which the bay's cables carry
+                let held_sender = ch.bay().and_then(|b| {
+                    let node = if li == 0 { b.lead } else { b.layers[li - 1].0 };
+                    let ident = &b.fx.sub.as_ref()?.nodes.get(node)?.ident;
+                    let env = ident.eq_ignore_ascii_case(crate::fm::ENV_SENDER);
+                    (env || ident.eq_ignore_ascii_case(crate::synth::KEY_SENDER)).then_some((node, env))
+                });
+                if let Some((node, env)) = held_sender {
+                    for ev in evs {
+                        let key = ev.key.clamp(0, 131) as u8;
+                        let vel = (ev.vel * ev.gain).clamp(0.0, 1.0);
+                        let raw = g.map(|g| &g.raw[..]).unwrap_or(&[]);
+                        if !env {
+                            if self.script_ctl.len() < 1024 {
+                                self.script_ctl.push((n.chan, node, 0, crate::synth::key_sender_value(raw, key)));
+                                self.script_ctl.push((n.chan, node, 1, vel));
+                            }
+                        } else if let Some(set) = crate::fm::Sender::parse(raw) {
+                            self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            let rand = (self.seed >> 8) as f32 / (1u32 << 24) as f32;
+                            self.env_runs.retain(|r| r.chan != n.chan || r.node != Some(node));
+                            let left = match len_frames {
+                                Some(f) => Some(f.max(1) + delay as u64),
+                                None if live => None,
+                                None => Some(delay as u64 + (sr * 0.25) as u64),
+                            };
+                            self.env_runs.push(EnvRun { chan: n.chan, key: n.key, sent: key, node: Some(node), vel, rand, t: 0.0, rel: None, left, set });
+                        }
+                    }
+                    continue;
+                }
                 for ev in evs {
                 let shaped = ev != plain;
                 let (note_gain, gain, pl, pr, hz) = if shaped {
@@ -2426,7 +2461,15 @@ impl Player {
             let dt = n as f32 / self.sr;
             let mut fitted = false;
             for r in self.env_runs.iter_mut() {
-                for l in song.ctl_links.iter().filter(|l| l.chan() == Some(r.chan as usize)) {
+                if let Some(node) = r.node {
+                    // held in a bay: the outputs go down the bay's cables with the next block
+                    for a in 0..r.set.arts.len() {
+                        if let (Some(v), true) = (r.set.value(a, r.sent, r.vel, r.rand, r.t, r.rel), self.script_ctl.len() < 1024) {
+                            self.script_ctl.push((r.chan, node, a as u16, v));
+                        }
+                    }
+                }
+                for l in song.ctl_links.iter().filter(|l| r.node.is_none() && l.chan() == Some(r.chan as usize)) {
                     if let Some(v) = r.set.value(l.out as usize, r.key, r.vel, r.rand, r.t, r.rel) {
                         if !fitted {
                             self.ov.fit(song);
@@ -2991,6 +3034,42 @@ mod tests {
         };
         let (same, up) = (run(0.5), run(1.0));
         assert!(same > 20.0 && (up / same - 4.0).abs() < 0.4, "{same} {up}");
+    }
+
+    #[test]
+    fn an_envelope_sender_held_in_a_bay_runs_down_its_cables() {
+        use crate::fxpatch::{Cable, End, Node, SetCable};
+        let peak = |b: &[f32]| b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let raw = crate::fm::tests::sender_block();
+        let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+        ch.plugin = crate::song::BAY.to_string();
+        let node = |ident: &str, fx| Node { ident: ident.to_string(), name: String::new(), fx };
+        let c = |a, b| Cable { from: a, to: b, level: 1.0 };
+        // the instrument sounds through a level unit, whose level the sender's third output holds
+        let patch = crate::fxpatch::Patch {
+            nodes: vec![node("", None), node(crate::fm::ENV_SENDER, None), node("", Some(fx::Fx::new(fx::Kind::Balance)))],
+            cables: vec![c(End::Bay, End::Node(2)), c(End::Node(2), End::Bay)],
+            order: vec![0, 1, 2],
+            sets: vec![SetCable { from: (1, 2), to: (2, 1) }],
+            feeds: vec![1],
+            ..Default::default()
+        };
+        let sender = crate::synth::Gen::decode(crate::fm::ENV_SENDER, &raw).unwrap();
+        ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![(1, sender)] });
+        let mut song = Song::new();
+        song.channels = vec![ch];
+        let (h, mut p) = new_player(song, 48_000.0);
+        h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+        let mut a = vec![0.0; 512];
+        p.render(&mut a, 2);
+        p.render(&mut a, 2);
+        // its envelope starts from nothing
+        let early = peak(&a);
+        let mut long = vec![0.0f32; 96_000];
+        p.render(&mut long, 2);
+        p.render(&mut a, 2);
+        let late = peak(&a);
+        assert!(early < 0.02 && late > 0.05 && late > early * 5.0, "{early} {late}");
     }
 
     #[test]

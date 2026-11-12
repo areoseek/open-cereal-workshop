@@ -254,12 +254,16 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
                 continue;
             }
             if let Some(g) = crate::synth::Gen::decode(&nodes[n].ident, blocks[n]) {
-                if lead.is_none() {
+                // the channel's own instrument is the first that sounds; a held sender is only that when nothing does
+                if lead.is_none() && g.kind != crate::synth::Kind::Quiet {
                     lead = Some((n, g));
                 } else {
                     layers.push((n, g));
                 }
             }
+        }
+        if lead.is_none() && !layers.is_empty() {
+            lead = Some(layers.remove(0));
         }
     }
     let main_out = raw.iter().map(|c| c.0).filter(sound).min();
