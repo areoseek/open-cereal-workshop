@@ -16,7 +16,7 @@ An open source, pattern-based music workstation written in Rust. Native on Linux
     cargo run --release                      # the application
     cargo run --release -- song.flp          # open a project
 
-On Linux, `packaging/install.sh` puts the built program, a menu entry and the icon under `~/.local`.
+On Linux, `packaging/install.sh` puts the built program, a menu entry and the icon under `~/.local`. `packaging/appimage.sh` makes a single-file AppImage (it needs appimagetool), `packaging/PKGBUILD` an Arch package, and `packaging/windows.iss` is the Inno Setup script for a Windows installer. The build workflow makes the AppImage and the installer too; neither has been through a real release yet.
 
 It opens and saves `.flp` project files. A project that is opened and saved without changes comes back byte for
 byte; edits are patched into the original file so settings we do not understand yet are kept.

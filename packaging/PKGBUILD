@@ -1,0 +1,25 @@
+# Arch Linux package, built from the checked-out repository:  cd packaging && makepkg -si
+pkgname=breakfast-cereal
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Pattern-based music workstation"
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+depends=('alsa-lib' 'libxkbcommon' 'wayland' 'libglvnd')
+makedepends=('cargo')
+options=('!lto')
+
+build() {
+    cd "$startdir/.."
+    cargo build --release --locked -p breakfast-cereal
+}
+
+package() {
+    cd "$startdir/.."
+    install -Dm755 target/release/breakfast-cereal "$pkgdir/usr/bin/breakfast-cereal"
+    install -Dm644 packaging/breakfast-cereal.desktop "$pkgdir/usr/share/applications/breakfast-cereal.desktop"
+    install -Dm644 packaging/breakfast-cereal.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/breakfast-cereal.png"
+    install -Dm644 packaging/breakfast-cereal.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/breakfast-cereal.svg"
+    install -Dm644 packaging/breakfast-cereal.xml "$pkgdir/usr/share/mime/packages/breakfast-cereal.xml"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

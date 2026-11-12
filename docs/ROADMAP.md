@@ -19,4 +19,4 @@ Left, roughly in order
 - Measuring every item marked as an estimate in docs/PARITY.md against the reference and correcting it.
 - The "Not done" notes in docs/PARITY.md, unit by unit.
 - More free, properly licensed sounds beyond the small starter kit the program makes itself (docs/CONTENT-SOURCES.md).
-- Packages: an AppImage or Flatpak for Linux, an installer for Windows.
+- Packages: the AppImage, Arch package and Windows installer scripts are written but have not been through a real release; a Flatpak is not written.
