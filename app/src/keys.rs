@@ -537,6 +537,7 @@ impl App {
             Win::Piano => self.show_piano,
             Win::Mixer => self.show_mixer,
             Win::Browser => self.show_browser,
+            Win::Events => self.show_events,
             Win::None => false,
         }
     }
@@ -561,6 +562,7 @@ impl App {
             Win::Piano => self.show_piano = false,
             Win::Mixer => self.show_mixer = false,
             Win::Browser => {}
+            Win::Events => self.show_events = false,
             Win::None => return,
         }
         self.focus = Win::None;

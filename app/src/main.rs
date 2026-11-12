@@ -23,6 +23,7 @@ pub(crate) enum Win {
     Playlist,
     Mixer,
     Browser,
+    Events,
 }
 mod keys;
 mod testkeys;
@@ -1657,6 +1658,7 @@ impl App {
                         self.step_at = None;
                         self.status = format!("Step editing: {}", if tr.step_edit() { "on" } else { "off" });
                     }
+                    Key::I if self.focus == Win::Events && self.show_events => self.events_insert_now(),
                     Key::I => {
                         self.wait_input = !self.wait_input;
                         self.status = format!("Wait for input to start playing: {}", if self.wait_input { "on" } else { "off" });
@@ -2403,7 +2405,10 @@ impl eframe::App for App {
         egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
         self.show_chanset = open;
         let mut open = self.show_events;
-        egui::Window::new("Event editor").open(&mut open).frame(frame).default_pos([left + 60.0, top + 80.0]).default_size([760.0, 260.0]).show(ctx, |ui| self.events_ui(ui));
+        let shown = egui::Window::new("Event editor").open(&mut open).frame(frame).default_pos([left + 60.0, top + 80.0]).default_size([760.0, 260.0]).show(ctx, |ui| self.events_ui(ui));
+        if shown.is_some_and(|r| took(&r.response)) {
+            self.focus = Win::Events;
+        }
         self.show_events = open;
         self.fx_window(ctx, frame);
 

@@ -69,6 +69,21 @@ impl App {
         out
     }
 
+    /// Ctrl+I: write where the shown control stands now as an event at the play position of the pattern.
+    pub(crate) fn events_insert_now(&mut self) {
+        let pat = self.handle.transport.pattern();
+        self.song.ensure_pattern(pat);
+        let Some((param, dest)) = self.events.target else { return };
+        let Some(raw) = self.song.event_raw(self.song.event_target(param, dest)) else { return };
+        let total = self.song.pattern_length(pat).max(self.song.bar().max(1));
+        let tick = if self.handle.transport.song_mode() { 0 } else { (self.handle.transport.tick().max(0.0) as u32) % total };
+        let ev = &mut self.song.patterns[pat].events;
+        ev.retain(|e| (e.param, e.dest, e.tick) != (param, dest, tick));
+        ev.push(PatEvent { tick, param, dest, raw });
+        ev.sort_by_key(|e| e.tick);
+        self.dirty = true;
+    }
+
     pub(crate) fn events_ui(&mut self, ui: &mut Ui) {
         let pat = self.handle.transport.pattern();
         self.song.ensure_pattern(pat);
@@ -82,6 +97,10 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.menu_button("Edit", |ui| {
+                if ui.button("Insert current control value   Ctrl+I").clicked() {
+                    self.events_insert_now();
+                    ui.close_menu();
+                }
                 if ui.button("Delete all events of this control").clicked() {
                     self.song.patterns[pat].events.retain(|e| (e.param, e.dest) != (param, dest));
                     self.dirty = true;

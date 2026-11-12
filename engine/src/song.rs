@@ -1858,6 +1858,30 @@ impl Song {
         }
     }
 
+    /// Where a control stands now, in the raw values its events carry; None for one we cannot read.
+    pub fn event_raw(&self, t: Target) -> Option<i32> {
+        let slot = |i: usize, k: u16| self.inserts.get(i)?.slots.iter().find(|x| x.index == k);
+        Some(match t {
+            Target::ChanVolume(c) => (self.channels.get(c)?.volume * 12800.0).round() as i32,
+            Target::ChanPan(c) => ((self.channels.get(c)?.pan + 1.0) * 6400.0).round() as i32,
+            Target::ChanPitch(c) => self.channels.get(c)?.pitch_cents.round() as i32,
+            Target::InsertVolume(i) => (self.inserts.get(i)?.volume / 1.25 * 16000.0).round() as i32,
+            Target::InsertPan(i) => (self.inserts.get(i)?.pan * 6400.0).round() as i32,
+            Target::Tempo => (self.tempo * 1000.0).round() as i32,
+            Target::SlotMix(i, k) => (slot(i, k)?.mix * 12800.0).round() as i32,
+            Target::SlotOn(i, k) => slot(i, k)?.enabled as i32,
+            Target::SlotParam(i, k, p) => {
+                let fx = slot(i, k)?.fx.as_ref()?;
+                if fx.ext.is_some() {
+                    return None;
+                }
+                fx.p.get(p as usize)?.round() as i32
+            }
+            Target::ChanParam(c, p) => self.channels.get(c)?.gen.as_ref()?.p.get(p as usize)?.round() as i32,
+            Target::Other { .. } => return None,
+        })
+    }
+
     /// The raw values a target's control runs between; None for one we do not play.
     pub fn event_range(&self, t: Target) -> Option<(i32, i32)> {
         Some(match t {
