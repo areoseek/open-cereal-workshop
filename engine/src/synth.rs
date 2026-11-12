@@ -1124,6 +1124,7 @@ impl Gen {
         match self.kind {
             Kind::Duo => crate::duo::tail(&self.p),
             Kind::Additive => crate::additive::tail(&self.p),
+            Kind::Fm => self.fm.as_ref().map(|f| f.tail).unwrap_or_default(),
             Kind::SawSyn => crate::analog::saw_tail(&self.p),
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),

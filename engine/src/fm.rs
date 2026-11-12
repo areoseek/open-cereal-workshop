@@ -416,12 +416,52 @@ pub struct Patch {
     pub filt_at: [usize; 3],
     /// How an operator's own settings are laid out in this block.
     pub lay: OpLay,
+    /// Chorus, echo and room behind the effects send (current layouts only).
+    pub tail: crate::tailfx::Set,
     used: [bool; 6],
     fused: [bool; 3],
     any_moving: bool,
 }
 
 pub const ARTS: usize = 62;
+
+/// The effects section of a current block: a chorus, three echoes and a room. `share` is how much of the sound
+/// is sent to them. One echo runs here, the first that is switched on; the chorus knob order is an estimate.
+fn effects(d: &[u8], share: f32) -> crate::tailfx::Set {
+    use crate::tailfx::{Chorus, Delay, Reverb, Set};
+    let k = |o: usize, top: i32| at(d, o).clamp(-top, top) as f32 / top as f32;
+    let mut set = Set::default();
+    if d[975] > 0 {
+        let wet = k(752, 128).abs() * share * (0.4 + 0.2 * d[975].min(3) as f32);
+        if wet > 0.0 {
+            set.chorus = Some(Chorus { depth: k(736, 128).abs(), hz: 0.1 * 20f32.powf(k(740, 128).abs()), wet });
+        }
+    }
+    for base in [978usize, 1001, 1024] {
+        let (vol, on) = (k(base + 12, 128), d[base + 22] != 0);
+        if !on || vol == 0.0 {
+            continue;
+        }
+        let ticks = at(d, base + 4).clamp(1, 384) as f32;
+        let side = (ticks + at(d, base + 8).clamp(-384, 384) as f32).clamp(1.0, 768.0);
+        // the middle mode turns each repeat over, which sounds the same through one loop here
+        let mut e = Delay { left: ticks / 48.0, right: side / 48.0, fb: k(base, 128).abs() * 0.95, high_hz: 9000.0, wet: vol.abs() * share, ..Default::default() };
+        if at(d, base + 16) == 2 && e.left == e.right {
+            e.right = e.left * 2.0;
+        }
+        if d[base + 20] == 0 {
+            e.free = (ticks / 384.0).max(0.002);
+        }
+        set.delay = Some(e);
+        break;
+    }
+    let vol = k(1079, 128);
+    if d[1083] != 0 && vol != 0.0 {
+        let cut = |o: usize| if at(d, o) >= 221 { 20000.0 } else { at(d, o).clamp(5, 221) as f32 * 100.0 };
+        set.reverb = Some(Reverb { secs: at(d, 1067).clamp(1, 200) as f32 / 10.0, high_hz: cut(1071).min(cut(1051)), wet: vol.abs() * share });
+    }
+    set
+}
 
 struct R<'a> {
     d: &'a [u8],
@@ -755,7 +795,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -882,14 +922,17 @@ impl Patch {
             return None;
         }
         let mut p = Self::default();
+        let (mut sent, mut plain) = (0.0f32, 0.0f32);
         p.volume = at(d, 0).clamp(0, 256) as f32 / 128.0;
         p.lfo = at(d, 4).clamp(-128, 128) as f32 / 128.0;
         p.pitch = at(d, 8).clamp(-48, 48) as f32;
         let cell = |base: usize, r: usize, c: usize| at(d, base + r * 36 + c * 4).clamp(-256, 256) as f32 / 256.0;
         for r in 0..9 {
             p.pan[r] = cell(12, r, 6);
-            // nothing of ours sits behind the effects send yet, so it joins the plain output
+            // what is sent to the effects is also heard plain; the effects add to it by the share sent
             let (send, out) = (cell(12, r, 7), cell(12, r, 8));
+            sent += send.abs();
+            plain += out.abs();
             p.out[r] = out + send.abs() * if out < 0.0 { -1.0 } else { 1.0 };
             for c in 0..6 {
                 if r < 6 {
@@ -909,6 +952,9 @@ impl Patch {
         p.uni_phase = at(d, 712).clamp(0, 128) as f32 / 128.0;
         p.modx = at(d, 728).clamp(0, 1024) as f32 / 1024.0;
         p.mody = at(d, 732).clamp(0, 1024) as f32 / 1024.0;
+        if ver >= 19 && sent > 0.0 {
+            p.tail = effects(d, sent / (sent + plain));
+        }
 
         // the patch notes: where they start moved between layouts. Newer blocks hold a one-byte length and two
         // bytes per letter, older ones a four-byte length and one byte per letter
@@ -1611,6 +1657,33 @@ pub(crate) mod tests {
         let o = run(&p, 96, 20000, 30000);
         assert!(o.iter().all(|f| f[0].is_finite() && f[0].abs() < 20.0));
         assert!(o[2000..9000].iter().any(|f| (f[0] - f[1]).abs() > 1e-4), "unison voices sit apart");
+    }
+
+    /// Nothing sent to the effects leaves them out; a send brings in the echo, chorus and room that are switched on.
+    #[test]
+    fn the_effects_follow_the_send() {
+        let put = |d: &mut Vec<u8>, o: usize, v: i32| d[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let mut d = plain_block();
+        d[975] = 3;
+        for (o, v) in [(736, 36), (740, 15), (752, 128), (978, 64), (982, 144), (990, 64), (1067, 15), (1071, 40), (1051, 221), (1079, 25)] {
+            put(&mut d, o, v);
+        }
+        d[998] = 1;
+        d[1000] = 1;
+        d[1083] = 1;
+        assert!(!Patch::from_plain(&d, 25).unwrap().tail.any(), "no send, no effects");
+        put(&mut d, 12 + 7 * 4, 128);
+        let t = Patch::from_plain(&d, 25).unwrap().tail;
+        let e = t.delay.expect("the first echo is on");
+        assert_eq!((e.left, e.right), (3.0, 3.0));
+        assert!(e.wet > 0.1 && e.wet < 0.5 && e.free == 0.0);
+        assert!(t.chorus.is_some());
+        let r = t.reverb.expect("the room is on");
+        assert_eq!((r.secs, r.high_hz), (1.5, 4000.0));
+        d[1083] = 0;
+        d[1000] = 0;
+        let t = Patch::from_plain(&d, 25).unwrap().tail;
+        assert!(t.delay.is_none() && t.reverb.is_none() && t.chorus.is_some());
     }
 
     /// The older point layouts read, and a line changed in one is written back in the current layout.
