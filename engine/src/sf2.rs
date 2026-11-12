@@ -307,7 +307,13 @@ impl Bank {
                 let env = Env { on: true, delay: seconds(v[33]), attack: seconds(v[34]), hold: seconds(v[35]), decay: seconds(v[36]), sustain, release: seconds(v[38]).max(0.005), amount: 0.0, tension: [0.0, -1.0, -1.0] };
                 let hz = 8.176 * 2f32.powf(v[8].clamp(1500, 13500) as f32 / 1200.0);
                 let q = 10f32.powf(v[9].clamp(0, 960) as f32 / 200.0) * 0.707;
-                let filter = (hz < 19_000.0).then(|| (((hz / 20.0).ln() / 1000f32.ln()).clamp(0.0, 1.0), ((q - 0.707) / 10.0).clamp(0.0, 1.0)));
+                let menv = |amount: f32| Env { on: true, delay: seconds(v[25]), attack: seconds(v[26]), hold: seconds(v[27]), decay: seconds(v[28]), sustain: 1.0 - (v[29].clamp(0, 1000) as f32) / 1000.0, release: seconds(v[30]).max(0.005), amount, tension: [0.0; 3] };
+                const SPAN: f32 = 11958.9; // cents across the cutoff scale
+                let rate = |c: i32| 8.176 * 2f32.powf(c.clamp(-16000, 4500) as f32 / 1200.0);
+                let lfos = [[seconds(v[21]), rate(v[22]), v[5] as f32, v[10] as f32 / SPAN, v[13] as f32 / 10.0], [seconds(v[23]), rate(v[24]), v[6] as f32, 0.0, 0.0]];
+                let lfos = lfos.map(|l| if l[2] == 0.0 && l[3] == 0.0 && l[4] == 0.0 { [0.0; 5] } else { l });
+                let moved = v[11] != 0 || v[10] != 0;
+                let filter = (hz < 19_000.0 || moved).then(|| (((hz / 20.0).ln() / 1000f32.ln()).clamp(0.0, 1.0), ((q - 0.707) / 10.0).clamp(0.0, 1.0)));
                 out.push(Zone {
                     name: h.name.clone(),
                     key_lo: key.0,
@@ -333,6 +339,9 @@ impl Bank {
                     env: Some(env),
                     filter,
                     pick: 0,
+                    penv: (v[7] != 0).then(|| menv(v[7] as f32)),
+                    cenv: (v[11] != 0).then(|| menv(v[11] as f32 / SPAN)),
+                    lfos,
                 });
             }
         }
@@ -409,8 +418,8 @@ mod tests {
                     chunk(b"pbag", &w16(&[0, 0, 2, 0])),
                     chunk(b"pgen", &gens(&[(51, 12), (41, 0), (0, 0)])),
                     chunk(b"inst", &inst),
-                    chunk(b"ibag", &w16(&[0, 0, 1, 0, 5, 0])),
-                    chunk(b"igen", &gens(&[(17, -250), (43, 40 | 80 << 8), (54, 1), (37, 200), (53, 0), (0, 0)])),
+                    chunk(b"ibag", &w16(&[0, 0, 1, 0, 8, 0])),
+                    chunk(b"igen", &gens(&[(17, -250), (43, 40 | 80 << 8), (54, 1), (37, 200), (6, 50), (24, 0), (11, 2400), (53, 0), (0, 0)])),
                     chunk(b"shdr", &shdr),
                 ],
             ),
@@ -433,6 +442,9 @@ mod tests {
         assert_eq!(z.pan, -0.5);
         assert!((z.env.unwrap().sustain - 0.1).abs() < 1e-4);
         assert_eq!(z.sample.as_ref().unwrap().frames.len(), 400);
+        // the vibrato and the filter sweep come through
+        assert!((z.lfos[1][1] - 8.176).abs() < 1e-3 && z.lfos[1][2] == 50.0 && z.lfos[0] == [0.0; 5]);
+        assert!(z.penv.is_none() && (z.cenv.unwrap().amount - 0.2007).abs() < 1e-3 && z.filter.is_some());
         // an unknown preset falls back to the first one
         assert_eq!(b.zones(3, 3).len(), 1);
     }

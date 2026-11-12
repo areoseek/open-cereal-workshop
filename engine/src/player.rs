@@ -772,6 +772,8 @@ struct Voice {
     venv: Env,
     penv: Env,
     cenv: Env,
+    /// A zone's own wobbles (see `zones::Zone::lfos`).
+    zl: [[f32; 5]; 2],
     env_now: f32,
     env_inc: f32,
     /// Filter: type, knob positions, coefficients and state (two stages, two channels).
@@ -808,12 +810,25 @@ impl Voice {
     /// Work out the envelopes and the filter for the next few frames.
     fn control(&mut self) {
         let t = self.t as f32 / self.sr;
+        let mut wob = [0.0f32; 3];
+        for l in &self.zl {
+            if l[1] > 0.0 && t > l[0] {
+                let ph = ((t - l[0]) * l[1]).fract();
+                let tri = if ph < 0.25 { ph * 4.0 } else if ph < 0.75 { 2.0 - ph * 4.0 } else { ph * 4.0 - 4.0 };
+                wob[0] += tri * l[2];
+                wob[1] += tri * l[3];
+                wob[2] += tri * l[4];
+            }
+        }
         if self.venv.on {
-            let target = if self.releasing {
+            let mut target = if self.releasing {
                 self.venv.released(self.rel_from, self.rel_t as f32 / self.sr).unwrap_or(-1.0)
             } else {
                 self.venv.held(t)
             };
+            if wob[2] != 0.0 && target > 0.0 {
+                target *= 10f32.powf(wob[2] / 20.0);
+            }
             if target < 0.0 {
                 if !self.kill {
                     self.active = false;
@@ -840,6 +855,9 @@ impl Voice {
         } else {
             self.step
         };
+        if wob[0] != 0.0 {
+            self.step_now *= (wob[0] as f64 / 1200.0).exp2();
+        }
         if self.slide != self.slide_to {
             let d = self.slide_inc * CTL as f32;
             self.slide = if (self.slide_to - self.slide).abs() <= d { self.slide_to } else { self.slide + d * (self.slide_to - self.slide).signum() };
@@ -865,6 +883,7 @@ impl Voice {
             if self.cenv.on {
                 x += self.cenv.amount * self.cenv.held(t);
             }
+            x += wob[1];
             let hz = (20.0 * 1000f32.powf(x.clamp(0.0, 1.0))).min(self.sr * 0.45);
             self.fg = (std::f32::consts::PI * hz / self.sr).tan();
             self.fk = 1.0 / (0.707 + self.fres * 10.0);
@@ -1823,6 +1842,9 @@ impl Player {
                         fon: z.filter.is_some(),
                         fcut: z.filter.map_or(1.0, |f| f.0),
                         fres: z.filter.map_or(0.0, |f| f.1),
+                        penv: z.penv.unwrap_or_default(),
+                        cenv: z.cenv.unwrap_or_default(),
+                        zl: z.lfos,
                         ..Default::default()
                     });
                 }

@@ -43,11 +43,17 @@ pub struct Zone {
     /// How a note chooses among the zones it falls in: 0 sounds them all, 1 takes them in turn,
     /// 2 picks one at random, 3 picks one at random but never the same twice running.
     pub pick: u8,
+    /// Envelopes that move the pitch (amount in cents) and the filter (amount on the cutoff's 0..=1 scale).
+    pub penv: Option<crate::song::Env>,
+    pub cenv: Option<crate::song::Env>,
+    /// Two slow wobbles: seconds before it starts, cycles per second, then its reach over pitch (cents),
+    /// the cutoff (0..=1 scale) and the level (decibels).
+    pub lfos: [[f32; 5]; 2],
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2] }
     }
 }
 
