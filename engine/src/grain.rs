@@ -15,6 +15,19 @@ pub struct Set {
     pub grain_spacing: f32,
     /// 1 = each grain starts where the last one ended; negative walks backwards.
     pub wave_spacing: f32,
+    /// 0..1: how far the grains are thrown to the left and right in turn.
+    pub pan: f32,
+    /// A slow wave that pushes the wave spacing about: its depth (0..1) and its speed in Hz.
+    pub depth: f32,
+    pub speed: f32,
+    /// 0..1: how far each grain's start is scattered.
+    pub rand: f32,
+}
+
+/// The two spacing knobs: 611 is even, and the stored presets named "twice as fast" and "twice as slow" sit
+/// near 411, so the knob follows a power curve; the sign walks backwards.
+fn spacing(v: f32) -> f32 {
+    v.signum() * (v.abs() / 611.0).powf(1.75)
 }
 
 impl Set {
@@ -23,8 +36,12 @@ impl Set {
         Self {
             hold: (int(1).unwrap_or(200.0) / 10000.0).clamp(0.002, 1.0),
             attack: (int(2).unwrap_or(50.0) / 10000.0).clamp(0.0005, 0.5),
-            grain_spacing: (int(3).unwrap_or(611.0) / 611.0).clamp(0.05, 8.0),
-            wave_spacing: (int(4).unwrap_or(611.0) / 611.0).clamp(-8.0, 8.0),
+            grain_spacing: spacing(int(3).unwrap_or(611.0)).clamp(0.05, 8.0),
+            wave_spacing: spacing(int(4).unwrap_or(611.0)).clamp(-8.0, 8.0),
+            pan: (int(5).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
+            speed: 0.05 * 400f32.powf((int(6).unwrap_or(180.0) / 256.0).clamp(0.0, 1.0)),
+            depth: (int(7).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
+            rand: (int(8).unwrap_or(0.0) / 256.0).clamp(0.0, 1.0),
         }
     }
 }
@@ -36,6 +53,8 @@ struct Grain {
     /// Frames of output played so far, and the frames it lasts.
     t: f32,
     on: bool,
+    /// Left and right gains.
+    lr: [f32; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -53,13 +72,17 @@ pub struct Voice {
     done: bool,
     fade: f32,
     fading: bool,
+    /// Grains started, the slow wave's place, and the dice for the scatter.
+    count: u32,
+    lfo: f32,
+    dice: u32,
 }
 
 impl Voice {
     pub fn start(smp: &Arc<Sample>, set: Set, sr: f32, vel: f32, dphase: f32) -> Self {
         let step = (dphase * sr / 261.6256) as f64 * smp.rate as f64 / sr as f64;
         let next_at = if set.wave_spacing < 0.0 { (smp.frames.len() as f64 - set.hold as f64 * smp.rate as f64).max(0.0) } else { 0.0 };
-        Self { smp: smp.clone(), set, step, sr, grains: Default::default(), next_at, wait: 0.0, vel, done: smp.frames.is_empty(), fade: 1.0, fading: false }
+        Self { smp: smp.clone(), set, step, sr, grains: Default::default(), next_at, wait: 0.0, vel, done: smp.frames.is_empty(), fade: 1.0, fading: false, count: 0, lfo: 0.0, dice: 0x9e37_79b9 }
     }
 
     pub fn release(&mut self) -> f32 {
@@ -74,13 +97,22 @@ impl Voice {
             if self.next_at < 0.0 || self.next_at >= n {
                 self.done = true;
             } else if let Some(g) = self.grains.iter_mut().find(|g| !g.on) {
-                *g = Grain { at: self.next_at, t: 0.0, on: true };
+                self.dice ^= self.dice << 13;
+                self.dice ^= self.dice >> 17;
+                self.dice ^= self.dice << 5;
+                let throw = (self.dice as f32 / u32::MAX as f32 * 2.0 - 1.0) * s.rand * 0.25 * self.smp.rate as f32;
+                let side = if self.count % 2 == 0 { -s.pan } else { s.pan };
+                let at = (self.next_at + throw as f64).clamp(0.0, (n - 1.0).max(0.0));
+                *g = Grain { at, t: 0.0, on: true, lr: [(1.0 - side).min(1.0), (1.0 + side).min(1.0)] };
+                self.count += 1;
                 self.wait += s.hold * s.grain_spacing * self.sr;
-                // one grain's worth of wave at the played pitch
-                self.next_at += s.wave_spacing as f64 * s.hold as f64 * self.sr as f64 * self.step;
+                // one grain's worth of wave at the played pitch, pushed about by the slow wave
+                let push = 1.0 + s.depth * (self.lfo * std::f32::consts::TAU).sin();
+                self.next_at += (s.wave_spacing * push) as f64 * s.hold as f64 * self.sr as f64 * self.step;
             }
         }
         self.wait -= 1.0;
+        self.lfo = (self.lfo + s.speed / self.sr).fract();
         let (hold, att) = (s.hold * self.sr, (s.attack * self.sr).max(1.0));
         let mut o = [0.0f32; 2];
         for g in self.grains.iter_mut().filter(|g| g.on) {
@@ -93,8 +125,8 @@ impl Voice {
             let (a, b) = (self.smp.frames[i], self.smp.frames[i + 1]);
             // fade in over the attack, hold, then fade out while the next grain fades in
             let e = (g.t / att).min(1.0).min(((hold + att - g.t) / att).max(0.0));
-            o[0] += (a[0] + (b[0] - a[0]) * f) * e;
-            o[1] += (a[1] + (b[1] - a[1]) * f) * e;
+            o[0] += (a[0] + (b[0] - a[0]) * f) * e * g.lr[0];
+            o[1] += (a[1] + (b[1] - a[1]) * f) * e * g.lr[1];
             g.at += self.step;
             g.t += 1.0;
         }

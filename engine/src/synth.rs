@@ -1177,7 +1177,7 @@ impl Gen {
             Kind::Image => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: self.img.clone(), smp: None })), ..Default::default() },
             Kind::Grain => Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: self.kind, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, crate::grain::Set::parse(&self.raw))) })), ..Default::default() },
             Kind::Travel => {
-                let set = crate::grain::Set { hold: 0.05, attack: 0.004, grain_spacing: 1.0, wave_spacing: 1.0 };
+                let set = crate::grain::Set { hold: 0.05, attack: 0.004, grain_spacing: 1.0, wave_spacing: 1.0, pan: 0.0, depth: 0.0, speed: 1.0, rand: 0.0 };
                 Tone { mini: Some(std::sync::Arc::new(crate::minis::Patch { kind: Kind::Grain, p: Vec::new(), set: None, img: None, smp: self.smp.clone().map(|s| (s, set)) })), ..Default::default() }
             }
             Kind::Forge => Tone { add: Some(std::sync::Arc::new(self.forge())), ..Default::default() },
