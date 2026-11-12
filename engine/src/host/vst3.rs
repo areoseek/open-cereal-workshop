@@ -75,7 +75,7 @@ unsafe extern "system" fn host_name(_: Obj, name: *mut u16) -> i32 {
     if name.is_null() {
         return BAD_ARG;
     }
-    let text: Vec<u16> = "Breakfast Cereal DAW".encode_utf16().chain(Some(0)).collect();
+    let text: Vec<u16> = "Open Cereal Workshop".encode_utf16().chain(Some(0)).collect();
     std::ptr::copy_nonoverlapping(text.as_ptr(), name, text.len());
     OK
 }

@@ -734,7 +734,7 @@ impl Instance {
         }
         let found = inside(path).into_iter().find(|f| id.is_empty() || f.id == id)?;
         let l = load(path)?;
-        let names: Vec<CString> = ["Breakfast Cereal DAW", "Breakfast Cereal", "", env!("CARGO_PKG_VERSION")].iter().filter_map(|s| CString::new(*s).ok()).collect();
+        let names: Vec<CString> = ["Open Cereal Workshop", "Open Cereal Workshop", "", env!("CARGO_PKG_VERSION")].iter().filter_map(|s| CString::new(*s).ok()).collect();
         let shared = Box::into_raw(Box::new(Shared {
             callback: AtomicBool::new(false),
             restart: AtomicBool::new(false),
@@ -1563,7 +1563,7 @@ mod tests {
         };
         let found = inside(&path);
         assert_eq!(found.len(), 1);
-        assert!(found[0].instrument && found[0].name == "Test Tone" && found[0].vendor == "Breakfast Cereal");
+        assert!(found[0].instrument && found[0].name == "Test Tone" && found[0].vendor == "Open Cereal Workshop");
         assert_eq!(found[0].id, "B7EAFA57CE4EA1007E57701100000003");
         let inst = Instance::open(&path, "").expect("opens");
         assert!(inst.has_note_in && inst.takes_sound() && !inst.has_window());
@@ -1740,7 +1740,7 @@ mod tests {
         assert_eq!(state, 0.5f64.to_le_bytes());
 
         // a second one takes the state over; a longer stretch than one call holds is cut up
-        let other = Instance::open(&path, "org.breakfast-cereal.test-tone").expect("opens again");
+        let other = Instance::open(&path, "org.open-cereal-workshop.test-tone").expect("opens again");
         assert!(other.restore(&state));
         assert!(other.activate(44_100.0));
         let mut io = vec![[1.0f32; 2]; MAX_FRAMES * 2 + 100];

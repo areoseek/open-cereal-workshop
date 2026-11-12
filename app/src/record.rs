@@ -242,7 +242,7 @@ pub fn folder(project: Option<&Path>) -> PathBuf {
         return dir.join("Recorded");
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join("Documents").join("Breakfast Cereal").join("Recorded")
+    home.join("Documents").join("Open Cereal Workshop").join("Recorded")
 }
 
 #[cfg(test)]

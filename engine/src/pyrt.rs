@@ -126,7 +126,7 @@ impl Py {
         };
         let version = std::ffi::CStr::from_ptr(ver()).to_string_lossy().split_whitespace().next().unwrap_or("3").to_string();
         let src = CString::new(include_str!("flvfx_shim.py")).ok()?;
-        let code = compile(src.as_ptr(), c"<breakfast cereal note scripts>".as_ptr(), 257);
+        let code = compile(src.as_ptr(), c"<open cereal workshop note scripts>".as_ptr(), 257);
         let globals = dict_new();
         if code.is_null() || globals.is_null() {
             clear();

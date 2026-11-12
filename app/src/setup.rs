@@ -89,7 +89,7 @@ fn home() -> Option<PathBuf> {
 
 pub(crate) fn settings_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").or_else(|| std::env::var_os("APPDATA")).map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?;
-    Some(base.join("breakfast-cereal").join("settings.txt"))
+    Some(base.join("open-cereal-workshop").join("settings.txt"))
 }
 
 /// Where copies of unsaved work and of overwritten projects are kept.
@@ -382,7 +382,7 @@ pub fn detect() -> Vec<PathBuf> {
 /// Where unpacked content lives: this program's own data folder.
 fn content_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME").or_else(|| std::env::var_os("LOCALAPPDATA")).map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))?;
-    Some(base.join("breakfast-cereal").join("content"))
+    Some(base.join("open-cereal-workshop").join("content"))
 }
 
 fn start_unpack(installer: PathBuf) -> Result<Job, String> {
@@ -460,7 +460,7 @@ impl App {
             ui.set_width(560.0);
             ui.label(RichText::new("Bring your own sounds").size(17.0).color(TEXT));
             ui.add_space(4.0);
-            ui.label("Breakfast Cereal DAW does not include, and cannot include, the sounds, presets and demo songs that come with FL Studio. Projects made there usually point at those files.");
+            ui.label("Open Cereal Workshop does not include, and cannot include, the sounds, presets and demo songs that come with FL Studio. Projects made there usually point at those files.");
             ui.add_space(4.0);
             ui.label("All this needs is the FL Studio installer file, which you download yourself from Image-Line (the free trial is the same file). Choose it below and the sounds, presets, demo projects and templates are read out of it into this program's data folder on your disk. Nothing is installed or run, nothing is uploaded, and your use of those files stays under Image-Line's licence.");
             ui.add_space(8.0);

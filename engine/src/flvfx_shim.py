@@ -1,4 +1,4 @@
-# Breakfast Cereal DAW: the module note scripts import as `flvfx`, and the driver the engine talks to.
+# Open Cereal Workshop: the module note scripts import as `flvfx`, and the driver the engine talks to.
 # Our own code, written from the public description of the scripting interface. The engine sends lines of
 # text in and reads lines of text back, so that only a handful of interpreter calls are needed.
 import struct

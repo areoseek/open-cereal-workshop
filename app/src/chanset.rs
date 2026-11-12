@@ -1174,7 +1174,7 @@ fn midi_sender_panel(ui: &mut Ui, raw: &mut Vec<u8>, transport: &cereal_engine::
         num_or_none(ui, &mut set.bank[0], 127, 0).hint("Coarse");
         num_or_none(ui, &mut set.bank[1], 127, 0).hint("Fine");
         let mut port = set.port as i32;
-        ui.label("Port").hint(if cfg!(windows) { "Port N plays through the Nth MIDI output device of the system" } else { "Each port in use shows up as a port of the client \"Breakfast Cereal Out\"; connect it to a synth or an interface" });
+        ui.label("Port").hint(if cfg!(windows) { "Port N plays through the Nth MIDI output device of the system" } else { "Each port in use shows up as a port of the client \"Open Cereal Workshop Out\"; connect it to a synth or an interface" });
         ui.add(egui::DragValue::new(&mut port).range(0..=255).speed(0.1));
         set.port = port.clamp(0, 255) as u8;
         let lit = crate::midi::SENT.load(std::sync::atomic::Ordering::Relaxed);

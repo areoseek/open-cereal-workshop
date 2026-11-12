@@ -26,9 +26,9 @@ static TEXTS: Texts = Texts { features: [c"instrument".as_ptr(), c"audio-effect"
 
 static DESC: Descriptor = Descriptor {
     version: VERSION,
-    id: c"org.breakfast-cereal.test-tone".as_ptr(),
+    id: c"org.open-cereal-workshop.test-tone".as_ptr(),
     name: c"Test Tone".as_ptr(),
-    vendor: c"Breakfast Cereal".as_ptr(),
+    vendor: c"Open Cereal Workshop".as_ptr(),
     url: c"".as_ptr(),
     manual_url: c"".as_ptr(),
     support_url: c"".as_ptr(),

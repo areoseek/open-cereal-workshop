@@ -18,10 +18,10 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
-            bin: breakfast-cereal
+            bin: open-cereal-workshop
           - os: windows-latest
             name: windows-x86_64
-            bin: breakfast-cereal.exe
+            bin: open-cereal-workshop.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
       - name: Test
         run: cargo test --release --locked
       - name: Build
-        run: cargo build --release --locked -p breakfast-cereal
+        run: cargo build --release --locked -p open-cereal-workshop
       - name: Pack
         shell: bash
         run: |
@@ -54,8 +54,8 @@ jobs:
         shell: pwsh
         run: |
           iscc packaging\windows.iss
-          Copy-Item target\Breakfast-Cereal-DAW-setup-x86_64.exe out\
+          Copy-Item target\Open-Cereal-Workshop-setup-x86_64.exe out\
       - uses: actions/upload-artifact@v4
         with:
-          name: breakfast-cereal-${{ matrix.name }}
+          name: open-cereal-workshop-${{ matrix.name }}
           path: out

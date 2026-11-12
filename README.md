@@ -1,4 +1,4 @@
-# Breakfast Cereal DAW
+# Open Cereal Workshop
 
 An open source, pattern-based music workstation written in Rust. Native on Linux, also built for Windows.
 

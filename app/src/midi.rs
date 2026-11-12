@@ -185,7 +185,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     use std::ffi::CString;
 
     let seq = alsa::Seq::open(None, Some(alsa::Direction::Capture), true)?;
-    seq.set_client_name(&CString::new("Breakfast Cereal")?)?;
+    seq.set_client_name(&CString::new("Open Cereal Workshop")?)?;
     let port = seq.create_simple_port(&CString::new("Input")?, PortCap::WRITE | PortCap::SUBS_WRITE, PortType::MIDI_GENERIC | PortType::APPLICATION)?;
     let me = seq.client_id()?;
     let mut linked: Vec<(i32, i32)> = Vec::new();
@@ -204,7 +204,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 let id = client.get_client();
                 // not ourselves, not the system's own ports, not the loop-back port
                 // nor our own sending client: what we send must not come back in as played notes
-                if id == me || id == 0 || id == 14 || client.get_name().map(|n| n.starts_with("Breakfast Cereal")).unwrap_or(false) {
+                if id == me || id == 0 || id == 14 || client.get_name().map(|n| n.starts_with("Open Cereal Workshop")).unwrap_or(false) {
                     continue;
                 }
                 for p in PortIter::new(&seq, id) {
@@ -472,7 +472,7 @@ pub static SENT: AtomicUsize = AtomicUsize::new(0);
 
 /// Starts the thread that puts the sender channels' messages on the wire.
 ///
-/// Linux: a sequencer client "Breakfast Cereal Out" with one readable port per port number in use, for
+/// Linux: a sequencer client "Open Cereal Workshop Out" with one readable port per port number in use, for
 /// synths and hardware to be connected to. Windows: port N plays through the Nth output device.
 pub fn start_out(from: Arc<cereal_engine::player::Transport>) {
     if std::env::var_os("CEREAL_NO_MIDI").is_some() {
@@ -489,7 +489,7 @@ fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn st
     use std::ffi::CString;
 
     let seq = alsa::Seq::open(None, Some(alsa::Direction::Playback), true)?;
-    seq.set_client_name(&CString::new("Breakfast Cereal Out")?)?;
+    seq.set_client_name(&CString::new("Open Cereal Workshop Out")?)?;
     use alsa::seq::{Addr, ClientIter, PortIter, PortSubscribe};
     let me = seq.client_id()?;
     let mut ports: Vec<(u8, i32)> = Vec::new();
@@ -511,7 +511,7 @@ fn run_out(from: Arc<cereal_engine::player::Transport>) -> Result<(), Box<dyn st
             let mut want: Vec<(u8, i32, i32)> = Vec::new();
             for client in ClientIter::new(&seq) {
                 let id = client.get_client();
-                if id == me || id == 0 || client.get_name().map(|n| n.starts_with("Breakfast Cereal")).unwrap_or(false) {
+                if id == me || id == 0 || client.get_name().map(|n| n.starts_with("Open Cereal Workshop")).unwrap_or(false) {
                     continue;
                 }
                 for p in PortIter::new(&seq, id) {

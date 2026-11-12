@@ -345,7 +345,7 @@ unsafe extern "system" fn f_one(_: Obj) -> u32 {
     1
 }
 unsafe extern "system" fn f_info(_: Obj, info: *mut FactoryInfo) -> i32 {
-    put(&mut (*info).vendor, "Breakfast Cereal");
+    put(&mut (*info).vendor, "Open Cereal Workshop");
     OK
 }
 unsafe extern "system" fn f_count(_: Obj) -> i32 {
@@ -372,7 +372,7 @@ unsafe extern "system" fn f_class2(_: Obj, index: i32, info: *mut ClassInfo2) ->
     put(&mut i.category, "Audio Module Class");
     put(&mut i.name, "Test Tone");
     put(&mut i.sub, "Instrument|Fx");
-    put(&mut i.vendor, "Breakfast Cereal");
+    put(&mut i.vendor, "Open Cereal Workshop");
     put(&mut i.version, "0.1.0");
     put(&mut i.sdk, "VST 3.7");
     OK

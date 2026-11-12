@@ -3,7 +3,7 @@ name = "cereal-engine"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 edition = "2021"
-description = "Audio engine for Breakfast Cereal DAW: project model, .flp reading and writing, sampler, sequencer, mixer. No UI, no audio device."
+description = "Audio engine for Open Cereal Workshop: project model, .flp reading and writing, sampler, sequencer, mixer. No UI, no audio device."
 
 [dependencies]
 arc-swap = "1"

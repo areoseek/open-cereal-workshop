@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Open Cereal Workshop
+GenericName=Music Workstation
+Comment=Pattern-based music workstation
+Exec=open-cereal-workshop %f
+Icon=open-cereal-workshop
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Sequencer;
+MimeType=application/x-open-cereal-workshop-project;
+StartupWMClass=open-cereal-workshop

@@ -1,5 +1,5 @@
 # Arch Linux package, built from the checked-out repository:  cd packaging && makepkg -si
-pkgname=breakfast-cereal
+pkgname=open-cereal-workshop
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Pattern-based music workstation"
@@ -11,15 +11,15 @@ options=('!lto')
 
 build() {
     cd "$startdir/.."
-    cargo build --release --locked -p breakfast-cereal
+    cargo build --release --locked -p open-cereal-workshop
 }
 
 package() {
     cd "$startdir/.."
-    install -Dm755 target/release/breakfast-cereal "$pkgdir/usr/bin/breakfast-cereal"
-    install -Dm644 packaging/breakfast-cereal.desktop "$pkgdir/usr/share/applications/breakfast-cereal.desktop"
-    install -Dm644 packaging/breakfast-cereal.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/breakfast-cereal.png"
-    install -Dm644 packaging/breakfast-cereal.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/breakfast-cereal.svg"
-    install -Dm644 packaging/breakfast-cereal.xml "$pkgdir/usr/share/mime/packages/breakfast-cereal.xml"
+    install -Dm755 target/release/open-cereal-workshop "$pkgdir/usr/bin/open-cereal-workshop"
+    install -Dm644 packaging/open-cereal-workshop.desktop "$pkgdir/usr/share/applications/open-cereal-workshop.desktop"
+    install -Dm644 packaging/open-cereal-workshop.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/open-cereal-workshop.png"
+    install -Dm644 packaging/open-cereal-workshop.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/open-cereal-workshop.svg"
+    install -Dm644 packaging/open-cereal-workshop.xml "$pkgdir/usr/share/mime/packages/open-cereal-workshop.xml"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

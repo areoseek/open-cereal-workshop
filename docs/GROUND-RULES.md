@@ -1,6 +1,6 @@
 # Ground rules: how this project stays our own work
 
-Breakfast Cereal DAW is an independent program that aims to do what a pattern-based DAW does. It is not a copy of FL Studio.
+Open Cereal Workshop is an independent program that aims to do what a pattern-based DAW does. It is not a copy of FL Studio.
 
 Allowed sources
 - Using the public demo the way any user would, and writing down what each control does.

@@ -1,4 +1,4 @@
-//! Breakfast Cereal DAW engine: the project model, `.flp` reading and writing, the sampler, the sequencer and
+//! Open Cereal Workshop engine: the project model, `.flp` reading and writing, the sampler, the sequencer and
 //! the mixer. No UI and no audio device live here; the app feeds `Player::render` from its audio callback.
 
 pub mod flp;

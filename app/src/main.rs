@@ -1,4 +1,4 @@
-//! Breakfast Cereal DAW: the application window. Toolbar and transport on top, browser on the left, and the
+//! Open Cereal Workshop: the application window. Toolbar and transport on top, browser on the left, and the
 //! channel rack, piano roll, playlist and mixer as windows on the workspace.
 
 mod browser;
@@ -3269,7 +3269,7 @@ impl App {
         }
         let mut open = self.show_about;
         egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.heading("Breakfast Cereal DAW");
+            ui.heading("Open Cereal Workshop");
             ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             ui.label("A free, open source music workstation for Linux and Windows.");
             ui.label(RichText::new(&self.audio).color(TEXT_DIM).small());
@@ -3679,7 +3679,7 @@ impl eframe::App for App {
             self.hist_at = self.history.len() - 1;
         }
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".into());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name}{} - Breakfast Cereal DAW", if self.unsaved { " *" } else { "" })));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name}{} - Open Cereal Workshop", if self.unsaved { " *" } else { "" })));
         if self.handle.transport.playing() || self.handle.transport.voices() > 0 {
             ctx.request_repaint();
         } else {
@@ -3707,7 +3707,7 @@ fn main() -> eframe::Result {
         let i = i.to_rgba8();
         egui::IconData { width: i.width(), height: i.height(), rgba: i.into_raw() }
     });
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_maximized(true).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Breakfast Cereal DAW").with_app_id("breakfast-cereal");
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1500.0, 900.0]).with_maximized(true).with_min_inner_size(Vec2::new(800.0, 500.0)).with_title("Open Cereal Workshop").with_app_id("open-cereal-workshop");
     if let Some(i) = icon {
         viewport = viewport.with_icon(i);
     }
@@ -3716,7 +3716,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "breakfast-cereal",
+        "open-cereal-workshop",
         options,
         Box::new(move |cc| {
             let mut v = egui::Visuals::dark();

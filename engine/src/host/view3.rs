@@ -375,7 +375,7 @@ mod os {
             conn.change_property32(PropMode::REPLACE, id, protocols, AtomEnum::ATOM, &[delete]).ok()?;
             conn.change_property8(PropMode::REPLACE, id, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes()).ok()?;
             conn.change_property8(PropMode::REPLACE, id, net_name, utf8, title.as_bytes()).ok()?;
-            conn.change_property8(PropMode::REPLACE, id, AtomEnum::WM_CLASS, AtomEnum::STRING, b"breakfast-cereal\0Breakfast Cereal\0").ok()?;
+            conn.change_property8(PropMode::REPLACE, id, AtomEnum::WM_CLASS, AtomEnum::STRING, b"open-cereal-workshop\0Open Cereal Workshop\0").ok()?;
             // our main window may live on another display system, where this one cannot be tied to it:
             // it is kept in front instead, as an editor floating over the program
             let state = conn.intern_atom(false, b"_NET_WM_STATE").ok()?.reply().ok()?.atom;
@@ -538,7 +538,7 @@ mod os {
     impl Win {
         pub fn open(title: &str, w: i32, h: i32, resizable: bool) -> Option<Win> {
             static CLASS: std::sync::Once = std::sync::Once::new();
-            let class = wide("BreakfastCerealPlugView");
+            let class = wide("OpenCerealWorkshopPlugView");
             // SAFETY: the documented window calls, on the window thread, with strings that outlive them.
             unsafe {
                 let instance = GetModuleHandleW(std::ptr::null());

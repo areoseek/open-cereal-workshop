@@ -129,7 +129,7 @@ impl App {
         .hint("Notes on this channel play the clips of the performance zone: each octave is a track, each key a clip");
         changed |= ui.checkbox(&mut self.settings.midi_sync, "Send master sync").hint("The clock, start and stop go to every output that has a port number").changed();
         if cfg!(target_os = "linux") {
-            ui.label(RichText::new("Each port in use is also a port of \"Breakfast Cereal Out\" that other programs can connect to.").color(TEXT_DIM).small());
+            ui.label(RichText::new("Each port in use is also a port of \"Open Cereal Workshop Out\" that other programs can connect to.").color(TEXT_DIM).small());
         }
         ui.add_space(8.0);
         ui.label(RichText::new("Input").strong());
