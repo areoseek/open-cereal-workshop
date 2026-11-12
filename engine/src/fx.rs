@@ -811,18 +811,18 @@ pub static DEFS: &[Def] = &[
         size: 52,
         fixed: &[],
         params: &[
-            p("Mix", 4, 0, 127, 127),
-            p("Gain", 8, 0, 127, 64),
-            p("Squarize", 12, 0, 65535, 1),
-            p("Squarize on", 16, 0, 1, 0),
-            p("Relation", 20, 0, 4, 0),
-            p("Preserve", 24, 0, 65535, 32768),
-            p("Impact", 28, 0, 65535, 32768),
-            p("Puncher on", 32, 0, 1, 0),
-            p("Filter post", 36, 0, 1, 0),
-            p("Resonance", 40, 0, 16383, 0),
-            p("Cutoff", 44, 0, 16383, 7500),
-            p("Punch level", 48, 0, 16383, 0),
+            p("Gain", 4, 0, 127, 127),
+            p("Mix", 8, 0, 127, 64),
+            p("Steps", 12, 0, 65535, 1),
+            p("Filter on", 16, 0, 1, 0),
+            p("Filter type", 20, 0, 4, 0),
+            p("Resonance", 24, 0, 65535, 32768),
+            p("Cutoff", 28, 0, 65535, 32768),
+            p("Filter post", 32, 0, 1, 0),
+            p("Relation", 36, 0, 3, 0),
+            p("Hit", 40, 0, 44100, 0),
+            p("Keep", 44, 0, 44100, 7500),
+            p("Hit level", 48, 0, 65535, 0),
         ],
     },
     Def { kind: Kind::DcBlock, ident: "Fruity Center", title: "Centre", size: 8, fixed: &[(0, 1)], params: &[p("On", 4, 0, 1, 1)] },
@@ -3761,38 +3761,90 @@ impl Unit {
                 }
             }
             Kind::Squeeze => {
-                let (mix, gain) = (p[0] / 127.0, p[1] / 64.0);
-                let q = (2f32).powf(15.0 - 13.0 * p[2] / 65535.0);
-                let (sq_on, punch_on, post) = (p[3] >= 0.5, p[7] >= 0.5, p[8] >= 0.5);
-                let keep = (p[5] / 65535.0 * sr) as usize;
-                let hit = (p[6] / 65535.0 * sr) as usize;
-                let level = p[11] / 16383.0;
-                let g = svf_g((p[10].max(20.0)).min(sr * 0.45), sr);
-                let k = 2.0 - 1.9 * (p[9] / 16383.0).clamp(0.0, 1.0);
-                let open = p[10] >= 16383.0;
+                // Every law here was measured against reference renders.
+                let (gain, mix) = (p[0] / 127.0, p[1] / 128.0);
+                // Step size doubles every 1/30 of the knob, from one 16 bit step.
+                let step = (2f32).powf(30.0 * p[2] / 65536.0 - 15.0);
+                let (filter_on, kind, post) = (p[3] >= 0.5, p[4] as i32, p[7] >= 0.5);
+                let fc = 50.0 * 661.5f32.powf(p[6] / 65535.0);
+                let ff = 2.0 * (std::f32::consts::PI * (fc / (2.0 * sr)).min(0.25)).sin();
+                let damp = (2.0 * (1.0 - (p[5] / 65535.0).clamp(0.0, 1.0).powf(0.25))).min((2.0 / ff - ff * 0.5).min(2.0));
+                // Block lengths in samples: one sample at zero, a second at the top of the range.
+                let len = |v: f32| 44101f64.powf(v as f64 / 44100.0) as f32;
+                let keep = len(p[10]);
+                let hit = match p[8] as i32 {
+                    1 => keep,
+                    2 => keep * keep,
+                    3 => keep.sqrt(),
+                    _ => len(p[9]),
+                };
+                let punch_on = p[8] >= 0.5 || p[9] >= 0.5;
+                let scale = sr / 44100.0;
+                let (keep, cycle) = (keep * scale, (keep + hit) * scale);
+                let level = p[11] / 65535.0;
+                let filt = |z: &mut [f32], x: f32| -> f32 {
+                    let mut out = 0.0;
+                    for _ in 0..2 {
+                        let notch = x - damp * z[1];
+                        z[0] += ff * z[1];
+                        let high = notch - z[0];
+                        z[1] += ff * high;
+                        out += 0.5
+                            * match kind {
+                                1 => high,
+                                2 => z[1],
+                                3 => notch,
+                                4 => z[0] - high,
+                                _ => z[0],
+                            };
+                    }
+                    out
+                };
+                if z[6] == 0.0 {
+                    // From a cold start it only runs 170 samples of silence before stopping.
+                    z[5] = 41.0 * scale;
+                    z[6] = 1.0;
+                }
                 for f in io.iter_mut() {
                     let dry = *f;
                     let mut y = *f;
-                    if !post && !open {
-                        y[0] = svf(&mut z[0..2], y[0], g, k).0;
-                        y[1] = svf(&mut z[2..4], y[1], g, k).0;
+                    // The unit stops 212 samples after its input goes silent, whatever is still ringing inside.
+                    if dry[0].abs() > 1e-7 || dry[1].abs() > 1e-7 {
+                        z[5] = 0.0;
+                    } else {
+                        z[5] += 1.0;
                     }
-                    if sq_on {
-                        y[0] = (y[0] * q).round() / q;
-                        y[1] = (y[1] * q).round() / q;
+                    if z[5] >= 212.0 * scale {
+                        // Everything inside holds still until sound comes back.
+                        *f = [0.0; 2];
+                        continue;
                     }
-                    if punch_on && hit > 0 {
-                        if self.pos >= keep {
-                            y = [level; 2];
+                    if filter_on && !post {
+                        y[0] = filt(&mut z[0..2], y[0]);
+                        y[1] = filt(&mut z[2..4], y[1]);
+                    }
+                    if step < 4.0 {
+                        y[0] = ((y[0] / step).round() * step).clamp(-1.0, 1.0);
+                        y[1] = ((y[1] / step).round() * step).clamp(-1.0, 1.0);
+                    } else {
+                        y = [0.0; 2];
+                    }
+                    if punch_on {
+                        // Share of this sample that falls inside the kept block; block edges land between samples.
+                        let t = z[4];
+                        let over = |a: f32, b: f32| ((t + 1.0).min(b) - t.max(a)).max(0.0);
+                        let w = (over(0.0, keep) + over(cycle, cycle + keep)).min(1.0);
+                        let g = w + (1.0 - w) * level;
+                        y[0] *= g;
+                        y[1] *= g;
+                        z[4] = t + 1.0;
+                        if z[4] >= cycle {
+                            z[4] -= cycle;
                         }
-                        self.pos += 1;
-                        if self.pos >= keep + hit {
-                            self.pos = 0;
-                        }
                     }
-                    if post && !open {
-                        y[0] = svf(&mut z[0..2], y[0], g, k).0;
-                        y[1] = svf(&mut z[2..4], y[1], g, k).0;
+                    if filter_on && post {
+                        y[0] = filt(&mut z[0..2], y[0]);
+                        y[1] = filt(&mut z[2..4], y[1]);
                     }
                     f[0] = (dry[0] + (y[0] - dry[0]) * mix) * gain;
                     f[1] = (dry[1] + (y[1] - dry[1]) * mix) * gain;
