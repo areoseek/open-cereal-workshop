@@ -505,6 +505,16 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 }
             }
         }
+        if let (Some(sl), true) = (now.slices.as_ref(), now.slices != was.slices && now.plugin == was.plugin) {
+            // a loop slicer whose cuts were moved: the new places go into its own block
+            if let Some(i) = find(ev, end, id::PLUGIN_PARAMS) {
+                if let Value::Data(d) = &mut ev[i].value {
+                    if now.plugin.eq_ignore_ascii_case("Fruity Slicer") {
+                        sl.store(d);
+                    }
+                }
+            }
+        }
         if let (Some(bay), Some(g), true) = (now.bay(), now.gen.as_ref(), was.bay().is_some()) {
             // still a patch bay: only its instrument's settings go back, inside the bay's own block
             let held = bay.fx.sub != was.bay().and_then(|b| b.fx.sub.clone());
@@ -2556,6 +2566,7 @@ mod tests {
     #[test]
     fn corpus_saves_exactly_and_edits_survive() {
         let Ok(dir) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        static SLICERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
                 let p = e.path();
@@ -2573,6 +2584,18 @@ mod tests {
             let bytes = std::fs::read(&p).unwrap();
             let (song, f) = reload(&bytes);
             assert_eq!(to_bytes(&song, Some(&f)).unwrap(), bytes, "untouched save differs: {}", p.display());
+
+            // a loop slicer's cut moved by hand comes back where it was put
+            if let Some(ci) = song.channels.iter().position(|c| c.plugin.eq_ignore_ascii_case("Fruity Slicer") && c.slices.as_ref().is_some_and(|s| s.cuts.len() > 1)) {
+                let mut s = song.clone();
+                let mut sl = (**s.channels[ci].slices.as_ref().unwrap()).clone();
+                sl.cuts[1].pos += 3;
+                sl.cuts[0].reverse = !sl.cuts[0].reverse;
+                s.channels[ci].slices = Some(std::sync::Arc::new(sl.clone()));
+                let (back, _) = reload(&to_bytes(&s, Some(&f)).unwrap());
+                assert_eq!(back.channels[ci].slices.as_deref(), Some(&sl), "moved cut lost: {}", p.display());
+                SLICERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
 
             let mut s = song.clone();
             s.tempo = 133.25;
@@ -2632,5 +2655,6 @@ mod tests {
                 assert_eq!((c.name.as_str(), c.sample_path.as_str(), c.insert), (o.name.as_str(), o.sample_path.as_str(), o.insert), "{name}");
             }
         }
+        eprintln!("slicers with a moved cut checked: {}", SLICERS.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

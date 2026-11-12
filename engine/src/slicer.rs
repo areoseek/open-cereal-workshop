@@ -123,6 +123,29 @@ impl Slices {
         Some(Self { beats: flt(4)?, bpm: flt(8)?, path, cuts, base, rate })
     }
 
+    /// Write the cuts' places and reverse switches back into the block they were read from. The count and
+    /// the names stay as they are, so every value keeps its place. False when the block does not match.
+    pub fn store(&self, state: &mut [u8]) -> bool {
+        let Some(n) = state.get(32).map(|&n| n as usize) else { return false };
+        let mut at = 33 + n;
+        let Some(count) = state.get(at..at + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap())) else { return false };
+        if count as usize != self.cuts.len() {
+            return false;
+        }
+        at += 4;
+        for cut in &self.cuts {
+            let Some(n) = state.get(at).map(|&n| n as usize) else { return false };
+            let next = at + 1 + n;
+            if state.len() < next + 13 {
+                return false;
+            }
+            state[next..next + 4].copy_from_slice(&(cut.pos as i32).to_le_bytes());
+            state[next + 12] = cut.reverse as u8;
+            at = next + 13;
+        }
+        true
+    }
+
     /// The slice a key plays: (first frame, frames, reversed), in the cut points' own rate.
     pub fn for_key(&self, key: u8, total: usize) -> Option<(usize, usize, bool)> {
         let k = self.cuts.iter().position(|c| c.key == key as i32).or_else(|| {
@@ -139,6 +162,37 @@ impl Slices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moved_cuts_go_back_into_the_block() {
+        let mut b = 1i32.to_le_bytes().to_vec();
+        b.extend(4.0f32.to_le_bytes());
+        b.extend(120.0f32.to_le_bytes());
+        b.resize(32, 0);
+        b.push(5);
+        b.extend(b"a.wav");
+        b.extend(2i32.to_le_bytes());
+        for (name, pos) in [("one", 0i32), ("", 900)] {
+            b.push(name.len() as u8);
+            b.extend(name.as_bytes());
+            b.extend(pos.to_le_bytes());
+            b.extend((-1i32).to_le_bytes());
+            b.extend([0u8; 5]);
+        }
+        b.push(0);
+        b.extend(60i32.to_le_bytes());
+        b.extend(44100i32.to_le_bytes());
+        let mut sl = Slices::parse(&b).unwrap();
+        assert_eq!(sl.cuts[1].pos, 900);
+        sl.cuts[1].pos = 1234;
+        sl.cuts[0].reverse = true;
+        let len = b.len();
+        assert!(sl.store(&mut b));
+        assert_eq!(b.len(), len);
+        assert_eq!(Slices::parse(&b).unwrap(), sl);
+        sl.cuts.pop();
+        assert!(!sl.store(&mut b));
+    }
 
     #[test]
     fn a_wave_kept_in_the_block_gives_its_markers_as_slices() {

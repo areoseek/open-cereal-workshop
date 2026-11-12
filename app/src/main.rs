@@ -528,6 +528,12 @@ impl App {
                     }
                     "piano" => app.show_piano = true,
                     "channel" => app.show_chanset = true,
+                    w if w.starts_with("chan=") => {
+                        // "chan=slicer" picks the first loop slicer; a number picks that channel
+                        let n = w[5..].parse().ok().or_else(|| app.song.channels.iter().position(|c| c.slices.is_some()));
+                        app.sel_chan = n.unwrap_or(0).min(app.song.channels.len().saturating_sub(1));
+                        app.show_chanset = true;
+                    }
                     "misc" => {
                         app.show_chanset = true;
                         app.chanset.show_misc();

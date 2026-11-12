@@ -399,6 +399,51 @@ impl App {
                         let r = draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
                         // the cuts over the wave, each with its number; reversed slices are tinted
                         let total = (s.frames.len() as f64 * sl.rate as f64 / s.rate.max(1) as f64).max(1.0);
+                        // the first kind keeps its cuts in its own block, so they can be moved by hand: drag a
+                        // cut line, right-click a slice to turn it around
+                        if c.plugin.eq_ignore_ascii_case("Fruity Slicer") {
+                            let resp = ui.interact(r, ui.id().with(("cuts", ci)), egui::Sense::click_and_drag());
+                            let grab = egui::Id::new(("cut grab", ci));
+                            let frame_at = |x: f32| (((x - r.left()) / r.width().max(1.0)).clamp(0.0, 1.0) as f64 * total) as usize;
+                            let mut edit = None;
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                if resp.drag_started() {
+                                    let near = sl.cuts.iter().enumerate().skip(1).map(|(i, c)| (i, (r.left() + (c.pos as f64 / total) as f32 * r.width() - pos.x).abs())).filter(|&(_, d)| d < 5.0).min_by(|a, b| a.1.total_cmp(&b.1));
+                                    ui.data_mut(|d| d.insert_temp(grab, near.map_or(usize::MAX, |n| n.0)));
+                                }
+                                let held: usize = ui.data(|d| d.get_temp(grab)).unwrap_or(usize::MAX);
+                                if resp.dragged() && held < sl.cuts.len() {
+                                    // a cut stays between its neighbours
+                                    let lo = sl.cuts.iter().map(|c| c.pos).filter(|&p| p < sl.cuts[held].pos).max().map_or(1, |p| p + 1);
+                                    let hi = sl.cuts.iter().map(|c| c.pos).filter(|&p| p > sl.cuts[held].pos).min().map_or(total as usize, |p| p).saturating_sub(1).max(lo);
+                                    let to = frame_at(pos.x).clamp(lo, hi);
+                                    if to != sl.cuts[held].pos {
+                                        edit = Some((held, to, sl.cuts[held].reverse));
+                                    }
+                                }
+                                if resp.secondary_clicked() {
+                                    let f = frame_at(pos.x);
+                                    if let Some((i, c)) = sl.cuts.iter().enumerate().filter(|(_, c)| c.pos <= f).max_by_key(|(_, c)| c.pos) {
+                                        edit = Some((i, c.pos, !c.reverse));
+                                    }
+                                }
+                            }
+                            if resp.hovered() {
+                                let over = ui.ctx().pointer_hover_pos().is_some_and(|p| sl.cuts.iter().skip(1).any(|c| (r.left() + (c.pos as f64 / total) as f32 * r.width() - p.x).abs() < 5.0));
+                                if over {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                }
+                            }
+                            if let Some((i, pos, reverse)) = edit {
+                                let mut new = (*sl).clone();
+                                new.cuts[i].pos = pos;
+                                new.cuts[i].reverse = reverse;
+                                let ch = &mut self.song.channels[ci];
+                                ch.slices = Some(std::sync::Arc::new(new));
+                                changed = true;
+                            }
+                        }
+                        let sl = self.song.channels[ci].slices.clone().unwrap();
                         let p = ui.painter_at(r);
                         for (i, cut) in sl.cuts.iter().enumerate() {
                             let x = r.left() + (cut.pos as f64 / total) as f32 * r.width();
