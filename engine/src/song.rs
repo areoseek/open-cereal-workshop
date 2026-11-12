@@ -615,6 +615,18 @@ impl Pattern {
             false
         }
     }
+    /// A step counts as lit when the channel has a note anywhere inside it: a shifted step starts late.
+    pub fn has_step_in(&self, chan: u16, pos: u32, step: u32) -> bool {
+        self.notes.iter().any(|n| n.chan == chan && n.pos >= pos && n.pos < pos + step)
+    }
+    pub fn set_step_in(&mut self, chan: u16, pos: u32, step: u32, on: bool) {
+        if !on {
+            self.notes.retain(|n| !(n.chan == chan && n.pos >= pos && n.pos < pos + step));
+        } else if !self.has_step_in(chan, pos, step) {
+            self.notes.push(Note::step(pos, chan));
+            self.sort();
+        }
+    }
     pub fn set_step(&mut self, chan: u16, pos: u32, on: bool) {
         if self.has_step(chan, pos) != on {
             self.toggle_step(chan, pos);

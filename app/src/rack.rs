@@ -29,7 +29,7 @@ pub struct State {
     keys: bool,
 }
 
-const GRAPH: [&str; 7] = ["Note pitch", "Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y"];
+const GRAPH: [&str; 8] = ["Note pitch", "Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y", "Shift"];
 const GRAPH_H: f32 = 64.0;
 /// The keyboard editor: the height of one key's row, and of the part of the keyboard in view.
 const KEY_H: f32 = 7.0;
@@ -133,7 +133,7 @@ impl App {
                     self.rack.keys = !self.rack.keys;
                 }
                 if self.rack.graph {
-                    egui::ComboBox::from_id_salt("rack_graph_kind").width(110.0).selected_text(GRAPH[self.rack.graph_kind.min(6)]).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("rack_graph_kind").width(110.0).selected_text(GRAPH[self.rack.graph_kind.min(7)]).show_ui(ui, |ui| {
                         for (i, name) in GRAPH.iter().enumerate() {
                             ui.selectable_value(&mut self.rack.graph_kind, i, *name);
                         }
@@ -178,19 +178,19 @@ impl App {
                         let pos = s * step;
                         let notes = &mut self.song.patterns[pat];
                         if resp.secondary_clicked() || (resp.dragged_by(egui::PointerButton::Secondary)) {
-                            if notes.has_step(chan, pos) {
-                                notes.set_step(chan, pos, false);
+                            if notes.has_step_in(chan, pos, step) {
+                                notes.set_step_in(chan, pos, step, false);
                                 self.dirty = true;
                             }
                         } else if resp.clicked() || resp.dragged_by(egui::PointerButton::Primary) || resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) {
-                            notes.set_step(chan, pos, true);
-                            for n in notes.notes.iter_mut().filter(|n| n.chan == chan && n.pos == pos) {
+                            notes.set_step_in(chan, pos, step, true);
+                            for n in notes.notes.iter_mut().filter(|n| n.chan == chan && n.pos / step == s) {
                                 n.key = key as _;
                             }
                             self.dirty = true;
                         }
                     }
-                    for n in self.song.patterns[pat].notes.iter().filter(|n| n.chan == chan && n.pos % step == 0 && ((n.pos / step) as usize) < nsteps) {
+                    for n in self.song.patterns[pat].notes.iter().filter(|n| n.chan == chan && ((n.pos / step) as usize) < nsteps) {
                         let x = area.left() + (n.pos / step) as f32 * pitch;
                         let y = row(n.key as i32);
                         p.rect_filled(Rect::from_min_max(Pos2::new(x, y), Pos2::new(x + STEP_W, y + KEY_H - 1.0)), 1.0, ACCENT);
@@ -198,8 +198,9 @@ impl App {
                 });
             }
             if self.rack.graph {
-                let (chan, kind) = (self.sel_chan as u16, self.rack.graph_kind.min(6));
-                let two_sided = kind >= 3;
+                let (chan, kind) = (self.sel_chan as u16, self.rack.graph_kind.min(7));
+                let two_sided = (3..7).contains(&kind);
+                let mut moved = false;
                 egui::ScrollArea::horizontal().id_salt("rack_graph_scroll").show(ui, |ui| {
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(234.0 + nsteps as f32 * (STEP_W + 3.0), GRAPH_H), Sense::click_and_drag());
                     let area = Rect::from_min_max(Pos2::new(rect.left() + 234.0, rect.top()), rect.max);
@@ -210,24 +211,34 @@ impl App {
                     }
                     let drag = resp.interact_pointer_pos().filter(|pp| area.contains(*pp) && (resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on()));
                     let hit = drag.map(|pp| (((pp.x - area.left()) / (STEP_W + 3.0)) as u32, ((area.bottom() - pp.y) / area.height()).clamp(0.0, 1.0)));
-                    for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == chan && n.pos % step == 0) {
+                    for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == chan) {
                         let s = n.pos / step;
                         if s as usize >= nsteps {
                             continue;
                         }
                         if let Some((hs, f)) = hit {
                             if hs == s {
-                                graph_set(n, kind, f);
+                                if kind == 7 {
+                                    // shift: how late in its step the note starts
+                                    n.pos = s * step + (f * (step - 1) as f32).round() as u32;
+                                    moved = true;
+                                } else {
+                                    graph_set(n, kind, f);
+                                }
                                 self.dirty = true;
                             }
                         }
                         let x = area.left() + s as f32 * (STEP_W + 3.0);
-                        let y = area.bottom() - graph_get(n, kind) * area.height();
+                        let share = if kind == 7 { (n.pos % step) as f32 / (step - 1).max(1) as f32 } else { graph_get(n, kind) };
+                        let y = area.bottom() - share * area.height();
                         let foot = if two_sided { area.center().y } else { area.bottom() };
                         let bar = Rect::from_min_max(Pos2::new(x, y.min(foot)), Pos2::new(x + STEP_W, y.max(foot).max(y.min(foot) + 2.0)));
                         p.rect_filled(bar, 1.0, ACCENT);
                     }
                 });
+                if moved {
+                    self.song.patterns[pat].sort();
+                }
             }
         });
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -340,7 +351,7 @@ impl App {
                         for every in [2u32, 4, 8] {
                             if ui.button(format!("Fill each {every} steps")).clicked() {
                                 for s in (0..nsteps as u32).step_by(every as usize) {
-                                    self.song.patterns[pat].set_step(ci as u16, s * step, true);
+                                    self.song.patterns[pat].set_step_in(ci as u16, s * step, step, true);
                                 }
                                 self.dirty = true;
                                 ui.close_menu();
@@ -374,7 +385,7 @@ impl App {
 
                     // steps, or a small piano roll picture when the channel has real notes
                     let notes: Vec<(u32, u32, u8)> = self.song.patterns[pat].notes.iter().filter(|n| n.chan == ci as u16).map(|n| (n.pos, n.len, n.key)).collect();
-                    let melodic = notes.iter().any(|n| n.1 != 0 || n.2 != 60 || n.0 % step != 0);
+                    let melodic = notes.iter().any(|n| n.1 != 0);
                     if melodic {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(nsteps as f32 * (STEP_W + 3.0) - 3.0, STEP_H), Sense::click());
                         let p = ui.painter();
@@ -395,11 +406,12 @@ impl App {
                         }
                     } else {
                         for s in 0..nsteps {
-                            let (rect, _) = ui.allocate_exact_size(Vec2::new(STEP_W, STEP_H), Sense::hover());
+                            // the steps take the drag themselves, so painting across them does not move the window
+                            let (rect, _) = ui.allocate_exact_size(Vec2::new(STEP_W, STEP_H), Sense::drag());
                             let tick = s as u32 * step;
-                            let lit = notes.iter().any(|n| n.0 == tick);
+                            let lit = notes.iter().any(|n| n.0 / step == s as u32);
                             if ui.rect_contains_pointer(rect) && (primary || secondary) && lit != primary {
-                                self.song.patterns[pat].set_step(ci as u16, tick, primary);
+                                self.song.patterns[pat].set_step_in(ci as u16, tick, step, primary);
                                 self.dirty = true;
                                 if primary {
                                     self.sel_chan = ci;
