@@ -45,6 +45,10 @@ pub struct WaveEd {
     rename: Option<usize>,
     /// The tool whose settings are on show under the picture (its edit number).
     tool: Option<u8>,
+    /// The claw: the tempo, the stretch in beats, and which stretch of every so many goes.
+    claw_bpm: f32,
+    claw_beats: f32,
+    claw_every: u32,
     time: f32,
     semis: f32,
     eq: [f32; 10],
@@ -70,7 +74,7 @@ struct Snap {
 
 impl Default for WaveEd {
     fn default() -> Self {
-        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None }
+        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, claw_bpm: 120.0, claw_beats: 1.0, claw_every: 4, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None }
     }
 }
 
@@ -321,6 +325,7 @@ impl WaveEd {
                         (53, "Blur... (Ctrl+B)"),
                         (54, "Equalise... (Ctrl+Q)"),
                         (55, "Tune the loop... (Ctrl+L)"),
+                        (56, "Claw machine... (Alt+W)"),
                     ] {
                         if ui.button(name).clicked() {
                             self.tool = Some(k);
@@ -391,6 +396,14 @@ impl WaveEd {
                             let name = if *hz >= 1000.0 { format!("{}k ", hz / 1000.0) } else { format!("{hz} ") };
                             ui.add(egui::DragValue::new(&mut self.eq[i]).range(-36.0..=18.0).speed(0.1).prefix(name).suffix(" dB"));
                         }
+                    }
+                    56 => {
+                        ui.label("Claw machine: throw away every");
+                        ui.add(egui::DragValue::new(&mut self.claw_every).range(2..=64).speed(0.05).suffix(". stretch"));
+                        ui.label("of");
+                        ui.add(egui::DragValue::new(&mut self.claw_beats).range(0.0625..=64.0).speed(0.01).suffix(" beats"));
+                        ui.label("at");
+                        ui.add(egui::DragValue::new(&mut self.claw_bpm).range(20.0..=400.0).speed(0.1).suffix(" BPM"));
                     }
                     _ => {
                         ui.label("Tune the loop (or the marked stretch) so its end runs into its start. Join:");
@@ -627,6 +640,7 @@ impl WaveEd {
                     (M::ALT, Key::S, 38),
                     (M::ALT, Key::A, 13),
                     (M::ALT, Key::T, 60),
+                    (M::ALT, Key::W, 67),
                     (M::CTRL, Key::T, 61),
                     (M::CTRL, Key::R, 62),
                     (M::CTRL, Key::B, 63),
@@ -667,6 +681,7 @@ impl WaveEd {
                 4 => self.clip = self.frames[a..b].to_vec(),
                 28 => self.sel = (self.sel.0, self.sel.0),
                 60..=65 => self.tool = Some(e - 10),
+                67 => self.tool = Some(56),
                 66 => self.spec = !self.spec,
                 26 | 27 => {
                     // step to the stretch before or after, flag to flag
@@ -842,6 +857,11 @@ impl WaveEd {
                         }
                         53 => ops::blur(&mut self.frames, a, b, self.blur),
                         54 => ops::equalize(&mut self.frames, a, b, self.rate, &self.eq),
+                        56 => {
+                            let period = (60.0 / self.claw_bpm.max(1.0) * self.claw_beats * self.rate as f32) as usize;
+                            let new = ops::claw(&self.frames[a..b], period, self.claw_every as usize, self.rate);
+                            self.swap_in(a, b, new);
+                        }
                         55 => {
                             let (la, lb) = if self.lp.1 > self.lp.0 { self.lp } else { (a, b) };
                             ops::tune_loop(&mut self.frames, la, lb, (self.join_ms / 1000.0 * self.rate as f32) as usize);

@@ -549,6 +549,35 @@ fn overlap_stretch(clip: &[[f32; 2]], factor: f64, rate: u32) -> Frames {
 /// Move the pieces of a beat apart or together without stretching the pieces themselves: each piece starts
 /// `time` times later than it did; a piece left too long for its new place is faded short, one too short is
 /// followed by silence. `cuts` are where the pieces start, counted from the start of `clip`.
+/// Throw away every `every`-th stretch of `period` frames and close the gaps, with a short blend at each join.
+pub fn claw(clip: &[[f32; 2]], period: usize, every: usize, rate: u32) -> Frames {
+    let period = period.max(1);
+    let every = every.max(2);
+    let blend = ((rate as usize) / 200).min(period / 2);
+    let mut out: Frames = Vec::with_capacity(clip.len());
+    let mut joined = false;
+    for (k, part) in clip.chunks(period).enumerate() {
+        if (k + 1) % every == 0 {
+            joined = true;
+            continue;
+        }
+        let from = out.len();
+        out.extend_from_slice(part);
+        if joined && from >= blend {
+            // a quick fade down before the cut and up after it, so the join does not click
+            for i in 0..blend.min(part.len()) {
+                let t = (i + 1) as f32 / (blend + 1) as f32;
+                for c in 0..2 {
+                    out[from + i][c] *= t;
+                    out[from - 1 - i][c] *= t;
+                }
+            }
+        }
+        joined = false;
+    }
+    out
+}
+
 pub fn drum_stretch(clip: &[[f32; 2]], cuts: &[usize], time: f32, rate: u32) -> Frames {
     let time = time.clamp(0.05, 20.0) as f64;
     let mut starts: Vec<usize> = cuts.iter().copied().filter(|&c| c > 0 && c < clip.len()).collect();
@@ -792,6 +821,17 @@ mod tests {
         gate(&mut f, 0, 48_000, thresh, rate);
         assert_eq!(peak(&f, 20_000, 28_000), 0.0);
         assert!(peak(&f, 13_000, 17_000) > 0.5);
+    }
+
+    #[test]
+    fn the_claw_takes_every_nth_stretch() {
+        let clip: Frames = (0..1000).map(|i| [(i / 100) as f32, 1.0]).collect();
+        let out = claw(&clip, 100, 4, 48_000);
+        assert_eq!(out.len(), 800);
+        // stretches 3 and 7 are gone: the fourth hundred now holds what was the fifth
+        assert_eq!(out[350][0], 4.0);
+        assert_eq!(out[750][0], 9.0);
+        assert_eq!(out[240][0], 2.0);
     }
 
     #[test]
