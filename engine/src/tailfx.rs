@@ -112,10 +112,52 @@ fn svf(s: &mut [f32; 2], x: f32, g: f32, k: f32) -> (f32, f32, f32) {
     (v2, v1, x - k * v1 - v2)
 }
 
+/// One band of a three-band equaliser.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Band {
+    /// 0 low shelf, 1 peak, 2 high shelf.
+    pub kind: u8,
+    pub hz: f32,
+    pub db: f32,
+    /// Width in octaves (peaks only).
+    pub octaves: f32,
+}
+
+impl Band {
+    /// The filter as (b0, b1, b2, a1, a2), after the well-known cookbook formulas.
+    fn coefs(&self, sr: f32) -> [f32; 5] {
+        let a = 10f32.powf(self.db / 40.0);
+        let w = TAU * self.hz.clamp(20.0, sr * 0.45) / sr;
+        let (sn, cs) = w.sin_cos();
+        let (b, a0, a1, a2);
+        match self.kind {
+            1 => {
+                let alpha = sn * (std::f32::consts::LN_2 / 2.0 * self.octaves.clamp(0.1, 6.0) * w / sn).sinh();
+                b = [1.0 + alpha * a, -2.0 * cs, 1.0 - alpha * a];
+                (a0, a1, a2) = (1.0 + alpha / a, -2.0 * cs, 1.0 - alpha / a);
+            }
+            k => {
+                // a shelf of the gentlest slope without a bump
+                let alpha = sn / 2.0 * std::f32::consts::SQRT_2;
+                let r = 2.0 * a.sqrt() * alpha;
+                // the high shelf is the low one mirrored
+                let s = if k == 0 { 1.0 } else { -1.0 };
+                b = [a * ((a + 1.0) - s * (a - 1.0) * cs + r), s * 2.0 * a * ((a - 1.0) - s * (a + 1.0) * cs), a * ((a + 1.0) - s * (a - 1.0) * cs - r)];
+                (a0, a1, a2) = ((a + 1.0) + s * (a - 1.0) * cs + r, s * -2.0 * ((a - 1.0) + s * (a + 1.0) * cs), (a + 1.0) + s * (a - 1.0) * cs - r);
+            }
+        }
+        [b[0] / a0, b[1] / a0, b[2] / a0, a1 / a0, a2 / a0]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Set {
+    /// A three-band equaliser ahead of everything else.
+    pub tone: Option<[Band; 3]>,
     pub rack: Option<Rack>,
     pub delay: Option<Delay>,
+    /// Further echoes beside the first, each fed the same sound.
+    pub more: [Option<Delay>; 2],
     pub chorus: Option<Chorus>,
     pub gate: Option<Gate>,
     pub body: Option<Body>,
@@ -124,13 +166,13 @@ pub struct Set {
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
     pub fn tail(&self, sr: f32, step: f32) -> usize {
         let mut n = 0.0;
-        if let Some(d) = &self.delay {
+        for d in self.delay.iter().chain(self.more.iter().flatten()) {
             let time = if d.free > 0.0 { d.free * sr } else { d.left.max(d.right) * step };
             let repeats = if d.fb > 0.001 { (0.001f32.ln() / d.fb.ln()).ceil().min(60.0) } else { 1.0 };
             n += time * (repeats + 1.0);
@@ -166,6 +208,17 @@ pub struct State {
     combs: Vec<(Vec<f32>, usize, f32)>,
     passes: Vec<(Vec<f32>, usize)>,
     rack: Box<RackState>,
+    tone: [[[f32; 2]; 2]; 3],
+    more: [Side; 2],
+    dry: Vec<[f32; 2]>,
+}
+
+/// What one of the further echoes remembers.
+#[derive(Default)]
+struct Side {
+    line: Vec<[f32; 2]>,
+    at: usize,
+    lp: [f32; 2],
 }
 
 /// Comb and all-pass lengths of the room at 44.1 kHz; the right side is a little longer.
@@ -174,13 +227,30 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default() }
+        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new() }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
     /// sixteenth notes while it plays, so the gate keeps its place in the bar.
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
         let sr = self.sr;
+        if let Some(bands) = &set.tone {
+            for (band, z) in bands.iter().zip(self.tone.iter_mut()) {
+                if band.db == 0.0 {
+                    continue;
+                }
+                let c = band.coefs(sr);
+                for f in buf.iter_mut() {
+                    for side in 0..2 {
+                        let x = f[side];
+                        let y = c[0] * x + z[side][0];
+                        z[side][0] = c[1] * x - c[3] * y + z[side][1];
+                        z[side][1] = c[2] * x - c[4] * y;
+                        f[side] = y;
+                    }
+                }
+            }
+        }
         if let Some(r) = &set.rack {
             self.rack_first(r, buf);
         }
@@ -208,6 +278,11 @@ impl State {
                     }
                 }
             }
+        }
+        let many = set.more.iter().any(|m| m.is_some());
+        if many {
+            self.dry.clear();
+            self.dry.extend_from_slice(buf);
         }
         if let Some(d) = &set.delay {
             let n = (sr * 4.0) as usize;
@@ -246,6 +321,29 @@ impl State {
                 }
                 self.line[self.at] = [f[0] + wet[0] * d.fb, f[1] + wet[1] * d.fb];
                 self.at = (self.at + 1) % n;
+                f[0] += wet[0] * d.wet;
+                f[1] += wet[1] * d.wet;
+            }
+        }
+        for (d, st) in set.more.iter().zip(self.more.iter_mut()) {
+            let Some(d) = d else { continue };
+            let n = (sr * 4.0) as usize;
+            if st.line.len() != n {
+                st.line = vec![[0.0; 2]; n];
+                st.at = 0;
+            }
+            let (left, right) = if d.free > 0.0 { (d.free * sr, d.free * sr) } else { (d.left * step, d.right * step) };
+            let back = [left.clamp(8.0, n as f32 - 64.0) as usize, right.clamp(8.0, n as f32 - 64.0) as usize];
+            let lpc = 1.0 - (-TAU * d.high_hz.min(sr * 0.45) / sr).exp();
+            for (f, x) in buf.iter_mut().zip(self.dry.iter()) {
+                let mut wet = [0.0f32; 2];
+                for side in 0..2 {
+                    let y = st.line[(st.at + n - back[side]) % n][side];
+                    st.lp[side] += (y - st.lp[side]) * lpc;
+                    wet[side] = st.lp[side];
+                }
+                st.line[st.at] = [x[0] + wet[0] * d.fb, x[1] + wet[1] * d.fb];
+                st.at = (st.at + 1) % n;
                 f[0] += wet[0] * d.wet;
                 f[1] += wet[1] * d.wet;
             }
@@ -556,5 +654,30 @@ mod tests {
         assert!(early > 1e-3 && late < early * 0.1 && late > early * 0.0001, "{early} {late}");
         assert!(buf.iter().skip(3000).any(|f| (f[0] - f[1]).abs() > 1e-3));
         assert!(set.tail(48000.0, 1000.0) > 48000);
+    }
+}
+
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+
+    fn level(set: &Set, hz: f32) -> f32 {
+        let sr = 48000.0;
+        let mut st = State::new(sr);
+        let mut buf: Vec<[f32; 2]> = (0..24000).map(|i| [(TAU * hz * i as f32 / sr).sin(); 2]).collect();
+        st.process(set, &mut buf, 6000.0, None);
+        let rms = (buf[12000..].iter().map(|f| f[0] * f[0]).sum::<f32>() / 12000.0).sqrt();
+        20.0 * (rms * std::f32::consts::SQRT_2).log10()
+    }
+
+    #[test]
+    fn the_three_bands_lift_and_cut_where_they_stand() {
+        let band = |kind, hz, db| Band { kind, hz, db, octaves: 1.0 };
+        let low = Set { tone: Some([band(0, 200.0, -12.0), band(1, 1000.0, 0.0), band(2, 5000.0, 0.0)]), ..Default::default() };
+        assert!((level(&low, 40.0) + 12.0).abs() < 1.0 && level(&low, 4000.0).abs() < 0.5);
+        let mid = Set { tone: Some([band(0, 200.0, 0.0), band(1, 1000.0, 9.0), band(2, 5000.0, 0.0)]), ..Default::default() };
+        assert!((level(&mid, 1000.0) - 9.0).abs() < 0.5 && level(&mid, 100.0).abs() < 0.5 && level(&mid, 9000.0).abs() < 0.5);
+        let high = Set { tone: Some([band(0, 200.0, 0.0), band(1, 1000.0, 0.0), band(2, 5000.0, 6.0)]), ..Default::default() };
+        assert!((level(&high, 16000.0) - 6.0).abs() < 1.0 && level(&high, 300.0).abs() < 0.5);
     }
 }

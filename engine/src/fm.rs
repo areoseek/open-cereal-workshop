@@ -427,6 +427,18 @@ pub const ARTS: usize = 62;
 
 /// The effects section of a current block: a chorus, three echoes and a room. `share` is how much of the sound
 /// is sent to them. One echo runs here, the first that is switched on; the chorus knob order is an estimate.
+/// The three bands of the equaliser: 16 bytes each (level in hundredths of a dB, place, width, kind).
+/// The place is taken as 20 Hz to 20 kHz on an even pitch scale and the width as up to four octaves;
+/// both are estimates.
+fn equaliser(d: &[u8]) -> Option<[crate::tailfx::Band; 3]> {
+    let mut bands = [crate::tailfx::Band::default(); 3];
+    for (b, base) in bands.iter_mut().zip([1089usize, 1105, 1121]) {
+        let unit = |o: usize| at(d, o).clamp(0, 65536) as f32 / 65536.0;
+        *b = crate::tailfx::Band { kind: at(d, base + 12).clamp(0, 2) as u8, hz: 20.0 * 1000f32.powf(unit(base + 4)), db: at(d, base).clamp(-1800, 1800) as f32 / 100.0, octaves: 0.1 + 4.0 * unit(base + 8) };
+    }
+    bands.iter().any(|b| b.db != 0.0).then_some(bands)
+}
+
 fn effects(d: &[u8], share: f32) -> crate::tailfx::Set {
     use crate::tailfx::{Chorus, Delay, Reverb, Set};
     let k = |o: usize, top: i32| at(d, o).clamp(-top, top) as f32 / top as f32;
@@ -452,8 +464,11 @@ fn effects(d: &[u8], share: f32) -> crate::tailfx::Set {
         if d[base + 20] == 0 {
             e.free = (ticks / 384.0).max(0.002);
         }
-        set.delay = Some(e);
-        break;
+        if set.delay.is_none() {
+            set.delay = Some(e);
+        } else if let Some(slot) = set.more.iter_mut().find(|m| m.is_none()) {
+            *slot = Some(e);
+        }
     }
     let vol = k(1079, 128);
     if d[1083] != 0 && vol != 0.0 {
@@ -954,6 +969,20 @@ impl Patch {
         p.mody = at(d, 732).clamp(0, 1024) as f32 / 1024.0;
         if ver >= 19 && sent > 0.0 {
             p.tail = effects(d, sent / (sent + plain));
+        }
+        if ver >= 19 && d.len() >= 1137 {
+            // the equaliser stands on the output, on the effects' share, or on both; here it is one filter
+            // over the whole sound, so it runs unless it is meant for a share that is not the greater part
+            let share = if sent > 0.0 { sent / (sent + plain) } else { 0.0 };
+            let runs = match d[1085] {
+                1 => true,
+                2 => share < 0.5,
+                3 => share >= 0.5,
+                _ => false,
+            };
+            if runs {
+                p.tail.tone = equaliser(d);
+            }
         }
 
         // the patch notes: where they start moved between layouts. Newer blocks hold a one-byte length and two
@@ -1677,13 +1706,31 @@ pub(crate) mod tests {
         let e = t.delay.expect("the first echo is on");
         assert_eq!((e.left, e.right), (3.0, 3.0));
         assert!(e.wet > 0.1 && e.wet < 0.5 && e.free == 0.0);
-        assert!(t.chorus.is_some());
+        assert!(t.chorus.is_some() && t.more[0].is_none());
         let r = t.reverb.expect("the room is on");
         assert_eq!((r.secs, r.high_hz), (1.5, 4000.0));
+        // a second echo beside the first
+        for (o, v) in [(1001, 40), (1005, 96), (1013, 100)] {
+            put(&mut d, o, v);
+        }
+        d[1023] = 1;
+        let t = Patch::from_plain(&d, 25).unwrap().tail;
+        assert_eq!((t.delay.unwrap().left, t.more[0].unwrap().left, t.more[1]), (3.0, 2.0, None));
+        d[1023] = 0;
         d[1083] = 0;
         d[1000] = 0;
         let t = Patch::from_plain(&d, 25).unwrap().tail;
-        assert!(t.delay.is_none() && t.reverb.is_none() && t.chorus.is_some());
+        assert!(t.delay.is_none() && t.reverb.is_none() && t.chorus.is_some() && t.tone.is_none());
+        // the equaliser: switched to output and effects, its low band pulled down
+        d[1085] = 1;
+        for (o, v) in [(1089, -900), (1093, 5777), (1097, 17500), (1101, 0), (1109, 33145), (1117, 1), (1125, 55825), (1133, 2)] {
+            put(&mut d, o, v);
+        }
+        let bands = Patch::from_plain(&d, 25).unwrap().tail.tone.expect("the equaliser runs");
+        assert_eq!((bands[0].kind, bands[0].db, bands[1].kind, bands[2].kind), (0, -9.0, 1, 2));
+        assert!(bands[0].hz > 30.0 && bands[0].hz < 45.0 && bands[1].hz > 500.0 && bands[1].hz < 800.0 && bands[2].hz > 6000.0);
+        d[1085] = 0;
+        assert!(Patch::from_plain(&d, 25).unwrap().tail.tone.is_none());
     }
 
     /// The older point layouts read, and a line changed in one is written back in the current layout.
