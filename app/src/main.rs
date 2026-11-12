@@ -779,6 +779,32 @@ impl App {
                     None => "Not linked.".to_string(),
                 });
                 ui.label("Move a knob or slider on your MIDI device to link it.");
+                // what the control gets is this formula's answer for what was sent (Input); empty sends it on as it is
+                let id = egui::Id::new(("link_formula", self.song.event_address(t)));
+                let had = self.song.link_maps.iter().find(|m| m.target == t).map(|m| m.text.clone()).unwrap_or_default();
+                let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| had.clone());
+                ui.horizontal(|ui| {
+                    ui.label("Mapping formula");
+                    ui.add(egui::TextEdit::singleline(&mut text).hint_text("Input").desired_width(220.0));
+                    egui::ComboBox::from_id_salt("link_formula_pick").width(18.0).selected_text("").show_ui(ui, |ui| {
+                        for f in ["Input", "1-Input", "Input*0.5", "Input*0.5+0.5", "Input*2", "Input^2", "Tension(Input,10)", "Tension(1-Input,10)", "1-Cos(Input*Pi)*0.5-0.5"] {
+                            if ui.selectable_label(false, f).clicked() {
+                                text = f.to_string();
+                            }
+                        }
+                    });
+                });
+                let t_trim = text.trim().to_string();
+                if t_trim != had && (t_trim.is_empty() || cereal_engine::formula::compile(&t_trim).is_ok()) {
+                    self.song.link_maps.retain(|m| m.target != t);
+                    if !t_trim.is_empty() && !t_trim.eq_ignore_ascii_case("input") {
+                        self.song.link_maps.push(cereal_engine::song::LinkMap::new(t, &t_trim));
+                    }
+                    self.dirty = true;
+                } else if t_trim != had {
+                    ui.label(RichText::new("The formula does not read yet.").small().color(TEXT_DIM));
+                }
+                ui.data_mut(|d| d.insert_temp(id, text));
                 // sender units in the mixer can drive the control too
                 let mut senders: Vec<(usize, u16, u16, String)> = vec![];
                 for (i, ins) in self.song.inserts.iter().enumerate() {
@@ -852,13 +878,14 @@ impl App {
                 self.song.midi_links.retain(|l| l.target != t);
                 if let (Some(&(cc, v)), false) = (moves.first(), unlink) {
                     self.song.midi_links.push(cereal_engine::song::MidiLink { ctrl: cc as u16, port: 0, target: t });
-                    self.song.set_travel(t, v as f32 / 127.0);
+                    self.song.set_travel(t, self.song.mapped(t, v as f32 / 127.0));
                     self.status = format!("Controller {cc} linked to {}", self.song.target_name(t));
                 }
                 self.dirty = true;
                 done = true;
             }
             if done || !open {
+                ctx.data_mut(|d| d.remove::<String>(egui::Id::new(("link_formula", self.song.event_address(t)))));
                 self.link_learn = None;
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -867,7 +894,7 @@ impl App {
         for (cc, v) in moves {
             let hit: Vec<_> = self.song.midi_links.iter().filter(|l| l.ctrl == cc as u16 && !matches!(l.target, cereal_engine::song::Target::Other { .. })).map(|l| l.target).collect();
             for t in hit {
-                self.song.set_travel(t, v as f32 / 127.0);
+                self.song.set_travel(t, self.song.mapped(t, v as f32 / 127.0));
                 self.dirty = true;
             }
         }

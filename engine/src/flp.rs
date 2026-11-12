@@ -81,6 +81,8 @@ pub mod id {
     pub const PLAYLIST: u8 = 233;
     pub const CHAN_AUTOMATION: u8 = 234;
     pub const LINK: u8 = 227;
+    /// The mapping formula of the link written just before it.
+    pub const LINK_FORMULA: u8 = 230;
     /// A hardware controller tied to a control: laid out like `LINK`, with the controller number first.
     pub const MIDI_LINK: u8 = 226;
     pub const CHAN_FX_FLAGS: u8 = 70;
@@ -635,7 +637,16 @@ pub struct Flp {
     pub inserts: Vec<FlpInsert>,
     /// Automation clips and other controllers tied to the controls they drive.
     pub links: Vec<FlpLink>,
+    /// Mapping formulas: which entry of `links` and the text written after it.
+    pub link_formulas: Vec<(usize, String)>,
     pub file: FlpFile,
+}
+
+/// The text of a mapping formula record: two-byte characters, or one-byte ones in old files.
+pub fn formula_text(d: &[u8]) -> String {
+    let wide = d.len() >= 2 && d.len() % 2 == 0 && d.chunks(2).all(|c| c[1] == 0);
+    let s: String = if wide { d.chunks(2).map(|c| c[0] as char).collect() } else { d.iter().map(|b| *b as char).collect() };
+    s.trim_end_matches('\0').to_string()
 }
 
 /// One "this controls that" record (event 227).
@@ -1039,15 +1050,16 @@ impl Flp {
             a.markers = early_markers;
         }
         apply_mixer_params(&mut flp.inserts, &mixer_params, mixer_base(ver));
-        flp.links = file
-            .events
-            .iter()
-            .filter(|e| e.id == id::LINK)
-            .filter_map(|e| match &e.value {
-                Value::Data(d) if d.len() >= 12 => Some(FlpLink { kind: u16at(d, 0), source: u16at(d, 2), extra: u32at(d, 4), param: u16at(d, 8), dest: u16at(d, 10) }),
-                _ => None,
-            })
-            .collect();
+        for (i, e) in file.events.iter().enumerate() {
+            if let (id::LINK, Value::Data(d)) = (e.id, &e.value) {
+                if d.len() >= 12 {
+                    if let Some(Event { id: id::LINK_FORMULA, value: Value::Data(t) }) = file.events.get(i + 1) {
+                        flp.link_formulas.push((flp.links.len(), formula_text(t)));
+                    }
+                    flp.links.push(FlpLink { kind: u16at(d, 0), source: u16at(d, 2), extra: u32at(d, 4), param: u16at(d, 8), dest: u16at(d, 10) });
+                }
+            }
+        }
         flp.file = file;
         flp
     }

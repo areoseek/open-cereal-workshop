@@ -99,7 +99,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity PanOMatic (built, approximate)
 - [~] Fruity Parametric EQ (built as Seven Band EQ (classic), settings carried onto the newer unit)
 - [~] Fruity Parametric EQ 2 (built, approximate)
-- [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas not run)
+- [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas are read, run, edited in the link window and saved)
 - [~] Fruity Phase Inverter (built as Polarity Flip; no stored block seen, layout is a guess)
 - [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
 - [~] Fruity Reeverb (built as Room Reverb (classic), settings carried onto the newer unit)

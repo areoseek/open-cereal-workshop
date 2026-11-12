@@ -850,6 +850,43 @@ fn patch_ctl_links(ev: &mut Vec<Event>, song: &Song, base: &Song, mixer_base: us
     ev.splice(at..at, fresh);
 }
 
+/// Mapping formulas sit right after the link they belong to. One that still says what the song says keeps
+/// its bytes; the rest are written, changed or taken out, and one left without its link goes.
+fn patch_link_formulas(ev: &mut Vec<Event>, song: &Song, unicode: bool) {
+    let mut after_link: Option<Vec<&str>> = None;
+    let mut out: Vec<Event> = Vec::with_capacity(ev.len());
+    let all = std::mem::take(ev);
+    for e in all {
+        if e.id == id::LINK_FORMULA {
+            let keep = match (&after_link, &e.value) {
+                (Some(want), Value::Data(d)) => want.contains(&flp::formula_text(d).as_str()),
+                _ => false,
+            };
+            if keep {
+                after_link = None;
+                out.push(e);
+            }
+            // one that no longer fits is dropped here; the wanted text is written when the next record comes
+            continue;
+        }
+        if let Some(want) = after_link.take() {
+            if let Some(text) = want.first() {
+                let d: Vec<u8> = if unicode { text.encode_utf16().chain([0]).flat_map(|c| c.to_le_bytes()).collect() } else { text.bytes().chain([0]).collect() };
+                out.push(Event::data(id::LINK_FORMULA, d));
+            }
+        }
+        if let (id::LINK, Value::Data(d)) = (e.id, &e.value) {
+            if d.len() >= 12 {
+                let addr = (u16at(d, 8), u16at(d, 10));
+                let want: Vec<&str> = song.link_maps.iter().filter(|m| song.event_address(m.target) == addr).map(|m| m.text.as_str()).collect();
+                after_link = Some(want);
+            }
+        }
+        out.push(e);
+    }
+    *ev = out;
+}
+
 fn patch_midi_links(ev: &mut Vec<Event>, song: &Song, base: &Song) {
     if song.midi_links == base.midi_links {
         return;
@@ -1819,6 +1856,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_auto(&mut ev, song, &base);
     patch_midi_links(&mut ev, song, &base);
     patch_ctl_links(&mut ev, song, &base, flp::mixer_base(ver));
+    patch_link_formulas(&mut ev, song, unicode);
     patch_head(&mut ev, song, &base, unicode);
 
     let _ = latin1;
@@ -2289,9 +2327,22 @@ mod tests {
         assert_eq!(back.inserts[4].slots[0].fx.as_ref().unwrap().formula(), "a*b");
         // taking one away leaves the other
         song.ctl_links.remove(0);
-        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        let (bytes, flp) = save(&mut song, Some(&flp)).unwrap();
         let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
         assert_eq!(back.ctl_links, song.ctl_links);
+        // a mapping formula goes with its link, can be changed, and leaves with it
+        song.link_maps.push(crate::song::LinkMap::new(Target::InsertPan(3), "1-Input*0.5"));
+        assert!((song.mapped(Target::InsertPan(3), 0.5) - 0.75).abs() < 1e-6 && song.mapped(Target::InsertVolume(2), 0.5) == 0.5);
+        let (bytes, flp) = save(&mut song, Some(&flp)).unwrap();
+        let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
+        assert_eq!(back.link_maps, song.link_maps);
+        song.link_maps[0] = crate::song::LinkMap::new(Target::InsertPan(3), "Tension(Input,10)");
+        let (bytes, flp) = save(&mut song, Some(&flp)).unwrap();
+        let back = Song::from_flp_with(&flp::parse(&bytes).unwrap(), None, None);
+        assert_eq!(back.link_maps, song.link_maps);
+        song.link_maps.clear();
+        let (bytes, _) = save(&mut song, Some(&flp)).unwrap();
+        assert!(flp::parse(&bytes).unwrap().link_formulas.is_empty());
     }
 
     #[test]

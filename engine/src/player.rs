@@ -2199,7 +2199,7 @@ impl Player {
                 let local = (self.pos - pos as f64).min(len as f64) + offset as f64;
                 let v = auto.value_at(local);
                 for &t in &auto.targets {
-                    self.ov.set(t, v);
+                    self.ov.set(t, song.mapped(t, v));
                 }
             }
         }
@@ -2786,7 +2786,7 @@ impl Player {
                     self.ov.fit(song);
                     for k in 0..self.driven.len() {
                         let (t, v) = self.driven[k];
-                        self.ov.set(t, v);
+                        self.ov.set(t, song.mapped(t, v));
                     }
                     self.driven.clear();
                 }

@@ -827,6 +827,32 @@ pub struct Song {
     pub ctl_links: Vec<CtlLink>,
     /// Controls driven by a knob or slider of a MIDI device.
     pub midi_links: Vec<MidiLink>,
+    /// Mapping formulas of links: what arrives at the control is the formula's answer for what was sent.
+    pub link_maps: Vec<LinkMap>,
+}
+
+/// The mapping formula of whatever drives one control.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkMap {
+    pub target: Target,
+    pub text: String,
+    f: Option<crate::formula::Formula>,
+}
+
+impl LinkMap {
+    pub fn new(target: Target, text: &str) -> Self {
+        Self { target, text: text.to_string(), f: crate::formula::compile(text).ok() }
+    }
+
+    pub fn run(&self, v: f32) -> f32 {
+        match &self.f {
+            Some(f) => {
+                let out = f.value(&crate::formula::Vars { a: v as f64, ..Default::default() });
+                if out.is_finite() { out.clamp(0.0, 1.0) as f32 } else { v }
+            }
+            None => v,
+        }
+    }
 }
 
 /// One control tied to a controller number of a MIDI device.
@@ -907,6 +933,7 @@ impl Song {
             auto_plan: vec![],
             ctl_links: vec![],
             midi_links: vec![],
+            link_maps: vec![],
         };
         s.prepare();
         s
@@ -1255,6 +1282,9 @@ impl Song {
         for l in &mut self.midi_links {
             ft(&mut l.target);
         }
+        for l in &mut self.link_maps {
+            ft(&mut l.target);
+        }
     }
 
     /// Swap two channels of the rack, and with them everything that refers to either by number.
@@ -1292,6 +1322,9 @@ impl Song {
             ft(&mut l.target);
         }
         for l in &mut self.midi_links {
+            ft(&mut l.target);
+        }
+        for l in &mut self.link_maps {
             ft(&mut l.target);
         }
         for ch in &mut self.channels {
@@ -1347,6 +1380,13 @@ impl Song {
             }
         }
         self.midi_links.retain(|l| !matches!(l.target, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if k == ci));
+        self.link_maps.retain(|l| !matches!(l.target, Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if k == ci));
+        for l in &mut self.link_maps {
+            match &mut l.target {
+                Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k > ci => *k -= 1,
+                _ => {}
+            }
+        }
         for l in &mut self.midi_links {
             match &mut l.target {
                 Target::ChanVolume(k) | Target::ChanPan(k) | Target::ChanPitch(k) | Target::ChanParam(k, _) if *k > ci => *k -= 1,
@@ -1721,6 +1761,7 @@ impl Song {
                     _ => None,
                 })
                 .collect(),
+            link_maps: f.link_formulas.iter().filter_map(|(k, text)| f.links.get(*k).map(|l| LinkMap::new(target(l), text))).collect(),
             ctl_links: f
                 .links
                 .iter()
@@ -1880,6 +1921,17 @@ impl Song {
             Target::ChanParam(c, p) => self.channels.get(c)?.gen.as_ref()?.p.get(p as usize)?.round() as i32,
             Target::Other { .. } => return None,
         })
+    }
+
+    /// What reaches a control when `v` is sent to it: the answer of its mapping formula, when it has one.
+    pub fn mapped(&self, t: Target, v: f32) -> f32 {
+        if self.link_maps.is_empty() {
+            return v;
+        }
+        match self.link_maps.iter().find(|m| m.target == t) {
+            Some(m) => m.run(v),
+            None => v,
+        }
     }
 
     /// The raw values a target's control runs between; None for one we do not play.

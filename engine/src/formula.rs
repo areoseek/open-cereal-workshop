@@ -243,6 +243,10 @@ impl Parser {
                 if let Some(k) = ["a", "b", "c"].iter().position(|v| *v == w) {
                     return Ok(Node::Var(k as u8));
                 }
+                if w == "input" {
+                    // what a link's mapping formula is given
+                    return Ok(Node::Var(0));
+                }
                 let Some(&(_, f, least, most)) = FUNS.iter().find(|f| f.0 == w) else { return Err(format!("\"{w}\" is not a known name")) };
                 let mut args = Vec::new();
                 if self.op("(") && !self.op(")") {
