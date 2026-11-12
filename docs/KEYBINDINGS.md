@@ -96,7 +96,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Alt+G, Alt+Z, Alt+U | Group, zip, unzip | no |
 | PgUp / PgDn | Next / previous channel group | no |
 | Ctrl+Alt+R | Restretch all audio clips | no |
-| Shift+wheel | Move the channel under the pointer | no |
+| Shift+wheel on a channel name | Move that channel up / down | yes |
 
 ## Mixer
 | Binding | Action | Done |
@@ -113,7 +113,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+A, Ctrl+Shift+click | Select all, add to the selection | no (one track is selected at a time) |
 | Alt+R | Render the armed tracks to audio files | no |
 | Alt+W | Wave view | no |
-| Shift+wheel | Move the track under the pointer | no |
+| Shift+wheel on a track's name plate | Move that track left / right | yes |
 
 ## Piano roll
 | Binding | Action | Done |
@@ -194,7 +194,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
 | 6, Shift+6, Ctrl+P | Performance mode and its zoom | no |
 | 7 / 8, 9 | Transpose an audio clip down / up, reverse it | no |
-| Insert | Slice at the pointer | no |
+| Insert | Slice the clip under the pointer at the grid line | yes |
 | Shift+Alt+T | Time signature change | no |
 | Shift+G / Alt+G | Group / ungroup | no |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |
@@ -202,8 +202,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+Enter | Select the time round the selection | no |
 | Ctrl+F8, Alt+P | Project picker, picker panel | no |
 | Shift+M | Stretch mode | no |
-| Shift+wheel on a track name | Reorder tracks | no |
-| Shift+Alt+wheel | Nudge the clip under the pointer | no |
+| Shift+wheel on a track name | Move the track up / down | yes |
+| Shift+Alt+wheel | Nudge the clip under the pointer by the snap value | yes |
 | Right Shift, right Alt clicks | Slice, mute and quantise by clicking | no |
 
 ## Browser

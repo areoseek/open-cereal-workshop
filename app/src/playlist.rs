@@ -73,6 +73,8 @@ pub struct State {
     pub tool: Tool,
     snap: usize,
     pub sel: BTreeSet<usize>,
+    /// The grid point and the clip under the pointer, as of the last frame.
+    hover: Option<(u32, Option<usize>)>,
     clip: Vec<Clip>,
     /// What the draw and paint tools put down: the last clip touched, else the current pattern.
     brush: Option<(ClipSrc, u32, u32)>,
@@ -87,7 +89,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -217,6 +219,15 @@ impl App {
         let ntracks = self.song.tracks.len();
 
         if resp.hovered() {
+            // Shift and the wheel over a track name moves the track; with Alt as well, over a clip, it nudges the clip
+            if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
+                if heads.contains(pp) {
+                    let tr = (((pp.y - grid.top() + self.playlist.scroll_y) / th).floor().max(0.0) as usize).min(ntracks.saturating_sub(1));
+                    self.wheel_over = Some(crate::keys::WheelMove::Track(tr, false));
+                } else if let Some((_, Some(i))) = self.playlist.hover {
+                    self.wheel_over = Some(crate::keys::WheelMove::Clip(i, false));
+                }
+            }
             let (scroll, zoom, mods) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
             if zoom != 1.0 {
                 if mods.alt {
@@ -599,7 +610,10 @@ impl App {
             }
         }
 
+        self.playlist.hover = over.filter(|pp| grid.contains(*pp)).map(|pp| (snap(tick_of(pp.x)), hit.map(|h| h.0)));
+
         let mut done = false;
+        let mut cut: Option<(usize, u32)> = None;
         if let (Some(pp), Some(drag)) = (pointer, self.playlist.drag.as_ref()) {
             match drag {
                 Drag::Clips { mode, anchor_tick, anchor_track, orig } => {
@@ -685,17 +699,7 @@ impl App {
                         let x = x_of(*tick as f32);
                         ui.painter_at(grid).line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
                         if let Some((i, _)) = hit {
-                            let at = *tick;
-                            let c = &mut self.song.clips[i];
-                            if at > c.pos && at < c.pos + c.len {
-                                let mut tail = c.clone();
-                                tail.pos = at;
-                                tail.offset = c.offset + (at - c.pos);
-                                tail.len = c.pos + c.len - at;
-                                c.len = at - c.pos;
-                                self.song.clips.push(tail);
-                                self.dirty = true;
-                            }
+                            cut = Some((i, *tick));
                         }
                     } else {
                         done = true;
@@ -790,6 +794,9 @@ impl App {
             }
         } else if self.playlist.drag.is_some() && !down && !sec_down {
             done = true;
+        }
+        if let Some((i, at)) = cut {
+            self.pl_slice_clip(i, at);
         }
         if done {
             self.playlist.drag = None;
@@ -968,6 +975,29 @@ impl App {
         self.dirty = true;
     }
 
+    /// Cut one clip in two at a tick inside it.
+    fn pl_slice_clip(&mut self, i: usize, at: u32) {
+        let Some(c) = self.song.clips.get_mut(i) else { return };
+        if at > c.pos && at < c.pos + c.len {
+            let mut tail = c.clone();
+            tail.pos = at;
+            tail.offset = c.offset + (at - c.pos);
+            tail.len = c.pos + c.len - at;
+            c.len = at - c.pos;
+            self.song.clips.push(tail);
+            self.dirty = true;
+        }
+    }
+
+    /// Shift one clip by the snap value.
+    pub(crate) fn pl_nudge_clip(&mut self, i: usize, later: bool) {
+        let g = self.pl_snap().max(1);
+        if let Some(c) = self.song.clips.get_mut(i) {
+            c.pos = if later { c.pos + g } else { c.pos.saturating_sub(g) };
+            self.dirty = true;
+        }
+    }
+
     /// A new time marker at the play position, named straight away.
     pub(crate) fn add_marker(&mut self) {
         let bar = self.song.bar().max(1);
@@ -1105,6 +1135,11 @@ impl App {
                 self.playlist.scroll_x = ((self.playlist.scroll_x + off) * self.playlist.zoom / old - off).max(0.0);
             }
             Key::Home => self.handle.transport.seek(0),
+            Key::Insert if !repeat => {
+                if let Some((at, Some(i))) = self.playlist.hover {
+                    self.pl_slice_clip(i, at);
+                }
+            }
             Key::Backspace if !repeat => {
                 if self.playlist.snap == 1 {
                     self.playlist.snap = self.playlist.snap_back;

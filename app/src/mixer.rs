@@ -63,6 +63,9 @@ impl App {
                                     if resp.clicked() {
                                         self.sel_insert = i;
                                     }
+                                    if resp.hovered() {
+                                        self.wheel_over = Some(crate::keys::WheelMove::Insert(i, false));
+                                    }
                                     resp.context_menu(|ui| {
                                         if ui.button("Open mixer track state...").clicked() {
                                             self.state_ask = Some(crate::StateAsk::OpenTrack(i));

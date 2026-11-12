@@ -133,3 +133,17 @@ pub fn fit(ui: &Ui, text: &str, width: f32, font: &egui::FontId) -> String {
     }
     format!("{out}..")
 }
+
+/// The one text line of a rename window: it takes the keys as it appears, with the old name selected so typing replaces it.
+pub fn name_field(ui: &mut Ui, text: &mut String) -> Response {
+    let id = ui.make_persistent_id("name_field");
+    let fresh = !ui.memory(|m| m.has_focus(id));
+    let mut out = egui::TextEdit::singleline(text).id(id).show(ui);
+    if fresh {
+        out.response.request_focus();
+        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()));
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), id);
+    }
+    out.response
+}

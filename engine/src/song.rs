@@ -914,6 +914,20 @@ impl Song {
         let end = self.clips.iter().map(|c| c.pos + c.len).max().unwrap_or(0);
         end.div_ceil(bar).max(1) * bar
     }
+    /// Two playlist tracks change places, clips and all.
+    pub fn swap_tracks(&mut self, a: usize, b: usize) {
+        if a == b || a >= self.tracks.len() || b >= self.tracks.len() {
+            return;
+        }
+        self.tracks.swap(a, b);
+        for c in &mut self.clips {
+            if c.track as usize == a {
+                c.track = b as u16;
+            } else if c.track as usize == b {
+                c.track = a as u16;
+            }
+        }
+    }
     /// Where the song goes back to when it reaches its end: the loop marker if there is one, else the start marker.
     pub fn loop_start(&self) -> u32 {
         let of = |kind: u8| self.markers.iter().rev().find(|m| m.kind == kind).map(|m| m.pos);

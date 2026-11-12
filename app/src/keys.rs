@@ -8,6 +8,87 @@ use cereal_engine::song::Note;
 
 use crate::{App, Win};
 
+/// Something the wheel asked to move while the windows were being drawn; done once they are.
+#[derive(Clone, Copy)]
+pub(crate) enum WheelMove {
+    Channel(usize, bool),
+    Insert(usize, bool),
+    Track(usize, bool),
+    Clip(usize, bool),
+}
+
+impl App {
+    /// Shift and the wheel over something that can be moved: the turn is taken before anything scrolls with it.
+    pub(crate) fn take_wheel(&mut self, raw: &mut egui::RawInput) {
+        let Some(over) = self.wheel_over else { return };
+        let wanted = raw.modifiers.shift && (raw.modifiers.alt == matches!(over, WheelMove::Clip(..)));
+        if !wanted {
+            return;
+        }
+        let mut turned = 0.0;
+        raw.events.retain(|e| match e {
+            egui::Event::MouseWheel { unit, delta, .. } => {
+                turned += (delta.x + delta.y) / if *unit == egui::MouseWheelUnit::Point { 50.0 } else { 1.0 };
+                false
+            }
+            _ => true,
+        });
+        self.wheel_acc += turned;
+        let steps = self.wheel_acc.trunc();
+        self.wheel_acc -= steps;
+        if steps != 0.0 {
+            let up = steps > 0.0;
+            self.wheel_move = Some(match over {
+                WheelMove::Channel(i, _) => WheelMove::Channel(i, up),
+                WheelMove::Insert(i, _) => WheelMove::Insert(i, up),
+                WheelMove::Track(i, _) => WheelMove::Track(i, up),
+                WheelMove::Clip(i, _) => WheelMove::Clip(i, !up),
+            });
+        }
+    }
+
+    pub(crate) fn do_wheel_move(&mut self) {
+        let Some(mv) = self.wheel_move.take() else { return };
+        match mv {
+            WheelMove::Channel(ci, up) => {
+                let n = self.song.channels.len();
+                let to = if up { ci.checked_sub(1) } else { Some(ci + 1).filter(|t| *t < n) };
+                if let Some(to) = to.filter(|_| ci < n) {
+                    self.song.swap_channels(ci, to);
+                    if self.sel_chan == ci {
+                        self.sel_chan = to;
+                    } else if self.sel_chan == to {
+                        self.sel_chan = ci;
+                    }
+                    self.dirty = true;
+                }
+            }
+            WheelMove::Insert(i, left) => {
+                let n = self.song.inserts.len();
+                let to = if left { Some(i.wrapping_sub(1)).filter(|_| i > 1) } else { Some(i + 1).filter(|_| i > 0 && i + 2 < n) };
+                if let Some(to) = to {
+                    self.song.swap_inserts(i, to);
+                    if self.sel_insert == i {
+                        self.sel_insert = to;
+                    } else if self.sel_insert == to {
+                        self.sel_insert = i;
+                    }
+                    self.dirty = true;
+                }
+            }
+            WheelMove::Track(t, up) => {
+                let n = self.song.tracks.len();
+                let to = if up { t.checked_sub(1) } else { Some(t + 1).filter(|x| *x < n) };
+                if let Some(to) = to {
+                    self.song.swap_tracks(t, to);
+                    self.dirty = true;
+                }
+            }
+            WheelMove::Clip(i, later) => self.pl_nudge_clip(i, later),
+        }
+    }
+}
+
 /// The digit keys in the order the first ten channels are counted: 1 to 9, then 0.
 pub(crate) const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
 

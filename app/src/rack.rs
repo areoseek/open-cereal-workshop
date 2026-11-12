@@ -78,6 +78,9 @@ impl App {
                     if selected {
                         ui.painter().rect_filled(Rect::from_min_size(rect.right_top() + Vec2::new(2.0, 4.0), Vec2::new(3.0, STEP_H - 8.0)), 1.0, GREEN);
                     }
+                    if resp.hovered() {
+                        self.wheel_over = Some(crate::keys::WheelMove::Channel(ci, false));
+                    }
                     if resp.clicked() {
                         // a click on the name opens that channel's settings; a second click closes them
                         self.show_chanset = !(self.show_chanset && self.sel_chan == ci);
@@ -280,8 +283,7 @@ impl App {
         if let Some((ci, mut name)) = self.rack.rename.take() {
             let mut keep = true;
             egui::Window::new("Rename channel").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
-                let r = ui.text_edit_singleline(&mut name);
-                r.request_focus();
+                crate::widgets::name_field(ui, &mut name);
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     if let Some(c) = self.song.channels.get_mut(ci) {
                         c.name = name.clone();

@@ -24,6 +24,7 @@ pub(crate) enum Win {
     Mixer,
 }
 mod keys;
+mod testkeys;
 pub(crate) use keys::DIGITS;
 mod mixer;
 mod pianoroll;
@@ -178,6 +179,10 @@ pub(crate) struct App {
     show_picker: bool,
     /// Hold the song back until the first note is played, when play is pressed with recording armed.
     wait_input: bool,
+    wheel_acc: f32,
+    script: Option<testkeys::Script>,
+    wheel_move: Option<keys::WheelMove>,
+    wheel_over: Option<keys::WheelMove>,
     /// Keep the notes already there when recording over them.
     rec_blend: bool,
     /// The notes this recording pass wrote, which a pass that does not blend must not wipe again.
@@ -329,6 +334,10 @@ impl App {
             pl_max: false,
             show_picker: false,
             wait_input: false,
+            wheel_acc: 0.0,
+            script: testkeys::Script::from_env(),
+            wheel_move: None,
+            wheel_over: None,
             rec_blend: true,
             rec_new: Vec::new(),
             step_at: None,
@@ -1523,6 +1532,7 @@ impl App {
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
+        self.do_wheel_move();
         let typing_text = ctx.wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
         for e in events {
@@ -2030,8 +2040,7 @@ impl App {
             let mut keep = true;
             let mut open = true;
             egui::Window::new("Pattern name and colour").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-                let r = ui.text_edit_singleline(&mut name);
-                r.request_focus();
+                crate::widgets::name_field(ui, &mut name);
                 let mut col = self.song.patterns.get(pi).and_then(|p| p.color).unwrap_or([72, 81, 86]);
                 if ui.color_edit_button_srgb(&mut col).changed() {
                     if let Some(p) = self.song.patterns.get_mut(pi) {
@@ -2115,6 +2124,15 @@ struct RenderOpts {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(s) = self.script.as_mut().filter(|s| s.pending()) {
+            s.feed(raw);
+            ctx.request_repaint();
+        }
+        self.take_wheel(raw);
+        self.wheel_over = None;
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if !std::mem::replace(&mut self.prefs_win.scaled, true) && self.settings.scale > 0.0 {
             self.apply_scale(ctx);
@@ -2213,7 +2231,7 @@ impl eframe::App for App {
         if let Some((i, mut name)) = self.rename_insert.take() {
             let mut keep = true;
             egui::Window::new("Rename mixer track").collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.text_edit_singleline(&mut name).request_focus();
+                crate::widgets::name_field(ui, &mut name);
                 if ui.input(|x| x.key_pressed(Key::Enter)) {
                     if let Some(ins) = self.song.inserts.get_mut(i) {
                         ins.name = name.clone();
@@ -2232,7 +2250,7 @@ impl eframe::App for App {
         if let Some((i, mut name)) = self.rename_marker.take() {
             let mut keep = i < self.song.markers.len();
             egui::Window::new("Time marker").collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.text_edit_singleline(&mut name).request_focus();
+                crate::widgets::name_field(ui, &mut name);
                 let enter = ui.input(|x| x.key_pressed(Key::Enter));
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() || enter {
