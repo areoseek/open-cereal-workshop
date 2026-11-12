@@ -79,11 +79,11 @@ keyboard is on, and the number pad meaning applies otherwise.
 | 1 ... 9, 0 | Mute / unmute one of the first ten channels | part: with the typing keyboard off |
 | Ctrl+1 ... Ctrl+0 | Solo one of the first ten channels | yes |
 | Up / Down | Select the channel above / below | yes |
-| Alt+Up / Alt+Down | Move the selected channel up / down | yes |
-| Alt+C | Clone the channel | yes |
-| Alt+Del | Delete the channel | yes |
+| Alt+Up / Alt+Down | Move the selected channels up / down | yes |
+| Alt+C | Clone the selected channels | yes |
+| Alt+Del | Delete the selected channels | yes |
 | Alt+M | Show / hide the mixer track boxes | yes |
-| Ctrl+L | Send the channel to the first free mixer track | yes |
+| Ctrl+L | Send each selected channel to a free mixer track | yes |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste the channel's steps and notes | yes |
 | Shift+Ctrl+Left / Right | Turn the steps round by one step | yes |
 | Ctrl+Enter | Go to the playlist | yes |
@@ -92,9 +92,11 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Click / right-click the light | Mute / solo | yes |
 | Click the channel name | Select it, open or close its settings | yes |
 | Drop a sample, preset or score on a name | Load it | yes |
-| Shift+Up / Shift+Down | Add to the selection | no (one channel is selected at a time) |
-| Alt+G, Alt+Z, Alt+U | Group, zip, unzip | no |
-| PgUp / PgDn | Next / previous channel group | no |
+| Shift+Up / Shift+Down | Add to the selection | yes |
+| Click, Shift+click, right-click the selector beside a name | Select that channel alone, add or drop it, select all on show | yes |
+| Alt+G | Put the selected channels in a new or existing group, by name | yes |
+| Alt+Z / Alt+U | Zip the selected channels to a thin strip / unzip | yes |
+| PgUp / PgDn | Next / previous channel group | yes |
 | Ctrl+Alt+R | Restretch all audio clips | no |
 | Shift+wheel on a channel name | Move that channel up / down | yes |
 
@@ -105,8 +107,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | S | Solo the track | part: with the typing keyboard off |
 | Alt+S | Solo the track together with what feeds it and what it feeds | yes |
 | Alt+Left / Alt+Right | Move the track | yes |
-| Ctrl+L | Send the selected channel to this track | yes |
-| Shift+Ctrl+L | The same, starting at this track | part: one channel, so the same as Ctrl+L |
+| Ctrl+L | Send the selected channels to this track | yes |
+| Shift+Ctrl+L | Send the selected channels to this track and the ones after it, one each | yes |
 | Alt+L | Select the channel that plays into this track | yes |
 | F2 | Rename the track | yes |
 | Ctrl+Shift+S | Save the track's state | yes |

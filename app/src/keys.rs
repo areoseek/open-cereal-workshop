@@ -116,6 +116,16 @@ impl App {
         self.dirty = true;
     }
 
+    /// The channels a rack command works on: the selected ones, or the one that has the keys.
+    pub(crate) fn rack_targets(&self) -> Vec<usize> {
+        let n = self.song.channels.len();
+        let mut t: Vec<usize> = self.rack.sel.iter().copied().filter(|c| *c < n).collect();
+        if t.is_empty() && self.sel_chan < n {
+            t.push(self.sel_chan);
+        }
+        t
+    }
+
     pub(crate) fn clone_channel(&mut self, ci: usize) {
         let Some(mut c) = self.song.channels.get(ci).cloned() else { return };
         c.name = format!("{} #2", c.name);
@@ -196,6 +206,16 @@ impl App {
             return false;
         }
         let ci = self.sel_chan.min(n - 1);
+        let targets = self.rack_targets();
+        // the channels on show, in order; arrow keys walk these
+        let view: Vec<usize> = (0..n).filter(|c| self.song.in_view(*c)).collect();
+        let step = |from: usize, down: bool| {
+            if down {
+                view.iter().copied().find(|c| *c > from)
+            } else {
+                view.iter().rev().copied().find(|c| *c < from)
+            }
+        };
         if let Some(d) = DIGITS.iter().position(|k| *k == key).filter(|_| !m.alt && !m.shift) {
             // with the typing keyboard on, the plain digits are piano keys
             if self.typing_keys && !m.command {
@@ -222,13 +242,21 @@ impl App {
         }
         if m.command {
             match key {
-                Key::L if !repeat => match self.free_insert() {
-                    Some(i) => {
-                        self.link_channel(ci, i);
-                        self.sel_insert = i;
+                Key::L if !repeat => {
+                    // every selected channel gets a free track of its own
+                    for &c in &targets {
+                        match self.free_insert() {
+                            Some(i) => {
+                                self.link_channel(c, i);
+                                self.sel_insert = i;
+                            }
+                            None => {
+                                self.status = "No free mixer track".into();
+                                break;
+                            }
+                        }
                     }
-                    None => self.status = "No free mixer track".into(),
-                },
+                }
                 Key::Enter => {
                     self.show_playlist = true;
                     self.focus_window(Win::Playlist);
@@ -239,30 +267,86 @@ impl App {
         }
         if m.alt {
             match key {
-                Key::ArrowUp if ci > 0 => {
-                    self.song.swap_channels(ci, ci - 1);
-                    self.sel_chan = ci - 1;
-                    self.dirty = true;
+                Key::ArrowUp | Key::ArrowDown => {
+                    // the selected channels move together, the one nearest the way they go first
+                    let down = key == Key::ArrowDown;
+                    let mut order = targets.clone();
+                    if down {
+                        order.reverse();
+                    }
+                    let blocked = order.first().is_none_or(|&c| if down { c + 1 >= n } else { c == 0 });
+                    if !blocked {
+                        let moved = |c: usize| if down { c + 1 } else { c - 1 };
+                        for &c in &order {
+                            self.song.swap_channels(c, moved(c));
+                        }
+                        self.rack.sel = self.rack.sel.iter().map(|&c| moved(c)).collect();
+                        self.sel_chan = moved(ci);
+                        self.dirty = true;
+                    }
                 }
-                Key::ArrowDown if ci + 1 < n => {
-                    self.song.swap_channels(ci, ci + 1);
-                    self.sel_chan = ci + 1;
-                    self.dirty = true;
+                Key::C if !repeat => {
+                    for &c in &targets {
+                        self.clone_channel(c);
+                    }
                 }
-                Key::ArrowUp | Key::ArrowDown => {}
-                Key::C if !repeat => self.clone_channel(ci),
-                Key::Delete if !repeat => self.delete_channel(ci),
+                Key::Delete if !repeat => {
+                    for &c in targets.iter().rev() {
+                        self.delete_channel(c);
+                    }
+                }
                 Key::M if !repeat => self.rack.hide_selectors = !self.rack.hide_selectors,
+                Key::G if !repeat && !self.song.groups.is_empty() => self.rack.group_name = Some(String::new()),
+                Key::Z if !repeat => {
+                    for &c in &targets {
+                        self.song.channels[c].zipped = true;
+                    }
+                    self.dirty = true;
+                }
+                Key::U if !repeat => {
+                    // the selected ones if any of them is zipped, else every zipped channel on show
+                    let any = targets.iter().any(|&c| self.song.channels[c].zipped);
+                    for c in 0..n {
+                        if if any { targets.contains(&c) } else { self.song.in_view(c) } {
+                            self.song.channels[c].zipped = false;
+                        }
+                    }
+                    self.dirty = true;
+                }
                 _ => return false,
             }
             return true;
         }
         if m.shift {
-            return false;
+            // grow the selection towards the next channel
+            let to = match key {
+                Key::ArrowUp => step(ci, false),
+                Key::ArrowDown => step(ci, true),
+                _ => return false,
+            };
+            if let Some(to) = to {
+                self.rack.sel.insert(ci);
+                self.rack.sel.insert(to);
+                self.sel_chan = to;
+            }
+            return true;
         }
         match key {
-            Key::ArrowUp => self.sel_chan = ci.saturating_sub(1),
-            Key::ArrowDown => self.sel_chan = (ci + 1).min(n - 1),
+            Key::ArrowUp | Key::ArrowDown => {
+                self.rack.sel.clear();
+                if let Some(to) = step(ci, key == Key::ArrowDown).or(view.first().copied().filter(|_| !view.contains(&ci))) {
+                    self.sel_chan = to;
+                }
+            }
+            Key::PageUp | Key::PageDown if !repeat && !self.song.groups.is_empty() => {
+                // All, then each group in turn
+                let count = self.song.groups.len() as i32 + 1;
+                let now = self.song.cur_group.map(|g| g as i32 + 1).unwrap_or(0);
+                let to = (now + if key == Key::PageUp { 1 } else { -1 }).rem_euclid(count);
+                self.song.cur_group = (to > 0).then(|| to as usize - 1);
+                self.rack.sel.clear();
+                self.dirty = true;
+            }
             Key::F2 if !repeat => self.rack.rename = Some((ci, self.song.channels[ci].name.clone())),
             _ => return false,
         }
@@ -327,7 +411,11 @@ impl App {
         if m.command {
             match key {
                 Key::L if !repeat => {
-                    self.link_channel(self.sel_chan, i);
+                    // every selected channel plays into this track; with Shift each takes the next track along
+                    let last = n.saturating_sub(2).max(1);
+                    for (k, c) in self.rack_targets().into_iter().enumerate() {
+                        self.link_channel(c, if m.shift { (i + k).min(last) } else { i });
+                    }
                 }
                 Key::S if m.shift && !repeat => self.state_ask = Some(crate::StateAsk::SaveTrack(i)),
                 _ => return false,

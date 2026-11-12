@@ -31,6 +31,10 @@ pub struct Chan {
     pub insert: usize,
     /// When the volume envelope is on, notes stop at their end; otherwise one-shots play out.
     pub env_on: bool,
+    /// The rack group it is filed under (an index into the song's groups; anything past the end means the default one).
+    pub group: usize,
+    /// Drawn as a thin strip in the rack.
+    pub zipped: bool,
     /// Which channel of the file this came from (None for one added since the last load or save).
     pub src: Option<u16>,
     /// The curve and what it drives, for an automation clip channel.
@@ -522,7 +526,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, group: usize::MAX, zipped: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
     }
 }
 
@@ -800,6 +804,9 @@ pub struct Song {
     /// patterns[0] is "Pattern 1".
     pub patterns: Vec<Pattern>,
     pub tracks: Vec<Track>,
+    /// The channel rack's named groups, in name order, and the one on show (None for all).
+    pub groups: Vec<String>,
+    pub cur_group: Option<usize>,
     /// Kept sorted by position.
     pub clips: Vec<Clip>,
     /// Kept sorted by position.
@@ -886,6 +893,8 @@ impl Song {
             channels: names.iter().map(|n| Chan { name: n.to_string(), ..Default::default() }).collect(),
             patterns: vec![Pattern::default()],
             tracks: vec![Track::default(); DEFAULT_TRACKS],
+            groups: vec!["Unsorted".into()],
+            cur_group: None,
             clips: vec![],
             markers: vec![],
             inserts,
@@ -913,6 +922,71 @@ impl Song {
         let bar = self.bar();
         let end = self.clips.iter().map(|c| c.pos + c.len).max().unwrap_or(0);
         end.div_ceil(bar).max(1) * bar
+    }
+    /// The group new channels land in: the one on show, else the catch-all.
+    pub fn default_group(&self) -> usize {
+        self.cur_group.filter(|g| *g < self.groups.len()).or_else(|| self.groups.iter().position(|g| g == "Unsorted")).unwrap_or(0)
+    }
+    pub fn group_of(&self, chan: usize) -> usize {
+        match self.channels.get(chan) {
+            Some(c) if c.group < self.groups.len() => c.group,
+            _ => self.default_group(),
+        }
+    }
+    /// Whether the rack shows this channel with the group that is on show.
+    pub fn in_view(&self, chan: usize) -> bool {
+        self.cur_group.filter(|g| *g < self.groups.len()).is_none_or(|g| self.group_of(chan) == g)
+    }
+    /// File the given channels under a group of this name, made if it is not there yet; the list stays in name order.
+    pub fn group_channels(&mut self, chans: &[usize], name: &str) -> usize {
+        // settle everyone's group first, so adding a name cannot move a channel that had none
+        for i in 0..self.channels.len() {
+            self.channels[i].group = self.group_of(i);
+        }
+        let at = match self.groups.iter().position(|g| g == name) {
+            Some(i) => i,
+            None => {
+                let at = self.groups.iter().position(|g| g.to_lowercase().as_str() > name.to_lowercase().as_str()).unwrap_or(self.groups.len());
+                self.groups.insert(at, name.to_string());
+                for c in &mut self.channels {
+                    if c.group >= at {
+                        c.group += 1;
+                    }
+                }
+                if let Some(g) = self.cur_group.as_mut().filter(|g| **g >= at) {
+                    *g += 1;
+                }
+                at
+            }
+        };
+        for &c in chans {
+            if let Some(c) = self.channels.get_mut(c) {
+                c.group = at;
+            }
+        }
+        // a group nobody is in goes away, except the catch-all
+        let mut g = 0;
+        while g < self.groups.len() {
+            if self.groups[g] != "Unsorted" && g != at && !self.channels.iter().any(|c| c.group == g) {
+                self.groups.remove(g);
+                for c in &mut self.channels {
+                    if c.group > g {
+                        c.group -= 1;
+                    }
+                }
+                self.cur_group = match self.cur_group {
+                    Some(x) if x == g => None,
+                    Some(x) if x > g => Some(x - 1),
+                    x => x,
+                };
+                if at > g {
+                    return self.groups.iter().position(|n| n == name).unwrap_or(0);
+                }
+            } else {
+                g += 1;
+            }
+        }
+        at
     }
     /// Two playlist tracks change places, clips and all.
     pub fn swap_tracks(&mut self, a: usize, b: usize) {
@@ -1339,6 +1413,8 @@ impl Song {
                         Arc::new(Automation { points, targets })
                     }),
                     children: c.children.clone(),
+                    group: c.rack_group as usize,
+                    zipped: c.zipped,
                     smp: Sampler::from_flp(c),
                     raw: None,
                     gen: if c.kind == ChannelKind::Plugin { crate::synth::Gen::decode(&c.plugin, &c.state) } else { None },
@@ -1496,6 +1572,8 @@ impl Song {
             channels,
             patterns,
             tracks,
+            groups: f.groups.clone(),
+            cur_group: usize::try_from(f.cur_group).ok().filter(|g| *g < f.groups.len()),
             clips,
             markers: {
                 let mut m: Vec<TimeMarker> = f.arrangements.first().map(|a| a.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect()).unwrap_or_default();

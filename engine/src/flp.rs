@@ -27,6 +27,9 @@ pub mod id {
     pub const TIMESIG_NUM: u8 = 17;
     pub const TIMESIG_BEAT: u8 = 18;
     pub const CHAN_ZIPPED: u8 = 20;
+    pub const CHAN_GROUP: u8 = 145;
+    pub const CUR_GROUP: u8 = 146;
+    pub const GROUP_NAME: u8 = 231;
     pub const CHAN_TYPE: u8 = 21;
     pub const CHAN_TARGET_INSERT: u8 = 22;
     pub const PAN_LAW: u8 = 23;
@@ -411,6 +414,9 @@ pub struct FlpChannel {
     pub fade_out: u16,
     /// (cut, cut by) groups; 0 = none.
     pub cut_group: (u16, u16),
+    /// Which of the rack's named groups the channel is filed under.
+    pub rack_group: u32,
+    pub zipped: bool,
     pub time_shift: u16,
     /// Arpeggiator: direction (0 off, up, down, up-down, up-down with the ends twice, random), range in
     /// octaves, chord (-1 from the held notes, -2 the same but lone notes hold, 0 none, then the chord list), time
@@ -615,6 +621,9 @@ pub struct Flp {
     pub comment: String,
     pub tempo: f32,
     pub time_sig: (u8, u8),
+    /// The channel rack's named groups, and the one on show (-1 for all).
+    pub groups: Vec<String>,
+    pub cur_group: i32,
     pub main_pitch: i16,
     pub shuffle: u8,
     pub current_pattern: u16,
@@ -742,6 +751,8 @@ impl Flp {
                 (id::ARTIST, Value::Data(d)) => flp.artist = text(d),
                 (id::COMMENT, Value::Data(d)) => flp.comment = text(d),
                 (id::TEMPO, Value::Int(v)) => flp.tempo = *v as f32 / 1000.0,
+                (id::GROUP_NAME, Value::Data(d)) => flp.groups.push(text(d)),
+                (id::CUR_GROUP, Value::Int(v)) => flp.cur_group = *v as i32,
                 (id::TEMPO_WORD, Value::Word(v)) if flp.tempo == 0.0 => flp.tempo = *v as f32,
                 (id::TIMESIG_NUM, Value::Byte(v)) => flp.time_sig.0 = *v,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
@@ -979,6 +990,8 @@ impl Flp {
                         (id::CHAN_TIME_SHIFT, Value::Word(v)) => c.time_shift = *v,
                         (id::CHAN_SWING, Value::Word(v)) => c.swing = *v,
                         (id::CHAN_CUT_GROUP, Value::Int(v)) => c.cut_group = ((*v & 0xffff) as u16, (*v >> 16) as u16),
+                        (id::CHAN_GROUP, Value::Int(v)) => c.rack_group = *v,
+                        (id::CHAN_ZIPPED, Value::Byte(v)) => c.zipped = *v != 0,
                         (id::CHAN_ECHO, Value::Data(d)) if d.len() >= 20 => {
                             for k in 0..5 {
                                 c.echo[k] = u32at(d, k * 4) as i32;

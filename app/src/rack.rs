@@ -15,6 +15,10 @@ pub struct State {
     pub(crate) clip: Vec<cereal_engine::song::Note>,
     /// Leave out the mixer track boxes beside the channel names.
     pub(crate) hide_selectors: bool,
+    /// Channels selected besides the one that has the keys.
+    pub(crate) sel: std::collections::BTreeSet<usize>,
+    /// The name being typed for a new group of the selected channels.
+    pub(crate) group_name: Option<String>,
 }
 
 const STEP_W: f32 = 15.0;
@@ -32,9 +36,47 @@ impl App {
         let mut delete: Option<usize> = None;
         let mut clone: Option<usize> = None;
 
+        if !self.song.groups.is_empty() {
+            ui.horizontal(|ui| {
+                let shown = self.song.cur_group.and_then(|g| self.song.groups.get(g).cloned()).unwrap_or_else(|| "All".into());
+                let mut pick: Option<Option<usize>> = None;
+                egui::ComboBox::from_id_salt("rack_group").selected_text(shown).width(130.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.song.cur_group.is_none(), "All").clicked() {
+                        pick = Some(None);
+                    }
+                    for (g, name) in self.song.groups.iter().enumerate() {
+                        if ui.selectable_label(self.song.cur_group == Some(g), name).clicked() {
+                            pick = Some(Some(g));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Channel group on show (Page Up / Page Down)");
+                if let Some(p) = pick {
+                    self.song.cur_group = p;
+                    self.dirty = true;
+                }
+            });
+        }
+        self.rack.sel.retain(|c| *c < self.song.channels.len());
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
             for ci in 0..self.song.channels.len() {
+                if !self.song.in_view(ci) {
+                    continue;
+                }
+                if self.song.channels[ci].zipped {
+                    // a zipped channel is a thin strip in its colour; a click opens it out again
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(220.0 + nsteps as f32 * (STEP_W + 3.0), 5.0), Sense::click());
+                    let picked = self.sel_chan == ci || self.rack.sel.contains(&ci);
+                    ui.painter().rect_filled(rect, 1.0, rgb(self.song.channels[ci].color).gamma_multiply(if picked { 1.0 } else { 0.7 }));
+                    if resp.on_hover_text(self.song.channels[ci].name.clone()).clicked() {
+                        self.song.channels[ci].zipped = false;
+                        self.sel_chan = ci;
+                        self.dirty = true;
+                    }
+                    continue;
+                }
                 ui.horizontal(|ui| {
                     let on = self.song.channels[ci].enabled;
                     let r = led(ui, on, 16.0).on_hover_text("Mute / solo (right-click)");
@@ -66,7 +108,7 @@ impl App {
 
                     // name button
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(120.0, STEP_H), Sense::click());
-                    let selected = self.sel_chan == ci;
+                    let selected = self.sel_chan == ci || self.rack.sel.contains(&ci);
                     let c = &self.song.channels[ci];
                     let base = rgb(c.color);
                     let fill = if selected { base.lerp_to_gamma(Color32::WHITE, 0.25) } else { base };
@@ -75,8 +117,23 @@ impl App {
                     let label = fit(ui, &c.name, rect.width() - 10.0, &font);
                     let missing = matches!(c.kind, ChannelKind::Sampler | ChannelKind::AudioClip) && c.sample.is_none() && !c.sample_path.is_empty();
                     ui.painter().text(rect.left_center() + Vec2::new(6.0, 0.0), egui::Align2::LEFT_CENTER, label, font, if missing { Color32::from_rgb(255, 120, 110) } else { Color32::from_gray(235) });
-                    if selected {
-                        ui.painter().rect_filled(Rect::from_min_size(rect.right_top() + Vec2::new(2.0, 4.0), Vec2::new(3.0, STEP_H - 8.0)), 1.0, GREEN);
+                    // the selector beside the name: click for this one alone, Shift+click to add or drop it, right-click for all on show
+                    let sel_rect = Rect::from_min_size(rect.right_top() + Vec2::new(1.0, 3.0), Vec2::new(6.0, STEP_H - 6.0));
+                    let sel_resp = ui.interact(sel_rect, ui.id().with(("rack_sel", ci)), Sense::click());
+                    ui.painter().rect_filled(sel_rect.shrink2(Vec2::new(1.5, 1.0)), 1.0, if selected { GREEN } else { PANEL_DARK });
+                    if sel_resp.clicked() {
+                        if ui.input(|i| i.modifiers.shift) {
+                            if !self.rack.sel.remove(&ci) {
+                                self.rack.sel.insert(ci);
+                                self.rack.sel.insert(self.sel_chan);
+                            }
+                        } else {
+                            self.rack.sel.clear();
+                            self.sel_chan = ci;
+                        }
+                    }
+                    if sel_resp.secondary_clicked() {
+                        self.rack.sel = (0..self.song.channels.len()).filter(|c| self.song.in_view(*c)).collect();
                     }
                     if resp.hovered() {
                         self.wheel_over = Some(crate::keys::WheelMove::Channel(ci, false));
@@ -85,6 +142,7 @@ impl App {
                         // a click on the name opens that channel's settings; a second click closes them
                         self.show_chanset = !(self.show_chanset && self.sel_chan == ci);
                         self.sel_chan = ci;
+                        self.rack.sel.clear();
                     }
                     if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
                         if cereal_engine::preset::is_file(&path) {
@@ -280,6 +338,29 @@ impl App {
         if let Some(ci) = delete {
             self.delete_channel(ci);
         }
+        if let Some(mut name) = self.rack.group_name.take() {
+            let mut keep = true;
+            egui::Window::new("Group name").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                crate::widgets::name_field(ui, &mut name);
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        let t = self.rack_targets();
+                        let g = self.song.group_channels(&t, name);
+                        self.song.cur_group = Some(g);
+                        self.rack.sel.clear();
+                        self.dirty = true;
+                    }
+                    keep = false;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                }
+            });
+            if keep {
+                self.rack.group_name = Some(name);
+            }
+        }
         if let Some((ci, mut name)) = self.rack.rename.take() {
             let mut keep = true;
             egui::Window::new("Rename channel").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
@@ -307,6 +388,7 @@ impl App {
             return;
         }
         self.song.remove_channel(ci);
+        self.rack.sel.clear();
         self.sel_chan = self.sel_chan.min(self.song.channels.len().saturating_sub(1));
         self.dirty = true;
     }

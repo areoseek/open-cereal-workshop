@@ -151,6 +151,8 @@ fn skeleton(song: &Song) -> Flp {
         Event::text(id::GENRE, ""),
         Event::text(id::ARTIST, ""),
         Event::text(id::COMMENT, ""),
+        Event::text(id::GROUP_NAME, "Unsorted"),
+        Event::int(id::CUR_GROUP, u32::MAX),
     ];
     for i in 0..song.channels.len() {
         ev.extend(blank_channel(i as u16, true, false));
@@ -454,6 +456,26 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
         if now.kind != was.kind && matches!(now.kind, ChannelKind::AudioClip | ChannelKind::Sampler) {
             if let Some(i) = find(ev, end, id::CHAN_TYPE) {
                 ev[i].value = Value::Byte(if now.kind == ChannelKind::AudioClip { 4 } else { 0 });
+            }
+        }
+        let (group, group_was) = (song.group_of(ci), base.group_of(ci));
+        if group != group_was && !song.groups.is_empty() {
+            match find(ev, end, id::CHAN_GROUP) {
+                Some(i) => ev[i].value = Value::Int(group as u32),
+                None => {
+                    let at = find(ev, end, id::CHAN_CUT_GROUP).map(|i| i + 1).unwrap_or(start + 1);
+                    ev.insert(at, Event::int(id::CHAN_GROUP, group as u32));
+                    end += 1;
+                }
+            }
+        }
+        if now.zipped != was.zipped {
+            match find(ev, end, id::CHAN_ZIPPED) {
+                Some(i) => ev[i].value = Value::Byte(now.zipped as u8),
+                None => {
+                    ev.insert(end, Event::byte(id::CHAN_ZIPPED, now.zipped as u8));
+                    end += 1;
+                }
             }
         }
         if now.enabled != was.enabled {
@@ -1395,6 +1417,35 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
     }
 }
 
+/// The rack's group names and the group on show.
+fn patch_groups(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
+    if song.groups.is_empty() {
+        return;
+    }
+    if song.groups != base.groups {
+        let old: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::GROUP_NAME).map(|(i, _)| i).collect();
+        let Some(mut at) = old.first().copied().or(ev.iter().position(|e| e.id == id::CUR_GROUP)) else { return };
+        for &i in old.iter().rev() {
+            ev.remove(i);
+        }
+        for g in &song.groups {
+            ev.insert(at, text_event(id::GROUP_NAME, g, unicode));
+            at += 1;
+        }
+    }
+    if song.cur_group != base.cur_group {
+        let v = song.cur_group.map(|g| g as u32).unwrap_or(u32::MAX);
+        match ev.iter().position(|e| e.id == id::CUR_GROUP) {
+            Some(i) => ev[i].value = Value::Int(v),
+            None => {
+                if let Some(i) = ev.iter().rposition(|e| e.id == id::GROUP_NAME) {
+                    ev.insert(i + 1, Event::int(id::CUR_GROUP, v));
+                }
+            }
+        }
+    }
+}
+
 /// The first arrangement's time markers, written again whenever any of them changed.
 fn patch_markers(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, with_sig: bool) {
     if song.markers == base.markers {
@@ -1753,6 +1804,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     patch_markers(&mut ev, song, &base, unicode, ver >= (20, 0, 0, 0));
     patch_patterns(&mut ev, song, &base, &flp, unicode);
     patch_channels(&mut ev, song, &base, unicode, word_insert);
+    patch_groups(&mut ev, song, &base, unicode);
     patch_auto(&mut ev, song, &base);
     patch_midi_links(&mut ev, song, &base);
     patch_ctl_links(&mut ev, song, &base, flp::mixer_base(ver));
@@ -2126,6 +2178,24 @@ mod tests {
         let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
         let (r3, _) = reload(&bytes3);
         assert_eq!(r3.channels[at].zones.clone().and_then(|z| z.bank.clone()).unwrap().setting, again);
+    }
+
+    #[test]
+    fn rack_groups_are_saved_and_read_back() {
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        assert!(!r.groups.is_empty(), "the starting project has its catch-all group");
+        let drums = r.group_channels(&[0, 1], "Drums");
+        r.channels[2].zipped = true;
+        r.cur_group = Some(drums);
+        let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
+        let (r2, _) = reload(&bytes2);
+        assert_eq!(r2.groups, r.groups);
+        assert_eq!(r2.cur_group, Some(drums));
+        assert_eq!((0..4).map(|c| r2.group_of(c)).collect::<Vec<_>>(), (0..4).map(|c| r.group_of(c)).collect::<Vec<_>>());
+        assert_eq!(r2.groups[r2.group_of(0)], "Drums");
+        assert_eq!(r2.groups[r2.group_of(3)], "Unsorted");
+        assert!(r2.channels[2].zipped && !r2.channels[1].zipped);
     }
 
     #[test]
