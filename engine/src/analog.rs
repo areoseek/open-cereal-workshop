@@ -595,10 +595,15 @@ pub fn trio(p: &[f32]) -> Set {
 }
 
 /// Settings of the saw synth from its stored values (0 to 1 each, in file order). Placed with fair confidence
-/// from how the presets use them: 0 level, 2-5 level envelope, 6 transpose (four octaves), 7 fine, 14 unison
-/// voices, 15 unison detune, 23 square sub, 27 cutoff, 28 resonance, 29 key follow, 47 ensemble switch. Guesses:
-/// 17 sub level, 32-35 the second envelope, 36 how far it opens the filter. The rest (sync, slow wave, phaser,
-/// echo, room, arpeggiator) is not placed yet.
+/// from how the presets use them and what they are called: 0 level, 2-5 level envelope, 6 transpose (four
+/// octaves), 7 fine, 14 unison voices, 15 unison detune, 17 main level, 18 sub phase, 19 sub level, 21 sub
+/// restart, 22 sub upside down, 23 square sub, 24 and 25 sync, 27 cutoff, 28 resonance, 29 key follow, then the
+/// effects from 47 (see `saw_tail`). Guesses: 32-35 the second envelope, 36 how far it opens the filter. The sub
+/// is taken to sit at the main pitch: its octave and detune, the noise, sync itself, the slow wave and the
+/// arpeggiator are not placed yet.
+///
+/// A saw with the same saw upside down and a little later under it is a pulse wave, as wide as the wait; that is
+/// how its square sounds are made, and how they are played here.
 pub fn saw(p: &[f32]) -> Set {
     let full = p.len() >= 96;
     let v = |i: usize| -> f32 {
@@ -614,11 +619,23 @@ pub fn saw(p: &[f32]) -> Set {
     let time = |i: usize| 0.002 + v(i).powi(3) * 8.0;
     let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2), r: time(i + 3) };
     let tune = ((v(6) - 0.5) * 48.0).round() + (v(7) - 0.5) * 2.0;
-    let sub = if v(23) >= 0.5 { Shape::Square } else { Shape::Saw };
     let voices = 1 + (v(14) * 7.0).round() as u32;
     let apart = if voices > 1 { v(15) * 0.3 } else { 0.0 };
+    let (main, sub) = if full { (v(17), v(19)) } else { (1.0, 0.0) };
+    let mut width = 0.0;
+    let osc = if v(23) >= 0.5 {
+        [Osc { shape: Shape::Saw, semis: tune + apart, level: main }, Osc { shape: Shape::Square, semis: tune - apart, level: sub }, Osc::default()]
+    } else if v(22) >= 0.5 {
+        // the part the two saws share turns into a pulse; what is left of the louder one stays a saw
+        let both = main.min(sub);
+        width = (2.0 * v(18) - 1.0).abs().min(0.95);
+        [Osc { shape: Shape::Pulse, semis: tune + apart, level: both }, Osc { shape: Shape::Saw, semis: tune - apart, level: (main - sub).abs() }, Osc::default()]
+    } else {
+        [Osc { shape: Shape::Saw, semis: tune + apart, level: main }, Osc { shape: Shape::Saw, semis: tune - apart, level: sub }, Osc::default()]
+    };
     Set {
-        osc: [Osc { shape: Shape::Saw, semis: tune + apart, level: 1.0 }, Osc { shape: sub, semis: tune - 12.0 - apart, level: v(17) }, Osc::default()],
+        osc,
+        width,
         dual: voices > 1,
         amp: env(2),
         fenv: env(32),
@@ -627,8 +644,36 @@ pub fn saw(p: &[f32]) -> Set {
         res: v(28) * 0.9,
         env_oct: v(36) * 6.0,
         track: v(29),
-        chorus: if v(47) >= 0.5 { 1 } else { 0 },
         gain: 0.1 + v(0) * 0.4,
+        ..Default::default()
+    }
+}
+
+/// The saw synth's effects after its voices: chorus (47 on, depth, rate, mix), phaser (51 on, centre, rate, depth,
+/// feedback, mix), echo (57 on, left, right, feedback, sweep, low cut, high cut, mix) and room (65 on, length,
+/// high cut, damping, mix). The scales are estimates.
+pub fn saw_tail(p: &[f32]) -> crate::tailfx::Set {
+    use crate::tailfx;
+    if p.len() < 96 {
+        return tailfx::Set::default();
+    }
+    let u = |i: usize| p[i].clamp(0.0, 1.0);
+    let on = |i: usize| p[i] >= 0.5;
+    let steps = |i: usize| 1.0 + (u(i) * 7.0).round();
+    tailfx::Set {
+        rack: (on(51) && u(56) > 0.0).then(|| tailfx::Rack { phase: Some([u(54) * u(56), u(55)]), ..Default::default() }),
+        delay: (on(57) && u(64) > 0.0).then(|| tailfx::Delay {
+            left: steps(58),
+            right: steps(59),
+            fb: u(60) * 0.95,
+            wobble: u(61),
+            low_hz: if u(62) < 0.005 { 0.0 } else { 20.0 * 2f32.powf(u(62) * 8.0) },
+            high_hz: 200.0 * 100f32.powf(u(63)),
+            wet: u(64),
+            free: 0.0,
+        }),
+        chorus: (on(47) && u(50) > 0.0).then(|| tailfx::Chorus { depth: u(48), hz: 0.05 * 100f32.powf(u(49)), wet: u(50) }),
+        reverb: (on(65) && u(69) > 0.0).then(|| tailfx::Reverb { secs: 0.3 + u(66) * u(66) * 8.0, high_hz: 800.0 * 20f32.powf(u(67)) * (1.0 - 0.5 * u(68)), wet: u(69) * 0.7 }),
         ..Default::default()
     }
 }
@@ -701,7 +746,7 @@ fn fill(n: usize, placed: &[(usize, crate::duo::Info)], defs: &[f32]) -> Vec<cra
 
 const TRIO_GROUPS: [&str; 7] = ["Oscillator 1", "Oscillator 2", "Oscillator 3", "Slow oscillator", "Filter", "Filter envelope", "Level"];
 const POCKET_GROUPS: [&str; 4] = ["Oscillators", "Filter", "Filter envelope", "Level envelope"];
-const SAW_GROUPS: [&str; 5] = ["Oscillator", "Filter", "Filter envelope", "Level envelope", "Master"];
+const SAW_GROUPS: [&str; 10] = ["Oscillator", "Sub", "Filter", "Filter envelope", "Level envelope", "Chorus", "Phaser", "Echo", "Room", "Master"];
 
 /// What a fresh one of these holds, in file order.
 pub fn plain(kind: crate::synth::Kind) -> Vec<f32> {
@@ -787,15 +832,28 @@ pub fn page(kind: crate::synth::Kind) -> (&'static [&'static str], Vec<crate::du
             placed.push((7, k("Fine", 0)));
             placed.push((14, e("Voices", Ctl::Pick(&["1", "2", "3", "4", "5", "6", "7", "8"]), 0)));
             placed.push((15, k("Detune", 0)));
-            placed.push((17, k("Sub level", 0)));
-            placed.push((23, e("Square sub", Ctl::Switch, 0)));
+            placed.push((17, k("Level", 0)));
+            placed.push((19, k("Level", 1)));
+            placed.push((18, k("Phase", 1)));
+            placed.push((22, e("Upside down", Ctl::Switch, 1)));
+            placed.push((23, e("Square", Ctl::Switch, 1)));
             for (i, name) in [(27, "Cutoff"), (28, "Resonance"), (29, "Key follow"), (36, "Envelope")] {
-                placed.push((i, k(name, 1)));
+                placed.push((i, k(name, 2)));
             }
-            adsr(&mut placed, 32, 2);
-            adsr(&mut placed, 2, 3);
-            placed.push((0, k("Level", 4)));
-            placed.push((47, e("Ensemble", Ctl::Switch, 4)));
+            adsr(&mut placed, 32, 3);
+            adsr(&mut placed, 2, 4);
+            for (at, group, names) in [
+                (47usize, 5u8, &["Depth", "Rate", "Mix"][..]),
+                (51, 6, &["Centre", "Rate", "Depth", "Feedback", "Mix"][..]),
+                (57, 7, &["Left", "Right", "Feedback", "Sweep", "Low cut", "High cut", "Mix"][..]),
+                (65, 8, &["Length", "High cut", "Damping", "Mix"][..]),
+            ] {
+                placed.push((at, e("On", Ctl::Switch, group)));
+                for (j, name) in names.iter().enumerate() {
+                    placed.push((at + 1 + j, k(name, group)));
+                }
+            }
+            placed.push((0, k("Level", 9)));
             (&SAW_GROUPS, fill(96, &placed, &defs))
         }
     }

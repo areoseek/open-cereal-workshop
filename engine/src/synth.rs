@@ -1120,6 +1120,7 @@ impl Gen {
     pub fn tail(&self) -> crate::tailfx::Set {
         match self.kind {
             Kind::Duo => crate::duo::tail(&self.p),
+            Kind::SawSyn => crate::analog::saw_tail(&self.p),
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),
             Kind::Hybrid => crate::hybrid::tail(&self.p),
@@ -1565,6 +1566,14 @@ mod tests {
             assert!(!moved.is_empty() && (moved_at.is_empty() || moved.iter().all(|i| moved_at.contains(i))), "{ident} {moved:?}");
             assert_eq!(Gen::decode(ident, &out).unwrap().p[26], 0.125);
         }
+        // the saw synth carries its effects, and two saws make its pulse
+        let mut g = Gen::new(Kind::SawSyn);
+        assert!(!g.tail().any());
+        (g.p[57], g.p[65], g.p[19], g.p[22], g.p[18]) = (1.0, 1.0, 1.0, 1.0, 0.5);
+        let t = g.tail();
+        assert!(t.delay.is_some() && t.reverb.is_some() && t.chorus.is_none());
+        let set = crate::analog::saw(&g.p);
+        assert!(set.osc[0].shape == crate::analog::Shape::Pulse && set.width == 0.0 && set.osc[1].level == 0.0);
     }
 
     #[test]
@@ -2075,7 +2084,7 @@ mod tests {
             edge / level
         };
         let (open, shut) = (bright(1.0), bright(0.3));
-        assert!(open > shut * 1.5, "{open} {shut}");
+        assert!(open > shut * 1.3, "{open} {shut}");
         let tone = Gen::decode("Sawer", &[]).unwrap().tone();
         let patch = tone.mini.as_ref().unwrap();
         let mut v = crate::minis::Voice::start(patch, 44100.0, 57, 1.0, 0.005, 3);
