@@ -18,6 +18,14 @@ pub fn panel(ui: &mut Ui, inst: &Arc<Instance>, title: &str, target: &dyn Fn(u16
     });
     let fail_id = ui.id().with(("host-window", Arc::as_ptr(inst) as usize));
     if inst.has_window() {
+        // the first time a plug-in is opened its own editor comes up with it, as its panel would there
+        let first_id = ui.id().with(("host-first", Arc::as_ptr(inst) as usize));
+        if !ui.data(|d| d.get_temp::<bool>(first_id).unwrap_or(false)) {
+            ui.data_mut(|d| d.insert_temp(first_id, true));
+            if std::env::var_os("CEREAL_NO_PLUGIN_WINDOWS").is_none() {
+                inst.show_window(title);
+            }
+        }
         let open = inst.window_open();
         if ui.button(if open { "Close its window" } else { "Open its window" }).hint("The plug-in's own editor, in a window of its own").clicked() {
             if open {

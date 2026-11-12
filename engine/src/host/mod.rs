@@ -6,6 +6,7 @@
 
 pub mod abi;
 pub mod abi3;
+mod view3;
 mod vst3;
 
 use std::collections::HashMap;
@@ -1143,6 +1144,9 @@ impl Instance {
 
     /// Whether the plug-in has a window of its own that can float beside ours.
     pub fn has_window(&self) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.has_window();
+        }
         self.window_api().is_some()
     }
 
@@ -1161,6 +1165,10 @@ impl Instance {
 
     /// Show the plug-in's own window, floating. False when it has none it can show this way.
     pub fn show_window(&self, title: &str) -> bool {
+        if let Some(v) = &self.v3 {
+            guard_x_errors();
+            return v.show_window(title);
+        }
         if self.gui_open.load(Relaxed) && !self.shared().gui_closed.load(Relaxed) {
             return true;
         }
@@ -1193,6 +1201,9 @@ impl Instance {
     }
 
     pub fn hide_window(&self) {
+        if let Some(v) = &self.v3 {
+            return v.hide_window();
+        }
         if self.v3.is_none() && self.gui_open.swap(false, Relaxed) {
             // SAFETY: as in `window_api`.
             unsafe {
@@ -1209,6 +1220,9 @@ impl Instance {
     }
 
     pub fn window_open(&self) -> bool {
+        if let Some(v) = &self.v3 {
+            return v.window_open();
+        }
         self.v3.is_none() && self.gui_open.load(Relaxed) && !self.shared().gui_closed.load(Relaxed)
     }
 }

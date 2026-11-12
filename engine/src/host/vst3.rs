@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::Mutex;
 
 use super::abi3::*;
+use super::view3::Frame;
 use super::{AudioRole, Clock, Ev, Found, Param, MAX_FRAMES};
 
 /// The table of an object the plug-in gave us.
@@ -685,6 +686,10 @@ pub(super) struct Plug {
     /// Of each setting: its step count (stepped ones are shown as whole numbers) and its unit.
     meta: Mutex<HashMap<u32, (i32, String)>>,
     pub has_note_in: bool,
+    /// Our side of the plug-in's editor window.
+    frame: *mut Frame,
+    /// Whether it offers an editor we can show, once asked.
+    editor: std::sync::OnceLock<bool>,
     run: Mutex<Run>,
 }
 
@@ -799,7 +804,7 @@ impl Plug {
                 out_changes: Changes::new(),
                 steady: 0,
             };
-            let plug = Plug { component, processor, controller, separate, links, side, midi_map, meta: Mutex::new(HashMap::new()), has_note_in, run: Mutex::new(run) };
+            let plug = Plug { component, processor, controller, separate, links, side, midi_map, meta: Mutex::new(HashMap::new()), has_note_in, frame: Frame::make(), editor: std::sync::OnceLock::new(), run: Mutex::new(run) };
             plug.sync_controller();
             plug.params();
             Some((plug, found))
@@ -1184,8 +1189,30 @@ impl Plug {
         self.handler().rescan.swap(false, Relaxed)
     }
 
+    pub fn has_window(&self) -> bool {
+        // SAFETY: window-thread call into a live plug-in.
+        *self.editor.get_or_init(|| unsafe { Frame::offered(self.controller) })
+    }
+
+    pub fn show_window(&self, title: &str) -> bool {
+        // SAFETY: as in `has_window`; the frame lives as long as the plug-in.
+        self.has_window() && unsafe { Frame::show(self.frame, self.controller, title) }
+    }
+
+    pub fn hide_window(&self) {
+        // SAFETY: as in `show_window`.
+        unsafe { Frame::hide(self.frame) }
+    }
+
+    pub fn window_open(&self) -> bool {
+        // SAFETY: as in `show_window`.
+        unsafe { Frame::is_open(self.frame) }
+    }
+
     /// Window thread, every frame or so. `stalled` says no sound ran since the last time.
     pub fn idle(&self, stalled: bool) {
+        // SAFETY: as in `show_window`.
+        unsafe { Frame::idle(self.frame) };
         let h = self.handler();
         let moved: Vec<(u32, f64)> = h.to_ctrl.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
         if !self.controller.is_null() {
@@ -1222,6 +1249,7 @@ impl Drop for Plug {
         // SAFETY: nothing else can reach the plug-in any more; it is stopped and ended in the order the
         // standard asks, and our side is freed after it.
         unsafe {
+            Frame::hide(self.frame);
             let (cv, pv) = (vt::<ComponentVt>(self.component), vt::<ProcessorVt>(self.processor));
             if self.run.get_mut().map(|r| r.active).unwrap_or(false) {
                 (pv.set_processing)(self.processor, 0);
@@ -1244,6 +1272,7 @@ impl Drop for Plug {
             (cv.terminate)(self.component);
             let_go(self.component);
             drop(Box::from_raw(self.side));
+            Frame::free(self.frame);
         }
     }
 }

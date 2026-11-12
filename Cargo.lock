@@ -553,6 +553,7 @@ dependencies = [
  "rusty_mp3",
  "rusty_vorbis",
  "symphonia",
+ "x11rb",
 ]
 
 [[package]]

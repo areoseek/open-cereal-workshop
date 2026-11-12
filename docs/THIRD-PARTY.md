@@ -103,3 +103,9 @@ Steinberg.
 
 The `libloading` crate by Simonas Kazlauskas opens plug-in files at run time. It is used unmodified as a
 dependency under the ISC License; the licence text ships inside the crate.
+
+## x11rb (windows for plug-in editors on Linux)
+
+The `x11rb` crate by Uli Schlachter and contributors makes the X11 window a VST3 plug-in's editor is shown
+in. It is used unmodified as a dependency under the MIT License or the Apache License 2.0, at our choice;
+the licence texts ship inside the crate.
