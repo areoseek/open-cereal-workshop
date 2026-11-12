@@ -561,7 +561,13 @@ impl App {
     /// The built-in instruments and the installed plug-ins, as menu rows that each add a channel.
     pub(crate) fn instrument_menu(&mut self, ui: &mut Ui) {
         // some instruments have no fresh block of their own yet: they arrive with projects and presets
-        for d in cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()) {
+        let mut defs: Vec<_> = cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()).collect();
+        let favs = defs.iter().filter(|d| self.settings.plugfav.contains(&format!("g:{}", d.title))).count();
+        defs.sort_by_key(|d| !self.settings.plugfav.contains(&format!("g:{}", d.title)));
+        for (n, d) in defs.into_iter().enumerate() {
+            if n == favs && favs > 0 {
+                ui.separator();
+            }
             if ui.button(d.title).clicked() {
                 self.song.channels.push(Chan::instrument(d.kind));
                 self.sel_chan = self.song.channels.len() - 1;

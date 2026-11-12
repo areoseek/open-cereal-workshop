@@ -168,7 +168,13 @@ impl App {
                                 }
                             });
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                for d in Self::effect_defs() {
+                                let mut defs = Self::effect_defs();
+                                let favs = defs.iter().filter(|d| self.settings.plugfav.contains(&format!("f:{}", d.title))).count();
+                                defs.sort_by_key(|d| !self.settings.plugfav.contains(&format!("f:{}", d.title)));
+                                for (n, d) in defs.into_iter().enumerate() {
+                                    if n == favs && favs > 0 {
+                                        ui.separator();
+                                    }
                                     if ui.button(d.title).clicked() {
                                         act = Some(SlotAct::Set(slot, d.kind, d.ident));
                                     }

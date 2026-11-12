@@ -35,6 +35,9 @@ pub struct State {
     star_parents: bool,
     /// A page of the user's own being renamed: its number and the text so far.
     tab_name: Option<(usize, String)>,
+    /// Where the browser has been, and which of those places is on show.
+    hist: Vec<(Tab, Option<PathBuf>)>,
+    hist_at: usize,
 }
 
 /// A plug-in dragged out of the plug-in page.
@@ -395,6 +398,42 @@ impl App {
         self.browser.visible.clear();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Browser").strong().color(TEXT));
+            let b = &mut self.browser;
+            let now = (b.tab, b.selected.clone());
+            if b.hist.is_empty() {
+                b.hist.push(now);
+                b.hist_at = 0;
+            } else if b.hist[b.hist_at] != now {
+                // a new file on the same page takes the place of the last one, so the list holds places, not every click
+                if b.hist[b.hist_at].0 == now.0 && b.hist[b.hist_at].1.as_ref().and_then(|p| p.parent()) == now.1.as_ref().and_then(|p| p.parent()) {
+                    b.hist[b.hist_at] = now;
+                } else {
+                    b.hist.truncate(b.hist_at + 1);
+                    b.hist.push(now);
+                    if b.hist.len() > 200 {
+                        b.hist.remove(0);
+                    }
+                    b.hist_at = b.hist.len() - 1;
+                }
+            }
+            let mut go = None;
+            if ui.add_enabled(b.hist_at > 0, egui::Button::new("<").small()).hint("Back to where the browser was before").clicked() {
+                go = Some(b.hist_at - 1);
+            }
+            if ui.add_enabled(b.hist_at + 1 < b.hist.len(), egui::Button::new(">").small()).hint("Forward again").clicked() {
+                go = Some(b.hist_at + 1);
+            }
+            if let Some(k) = go {
+                b.hist_at = k;
+                let (tab, sel) = b.hist[k].clone();
+                b.tab = match tab {
+                    Tab::User(n) if n >= self.settings.tabs.len() => Tab::All,
+                    t => t,
+                };
+                b.hist[k].0 = b.tab;
+                b.selected = sel;
+                b.reveal = b.selected.is_some();
+            }
             if ui.small_button("Refresh").clicked() {
                 self.browser.refresh();
             }
@@ -657,12 +696,15 @@ impl App {
                 })
                 .body(|ui| {
                     let mut defs: Vec<_> = cereal_engine::synth::DEFS.iter().filter(|d| !d.arrives_only()).collect();
-                    defs.sort_by_key(|d| d.title);
+                    defs.sort_by_key(|d| (!self.settings.plugfav.contains(&format!("g:{}", d.title)), d.title));
                     for d in defs {
-                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to add a channel with this instrument, or drag it onto the channel rack");
+                        let key = format!("g:{}", d.title);
+                        let fav = self.settings.plugfav.contains(&key);
+                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(if fav { TEXT } else { TEXT_DIM })).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to add a channel with this instrument, or drag it onto the channel rack");
                         if r.drag_started() {
                             egui::DragAndDrop::set_payload(ui.ctx(), PlugDrag::Gen(d.kind));
                         }
+                        r.context_menu(|ui| self.plugfav_entry(ui, &key, fav));
                         if r.clicked() {
                             self.song.channels.push(cereal_engine::song::Chan::instrument(d.kind));
                             self.sel_chan = self.song.channels.len() - 1;
@@ -676,11 +718,16 @@ impl App {
                     ui.label(RichText::new("Effects").strong().color(TEXT));
                 })
                 .body(|ui| {
-                    for d in Self::effect_defs() {
-                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(TEXT_DIM)).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to put it in the first free slot of the selected mixer track, or drag it onto a mixer track or slot");
+                    let mut defs = Self::effect_defs();
+                    defs.sort_by_key(|d| (!self.settings.plugfav.contains(&format!("f:{}", d.title)), d.title));
+                    for d in defs {
+                        let key = format!("f:{}", d.title);
+                        let fav = self.settings.plugfav.contains(&key);
+                        let r = ui.add(egui::Label::new(RichText::new(d.title).color(if fav { TEXT } else { TEXT_DIM })).selectable(false).sense(Sense::click_and_drag()).truncate()).hint("Click to put it in the first free slot of the selected mixer track, or drag it onto a mixer track or slot");
                         if r.drag_started() {
                             egui::DragAndDrop::set_payload(ui.ctx(), PlugDrag::Fx(d.kind, d.ident));
                         }
+                        r.context_menu(|ui| self.plugfav_entry(ui, &key, fav));
                         if r.clicked() {
                             let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
                             self.effect_to_free_slot(ins, d.kind, d.ident);
@@ -689,6 +736,19 @@ impl App {
                 });
         });
         self.browser_drag(ui);
+    }
+
+    /// The favourite switch in a plug-in's right-click menu. Favourites lead the plug-in page and the menus that add plug-ins.
+    fn plugfav_entry(&mut self, ui: &mut Ui, key: &str, fav: bool) {
+        if ui.button(if fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+            if fav {
+                self.settings.plugfav.retain(|k| k != key);
+            } else {
+                self.settings.plugfav.push(key.to_string());
+            }
+            let _ = self.settings.save();
+            ui.close_menu();
+        }
     }
 
     /// Put an effect in the first free slot of a mixer track.

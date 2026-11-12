@@ -62,6 +62,8 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     /// The browser files marked as favourites.
     pub starred: Vec<PathBuf>,
+    /// The plug-ins marked as favourites: 'g:' or 'f:' and the title.
+    pub plugfav: Vec<String>,
     /// Tags given to browser files.
     pub tags: Vec<(PathBuf, Vec<String>)>,
     /// The browser pages of the user's own: name, then a folder ('F') or a search ('S') and what it holds.
@@ -139,6 +141,7 @@ impl Settings {
                 Some(("folder", v)) if !v.trim().is_empty() => s.folders.push(PathBuf::from(v.trim())),
                 Some(("recent", v)) if !v.trim().is_empty() => s.recent.push(PathBuf::from(v.trim())),
                 Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
+                Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
                 Some(("tag", v)) => {
                     if let Some((tags, path)) = v.split_once('\t') {
                         let tags: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
@@ -220,6 +223,9 @@ impl Settings {
         }
         for f in &self.starred {
             out += &format!("star={}\n", f.display());
+        }
+        for f in &self.plugfav {
+            out += &format!("plugfav={f}\n");
         }
         for (f, tags) in &self.tags {
             out += &format!("tag={}\t{}\n", tags.join(","), f.display());
