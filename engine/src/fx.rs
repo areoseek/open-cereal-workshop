@@ -4397,9 +4397,15 @@ impl Unit {
                 let mono = p[7] >= 0.5;
                 let n = self.buf.len();
                 let step = hz / sr;
+                // the hiss of the delay chips, heard in the wet part; gated, it is only there while sound comes in
+                let hiss = (p[12] / 6000.0).clamp(0.0, 1.0).powi(2) * 0.01;
+                let gated = p[13] >= 0.5;
+                let (up, down) = (1.0 - (-1.0 / (0.005 * sr)).exp(), 1.0 - (-1.0 / (0.25 * sr)).exp());
                 for f in io.iter_mut() {
                     let x = if mono { [(f[0] + f[1]) * 0.5; 2] } else { *f };
                     let mut w = [0f32; 2];
+                    let open = if !gated || x[0].abs().max(x[1].abs()) > 0.001 { 1.0 } else { 0.0 };
+                    z[4] += (open - z[4]) * if open > z[4] { up } else { down };
                     for c in 0..2 {
                         let ph = (self.ph + start + lr * c as f32).fract();
                         let l = if sine { 0.5 - 0.5 * (ph * TAU).cos() } else { 1.0 - (2.0 * ph - 1.0).abs() };
@@ -4409,7 +4415,11 @@ impl Unit {
                         let fr = at - i as f32;
                         let v = self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
                         z[c] += (v - z[c]) * hp;
-                        w[c] = v - z[c];
+                        self.dice ^= self.dice << 13;
+                        self.dice ^= self.dice >> 7;
+                        self.dice ^= self.dice << 17;
+                        let white = (self.dice >> 40) as f32 / (1u64 << 23) as f32 - 1.0;
+                        w[c] = v - z[c] + white * hiss * z[4];
                     }
                     self.buf[self.pos] = [x[0] + w[0] * fb, x[1] + w[1] * fb];
                     self.pos = (self.pos + 1) % n;
