@@ -267,4 +267,8 @@ These work while the pointer is over the wave picture.
 | Home / End | Show everything / show the marked stretch | yes |
 | Ctrl+Left / Ctrl+Right | Bring the start / end of the marked stretch into view | yes |
 | Shift+C | Send the marked stretch to the playlist | yes |
-| Alt+T, Ctrl+T, Alt+W, Ctrl+R, Ctrl+B, Ctrl+Q, Ctrl+L, S | Time stretch, drum stretch, claw, reverb, blur, equalise, loop tuning, spectrum view | no |
+| Alt+T / Ctrl+T | Time stretch and pitch shift / drum stretch | yes |
+| Ctrl+R / Ctrl+B / Ctrl+Q | Reverb / blur / equalise | yes |
+| Ctrl+L | Tune the loop | yes |
+| S | Frequencies in place of the wave | yes |
+| Alt+W | Claw | no |

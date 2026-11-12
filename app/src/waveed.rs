@@ -43,6 +43,21 @@ pub struct WaveEd {
     /// The flag under the right-click menu, and the one being renamed.
     menu_mark: Option<usize>,
     rename: Option<usize>,
+    /// The tool whose settings are on show under the picture (its edit number).
+    tool: Option<u8>,
+    time: f32,
+    semis: f32,
+    eq: [f32; 10],
+    blur: f32,
+    room_secs: f32,
+    room_wet: f32,
+    room_clip: bool,
+    join_ms: f32,
+    /// Frequencies in place of the wave.
+    spec: bool,
+    /// Counts the changes, so the frequency picture knows when it is stale.
+    rev: u64,
+    spec_tex: Option<((usize, usize, usize, u64), egui::TextureHandle)>,
 }
 
 /// One step back.
@@ -55,7 +70,7 @@ struct Snap {
 
 impl Default for WaveEd {
     fn default() -> Self {
-        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None }
+        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None }
     }
 }
 
@@ -136,7 +151,24 @@ impl WaveEd {
         Ok(())
     }
 
+    /// Put `new` where `a..b` was; the flags inside move in step with the change of length.
+    fn swap_in(&mut self, a: usize, b: usize, new: Vec<[f32; 2]>) {
+        let inside: Vec<ops::Mark> = self.marks.iter().filter(|m| m.at >= a && m.at < b).cloned().collect();
+        let scale = new.len() as f64 / (b - a).max(1) as f64;
+        ops::remove(&mut self.frames, a, b);
+        self.took_out(a, b);
+        ops::insert(&mut self.frames, a, &new);
+        self.put_in(a, new.len());
+        for m in inside {
+            let at = a + ((m.at - a) as f64 * scale) as usize;
+            self.add_mark(at.min(self.frames.len().saturating_sub(1)), (m.len as f64 * scale) as usize, m.name);
+        }
+        self.sel = (a, a + new.len());
+        self.fit();
+    }
+
     fn keep(&mut self) {
+        self.rev += 1;
         self.undo.push(Snap { frames: self.frames.clone(), sel: self.sel, marks: self.marks.clone(), lp: self.lp });
         // a handful of steps back is plenty and keeps long takes from piling up in memory
         let cap = if self.frames.len() > 20_000_000 { 2 } else { 12 };
@@ -281,6 +313,25 @@ impl WaveEd {
                         }
                     }
                 });
+                ui.menu_button("Tools", |ui| {
+                    for (k, name) in [
+                        (50u8, "Time stretch and pitch shift... (Alt+T)"),
+                        (51, "Drum stretch... (Ctrl+T)"),
+                        (52, "Reverb... (Ctrl+R)"),
+                        (53, "Blur... (Ctrl+B)"),
+                        (54, "Equalise... (Ctrl+Q)"),
+                        (55, "Tune the loop... (Ctrl+L)"),
+                    ] {
+                        if ui.button(name).clicked() {
+                            self.tool = Some(k);
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button(if self.spec { "Show the wave (S)" } else { "Show the frequencies (S)" }).clicked() {
+                        self.spec = !self.spec;
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("Noise", |ui| {
                     for (k, name) in [
                         (30u8, "Take the noise level from the marked stretch (Alt+N)"),
@@ -311,6 +362,49 @@ impl WaveEd {
                 });
             });
         });
+        if let Some(k) = self.tool {
+            ui.horizontal_wrapped(|ui| {
+                match k {
+                    50 | 51 => {
+                        ui.label(if k == 50 { "Time stretch:" } else { "Drum stretch (moves the slices apart, leaves them whole):" });
+                        ui.add(egui::DragValue::new(&mut self.time).range(0.1..=10.0).speed(0.005).prefix("length x"));
+                        if k == 50 {
+                            ui.add(egui::DragValue::new(&mut self.semis).range(-36.0..=36.0).speed(0.05).suffix(" semitones"));
+                        }
+                    }
+                    52 => {
+                        ui.label("Reverb:");
+                        ui.add_enabled(!self.room_clip, egui::DragValue::new(&mut self.room_secs).range(0.1..=8.0).speed(0.01).suffix(" s"));
+                        let mut pc = self.room_wet * 100.0;
+                        if ui.add(egui::DragValue::new(&mut pc).range(0.0..=100.0).speed(0.3).suffix(" % wet")).changed() {
+                            self.room_wet = pc / 100.0;
+                        }
+                        ui.add_enabled(!self.clip.is_empty(), egui::Checkbox::new(&mut self.room_clip, "use the copied sound as the room")).hint("Copy a recorded room echo (Ctrl+C) and it shapes the reverb in place of the built-in one");
+                    }
+                    53 => {
+                        ui.label("Blur:");
+                        ui.add(egui::Slider::new(&mut self.blur, 0.0..=1.0).show_value(false));
+                    }
+                    54 => {
+                        ui.label("Equalise:");
+                        for (i, hz) in ops::EQ_BANDS.iter().enumerate() {
+                            let name = if *hz >= 1000.0 { format!("{}k ", hz / 1000.0) } else { format!("{hz} ") };
+                            ui.add(egui::DragValue::new(&mut self.eq[i]).range(-36.0..=18.0).speed(0.1).prefix(name).suffix(" dB"));
+                        }
+                    }
+                    _ => {
+                        ui.label("Tune the loop (or the marked stretch) so its end runs into its start. Join:");
+                        ui.add(egui::DragValue::new(&mut self.join_ms).range(1.0..=2000.0).speed(0.5).suffix(" ms"));
+                    }
+                }
+                if ui.add_enabled(has && !recording, egui::Button::new("Apply")).clicked() {
+                    edit = Some(k);
+                }
+                if ui.button("Close").clicked() {
+                    self.tool = None;
+                }
+            });
+        }
         // the picture
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(780.0, 230.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
@@ -334,7 +428,28 @@ impl WaveEd {
             let mid = rect.center().y;
             let half = rect.height() * 0.48;
             let col = if recording { Color32::from_rgb(240, 110, 90) } else { ACCENT };
-            if span <= cols * 2 {
+            if self.spec {
+                let key = (v0, v1, n, self.rev);
+                if self.spec_tex.as_ref().is_none_or(|t| t.0 != key) {
+                    let (w, h) = (cols / 2, 115);
+                    let cells = ops::spectrum(&self.frames, v0, v1, w, h, self.rate);
+                    let px: Vec<Color32> = cells
+                        .iter()
+                        .map(|&v| {
+                            // dark, through the accent colour, to white at full level
+                            let (lo, hi) = if v < 0.6 { (PANEL_DARK, ACCENT) } else { (ACCENT, Color32::WHITE) };
+                            let t = if v < 0.6 { v / 0.6 } else { (v - 0.6) / 0.4 };
+                            let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+                            Color32::from_rgb(m(lo.r(), hi.r()), m(lo.g(), hi.g()), m(lo.b(), hi.b()))
+                        })
+                        .collect();
+                    let img = egui::ColorImage { size: [w, h], pixels: px };
+                    self.spec_tex = Some((key, ui.ctx().load_texture("wave frequencies", img, egui::TextureOptions::LINEAR)));
+                }
+                if let Some((_, tex)) = &self.spec_tex {
+                    p.image(tex.id(), rect, egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                }
+            } else if span <= cols * 2 {
                 let pts: Vec<Pos2> = (v0..v1).map(|i| Pos2::new(x_of(i), mid - (self.frames[i][0] + self.frames[i][1]) * 0.5 * half)).collect();
                 p.add(egui::Shape::line(pts, Stroke::new(1.2_f32, col)));
             } else {
@@ -511,6 +626,13 @@ impl WaveEd {
                     (M::CTRL, Key::U, 32),
                     (M::ALT, Key::S, 38),
                     (M::ALT, Key::A, 13),
+                    (M::ALT, Key::T, 60),
+                    (M::CTRL, Key::T, 61),
+                    (M::CTRL, Key::R, 62),
+                    (M::CTRL, Key::B, 63),
+                    (M::CTRL, Key::Q, 64),
+                    (M::CTRL, Key::L, 65),
+                    (M::NONE, Key::S, 66),
                     (M::NONE, Key::PageUp, 45),
                     (M::NONE, Key::PageDown, 46),
                     (M::NONE, Key::Home, 47),
@@ -533,6 +655,7 @@ impl WaveEd {
             match e {
                 20 => {
                     if let Some(s) = self.undo.pop() {
+                        self.rev += 1;
                         self.frames = s.frames;
                         self.sel = s.sel;
                         self.marks = s.marks;
@@ -543,6 +666,8 @@ impl WaveEd {
                 21 => self.sel = (0, self.frames.len()),
                 4 => self.clip = self.frames[a..b].to_vec(),
                 28 => self.sel = (self.sel.0, self.sel.0),
+                60..=65 => self.tool = Some(e - 10),
+                66 => self.spec = !self.spec,
                 26 | 27 => {
                     // step to the stretch before or after, flag to flag
                     let here = self.sel.0;
@@ -700,6 +825,26 @@ impl WaveEd {
                                 self.sel = (0, 0);
                                 self.fit();
                             }
+                        }
+                        50 => {
+                            let new = ops::stretch(&self.frames[a..b], self.time, self.semis, self.rate);
+                            self.swap_in(a, b, new);
+                        }
+                        51 => {
+                            let cuts: Vec<usize> = self.marks.iter().filter(|m| m.at > a && m.at < b).map(|m| m.at - a).collect();
+                            let new = ops::drum_stretch(&self.frames[a..b], &cuts, self.time, self.rate);
+                            self.swap_in(a, b, new);
+                        }
+                        52 => {
+                            let room = if self.room_clip && !self.clip.is_empty() { self.clip.clone() } else { ops::noise_impulse(self.rate, self.room_secs) };
+                            ops::convolve(&mut self.frames, a, b, &room, self.room_wet);
+                            self.fit();
+                        }
+                        53 => ops::blur(&mut self.frames, a, b, self.blur),
+                        54 => ops::equalize(&mut self.frames, a, b, self.rate, &self.eq),
+                        55 => {
+                            let (la, lb) = if self.lp.1 > self.lp.0 { self.lp } else { (a, b) };
+                            ops::tune_loop(&mut self.frames, la, lb, (self.join_ms / 1000.0 * self.rate as f32) as usize);
                         }
                         36 => ops::declick(&mut self.frames, a, b, self.rate, true),
                         37 => ops::declick(&mut self.frames, a, b, self.rate, false),

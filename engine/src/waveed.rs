@@ -308,6 +308,43 @@ pub fn noise_profile(f: &Frames, a: usize, b: usize) -> Vec<f32> {
     sum.iter().map(|s| s / count.max(1) as f32).collect()
 }
 
+/// Work on the stretch one overlapping window of `n` frames at a time, in frequencies: `work` gets the real
+/// and imaginary halves of each window (bins 0 to n/2 are the ones to change; the mirror half is kept in step
+/// for it) and which side it is.
+fn by_windows(f: &mut Frames, a: usize, b: usize, n: usize, mut work: impl FnMut(&mut [f32], &mut [f32], usize)) {
+    let hop = n / 4;
+    let win = |i: usize| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos();
+    let mut out = vec![[0.0f32; 2]; b - a];
+    let mut at = 0isize - (n - hop) as isize;
+    while at < (b - a) as isize {
+        for side in 0..2 {
+            let mut re: Vec<f32> = (0..n)
+                .map(|i| {
+                    let k = at + i as isize;
+                    if k >= 0 && (k as usize) < b - a { f[a + k as usize][side] * win(i) } else { 0.0 }
+                })
+                .collect();
+            let mut im = vec![0.0; n];
+            fft(&mut re, &mut im, false);
+            work(&mut re, &mut im, side);
+            for k in 1..n / 2 {
+                re[n - k] = re[k];
+                im[n - k] = -im[k];
+            }
+            fft(&mut re, &mut im, true);
+            for i in 0..n {
+                let k = at + i as isize;
+                if k >= 0 && (k as usize) < b - a {
+                    // four overlapping windows, each used twice, add up to 1.5
+                    out[k as usize][side] += re[i] * win(i) / 1.5;
+                }
+            }
+        }
+        at += hop as isize;
+    }
+    f[a..b].copy_from_slice(&out);
+}
+
 /// Take the noise of `profile` out of the stretch: each frequency is turned down by as much as the noise
 /// makes up of it. `amount` 1 takes the measured noise, more takes more, at the cost of a duller sound.
 pub fn denoise(f: &mut Frames, a: usize, b: usize, profile: &[f32], amount: f32) {
@@ -315,41 +352,251 @@ pub fn denoise(f: &mut Frames, a: usize, b: usize, profile: &[f32], amount: f32)
     if profile.len() != NOISE_N / 2 + 1 || b <= a {
         return;
     }
-    let hop = NOISE_N / 4;
-    let mut out = vec![[0.0f32; 2]; b - a + NOISE_N];
-    let mut at = 0isize - (NOISE_N - hop) as isize;
-    while at < (b - a) as isize {
-        for side in 0..2 {
-            let mut re: Vec<f32> = (0..NOISE_N)
-                .map(|i| {
-                    let k = at + i as isize;
-                    if k >= 0 && (k as usize) < b - a { f[a + k as usize][side] * window(i) } else { 0.0 }
-                })
-                .collect();
-            let mut im = vec![0.0; NOISE_N];
-            fft(&mut re, &mut im, false);
-            for k in 0..=NOISE_N / 2 {
-                let mag = (re[k] * re[k] + im[k] * im[k]).sqrt();
-                let keep = if mag > 1e-12 { ((mag - profile[k] * amount) / mag).max(0.03) } else { 0.0 };
-                re[k] *= keep;
-                im[k] *= keep;
-                if k > 0 && k < NOISE_N / 2 {
-                    re[NOISE_N - k] *= keep;
-                    im[NOISE_N - k] *= keep;
+    by_windows(f, a, b, NOISE_N, |re, im, _| {
+        for k in 0..=NOISE_N / 2 {
+            let mag = (re[k] * re[k] + im[k] * im[k]).sqrt();
+            let keep = if mag > 1e-12 { ((mag - profile[k] * amount) / mag).max(0.03) } else { 0.0 };
+            re[k] *= keep;
+            im[k] *= keep;
+        }
+    });
+}
+
+/// Smear the stretch in time: every frequency keeps its level but loses its place inside a long window.
+/// `amount` 0 to 1 sets how long the smear is, from a twentieth of a second to about a third.
+pub fn blur(f: &mut Frames, a: usize, b: usize, amount: f32) {
+    let (a, b) = span(f, a, b);
+    if b <= a {
+        return;
+    }
+    let n = [2048, 4096, 8192, 16384][((amount.clamp(0.0, 1.0) * 3.99) as usize).min(3)];
+    let mut seed = 12345u32;
+    by_windows(f, a, b, n, |re, im, _| {
+        for k in 1..n / 2 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let ph = (seed >> 8) as f32 / 16777216.0 * std::f32::consts::TAU;
+            let mag = (re[k] * re[k] + im[k] * im[k]).sqrt();
+            re[k] = mag * ph.cos();
+            im[k] = mag * ph.sin();
+        }
+    });
+}
+
+/// The centre frequencies of the equaliser's bands.
+pub const EQ_BANDS: [f32; 10] = [31.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+
+/// Turn each part of the frequency range up or down: `db` holds the change at each of `EQ_BANDS`, and the
+/// curve runs smoothly between them.
+pub fn equalize(f: &mut Frames, a: usize, b: usize, rate: u32, db: &[f32; 10]) {
+    let (a, b) = span(f, a, b);
+    if b <= a {
+        return;
+    }
+    let n = 4096;
+    let gains: Vec<f32> = (0..=n / 2)
+        .map(|k| {
+            let hz = (k as f32 * rate as f32 / n as f32).max(1.0);
+            let at = (hz / EQ_BANDS[0]).log2().clamp(0.0, 9.0);
+            let (i, t) = ((at as usize).min(8), at - (at as usize).min(8) as f32);
+            10f32.powf((db[i] + (db[i + 1] - db[i]) * t) / 20.0)
+        })
+        .collect();
+    by_windows(f, a, b, n, |re, im, _| {
+        for k in 0..=n / 2 {
+            re[k] *= gains[k];
+            im[k] *= gains[k];
+        }
+    });
+}
+
+/// Pass the stretch through the room whose echo is `impulse`: the echo is mixed in at `wet` (0 to 1) beside
+/// the sound as it was, and its tail runs on past the end of the stretch, lengthening the take if it must.
+pub fn convolve(f: &mut Frames, a: usize, b: usize, impulse: &[[f32; 2]], wet: f32) {
+    let (a, b) = span(f, a, b);
+    if b <= a || impulse.is_empty() {
+        return;
+    }
+    let total = b - a + impulse.len() - 1;
+    let n = total.next_power_of_two();
+    let dry_peak = peak(f, a, b);
+    let mut echo = vec![[0.0f32; 2]; total];
+    for side in 0..2 {
+        let mut xr: Vec<f32> = (0..n).map(|i| if i < b - a { f[a + i][side] } else { 0.0 }).collect();
+        let mut xi = vec![0.0; n];
+        let mut hr: Vec<f32> = (0..n).map(|i| impulse.get(i).map_or(0.0, |x| x[side])).collect();
+        let mut hi = vec![0.0; n];
+        fft(&mut xr, &mut xi, false);
+        fft(&mut hr, &mut hi, false);
+        for k in 0..n {
+            (xr[k], xi[k]) = (xr[k] * hr[k] - xi[k] * hi[k], xr[k] * hi[k] + xi[k] * hr[k]);
+        }
+        fft(&mut xr, &mut xi, true);
+        for (e, x) in echo.iter_mut().zip(&xr) {
+            e[side] = *x;
+        }
+    }
+    // the echo comes out as loud as the sound went in
+    let top = echo.iter().fold(0.0f32, |m, x| m.max(x[0].abs()).max(x[1].abs())).max(1e-9);
+    let scale = dry_peak / top * wet;
+    gain(f, a, b, 1.0 - wet * 0.5);
+    let wet: Frames = echo.iter().map(|x| [x[0] * scale, x[1] * scale]).collect();
+    mix(f, a, &wet);
+}
+
+/// A room echo made of fading noise, `secs` long, for when there is no recorded one at hand.
+pub fn noise_impulse(rate: u32, secs: f32) -> Frames {
+    let n = (rate as f32 * secs.clamp(0.05, 10.0)) as usize;
+    let mut seed = 99u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / 8388608.0 - 1.0
+    };
+    (0..n)
+        .map(|i| {
+            // sixty decibels down by the end
+            let fall = (-6.9 * i as f32 / n as f32).exp();
+            [next() * fall, next() * fall]
+        })
+        .collect()
+}
+
+/// Make the loop `a..b` join up with itself: its last stretch fades over into the sound that leads up to its
+/// start, so the end runs into the beginning without a step. `fade` is the length of the join in frames.
+pub fn tune_loop(f: &mut Frames, a: usize, b: usize, fade: usize) {
+    let (a, b) = span(f, a, b);
+    let fade = fade.min((b - a) / 2);
+    if fade == 0 {
+        return;
+    }
+    for i in 0..fade {
+        let t = (i + 1) as f32 / fade as f32;
+        // with no lead-up to borrow, the start of the loop itself is what the end fades into
+        let from = if a >= fade { f[a - fade + i] } else { f[a + i] };
+        let x = &mut f[b - fade + i];
+        let (keep, take) = ((1.0 - t).sqrt(), t.sqrt());
+        *x = [x[0] * keep + from[0] * take, x[1] * keep + from[1] * take];
+    }
+}
+
+/// Change the length of a sound without changing its pitch, and its pitch without changing its length.
+/// `time` is how many times longer it comes out, `semis` how many semitones higher.
+pub fn stretch(clip: &[[f32; 2]], time: f32, semis: f32, rate: u32) -> Frames {
+    let shift = 2f64.powf(semis as f64 / 12.0);
+    let longer = time.clamp(0.05, 20.0) as f64 * shift;
+    let long = if (longer - 1.0).abs() < 1e-4 { clip.to_vec() } else { overlap_stretch(clip, longer, rate) };
+    if (shift - 1.0).abs() < 1e-6 {
+        return long;
+    }
+    // played faster by the pitch change, which also brings the length back
+    let n = (long.len() as f64 / shift) as usize;
+    (0..n)
+        .map(|i| {
+            let p = i as f64 * shift;
+            let (k, t) = (p as usize, (p - p.floor()) as f32);
+            let (x, y) = (long[k.min(long.len() - 1)], long[(k + 1).min(long.len() - 1)]);
+            [x[0] + (y[0] - x[0]) * t, x[1] + (y[1] - x[1]) * t]
+        })
+        .collect()
+}
+
+/// Length change by laying short overlapping pieces down closer together or further apart; each piece is
+/// taken from where it lines up best with the one before, so the wave carries on unbroken.
+fn overlap_stretch(clip: &[[f32; 2]], factor: f64, rate: u32) -> Frames {
+    let n = ((rate as usize / 25).max(64)) & !1;
+    if clip.len() < n * 2 {
+        return clip.to_vec();
+    }
+    let hop = n / 2;
+    let reach = n / 4;
+    let mono: Vec<f32> = clip.iter().map(|x| x[0] + x[1]).collect();
+    let out_len = (clip.len() as f64 * factor) as usize;
+    let mut out = vec![[0.0f32; 2]; out_len + n];
+    let win = |i: usize| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos();
+    // where the piece before would have carried on from, in the source
+    let mut carry = 0usize;
+    let mut k = 0usize;
+    while k * hop < out_len {
+        let want = (k as f64 * hop as f64 / factor) as usize;
+        let mut best = want.min(clip.len() - n);
+        if k > 0 && carry + n <= clip.len() {
+            let lo = want.saturating_sub(reach);
+            let hi = (want + reach).min(clip.len() - n);
+            let mut top = f32::MIN;
+            let mut s = lo;
+            while s <= hi {
+                let score: f32 = (0..hop).step_by(4).map(|i| mono[s + i] * mono[carry + i]).sum();
+                if score > top {
+                    top = score;
+                    best = s;
                 }
-            }
-            fft(&mut re, &mut im, true);
-            for i in 0..NOISE_N {
-                let k = at + i as isize;
-                if k >= 0 && (k as usize) < b - a {
-                    // four overlapping windows, each used twice, add up to 1.5
-                    out[k as usize][side] += re[i] * window(i) / 1.5;
-                }
+                s += 2;
             }
         }
-        at += hop as isize;
+        for i in 0..n {
+            let x = clip[best + i];
+            let w = win(i);
+            let o = &mut out[k * hop + i];
+            o[0] += x[0] * w;
+            o[1] += x[1] * w;
+        }
+        carry = best + hop;
+        k += 1;
     }
-    f[a..b].copy_from_slice(&out[..b - a]);
+    out.truncate(out_len);
+    out
+}
+
+/// Move the pieces of a beat apart or together without stretching the pieces themselves: each piece starts
+/// `time` times later than it did; a piece left too long for its new place is faded short, one too short is
+/// followed by silence. `cuts` are where the pieces start, counted from the start of `clip`.
+pub fn drum_stretch(clip: &[[f32; 2]], cuts: &[usize], time: f32, rate: u32) -> Frames {
+    let time = time.clamp(0.05, 20.0) as f64;
+    let mut starts: Vec<usize> = cuts.iter().copied().filter(|&c| c > 0 && c < clip.len()).collect();
+    starts.insert(0, 0);
+    starts.dedup();
+    let mut out = vec![[0.0f32; 2]; (clip.len() as f64 * time) as usize];
+    for (k, &s) in starts.iter().enumerate() {
+        let e = starts.get(k + 1).copied().unwrap_or(clip.len());
+        let to = (s as f64 * time) as usize;
+        let room = ((e as f64 * time) as usize).min(out.len()).saturating_sub(to);
+        let len = (e - s).min(room);
+        let fade = (rate as usize / 200).min(len);
+        for i in 0..len {
+            let g = if len < e - s && i >= len - fade { (len - i) as f32 / fade as f32 } else { 1.0 };
+            out[to + i] = [clip[s + i][0] * g, clip[s + i][1] * g];
+        }
+    }
+    out
+}
+
+/// A picture of the frequencies over time: `cols` columns across `v0..v1`, `rows` rows from high (first) to
+/// low on an even pitch scale, each cell 0 (silent) to 1 (full level).
+pub fn spectrum(f: &Frames, v0: usize, v1: usize, cols: usize, rows: usize, rate: u32) -> Vec<f32> {
+    let n = 2048;
+    let mut out = vec![0.0f32; cols * rows];
+    let (v0, v1) = span(f, v0, v1);
+    if v1 <= v0 || cols == 0 || rows == 0 {
+        return out;
+    }
+    let (low, high) = (30.0f32, (rate as f32 / 2.0).max(60.0));
+    for c in 0..cols {
+        let mid = v0 + ((c as f64 + 0.5) / cols as f64 * (v1 - v0) as f64) as usize;
+        let mut re: Vec<f32> = (0..n)
+            .map(|i| {
+                let k = mid as isize + i as isize - (n / 2) as isize;
+                if k >= 0 && (k as usize) < f.len() { (f[k as usize][0] + f[k as usize][1]) * 0.5 * (0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos()) } else { 0.0 }
+            })
+            .collect();
+        let mut im = vec![0.0; n];
+        fft(&mut re, &mut im, false);
+        for r in 0..rows {
+            let hz = low * (high / low).powf(1.0 - (r as f32 + 0.5) / rows as f32);
+            let k = ((hz * n as f32 / rate as f32) as usize).clamp(1, n / 2 - 1);
+            let mag = (re[k] * re[k] + im[k] * im[k]).sqrt() / (n as f32 / 4.0);
+            out[r * cols + c] = ((20.0 * mag.max(1e-6).log10() + 84.0) / 84.0).clamp(0.0, 1.0);
+        }
+    }
+    out
 }
 
 /// The flags of a wave file: its cue points, with the names and lengths kept beside them.
@@ -545,5 +792,59 @@ mod tests {
         gate(&mut f, 0, 48_000, thresh, rate);
         assert_eq!(peak(&f, 20_000, 28_000), 0.0);
         assert!(peak(&f, 13_000, 17_000) > 0.5);
+    }
+
+    #[test]
+    fn the_frequency_tools_do_what_they_say() {
+        let rate = 48_000u32;
+        let tone = |hz: f32, n: usize| -> Frames { (0..n).map(|i| [(i as f32 * hz * std::f32::consts::TAU / rate as f32).sin() * 0.5; 2]).collect() };
+        let rms = |f: &[[f32; 2]]| (f.iter().map(|x| x[0] * x[0]).sum::<f32>() / f.len() as f32).sqrt();
+        // how often the wave crosses zero tells its pitch
+        let crossings = |f: &[[f32; 2]]| f.windows(2).filter(|w| w[0][0] <= 0.0 && w[1][0] > 0.0).count() as f32 / f.len() as f32 * rate as f32;
+        // twice as long at the same pitch; the same length an octave up
+        let src = tone(440.0, 48_000);
+        let long = stretch(&src, 2.0, 0.0, rate);
+        assert!((long.len() as i64 - 96_000).abs() < 10);
+        assert!((crossings(&long[4000..90_000]) - 440.0).abs() < 12.0, "{}", crossings(&long[4000..90_000]));
+        assert!(rms(&long[4000..90_000]) > 0.25);
+        let high = stretch(&src, 1.0, 12.0, rate);
+        assert!((high.len() as i64 - 48_000).abs() < 10);
+        assert!((crossings(&high[4000..44_000]) - 880.0).abs() < 25.0, "{}", crossings(&high[4000..44_000]));
+        // the equaliser takes the high tone down and leaves the low one
+        let mut both: Frames = tone(125.0, 48_000).iter().zip(tone(8000.0, 48_000)).map(|(a, b)| [a[0] + b[0]; 2]).collect();
+        let before = rms(&both[8000..40_000]);
+        let mut db = [0.0; 10];
+        db[7] = -40.0;
+        db[8] = -40.0;
+        db[9] = -40.0;
+        equalize(&mut both, 0, 48_000, rate, &db);
+        let after = rms(&both[8000..40_000]);
+        assert!((after / before - 0.707).abs() < 0.05, "{}", after / before);
+        // a click through a room is followed by the room, and the take grows by the tail
+        let mut click: Frames = vec![[0.0; 2]; 1000];
+        click[10] = [1.0; 2];
+        convolve(&mut click, 0, 1000, &noise_impulse(rate, 0.5), 1.0);
+        assert_eq!(click.len(), 1000 + 24_000 - 1);
+        assert!(rms(&click[2000..6000]) > 0.01 && rms(&click[2000..6000]) > rms(&click[20_000..24_000]) * 4.0);
+        // blur keeps the level about where it was and spreads a burst out
+        let mut burst: Frames = vec![[0.0; 2]; 48_000];
+        burst[20_000..22_000].copy_from_slice(&tone(1000.0, 2000));
+        blur(&mut burst, 0, 48_000, 1.0);
+        assert!(rms(&burst[14_000..18_000]) > 0.005);
+        // the loop end meets the loop start
+        let mut ramp: Frames = (0..10_000).map(|i| [i as f32 / 10_000.0; 2]).collect();
+        tune_loop(&mut ramp, 2000, 8000, 1000);
+        assert!((ramp[7999][0] - ramp[1999][0]).abs() < 1e-4);
+        // pieces of a beat move apart untouched
+        let beat: Frames = (0..4000).map(|i| [if i % 1000 < 100 { 1.0 } else { 0.0 }; 2]).collect();
+        let wide = drum_stretch(&beat, &[1000, 2000, 3000], 2.0, rate);
+        assert_eq!(wide.len(), 8000);
+        assert!(wide[2000][0] == 1.0 && wide[2099][0] == 1.0 && wide[1500][0] == 0.0 && wide[6050][0] == 1.0);
+        // the picture shows the tone as one bright row
+        let pic = spectrum(&tone(1000.0, 48_000), 0, 48_000, 8, 64, rate);
+        let col: Vec<f32> = (0..64).map(|r| pic[r * 8 + 4]).collect();
+        let brightest = col.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let hz = 30.0 * (24_000.0f32 / 30.0).powf(1.0 - (brightest as f32 + 0.5) / 64.0);
+        assert!((hz / 1000.0).log2().abs() < 0.2, "{hz}");
     }
 }
