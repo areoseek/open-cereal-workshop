@@ -47,6 +47,15 @@ pub struct Cable {
     pub level: f32,
 }
 
+/// A setting cable: an output of one unit moves a setting of another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetCable {
+    /// The sending unit and which of its outputs.
+    pub from: (usize, u16),
+    /// The unit moved and the setting, as the unit numbers its settings.
+    pub to: (usize, u16),
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Patch {
     pub nodes: Vec<Node>,
@@ -58,6 +67,8 @@ pub struct Patch {
     pub feeds: Vec<usize>,
     /// For a held instrument (by its number), the note units its notes pass on the way in.
     pub shape: Vec<(usize, Vec<crate::noteshape::Link>)>,
+    /// Setting cables between held units.
+    pub sets: Vec<SetCable>,
 }
 
 fn u32at(b: &[u8], at: usize) -> Option<u32> {
@@ -240,7 +251,15 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
     }
     let main_out = raw.iter().map(|c| c.0).filter(sound).min();
     let mut cables = Vec::new();
+    let mut sets = Vec::new();
     for (to, from, level) in raw {
+        // a setting cable runs from a unit's output socket (role 10) to a setting's socket (role 11)
+        if let (Some(&(a, 2, out, 10)), Some(&(b, 2, k, 11))) = (pins.get(&from), pins.get(&to)) {
+            if a != b && out < 4096 && k < 65536 {
+                sets.push(SetCable { from: (a, out as u16), to: (b, k as u16) });
+            }
+            continue;
+        }
         let from = match pins.get(&from) {
             Some(&(n, 0, _, _)) if lead.as_ref().is_some_and(|l| l.0 == n) => End::Bay,
             Some(&(n, 0, _, _)) => End::Node(n),
@@ -257,10 +276,13 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
         };
         cables.push(Cable { from, to, level });
     }
-    let order = sort(nodes.len(), &cables);
+    // a unit runs after the ones that send it settings, too
+    let mut deps = cables.clone();
+    deps.extend(sets.iter().map(|s| Cable { from: End::Node(s.from.0), to: End::Node(s.to.0), level: 1.0 }));
+    let order = sort(nodes.len(), &deps);
     let feeds: Vec<usize> = layers.iter().map(|l| l.0).collect();
     shape.retain(|s| lead.as_ref().is_some_and(|l| l.0 == s.0) || feeds.contains(&s.0));
-    Some((Patch { nodes, cables, order, feeds, shape }, lead, layers))
+    Some((Patch { nodes, cables, order, feeds, shape, sets }, lead, layers))
 }
 
 /// Units in an order where each comes after the ones feeding it. Units caught in a loop of cables go last,
@@ -379,6 +401,14 @@ pub struct State {
     scratch: Vec<[f32; 2]>,
     /// Sound handed in for a held instrument this block: the unit, the sound, and whether any came.
     feeds: Vec<(usize, Vec<[f32; 2]>, bool)>,
+    /// What each setting cable last carried; not a number until its sender has been heard once.
+    last: Vec<f32>,
+    /// The patch the units' settings were last brought in line with.
+    seen: Option<std::sync::Arc<Patch>>,
+    /// Where the song stands, in beats, and its tempo: for held units that keep time with it.
+    pub song_at: (f64, f32),
+    /// Settings sent to held instruments, which are played outside: the unit, the setting, the value.
+    pub gen_sets: Vec<(usize, u16, f32)>,
 }
 
 impl State {
@@ -388,6 +418,10 @@ impl State {
             bufs: vec![vec![[0.0; 2]; 1024]; p.nodes.len()],
             scratch: vec![[0.0; 2]; 1024],
             feeds: p.feeds.iter().map(|&n| (n, vec![[0.0; 2]; 1024], false)).collect(),
+            last: vec![f32::NAN; p.sets.len()],
+            seen: None,
+            song_at: (0.0, 130.0),
+            gen_sets: Vec::new(),
         }
     }
 
@@ -408,8 +442,20 @@ impl State {
     }
 
     /// Bring the held units' settings in line with `p` (same units, new values).
-    pub fn sync(&mut self, p: &Patch) {
-        for (u, n) in self.units.iter_mut().zip(&p.nodes) {
+    pub fn sync(&mut self, p: &std::sync::Arc<Patch>) {
+        // only when the patch itself was changed: in between, cables move the units' settings and they stay moved
+        if self.seen.as_ref().is_some_and(|s| std::sync::Arc::ptr_eq(s, p)) {
+            return;
+        }
+        let before = self.seen.replace(p.clone());
+        self.last.resize(p.sets.len(), f32::NAN);
+        // the first time round the units are as they were made, from this very patch
+        let Some(before) = before else { return };
+        for (i, (u, n)) in self.units.iter_mut().zip(&p.nodes).enumerate() {
+            // a unit nobody edited keeps what the cables made of it
+            if before.nodes.get(i).is_some_and(|o| o.fx == n.fx) {
+                continue;
+            }
             if let (Some(u), Some(f)) = (u, &n.fx) {
                 if u.fx != *f && u.fx.kind == f.kind && u.fx.p.len() == f.p.len() {
                     u.fx.p.copy_from_slice(&f.p);
@@ -422,10 +468,31 @@ impl State {
     }
 }
 
+/// Move a setting of a held unit, as a cable or an outside sender asks.
+fn set(p: &Patch, units: &mut [Option<Unit>], gen_sets: &mut Vec<(usize, u16, f32)>, to: (usize, u16), v: f32) {
+    match units.get_mut(to.0) {
+        Some(Some(u)) if u.fx.kind != crate::fx::Kind::Thru => u.fx.set_travel(to.1 as usize, v),
+        // an instrument, or a unit we have no sound for
+        _ if to.0 < p.nodes.len() && gen_sets.len() < 256 => gen_sets.push((to.0, to.1, v)),
+        _ => {}
+    }
+}
+
+impl State {
+    /// An output of a held unit that is run outside the bay (a note script's, say) has moved: everything cabled to it follows.
+    pub fn drive(&mut self, p: &Patch, from: (usize, u16), v: f32) {
+        for c in p.sets.iter().filter(|c| c.from == from) {
+            set(p, &mut self.units, &mut self.gen_sets, c.to, v.clamp(0.0, 1.0));
+        }
+    }
+}
+
 pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     if !p.cables.iter().any(|c| c.to == End::Bay) {
         // nothing reaches the output we know of: better the dry sound than silence
-        return;
+        if p.sets.is_empty() {
+            return;
+        }
     }
     let n = io.len();
     if st.scratch.len() < n {
@@ -434,7 +501,9 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             b.resize(n, [0.0; 2]);
         }
     }
-    let State { units, bufs, scratch, feeds } = st;
+    let song_at = st.song_at;
+    let State { units, bufs, scratch, feeds, last, gen_sets, .. } = st;
+    let sounds = p.cables.iter().any(|c| c.to == End::Bay);
     let gather = |to: End, scratch: &mut [[f32; 2]], bufs: &[Vec<[f32; 2]>], io: &[[f32; 2]]| {
         scratch.fill([0.0; 2]);
         for c in p.cables.iter().filter(|c| c.to == to) {
@@ -458,10 +527,29 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             }
             f.2 = false;
         }
+        let mut out = None;
         if let Some(u) = &mut units[i] {
+            u.song_at = song_at;
             u.process(&mut scratch[..n], cx);
+            out = Some(u.out);
         }
         bufs[i][..n].copy_from_slice(&scratch[..n]);
+        // what the unit sends goes down its setting cables, each time it has changed; when two senders move
+        // one setting, the one that moved last has it
+        if let Some(out) = out {
+            for (k, c) in p.sets.iter().enumerate().filter(|(_, c)| c.from.0 == i) {
+                let (Some(&v), Some(l)) = (out.get(c.from.1 as usize), last.get_mut(k)) else { continue };
+                if l.is_nan() {
+                    *l = v;
+                } else if (v - *l).abs() > 1e-6 {
+                    *l = v;
+                    set(p, units, gen_sets, c.to, v.clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+    if !sounds {
+        return;
     }
     gather(End::Bay, &mut scratch[..n], bufs, io);
     io.copy_from_slice(&scratch[..n]);
@@ -482,6 +570,86 @@ mod tests {
         let mut io = vec![[0.25, -0.5]; 2000];
         process(&p, &mut st, &mut io, &Ctx { sr: 44100.0, step: 5512.5, clock: Default::default() });
         assert!(io.iter().all(|s| *s == [0.25, -0.5]));
+    }
+
+    fn bay(senders: usize) -> Patch {
+        use crate::fx::Kind;
+        let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)) }).collect();
+        nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)) });
+        let c = |a, b| Cable { from: a, to: b, level: 1.0 };
+        Patch {
+            cables: vec![c(End::Bay, End::Node(senders)), c(End::Node(senders), End::Bay)],
+            order: (0..=senders).collect(),
+            sets: (0..senders).map(|i| SetCable { from: (i, 0), to: (senders, 1) }).collect(),
+            nodes,
+            ..Default::default()
+        }
+    }
+
+    fn level(p: &std::sync::Arc<Patch>, st: &mut State) -> f32 {
+        let cx = Ctx { sr: 44100.0, step: 5512.5, clock: Default::default() };
+        let mut io = vec![[0.5, 0.5]; 512];
+        for _ in 0..40 {
+            io.fill([0.5, 0.5]);
+            st.sync(p);
+            process(p, st, &mut io, &cx);
+        }
+        io[511][0].abs()
+    }
+
+    #[test]
+    fn a_setting_cable_sends_when_its_sender_moves() {
+        let mut p = bay(1);
+        p.nodes[0].fx.as_mut().unwrap().p[0] = 65536.0;
+        let a = std::sync::Arc::new(p.clone());
+        let mut st = State::new(&a, 44100.0);
+        // a sender that sits still leaves the setting where it was stored
+        let dry = level(&a, &mut st);
+        assert!((dry - 0.5).abs() < 0.02, "{dry}");
+        p.nodes[0].fx.as_mut().unwrap().p[0] = 0.0;
+        let b = std::sync::Arc::new(p.clone());
+        assert!(level(&b, &mut st) < 0.005);
+        // and the moved setting stays moved while the sender rests
+        assert!(level(&b, &mut st) < 0.005);
+        p.nodes[0].fx.as_mut().unwrap().p[0] = 65536.0;
+        let c = std::sync::Arc::new(p);
+        assert!(level(&c, &mut st) > dry * 1.1);
+    }
+
+    #[test]
+    fn of_two_senders_the_one_that_moved_last_has_the_setting() {
+        let mut p = bay(2);
+        let a = std::sync::Arc::new(p.clone());
+        let mut st = State::new(&a, 44100.0);
+        level(&a, &mut st);
+        p.nodes[0].fx.as_mut().unwrap().p[0] = 65536.0;
+        let b = std::sync::Arc::new(p.clone());
+        let loud = level(&b, &mut st);
+        p.nodes[1].fx.as_mut().unwrap().p[0] = 100.0;
+        let c = std::sync::Arc::new(p.clone());
+        let quiet = level(&c, &mut st);
+        assert!(quiet < loud * 0.1, "{quiet} {loud}");
+        // the first sender has not moved since: it does not take the setting back
+        assert!(level(&c, &mut st) < loud * 0.1);
+    }
+
+    #[test]
+    fn an_outside_sender_moves_what_it_is_cabled_to() {
+        let p = std::sync::Arc::new(bay(1));
+        let mut st = State::new(&p, 44100.0);
+        level(&p, &mut st);
+        st.drive(&p, (0, 0), 0.0);
+        // the unit inside has not moved, so what came from outside holds
+        assert!(level(&p, &mut st) < 0.005);
+        st.drive(&p, (0, 1), 1.0);
+        assert!(level(&p, &mut st) < 0.005);
+        // an instrument's settings are handed out instead
+        let mut q = bay(1);
+        q.nodes[1].fx = None;
+        let q = std::sync::Arc::new(q);
+        let mut st = State::new(&q, 44100.0);
+        st.drive(&q, (0, 0), 0.25);
+        assert_eq!(st.gen_sets, vec![(1, 1, 0.25)]);
     }
 
     #[test]

@@ -111,6 +111,8 @@ struct ScriptRun {
     /// Where in the chain of note units it stands, and the socket this instrument's cable leaves it by.
     at: usize,
     port: u32,
+    /// Which held unit of the bay the script is.
+    node: Option<usize>,
     def: Arc<crate::script::ScriptDef>,
     inst: crate::script::Inst,
     /// Note lines not yet due, with the frames each still waits.
@@ -402,6 +404,7 @@ impl Handle {
             scripts: Vec::new(),
             script_emit: None,
             script_serial: 0,
+            script_ctl: Vec::new(),
             midi_wait: Vec::with_capacity(64),
             midi_live: Vec::new(),
             host_wait: Vec::with_capacity(64),
@@ -889,6 +892,8 @@ pub struct Player {
     /// Set while a script's own note is being started: the instrument it is for, the first note unit after the script, the voice's tag.
     script_emit: Option<(usize, usize, u64)>,
     script_serial: u32,
+    /// Output values note scripts sent, waiting for their bays: the channel, the script's unit, the output, the value.
+    script_ctl: Vec<(u16, usize, u16, f32)>,
     /// MIDI messages on their way out, with the frames each still waits.
     midi_wait: Vec<(u64, crate::midiout::Msg)>,
     /// Hand-held notes of sender channels: channel, key, and the message that ends the note.
@@ -1022,7 +1027,7 @@ impl Player {
     }
 
     /// The running script in front of this instrument, started if it is not running yet. `None` when it may not or cannot run.
-    fn script_run(&mut self, chan: u16, li: usize, at: usize, port: u32, def: &Arc<crate::script::ScriptDef>) -> Option<usize> {
+    fn script_run(&mut self, chan: u16, li: usize, at: usize, port: u32, node: Option<usize>, def: &Arc<crate::script::ScriptDef>) -> Option<usize> {
         if let Some(i) = self.scripts.iter().position(|r| r.chan == chan && r.li == li && r.at == at && (Arc::ptr_eq(&r.def, def) || r.def == *def)) {
             self.scripts[i].port = port;
             return Some(i);
@@ -1041,7 +1046,7 @@ impl Player {
             v.let_go();
         }
         self.script_serial += 1;
-        self.scripts.push(ScriptRun { serial: self.script_serial, chan, li, at, port, def: def.clone(), inst, wait: Vec::new(), held: Vec::new(), acc: 0.0, next: 0 });
+        self.scripts.push(ScriptRun { serial: self.script_serial, chan, li, at, port, node, def: def.clone(), inst, wait: Vec::new(), held: Vec::new(), acc: 0.0, next: 0 });
         Some(self.scripts.len() - 1)
     }
 
@@ -1146,7 +1151,13 @@ impl Player {
                             x.remaining = Some(x.delay as u64 + at);
                         }
                     }
-                    Out::Ctl(..) | Out::Err(_) => {}
+                    Out::Ctl(k, v) => {
+                        // the script's own outputs move whatever the bay cables them to
+                        if let (Some(node), true) = (r.node, self.script_ctl.len() < 1024) {
+                            self.script_ctl.push((r.chan, node, k as u16, v));
+                        }
+                    }
+                    Out::Err(_) => {}
                 }
             }
             true
@@ -1635,7 +1646,7 @@ impl Player {
                     None => {
                         if let Some((si, def)) = chain.and_then(crate::noteshape::script_at) {
                             let c = chain.unwrap_or(&[]);
-                            if let Some(ri) = self.script_run(n.chan, li, si, c[si].port, &def) {
+                            if let Some(ri) = self.script_run(n.chan, li, si, c[si].port, Some(c[si].node), &def) {
                                 // the script is handed the note, and what sounds is up to it
                                 let before = crate::noteshape::apply(&c[..si], plain, n.chan, &mut self.seed, &mut self.shape_turn);
                                 let r = &mut self.scripts[ri];
@@ -2296,6 +2307,15 @@ impl Player {
         }
         // where the song stands in sixteenth notes, for effects that keep step with it
         let at_step = self.transport.playing().then(|| self.pos / song.step().max(1) as f64);
+        // what the note scripts sent from their outputs since the last block
+        for (c, node, k, v) in self.script_ctl.drain(..) {
+            let Some(u) = self.chan_fx.get_mut(c as usize).and_then(|c| c.as_mut()).and_then(|c| c.unit.as_mut()) else { continue };
+            if let Some(sub) = u.fx.sub.clone() {
+                if let Some(st) = u.bay_state() {
+                    st.drive(&sub, (node, k), v);
+                }
+            }
+        }
         for (c, cf) in self.chan_fx.iter_mut().enumerate() {
             let Some(cf) = cf else { continue };
             if !cf.dirty && cf.ring == 0 {
@@ -2303,8 +2323,20 @@ impl Player {
             }
             let mut ring = 0;
             if let Some(u) = &mut cf.unit {
+                u.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                 u.process(&mut cf.buf[..n], &cx);
                 ring = u.tail(&cx);
+                // settings the bay's cables sent to the instrument the notes play
+                if let (Some(st), Some(lead)) = (u.bay_state(), song.channels[c].bay().map(|b| b.lead)) {
+                    if !st.gen_sets.is_empty() {
+                        self.ov.fit(song);
+                        for (node, k, v) in st.gen_sets.drain(..) {
+                            if node == lead {
+                                self.ov.set(Target::ChanParam(c, k), v);
+                            }
+                        }
+                    }
+                }
             }
             if let Some((set, st)) = &mut cf.tail {
                 st.process(set, &mut cf.buf[..n], cx.step, at_step);
@@ -2492,6 +2524,9 @@ impl Player {
                                 _ => {}
                             }
                         }
+                    }
+                    if u.1.fx.kind == fx::Kind::Patch {
+                        u.1.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                     }
                     if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Formula) {
                         // a controller: run it, then hand its outputs to whatever is linked to them
@@ -2851,6 +2886,44 @@ mod tests {
         // a note sent out of a socket nothing is plugged into is not heard
         let other = run(Some(source(0, 1)));
         assert!(other.2 < 1e-6, "{other:?}");
+    }
+
+    #[test]
+    fn a_script_output_moves_the_setting_it_is_cabled_to() {
+        if crate::pyrt::get().is_none() {
+            eprintln!("no Python on this machine: skipped");
+            return;
+        }
+        let peak = |b: &[f32]| b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let run = |to: f32| {
+            use crate::fxpatch::{Cable, End, Node, SetCable};
+            use crate::noteshape::{Link, Shaper};
+            let src = format!("import flvfx\nflvfx.addOutputController('Out', 1.0)\ndef onTriggerVoice(v):\n    o = flvfx.Voice(v)\n    v.o = o\n    o.trigger()\n    flvfx.setOutputController('Out', {to})\ndef onReleaseVoice(v):\n    v.o.release()\n");
+            crate::script::allow(&src);
+            let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
+            ch.plugin = crate::song::BAY.to_string();
+            let node = |fx| Node { ident: String::new(), name: String::new(), fx };
+            let c = |a, b| Cable { from: a, to: b, level: 1.0 };
+            let patch = crate::fxpatch::Patch {
+                nodes: vec![node(None), node(None), node(Some(fx::Fx::new(fx::Kind::Balance)))],
+                cables: vec![c(End::Bay, End::Node(2)), c(End::Node(2), End::Bay)],
+                order: vec![0, 1, 2],
+                shape: vec![(0, vec![Link { shaper: Shaper::Script(Arc::new(crate::script::ScriptDef { source: src, params: String::new() })), port: 0, node: 1 }])],
+                sets: vec![SetCable { from: (1, 0), to: (2, 1) }],
+                ..Default::default()
+            };
+            ch.bay = Some(crate::song::Bay { fx: fx::Fx { kind: fx::Kind::Patch, p: vec![], ir: None, sub: Some(Arc::new(patch)), raw: None, ext: None }, lead: 0, layers: vec![] });
+            let mut song = Song::new();
+            song.channels = vec![ch];
+            let (h, mut p) = new_player(song, 48_000.0);
+            h.send(Cmd::NoteOn { chan: 0, key: 60, vel: 1.0 });
+            let mut a = vec![0.0; 12_000 * 2];
+            p.render(&mut a, 2);
+            p.render(&mut a, 2);
+            peak(&a)
+        };
+        let (open, shut) = (run(0.8), run(0.0));
+        assert!(open > 0.01 && shut < open * 0.01, "{open} {shut}");
     }
 
     #[test]

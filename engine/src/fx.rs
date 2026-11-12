@@ -2640,6 +2640,11 @@ impl Unit {
         self.patch.as_mut()?.feed(k, n)
     }
 
+    /// The running patch bay, when this unit is one.
+    pub fn bay_state(&mut self) -> Option<&mut crate::fxpatch::State> {
+        self.patch.as_deref_mut()
+    }
+
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
         if let Some(u) = &mut self.inner {
             translate(self.fx.kind, &self.fx.p, &mut u.fx.p, cx);
@@ -4082,6 +4087,7 @@ impl Unit {
             Kind::Patch => {
                 if let (Some(st), Some(sub)) = (&mut self.patch, &self.fx.sub) {
                     st.sync(sub);
+                    st.song_at = self.song_at;
                     crate::fxpatch::process(sub, st, io, cx);
                 }
             }
