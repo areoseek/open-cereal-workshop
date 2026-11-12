@@ -2259,6 +2259,26 @@ impl App {
                             self.status = format!("{n} empty patterns removed");
                             ui.close_menu();
                         }
+                        if ui.button("Purge unused audio clips").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
+                            let mut n = 0;
+                            for ci in (0..self.song.channels.len()).rev() {
+                                let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.clips.iter().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(ch) if ch == ci));
+                                if unused && self.song.channels.len() > 1 {
+                                    self.delete_channel(ci);
+                                    n += 1;
+                                }
+                            }
+                            self.status = format!("{n} unused audio clips removed");
+                            ui.close_menu();
+                        }
+                        if ui.button("Close all plugin windows").clicked() {
+                            self.fx_open = None;
+                            self.show_chanset = false;
+                            for inst in self.song.hosted() {
+                                inst.hide_window();
+                            }
+                            ui.close_menu();
+                        }
                         if ui.button("Stop all sound                Ctrl+H").clicked() {
                             self.handle.send(Cmd::Panic);
                             ui.close_menu();
