@@ -421,6 +421,20 @@ impl App {
                             }
                         }
                     }
+                    x if x.starts_with("fxpreset=") => {
+                        // put the unit of a state file on the master track's first slot and open it
+                        let unit = cereal_engine::preset::read(std::path::Path::new(&x[9..])).ok().and_then(|p| Some((p.ident.clone(), p.unit()?)));
+                        if let (Some((ident, cereal_engine::preset::Unit::Fx(f))), Some(ins)) = (unit, app.song.inserts.first_mut()) {
+                            ins.slots.retain(|s| s.index != 0);
+                            let mut s = cereal_engine::song::Slot::with_fx(0, f.kind);
+                            s.plugin = ident;
+                            s.fx = Some(f);
+                            ins.slots.insert(0, s);
+                            app.fx_open = Some((0, 0));
+                            app.sel_insert = 0;
+                            app.handle.publish(app.song.clone());
+                        }
+                    }
                     x if x.starts_with("gen=") => {
                         // put an instrument on the first channel and open its settings
                         if let Some(d) = cereal_engine::synth::DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(&x[4..])) {
@@ -714,6 +728,15 @@ impl App {
                         };
                         for (k, o) in outs.iter().enumerate() {
                             senders.push((i, s.index, k as u16, format!("{} ({}, slot {}): {o}", s.title(), self.song.insert_name(i), s.index + 1)));
+                        }
+                        // a board sends one output for every control on it (two for a pad)
+                        if let Some(raw) = s.fx.as_ref().filter(|f| f.kind == cereal_engine::fx::Kind::Surface).and_then(|f| f.raw.as_ref()) {
+                            for c in cereal_engine::surface::controls(raw) {
+                                for (n, &k) in c.outs.iter().enumerate() {
+                                    let axis = if c.outs.len() > 1 { [" X", " Y", " Z"].get(n).copied().unwrap_or("") } else { "" };
+                                    senders.push((i, s.index, k, format!("{} ({}, slot {}): {}{axis}", s.title(), self.song.insert_name(i), s.index + 1, c.name)));
+                                }
+                            }
                         }
                     }
                 }

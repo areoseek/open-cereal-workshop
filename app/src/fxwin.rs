@@ -225,6 +225,9 @@ impl App {
             if f.kind == Kind::Formula {
                 changed |= formula_ui(ui, f);
             }
+            if f.kind == Kind::Surface {
+                changed |= surface_ui(ui, f, 900.0);
+            }
             if f.kind == Kind::Notes {
                 changed |= notes_ui(ui, f);
             }
@@ -967,6 +970,159 @@ fn formula_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
     changed
 }
 
+/// A control board: every stored control drawn where it sits, and played with the mouse.
+pub fn surface_ui(ui: &mut Ui, f: &mut fx::Fx, max_w: f32) -> bool {
+    use cereal_engine::surface::{self, What};
+    let Some(raw) = f.raw.clone() else { return false };
+    let controls = surface::controls(&raw);
+    if controls.is_empty() {
+        ui.label(RichText::new("This board has no controls on it yet.").small().color(TEXT_DIM));
+        return false;
+    }
+    let (bw, bh) = surface::size(&raw);
+    // a board can hold controls beyond its stored size
+    let bw = controls.iter().fold(bw, |m, c| m.max(c.rect[0] + c.rect[2]));
+    let bh = controls.iter().fold(bh, |m, c| m.max(c.rect[1] + c.rect[3]));
+    let s = (max_w / bw).min(1.0);
+    let (area, _) = ui.allocate_exact_size(Vec2::new(bw * s, bh * s), Sense::hover());
+    let pt = ui.painter_at(area);
+    pt.rect_filled(area, 3.0, PANEL_DARK);
+    let col = |c: Option<[u8; 3]>, or: Color32| c.map_or(or, |c| Color32::from_rgb(c[0], c[1], c[2]));
+    let mut changed = false;
+    let base = ui.id().with(("board", std::sync::Arc::as_ptr(&raw) as usize));
+    for (n, c) in controls.iter().enumerate() {
+        let r = egui::Rect::from_min_size(area.min + Vec2::new(c.rect[0] * s, c.rect[1] * s), Vec2::new(c.rect[2].max(1.0) * s, c.rect[3].max(1.0) * s));
+        let get = |k: usize, p: &[f32]| c.outs.get(k).and_then(|&o| p.get(o as usize)).copied().unwrap_or(0.0);
+        let mut put = |k: usize, v: f32, p: &mut Vec<f32>| {
+            if let Some(slot) = c.outs.get(k).and_then(|&o| p.get_mut(o as usize)) {
+                let v = v.clamp(0.0, 1.0);
+                if (*slot - v).abs() > 1e-7 {
+                    *slot = v;
+                    changed = true;
+                }
+            }
+        };
+        let main = col(c.color, Color32::from_rgb(240, 160, 60));
+        match c.what {
+            What::Bevel => {
+                pt.rect_filled(r, 4.0 * s, col(c.color, Color32::from_rgb(60, 64, 70)));
+            }
+            What::Label => {
+                if !c.caption.is_empty() {
+                    let size = (c.font.abs() * 0.75 * s).clamp(7.0, 40.0);
+                    pt.text(r.center(), egui::Align2::CENTER_CENTER, &c.caption, egui::FontId::proportional(size), col(c.text_color, Color32::from_gray(220)));
+                }
+            }
+            What::Knob | What::Digits => {
+                let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
+                let mut v = get(0, &f.p);
+                let steps = (c.range.1 - c.range.0).abs().max(1.0);
+                if resp.dragged() {
+                    let fine = if ui.input(|i| i.modifiers.ctrl) { 0.1 } else { 1.0 };
+                    v -= resp.drag_delta().y / 160.0 * fine;
+                }
+                if resp.hovered() {
+                    let turn = ui.input(|i| i.smooth_scroll_delta.y);
+                    if turn != 0.0 {
+                        v += if c.what == What::Digits { turn.signum() / steps } else { turn / 1200.0 };
+                    }
+                }
+                if resp.double_clicked() || resp.clicked_by(egui::PointerButton::Middle) {
+                    v = c.rest.first().copied().unwrap_or(0.5);
+                }
+                put(0, v, &mut f.p);
+                let v = get(0, &f.p);
+                if c.what == What::Digits {
+                    pt.rect_filled(r, 3.0 * s, col(c.color, Color32::from_rgb(40, 44, 50)));
+                    let shown = (c.range.0 + (c.range.1 - c.range.0) * v).round();
+                    pt.text(r.center(), egui::Align2::CENTER_CENTER, format!("{shown:.0}"), egui::FontId::monospace((r.height() * 0.6).clamp(8.0, 40.0)), col(c.text_color, Color32::from_gray(230)));
+                } else {
+                    let rad = r.width().min(r.height()) / 2.0 - 1.0;
+                    pt.circle_filled(r.center(), rad, Color32::from_rgb(52, 56, 62));
+                    let ang = |t: f32| std::f32::consts::PI * (0.75 + 1.5 * t);
+                    let pts: Vec<Pos2> = (0..=24).map(|k| ang(v * k as f32 / 24.0)).map(|a| r.center() + Vec2::new(a.cos(), a.sin()) * rad).collect();
+                    pt.add(egui::Shape::line(pts, Stroke::new((2.0 * s).max(1.5), main)));
+                    let a = ang(v);
+                    pt.line_segment([r.center() + Vec2::new(a.cos(), a.sin()) * rad * 0.35, r.center() + Vec2::new(a.cos(), a.sin()) * rad * 0.85], Stroke::new((2.0 * s).max(1.5), Color32::from_gray(235)));
+                }
+                resp.on_hover_text(format!("{}: {:.0} %", c.name, v * 100.0));
+            }
+            What::Slider => {
+                let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
+                let upright = c.upright && r.height() >= r.width() || !c.upright && r.height() > r.width() * 1.5;
+                if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.is_pointer_button_down_on()) {
+                    let v = if upright { (r.bottom() - pos.y) / r.height() } else { (pos.x - r.left()) / r.width() };
+                    put(0, v, &mut f.p);
+                }
+                if resp.double_clicked() || resp.clicked_by(egui::PointerButton::Middle) {
+                    put(0, c.rest.first().copied().unwrap_or(0.5), &mut f.p);
+                }
+                let v = get(0, &f.p);
+                let rail = if upright { egui::Rect::from_center_size(r.center(), Vec2::new((r.width() * 0.3).max(3.0), r.height())) } else { egui::Rect::from_center_size(r.center(), Vec2::new(r.width(), (r.height() * 0.3).max(3.0))) };
+                pt.rect_filled(rail, 2.0, Color32::from_rgb(40, 44, 50));
+                let (fill, knob) = if upright {
+                    let y = r.bottom() - v * r.height();
+                    (egui::Rect::from_min_max(Pos2::new(rail.left(), y), rail.max), egui::Rect::from_center_size(Pos2::new(r.center().x, y), Vec2::new(r.width(), (6.0 * s).max(4.0))))
+                } else {
+                    let x = r.left() + v * r.width();
+                    (egui::Rect::from_min_max(rail.min, Pos2::new(x, rail.bottom())), egui::Rect::from_center_size(Pos2::new(x, r.center().y), Vec2::new((6.0 * s).max(4.0), r.height())))
+                };
+                pt.rect_filled(fill, 2.0, main);
+                pt.rect_filled(knob.intersect(area), 2.0, Color32::from_gray(225));
+                resp.on_hover_text(format!("{}: {:.0} %", c.name, v * 100.0));
+            }
+            What::Button | What::Check => {
+                let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
+                let on = get(0, &f.p) >= 0.5;
+                if c.what == What::Check || c.stays {
+                    if resp.clicked() {
+                        put(0, if on { 0.0 } else { 1.0 }, &mut f.p);
+                    }
+                } else {
+                    // held only while it is pressed
+                    let down = resp.is_pointer_button_down_on();
+                    if down != on {
+                        put(0, if down { 1.0 } else { 0.0 }, &mut f.p);
+                    }
+                }
+                let on = get(0, &f.p) >= 0.5;
+                let lit = if on { main } else { main.linear_multiply(0.35) };
+                if c.what == What::Check {
+                    let d = r.height().min(r.width()) * 0.7;
+                    pt.circle_filled(Pos2::new(r.left() + d / 2.0 + 1.0, r.center().y), d / 2.0, lit);
+                    if !c.caption.is_empty() {
+                        pt.text(Pos2::new(r.left() + d + 5.0, r.center().y), egui::Align2::LEFT_CENTER, &c.caption, egui::FontId::proportional((c.font.abs() * s).clamp(7.0, 24.0)), col(c.text_color, Color32::from_gray(220)));
+                    }
+                } else {
+                    pt.rect_filled(r, 4.0 * s, lit);
+                    if !c.caption.is_empty() {
+                        pt.text(r.center(), egui::Align2::CENTER_CENTER, &c.caption, egui::FontId::proportional((c.font.abs() * s).clamp(7.0, 24.0)), col(c.text_color, Color32::from_gray(20)));
+                    }
+                }
+                resp.on_hover_text(c.name.clone());
+            }
+            What::Pad => {
+                let resp = ui.interact(r, base.with(n), Sense::click_and_drag());
+                if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.is_pointer_button_down_on()) {
+                    put(0, (pos.x - r.left()) / r.width(), &mut f.p);
+                    put(1, (r.bottom() - pos.y) / r.height(), &mut f.p);
+                }
+                let (x, y) = (get(0, &f.p), get(1, &f.p));
+                pt.rect_filled(r, 3.0, col(c.color, Color32::from_rgb(24, 28, 32)));
+                let at = Pos2::new(r.left() + x * r.width(), r.bottom() - y * r.height());
+                pt.line_segment([Pos2::new(at.x, r.top()), Pos2::new(at.x, r.bottom())], Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
+                pt.line_segment([Pos2::new(r.left(), at.y), Pos2::new(r.right(), at.y)], Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
+                pt.circle_filled(at, (6.0 * s).max(3.0), Color32::from_gray(235));
+                resp.on_hover_text(format!("{}: X {:.0} %, Y {:.0} %", c.name, x * 100.0, y * 100.0));
+            }
+            What::Other => {
+                pt.rect_stroke(r, 2.0, Stroke::new(1.0_f32, Color32::from_white_alpha(30)), egui::StrokeKind::Inside);
+            }
+        }
+    }
+    changed
+}
+
 /// The equaliser's response picture with a handle per band. Returns true when a handle moved a setting.
 /// The held units of a patch bay, in the order they run, each with its own settings to turn.
 pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
@@ -987,6 +1143,16 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
         ui.add(egui::Label::new(RichText::new(cables.join("   ")).small().color(TEXT_DIM)).wrap());
     }
     ui.set_max_width(520.0);
+    // the boards first: they are what the bay is played from
+    for i in 0..sub.nodes.len() {
+        if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface) {
+            let mut board = sub.nodes[i].fx.clone().unwrap();
+            if surface_ui(ui, &mut board, 520.0) {
+                std::sync::Arc::make_mut(sub).nodes[i].fx = Some(board);
+                changed = true;
+            }
+        }
+    }
     egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
         for at in 0..sub.order.len() {
             let i = sub.order[at];

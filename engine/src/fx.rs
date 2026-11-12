@@ -58,6 +58,8 @@ pub enum Kind {
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
+    /// A board of controls that only sends their positions out.
+    Surface,
     /// A plug-in from another maker, run through the host.
     Hosted,
     /// Pages of notes or a web address; makes no sound.
@@ -710,7 +712,7 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Notes, ident: "Fruity NoteBook 2", title: "Note Pages", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Notes, ident: "Fruity NoteBook", title: "Note Pad", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Notes, ident: "Fruity HTML NoteBook", title: "Web Notes", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Control Surface", title: "Control Panel", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Surface, ident: "Control Surface", title: "Control Panel", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Edison", title: "Wave Recorder", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Formula, ident: "Fruity Formula Controller", title: "Formula Sender", size: 16, fixed: &[(0, 2)], params: &[p("A", 4, 0, 65536, 0), p("B", 8, 0, 65536, 0), p("C", 12, 0, 65536, 0)] },
     Def {
@@ -1772,6 +1774,9 @@ impl Fx {
         if kind == Kind::MorphEq {
             return Self::decode(def(kind).ident, &meq_fresh()).expect("our own block reads back");
         }
+        if kind == Kind::Surface {
+            return Self::decode(def(kind).ident, &crate::surface::fresh()).expect("our own block reads back");
+        }
         if kind == Kind::Patch {
             return Self::decode(def(kind).ident, &crate::fxpatch::fresh()).expect("our own block reads back");
         }
@@ -1799,6 +1804,13 @@ impl Fx {
         if let Some(h) = &self.ext {
             return h.0.set_travel(k, v);
         }
+        if self.kind == Kind::Surface {
+            // every control's position is a setting, and they all run from nought to one
+            if let Some(slot) = self.p.get_mut(k) {
+                *slot = v.clamp(0.0, 1.0);
+            }
+            return;
+        }
         if let (Some(q), Some(slot)) = (def(self.kind).params.get(k), self.p.get_mut(k)) {
             *slot = q.min as f32 + (q.max as f32 - q.min as f32) * v.clamp(0.0, 1.0);
         }
@@ -1820,6 +1832,9 @@ impl Fx {
         let d = DEFS.iter().find(|d| d.ident.eq_ignore_ascii_case(ident))?;
         if d.kind == Kind::Notes {
             return crate::notes::decode(ident, state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
+        }
+        if d.kind == Kind::Surface {
+            return crate::surface::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())), ext: None });
         }
         if d.kind == Kind::Formula {
             return formula_decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
@@ -1946,6 +1961,9 @@ impl Fx {
         }
         if self.kind == Kind::Rack {
             return crate::fxrack::encode(&self.p, base);
+        }
+        if self.kind == Kind::Surface {
+            return crate::surface::encode(&self.p, self.raw.as_ref().map(|r| r.as_slice()).or(base));
         }
         if self.kind == Kind::Formula {
             return formula_encode(&self.p, base);
@@ -2638,6 +2656,15 @@ impl Unit {
     /// For a patch bay standing as an instrument: where to add the sound of its layer `k` this block.
     pub fn bay_feed(&mut self, k: usize, n: usize) -> Option<&mut [[f32; 2]]> {
         self.patch.as_mut()?.feed(k, n)
+    }
+
+    /// What output `k` of a sender is sending now.
+    pub fn sends(&self, k: usize) -> Option<f32> {
+        match self.fx.kind {
+            // a board has as many outputs as it has controls
+            Kind::Surface => self.fx.p.get(k).copied(),
+            _ => self.out.get(k).copied(),
+        }
     }
 
     /// The running patch bay, when this unit is one.
@@ -3363,6 +3390,11 @@ impl Unit {
                 }
             }
             Kind::Xy => self.out = [p[0] / 65536.0, p[1] / 65536.0, 0.0],
+            Kind::Surface => {
+                for (o, v) in self.out.iter_mut().zip(p.iter()) {
+                    *o = *v;
+                }
+            }
             Kind::Xyz => {
                 if p.len() < 11 + 6 * XYZ_N {
                     return;
@@ -5010,7 +5042,7 @@ mod tests {
     fn blocks_round_trip() {
         for d in DEFS {
             // the filter bank's block is packed; its own module tests the trip
-            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch | Kind::Formula | Kind::Notes) {
+            if matches!(d.kind, Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::Patch | Kind::Formula | Kind::Notes | Kind::Surface) {
                 continue;
             }
             let mut fx = Fx::new(d.kind);

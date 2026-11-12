@@ -527,18 +527,17 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             }
             f.2 = false;
         }
-        let mut out = None;
         if let Some(u) = &mut units[i] {
             u.song_at = song_at;
             u.process(&mut scratch[..n], cx);
-            out = Some(u.out);
         }
         bufs[i][..n].copy_from_slice(&scratch[..n]);
         // what the unit sends goes down its setting cables, each time it has changed; when two senders move
         // one setting, the one that moved last has it
-        if let Some(out) = out {
+        if units[i].is_some() {
             for (k, c) in p.sets.iter().enumerate().filter(|(_, c)| c.from.0 == i) {
-                let (Some(&v), Some(l)) = (out.get(c.from.1 as usize), last.get_mut(k)) else { continue };
+                let Some(v) = units[i].as_ref().and_then(|u| u.sends(c.from.1 as usize)) else { continue };
+                let Some(l) = last.get_mut(k) else { continue };
                 if l.is_nan() {
                     *l = v;
                 } else if (v - *l).abs() > 1e-6 {
@@ -650,6 +649,62 @@ mod tests {
         let mut st = State::new(&q, 44100.0);
         st.drive(&q, (0, 0), 0.25);
         assert_eq!(st.gen_sets, vec![(1, 1, 0.25)]);
+    }
+
+    #[test]
+    fn a_board_sends_each_of_its_controls() {
+        let mut p = bay(1);
+        let mut board = Fx::new(crate::fx::Kind::Surface);
+        board.p = vec![0.0, 0.0, 0.0, 1.0];
+        p.nodes[0].fx = Some(board);
+        p.sets[0].from = (0, 3);
+        let a = std::sync::Arc::new(p.clone());
+        let mut st = State::new(&a, 44100.0);
+        level(&a, &mut st);
+        p.nodes[0].fx.as_mut().unwrap().p[3] = 0.0;
+        let b = std::sync::Arc::new(p.clone());
+        assert!(level(&b, &mut st) < 0.005);
+        // a cable into the board turns its control, and the board passes that on
+        let mut q = bay(2);
+        let mut board = Fx::new(crate::fx::Kind::Surface);
+        board.p = vec![1.0];
+        q.nodes[1].fx = Some(board);
+        q.sets = vec![SetCable { from: (0, 0), to: (1, 0) }, SetCable { from: (1, 0), to: (2, 1) }];
+        let a = std::sync::Arc::new(q.clone());
+        let mut st = State::new(&a, 44100.0);
+        let dry = level(&a, &mut st);
+        q.nodes[0].fx.as_mut().unwrap().p[0] = 0.0;
+        let b = std::sync::Arc::new(q);
+        assert!(dry > 0.4 && level(&b, &mut st) < 0.005);
+    }
+
+    /// With CEREAL_FLP_CORPUS set: the boards in the stock bays have the outputs their cables start from.
+    #[test]
+    fn stock_bays_cable_their_boards() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Effects/Patcher")];
+        let (mut bays, mut from_board, mut short) = (0, 0, 0);
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(p) = crate::preset::read(&path).ok().and_then(|f| decode(&f.state)) else { continue };
+                bays += 1;
+                for c in &p.sets {
+                    if let Some(f) = p.nodes[c.from.0].fx.as_ref().filter(|f| f.kind == crate::fx::Kind::Surface) {
+                        from_board += 1;
+                        if c.from.1 as usize >= f.p.len() {
+                            short += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("{bays} bays, {from_board} cables from boards, {short} from outputs the board does not hold");
+        assert!(bays > 50 && from_board > 500 && short * 50 < from_board);
     }
 
     #[test]

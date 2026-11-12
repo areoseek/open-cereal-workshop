@@ -13,6 +13,7 @@ pub mod fxsplit;
 pub mod noteshape;
 pub mod pyrt;
 pub mod script;
+pub mod surface;
 pub mod fxvoc;
 pub mod synth;
 pub mod law;

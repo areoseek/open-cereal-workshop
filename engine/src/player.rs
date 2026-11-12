@@ -2528,13 +2528,13 @@ impl Player {
                     if u.1.fx.kind == fx::Kind::Patch {
                         u.1.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                     }
-                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Formula) {
+                    if matches!(u.1.fx.kind, fx::Kind::Peak | fx::Kind::Xy | fx::Kind::Xyz | fx::Kind::Formula | fx::Kind::Surface) {
                         // a controller: run it, then hand its outputs to whatever is linked to them
                         u.1.song_at = (self.pos / song.ppq.max(1) as f64, (self.tpf * 60.0 * self.sr as f64 / song.ppq.max(1) as f64) as f32);
                         u.1.process(&mut bus[..n], &cx);
                         let slot = slots_index;
                         for l in song.ctl_links.iter().filter(|l| l.ins == i && l.slot == slot) {
-                            if let Some(&v) = u.1.out.get(l.out as usize) {
+                            if let Some(v) = u.1.sends(l.out as usize) {
                                 self.driven.push((l.target, v));
                             }
                         }
