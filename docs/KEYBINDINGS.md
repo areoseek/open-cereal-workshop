@@ -201,7 +201,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Insert | Slice the clip under the pointer at the grid line | yes |
 | Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |
 | Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |
-| Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selection | no |
+| Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selected clips into one audio clip (from the song start with Shift); the clips are muted under it | yes |
 | Ctrl+Alt+G | Grid colour | no |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |

@@ -1148,8 +1148,78 @@ impl App {
         self.dirty = true;
     }
 
+    /// Bounce the selected clips into one audio clip. The sound is rendered off line with only those
+    /// clips playing, the clips are muted and the new clip is laid over them. `from_start` renders
+    /// from the top of the song so that the clip starts there.
+    pub(crate) fn pl_consolidate(&mut self, from_start: bool) {
+        let sel: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| i < self.song.clips.len()).collect();
+        if sel.is_empty() {
+            self.status = "Select the clips to consolidate first".into();
+            return;
+        }
+        let clips = &self.song.clips;
+        let a = if from_start { 0 } else { sel.iter().map(|&i| clips[i].pos).min().unwrap_or(0) };
+        let b = sel.iter().map(|&i| clips[i].pos + clips[i].len.max(1)).max().unwrap_or(a + 1);
+        let track = sel.iter().map(|&i| clips[i].track).min().unwrap_or(0);
+        let mut part = self.song.clone();
+        part.clips = sel.iter().map(|&i| Clip { pos: clips[i].pos - a, muted: false, ..clips[i].clone() }).collect();
+        part.clips.sort_by_key(|c| c.pos);
+        part.markers.retain(|m| m.kind == 8);
+        for m in &mut part.markers {
+            m.pos = m.pos.saturating_sub(a);
+        }
+        part.prepare();
+        let rate = 44_100u32;
+        let buf = cereal_engine::render_song(&part, rate as f32, true, 0, 2.0);
+        let dir = crate::record::folder(self.path.as_deref());
+        let made = std::fs::create_dir_all(&dir).and_then(|_| {
+            let mut n = 1;
+            let path = loop {
+                let p = dir.join(format!("Consolidated {n}.wav"));
+                if !p.exists() {
+                    break p;
+                }
+                n += 1;
+            };
+            let f = std::fs::File::create(&path)?;
+            crate::wav::write(std::io::BufWriter::new(f), &buf, rate, 2, 24)?;
+            Ok(path)
+        });
+        match made {
+            Ok(path) => {
+                for &i in &sel {
+                    self.song.clips[i].muted = true;
+                }
+                let before = self.song.channels.len();
+                self.add_audio_clip(&path, a, Some(track));
+                if self.song.channels.len() > before {
+                    let ci = self.song.channels.len() - 1;
+                    self.playlist.sel.clear();
+                    for (i, c) in self.song.clips.iter_mut().enumerate() {
+                        if c.src == ClipSrc::Audio(ci) {
+                            // the tail rings on in the file; the clip itself covers what it replaces
+                            c.len = (b - a).max(1);
+                            c.track = track;
+                            self.playlist.sel.insert(i);
+                        }
+                    }
+                    self.status = format!("Consolidated into {}", path.display());
+                }
+                self.dirty = true;
+            }
+            Err(e) => self.status = format!("Consolidate failed: {e}"),
+        }
+    }
+
     /// A key press while the playlist has the focus. True when it was ours.
     pub(crate) fn playlist_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
+        if m.command && m.alt {
+            match key {
+                Key::C if !repeat => self.pl_consolidate(m.shift),
+                _ => return false,
+            }
+            return true;
+        }
         if m.command && !m.alt {
             match key {
                 Key::A => self.playlist.sel = (0..self.song.clips.len()).collect(),
