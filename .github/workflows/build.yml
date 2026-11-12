@@ -1,0 +1,46 @@
+# Builds and tests on Linux and Windows. The tests that need a user's own content are skipped when it is absent.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            bin: breakfast-cereal
+          - os: windows-latest
+            name: windows-x86_64
+            bin: breakfast-cereal.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --release --locked
+      - name: Build
+        run: cargo build --release --locked -p breakfast-cereal
+      - name: Pack
+        shell: bash
+        run: |
+          mkdir out
+          cp "target/release/${{ matrix.bin }}" LICENSE README.md out/
+          cp -r docs out/docs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: breakfast-cereal-${{ matrix.name }}
+          path: out
