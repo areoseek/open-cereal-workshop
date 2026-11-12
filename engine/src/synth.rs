@@ -1138,6 +1138,7 @@ impl Gen {
     pub fn mono(&self) -> Option<f32> {
         match self.kind {
             Kind::Duo => crate::duo::set(&self.p).mono,
+            Kind::Additive => crate::additive::Patch::new(&self.p, &[]).mono(),
             Kind::Hybrid => crate::hybrid::set(&self.p).mono,
             Kind::Morph => crate::morph::set(&self.p).mono,
             Kind::Triple => (self.p.len() >= crate::triple::COUNT && self.p[40] >= 0.5).then(|| if self.p[11] >= 0.5 { 0.005 + self.p[10].clamp(0.0, 1.0).powi(2) * 2.0 } else { 0.0 }),

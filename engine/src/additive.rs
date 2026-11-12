@@ -29,9 +29,15 @@ pub mod ix {
     pub const PLUCK: usize = 29;
     pub const PLUCK_MASKED: usize = 30;
     pub const VOLUME: usize = 33;
+    pub const VEL_VOLUME: usize = 34;
     pub const PITCH: usize = 35;
+    pub const DETUNE: usize = 36;
+    pub const GRIT: usize = 37;
     pub const VIBRATO: usize = 38;
     pub const PITCH_LFO: usize = 39;
+    pub const PORTAMENTO: usize = 40;
+    pub const LEGATO: usize = 41;
+    pub const SLIDE_TIME: usize = 42;
     pub const FILTER_ON: usize = 43;
     pub const F_ATTACK: usize = 44;
     pub const F_DECAY: usize = 45;
@@ -161,6 +167,12 @@ impl Patch {
         self.p.get(i).copied().unwrap_or(0.0)
     }
 
+    /// With legato on, one note sounds at a time; the seconds a held note takes to reach the next
+    /// (none unless portamento is on too). The time scale is an estimate.
+    pub fn mono(&self) -> Option<f32> {
+        (self.v(ix::LEGATO) != 0.0).then(|| if self.v(ix::PORTAMENTO) != 0.0 { 0.005 + (self.v(ix::SLIDE_TIME) / 1000.0).powi(2) * 2.0 } else { 0.0 })
+    }
+
     /// Seconds for the level to rise at the start of a note.
     pub fn attack_s(&self) -> f32 {
         (3.0 * (self.v(ix::ATTACK) / 1000.0).powi(3)).max(0.0015)
@@ -235,6 +247,8 @@ pub struct Voice {
     im: Vec<f32>,
     /// Random start phase per harmonic, in cycles.
     hphase: Vec<f32>,
+    /// How far each harmonic has run ahead of its place, in cycles (harmonic detune and grit).
+    drift: Vec<f32>,
     last: [f32; 8],
     primed: bool,
     ph: [f32; MAX_UNISON],
@@ -280,6 +294,7 @@ impl Voice {
             re: vec![0.0; m],
             im: vec![0.0; m],
             hphase: Vec::new(),
+            drift: Vec::new(),
             last: [f32::NAN; 8],
             primed: false,
             ph: [0.0; MAX_UNISON],
@@ -367,6 +382,10 @@ impl Voice {
         // level and pitch movement
         let dec = patch.v(ix::DECAY);
         self.level = if dec < 1000.0 { (-t / (10.0 * (dec / 1000.0).powi(3) + 0.004)).exp() } else { 1.0 } * patch.v(ix::VOLUME) / 1000.0;
+        if patch.v(ix::VEL_VOLUME) == 0.0 && self.vel > 0.0 {
+            // the link from velocity is off: every note is as loud as a full one
+            self.level *= (1.0 / self.vel).min(16.0);
+        }
         let trem = patch.v(ix::TREMOLO) / 1000.0;
         self.trem = if trem > 0.0 { (t * 5.5 * TAU).sin() * trem * 0.8 } else { 0.0 };
         let vib = patch.v(ix::VIBRATO) / 1000.0 * 60.0 * (t * 6.0 * TAU).sin();
@@ -395,7 +414,16 @@ impl Voice {
         let ph_width = if ph_amt > 0.0 { (patch.v(ix::PH_WIDTH) / 5000.0 * (1.0 + patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo)).max(0.02) } else { 0.0 };
         let hz_amt = (patch.v(ix::HZ_AMOUNT) / 1000.0 * (1.0 + patch.v(ix::HZ_LFO) / 1000.0 * lfo)).clamp(0.0, 1.0);
 
-        let key = [n as f32, if open { 99.0 } else { cut }, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, 0.0];
+        // harmonic detune spreads the harmonics apart (or draws them together) the higher they lie, and
+        // grit shakes each one; both are done by letting the harmonics' phases run, so the wave is redrawn
+        // on every tick while either is on. How far the knobs reach is an estimate.
+        let detune = patch.v(ix::DETUNE);
+        let grit = patch.v(ix::GRIT) / 1000.0;
+        let moving = detune != 0.0 || grit != 0.0;
+        if moving && self.drift.len() < n {
+            self.drift.resize(n, 0.0);
+        }
+        let key = [n as f32, if open { 99.0 } else { cut }, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }];
         if self.primed && key.iter().zip(&self.last).all(|(a, b)| (a - b).abs() < 1e-4) {
             self.blend = false;
             return;
@@ -477,6 +505,23 @@ impl Voice {
                 Some((_, ph)) => ph.get(k - 1).copied().unwrap_or(0.0),
                 None => 0.0,
             } + self.hphase.get(k - 1).copied().unwrap_or(0.0);
+            let phi = if moving {
+                let d = &mut self.drift[k - 1];
+                if detune != 0.0 {
+                    // the sixteenth harmonic moves by the knob's own cents, lower ones by less
+                    let ratio = 2f32.powf(detune * kf.log2() / 4800.0) - 1.0;
+                    *d += (kf * dphase * ratio * TICK as f32).clamp(-0.45, 0.45);
+                }
+                if grit != 0.0 {
+                    // turned left, the shaking grows with the harmonic number
+                    let reach = if grit < 0.0 { (kf / 16.0).min(1.0) } else { 1.0 };
+                    *d += (rnd(&mut self.seed) - 0.5) * grit.abs() * 0.5 * reach;
+                }
+                *d = d.fract();
+                phi + *d
+            } else {
+                phi
+            };
             let (s, c) = (phi * TAU).sin_cos();
             self.re[2 * k] = a * s;
             self.im[2 * k] = -a * c;
@@ -577,6 +622,26 @@ mod tests {
             c += v * a.cos();
         }
         (s * s + c * c).sqrt() * 2.0 / x.len() as f32
+    }
+
+    #[test]
+    fn harmonic_detune_moves_the_upper_harmonics_and_grit_roughens_them() {
+        let mut p = patch();
+        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::PHASE] = 0.0;
+        let x = render(&p, 200.0, 48_000);
+        p.p[ix::DETUNE] = 240.0;
+        let y = render(&p, 200.0, 48_000);
+        // the fourth harmonic goes up by 120 cents, the first stays
+        let moved = 800.0 * 2f32.powf(120.0 / 1200.0);
+        assert!(level_at(&y, moved) > 4.0 * level_at(&y, 800.0), "{} {}", level_at(&y, moved), level_at(&y, 800.0));
+        assert!(level_at(&y, moved) > 0.5 * level_at(&x, 800.0));
+        assert!((level_at(&y, 200.0) / level_at(&x, 200.0) - 1.0).abs() < 0.05);
+        p.p[ix::DETUNE] = 0.0;
+        p.p[ix::GRIT] = 600.0;
+        let z = render(&p, 200.0, 48_000);
+        assert!(level_at(&z, 800.0) < 0.8 * level_at(&x, 800.0));
+        assert!(level_at(&z, 730.0) > 3.0 * level_at(&x, 730.0));
     }
 
     #[test]
