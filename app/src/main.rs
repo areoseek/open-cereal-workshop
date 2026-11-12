@@ -1077,7 +1077,7 @@ impl App {
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
         if self.render.is_none() {
-            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false });
+            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false, tempo_info: false, no_inserts: false, no_master: false });
         }
     }
 
@@ -1097,7 +1097,7 @@ impl App {
         } else {
             self.piano.time_sel
         };
-        let job = cereal_engine::RenderJob { rate: o.rate as f32, song_mode: o.song, pattern: self.handle.transport.pattern(), tail: if o.tail_mode == 0 { 0.0 } else { o.tail }, range, stems: o.split, stem: None };
+        let job = cereal_engine::RenderJob { rate: o.rate as f32, song_mode: o.song, pattern: self.handle.transport.pattern(), tail: if o.tail_mode == 0 { 0.0 } else { o.tail }, range, stems: o.split, stem: None, no_inserts: o.no_inserts, no_master: o.no_master };
         let mut done = cereal_engine::render_job(&self.song, &job);
         if o.tail_mode == 2 {
             done.wrap();
@@ -1177,6 +1177,15 @@ impl App {
             let marks: Vec<cereal_engine::waveed::Mark> = self.song.markers.iter().filter(|m| m.pos >= from && range.is_none_or(|r| m.pos < r.1)).map(|m| cereal_engine::waveed::Mark { at: ((m.pos - from) as f64 * per_tick) as usize, len: 0, name: m.name.clone() }).collect();
             if let Ok(mut bytes) = std::fs::read(&path) {
                 cereal_engine::waveed::write_marks(&mut bytes, &marks);
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
+        if r.is_ok() && o.tempo_info && !o.flac {
+            let frames = done.main;
+            let tempo = self.song.tempo.max(1.0);
+            let beats = (frames as f64 / o.rate as f64 * tempo as f64 / 60.0).round().max(1.0) as u32;
+            if let Ok(mut bytes) = std::fs::read(&path) {
+                cereal_engine::waveed::write_loop_info(&mut bytes, frames, o.rate, tempo, beats, (4, 4), o.tail_mode == 2);
                 let _ = std::fs::write(&path, bytes);
             }
         }
@@ -1419,6 +1428,13 @@ impl App {
                     ui.add_enabled(o.lossy == 0, egui::Checkbox::new(&mut o.split, "Split mixer tracks")).hint("Also write one file for every mixer track that sounds, named after the track");
                     ui.add_enabled(o.lossy == 0 && !o.flac && o.song, egui::Checkbox::new(&mut o.marks, "Save playlist markers")).hint("Time markers go into the WAV file as cue points");
                     ui.add_enabled(o.lossy == 0 && o.bits == 16, egui::Checkbox::new(&mut o.dither, "Dithering")).hint("A whisper of noise that hides the steps of 16 bits");
+                    ui.add_enabled(o.lossy == 0 && !o.flac, egui::Checkbox::new(&mut o.tempo_info, "Save tempo information")).hint("Tempo and beat count go into the WAV file; with the tail wrapped it is marked as a loop");
+                    let mut ins = !o.no_inserts;
+                    ui.checkbox(&mut ins, "Enable insert effects").hint("Off: the mixer tracks' effect slots are left out");
+                    o.no_inserts = !ins;
+                    let mut mas = !o.no_master;
+                    ui.checkbox(&mut mas, "Enable master effects").hint("Off: the master track's effect slots are left out");
+                    o.no_master = !mas;
                 });
                 ui.end_row();
             });
@@ -3303,6 +3319,10 @@ struct RenderOpts {
     /// Time markers go into the WAV file as cue points.
     marks: bool,
     dither: bool,
+    /// Tempo and beat count (and a loop, when the tail is wrapped) go into the WAV file.
+    tempo_info: bool,
+    no_inserts: bool,
+    no_master: bool,
 }
 
 impl eframe::App for App {

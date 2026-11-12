@@ -124,7 +124,7 @@ pub fn render_track(song: &Song, sample_rate: f32, song_mode: bool, pattern: usi
 }
 
 fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, tail: f32, stem: Option<usize>) -> Vec<f32> {
-    let job = RenderJob { rate: sample_rate, song_mode, pattern, tail, range: None, stems: false, stem };
+    let job = RenderJob { rate: sample_rate, song_mode, pattern, tail, range: None, stems: false, stem, no_inserts: false, no_master: false };
     render_job(song, &job).mix
 }
 
@@ -139,6 +139,10 @@ pub struct RenderJob {
     pub range: Option<(u32, u32)>,
     pub stems: bool,
     pub stem: Option<usize>,
+    /// Leave the effect slots of the mixer tracks out.
+    pub no_inserts: bool,
+    /// Leave the effect slots of the master track out.
+    pub no_master: bool,
 }
 
 /// A finished render: interleaved stereo, the frames before the tail, and each sounding mixer track's own sound.
@@ -177,7 +181,13 @@ pub fn render_job(song: &Song, job: &RenderJob) -> Rendered {
         i.set_offline(true);
         i.activate(sample_rate);
     }
-    let (h, mut p) = new_player(song.clone(), sample_rate);
+    let mut played = song.clone();
+    for (i, ins) in played.inserts.iter_mut().enumerate() {
+        if (i == 0 && job.no_master) || (i != 0 && job.no_inserts) {
+            ins.fx_on = false;
+        }
+    }
+    let (h, mut p) = new_player(played, sample_rate);
     p.set_offline(true);
     p.stem = stem;
     p.stem_all = job.stems;
@@ -241,7 +251,7 @@ mod tests {
         // an empty song: nothing sounds, so no track is kept, and a picked stretch sets the length
         let song = Song::default();
         let ppq = song.ppq;
-        let job = RenderJob { rate: 44_100.0, song_mode: true, pattern: 0, tail: 0.0, range: Some((0, ppq * 4)), stems: true, stem: None };
+        let job = RenderJob { rate: 44_100.0, song_mode: true, pattern: 0, tail: 0.0, range: Some((0, ppq * 4)), stems: true, stem: None, no_inserts: false, no_master: false };
         let done = render_job(&song, &job);
         assert!(done.stems.is_empty());
         let want = (4.0 * 60.0 / song.tempo as f64 * 44_100.0) as usize;
@@ -265,7 +275,7 @@ mod tests {
         assert!(peak(&one) > 0.1, "the track the channel plays into is heard");
         assert!(peak(&two) == 0.0, "another track is silent");
         // all tracks in one pass: the same sound, and only the tracks that sounded
-        let all = render_job(&s, &RenderJob { rate: 48_000.0, song_mode: false, pattern: 0, tail: 0.5, range: None, stems: true, stem: None });
+        let all = render_job(&s, &RenderJob { rate: 48_000.0, song_mode: false, pattern: 0, tail: 0.5, range: None, stems: true, stem: None, no_inserts: false, no_master: false });
         let got: Vec<usize> = all.stems.iter().map(|t| t.0).collect();
         assert_eq!(got, vec![0, 1]);
         assert_eq!(all.stems[1].1, one);

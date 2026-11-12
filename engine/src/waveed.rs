@@ -723,9 +723,64 @@ pub fn write_marks(wav: &mut Vec<u8>, marks: &[Mark]) {
     wav[4..8].copy_from_slice(&total.to_le_bytes());
 }
 
+/// Add tempo and loop notes to a finished wave file, the way loop libraries read them: how many beats it holds
+/// at what tempo, and (when `looped`) one loop over the first `frames` frames.
+pub fn write_loop_info(wav: &mut Vec<u8>, frames: usize, rate: u32, tempo: f32, beats: u32, meter: (u16, u16), looped: bool) {
+    if wav.len() < 12 || frames == 0 {
+        return;
+    }
+    let mut acid = Vec::new();
+    // bit 0 says "play once"; a loop leaves it clear
+    acid.extend((if looped { 0u32 } else { 1 }).to_le_bytes());
+    acid.extend(60u16.to_le_bytes());
+    acid.extend(0x8000u16.to_le_bytes());
+    acid.extend(0f32.to_le_bytes());
+    acid.extend(beats.to_le_bytes());
+    acid.extend(meter.1.to_le_bytes());
+    acid.extend(meter.0.to_le_bytes());
+    acid.extend(tempo.to_le_bytes());
+    wav.extend(b"acid");
+    wav.extend((acid.len() as u32).to_le_bytes());
+    wav.extend(&acid);
+    if looped {
+        let mut smpl = Vec::new();
+        let period = (1e9 / rate.max(1) as f64) as u32;
+        for v in [0u32, 0, period, 60, 0, 0, 0, 1, 0] {
+            smpl.extend(v.to_le_bytes());
+        }
+        for v in [0u32, 0, 0, frames as u32 - 1, 0, 0] {
+            smpl.extend(v.to_le_bytes());
+        }
+        wav.extend(b"smpl");
+        wav.extend((smpl.len() as u32).to_le_bytes());
+        wav.extend(&smpl);
+    }
+    let total = (wav.len() - 8) as u32;
+    wav[4..8].copy_from_slice(&total.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_notes_are_added_as_whole_chunks() {
+        let mut wav = Vec::new();
+        crate::wav::write(&mut wav, &[0.0; 200], 44_100, 2, 16).unwrap();
+        let before = wav.len();
+        write_loop_info(&mut wav, 100, 44_100, 140.0, 8, (4, 4), true);
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize, wav.len() - 8);
+        assert_eq!(&wav[before..before + 4], b"acid");
+        assert_eq!(u32::from_le_bytes(wav[before + 4..before + 8].try_into().unwrap()), 24);
+        assert_eq!(f32::from_le_bytes(wav[before + 28..before + 32].try_into().unwrap()), 140.0);
+        let s = before + 32;
+        assert_eq!(&wav[s..s + 4], b"smpl");
+        assert_eq!(u32::from_le_bytes(wav[s + 4..s + 8].try_into().unwrap()), 60);
+        // the loop ends on the last frame
+        assert_eq!(u32::from_le_bytes(wav[s + 8 + 48..s + 8 + 52].try_into().unwrap()), 99);
+        // and the file still opens
+        assert_eq!(crate::sample::Sample::decode(wav, "wav").unwrap().frames.len(), 100);
+    }
 
     fn ramp(n: usize) -> Frames {
         (0..n).map(|i| [i as f32 / n as f32 * 0.5, -(i as f32) / n as f32 * 0.25]).collect()
