@@ -51,6 +51,9 @@ pub struct Settings {
     pub midi_perf: u8,
     /// Size of the whole interface; 0 = as the system says.
     pub scale: f32,
+    /// The mixer's track width: 0 wide, 1 compact, 2 extra large.
+    pub mixer_view: u8,
+    pub mixer_big: bool,
     /// The colour of the playlist and piano roll grid, when it is not the usual one.
     pub grid: Option<[u8; 3]>,
     /// Extra folders for the browser and the sound search.
@@ -179,6 +182,8 @@ impl Settings {
                 }
                 Some(("midi_sync", v)) => s.midi_sync = v.trim() == "1",
                 Some(("midi_perf", v)) => s.midi_perf = v.trim().parse::<u8>().unwrap_or(0).min(16),
+                Some(("mixer_view", v)) => s.mixer_view = v.trim().parse().unwrap_or(0),
+                Some(("mixer_big", v)) => s.mixer_big = v.trim() == "1",
                 Some(("scale", v)) => s.scale = v.trim().parse().unwrap_or(0.0),
                 Some(("grid", v)) => {
                     let c: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -250,6 +255,9 @@ impl Settings {
         }
         if self.scale > 0.0 {
             out += &format!("scale={}\n", self.scale);
+        }
+        if self.mixer_view != 0 || self.mixer_big {
+            out += &format!("mixer_view={}\nmixer_big={}\n", self.mixer_view, self.mixer_big as u8);
         }
         if let Some([r, g, b]) = self.grid {
             out += &format!("grid={r},{g},{b}\n");

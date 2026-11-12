@@ -6,7 +6,6 @@ use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use crate::widgets::*;
 use crate::App;
 
-const STRIP_W: f32 = 50.0;
 
 #[derive(Clone, Copy)]
 enum SlotAct {
@@ -51,13 +50,36 @@ impl App {
             }
             u
         };
-        let font = FontId::proportional(10.5);
+        let font = FontId::proportional(if self.settings.mixer_view == 1 { 9.0 } else { 10.5 });
         let mut route: Option<(usize, usize, bool)> = None;
+        let sw = self.strip_w();
+        ui.horizontal(|ui| {
+            ui.menu_button(RichText::new("View").small(), |ui| {
+                for (k, name) in [(1u8, "Compact"), (0, "Wide"), (2, "Extra large")] {
+                    if ui.radio(self.settings.mixer_view == k, name).clicked() {
+                        self.settings.mixer_view = k;
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if ui.checkbox(&mut self.mixer_wave, "Wave meters     Alt+W").clicked() {
+                    ui.close_menu();
+                }
+                if ui.checkbox(&mut self.settings.mixer_big, "Big meter").hint("A tall meter for the selected track at the left of the mixer").clicked() {
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+            });
+        });
         ui.horizontal_top(|ui| {
+            if self.settings.mixer_big {
+                self.big_meter(ui);
+            }
             let side = 190.0;
             let held = |d: u8| -> Vec<usize> { (0..n).filter(|&i| self.song.inserts[i].dock.min(2) == d).collect() };
             let (left, middle, right) = (held(0), held(1), held(2));
-            let width_of = |v: &[usize]| -> f32 { v.iter().map(|&i| STRIP_W + 2.0 + if self.song.inserts[i].separator { 8.0 } else { 0.0 }).sum() };
+            let width_of = |v: &[usize]| -> f32 { v.iter().map(|&i| sw + 2.0 + if self.song.inserts[i].separator { 8.0 } else { 0.0 }).sum() };
             let (lw, rw) = (width_of(&left), width_of(&right));
             ui.spacing_mut().item_spacing.x = 2.0;
             for &i in &left {
@@ -300,16 +322,56 @@ impl App {
 
 impl App {
     /// One mixer track as a strip: name plate, mute light, pan, fader with its meter, and the routing arrow.
+    /// How wide a track is in the chosen view.
+    fn strip_w(&self) -> f32 {
+        [50.0, 36.0, 78.0][(self.settings.mixer_view as usize).min(2)]
+    }
+
+    /// The selected track's level, both sides, tall and with a scale.
+    fn big_meter(&mut self, ui: &mut Ui) {
+        let h = (ui.available_height() - 8.0).clamp(120.0, 330.0);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(64.0, h), Sense::click());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 3.0, PANEL_DARK);
+        let i = self.sel_insert.min(self.peaks.len().saturating_sub(1));
+        let (l, r) = self.peaks.get(i).copied().unwrap_or((0.0, 0.0));
+        // from 60 below full level at the bottom to 6 over at the top
+        let y_of = |db: f32| rect.bottom() - 4.0 - ((db + 60.0) / 66.0).clamp(0.0, 1.0) * (rect.height() - 22.0);
+        for db in [6, 0, -6, -12, -18, -24, -36, -48, -60] {
+            let y = y_of(db as f32);
+            p.line_segment([egui::Pos2::new(rect.left() + 3.0, y), egui::Pos2::new(rect.left() + 8.0, y)], Stroke::new(1.0_f32, LINE_SOFT));
+            p.text(egui::Pos2::new(rect.left() + 10.0, y), Align2::LEFT_CENTER, db.to_string(), FontId::proportional(8.5), TEXT_DIM);
+        }
+        for (k, v) in [l, r].into_iter().enumerate() {
+            let x = rect.left() + 30.0 + k as f32 * 15.0;
+            let db = 20.0 * v.max(1e-6).log10();
+            let bar = egui::Rect::from_min_max(egui::Pos2::new(x, y_of(db)), egui::Pos2::new(x + 12.0, rect.bottom() - 4.0));
+            p.rect_filled(egui::Rect::from_min_max(egui::Pos2::new(x, y_of(6.0)), bar.max), 1.0, PANEL);
+            p.rect_filled(bar, 1.0, GREEN);
+            if db > 0.0 {
+                p.rect_filled(egui::Rect::from_min_max(bar.min, egui::Pos2::new(x + 12.0, y_of(0.0))), 1.0, Color32::from_rgb(240, 80, 70));
+            }
+        }
+        let top = self.peak_top.get(i).copied().unwrap_or(0.0);
+        let text = if top <= 1e-5 { "-inf".to_string() } else { format!("{:.1}", 20.0 * top.log10()) };
+        p.text(rect.center_top() + Vec2::new(0.0, 3.0), Align2::CENTER_TOP, text, FontId::proportional(11.0), if top > 1.0 { Color32::from_rgb(240, 80, 70) } else { TEXT });
+        if resp.hint("Level of the selected track; the number is its highest peak (click to reset)").clicked() {
+            self.peak_top.iter_mut().for_each(|p| *p = 0.0);
+        }
+    }
+
     fn strip(&mut self, ui: &mut Ui, i: usize, n: usize, used: usize, font: &FontId, route: &mut Option<(usize, usize, bool)>) {
+        let sw = self.strip_w();
+        let view = (self.settings.mixer_view as usize).min(2);
         let selected = self.sel_insert == i || self.mixer_sel.contains(&i);
         let name = self.song.insert_name(i);
         let frame = egui::Frame::new().fill(if selected { PANEL.lerp_to_gamma(Color32::WHITE, 0.08) } else { PANEL }).inner_margin(3.0).corner_radius(3.0);
         let inner = frame.show(ui, |ui| {
-            ui.set_width(STRIP_W - 6.0);
+            ui.set_width(sw - 6.0);
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 // name plate
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 30.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(sw - 6.0, 30.0), Sense::click());
                 let col = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
                 ui.painter().rect_filled(rect, 2.0, col);
                 ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
@@ -407,7 +469,7 @@ impl App {
                     ins.enabled = !ins.enabled;
                     self.dirty = true;
                 }
-                let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, 20.0).hint("Panning");
+                let r = knob(ui, &mut ins.pan, -1.0, 1.0, 0.0, [20.0, 15.0, 26.0][view]).hint("Panning");
                 control_menu(&r, cereal_engine::song::Target::InsertPan(i));
                 if r.changed() {
                     self.dirty = true;
@@ -416,14 +478,14 @@ impl App {
                 // the highest level seen since the last click on it
                 let top = self.peak_top.get(i).copied().unwrap_or(0.0);
                 let text = if top <= 1e-5 { "-inf".to_string() } else { format!("{:.1}", 20.0 * top.log10()) };
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 11.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(sw - 6.0, 11.0), Sense::click());
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(9.0), if top > 1.0 { Color32::from_rgb(240, 80, 70) } else { TEXT_DIM });
                 if resp.hint("Highest peak in dB (click to reset)").clicked() {
                     self.peak_top.iter_mut().for_each(|p| *p = 0.0);
                 }
             }
             let h = (ui.available_height() - 56.0).clamp(60.0, 220.0);
-                let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new(16.0, h), if self.mixer_wave { (0.0, 0.0) } else { self.peaks[i] });
+                let r = fader(ui, &mut ins.volume, 1.25, 1.0, Vec2::new([16.0, 11.0, 28.0][view], h), if self.mixer_wave { (0.0, 0.0) } else { self.peaks[i] });
                 if self.mixer_wave {
                     // the sound of the last moments, newest at the top, as a wave down the meter
                     let (p, at) = (ui.painter(), r.rect);
@@ -456,13 +518,13 @@ impl App {
                     }
                 }
                 let dot = if used > 0 { GREEN } else { PANEL_DARK };
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 8.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(sw - 6.0, 8.0), Sense::hover());
                 ui.painter().circle_filled(rect.center(), 3.0, dot);
                 // routing from the selected insert into this one
                 let src = self.sel_insert;
                 if src != i && src != 0 && src < n {
                     let routed = self.song.inserts[src].sends.contains(&i);
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(STRIP_W - 6.0, 12.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(sw - 6.0, 12.0), Sense::click());
                     let c = rect.center();
                     let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
                     ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
