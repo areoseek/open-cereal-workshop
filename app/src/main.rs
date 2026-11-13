@@ -2548,7 +2548,10 @@ impl App {
         for a in std::mem::take(&mut self.actions) {
             match a {
                 Action::Preview(p) => match self.lib.load_path(&p) {
-                    Ok(s) => self.handle.send(Cmd::Preview(s)),
+                    Ok(s) => {
+                        self.browser.heard(&p, &s);
+                        self.handle.send(Cmd::Preview(s))
+                    }
                     Err(e) => self.status = e,
                 },
                 Action::Open(p) => self.leave(Leave::Open(p)),

@@ -40,6 +40,33 @@ pub struct State {
     hist_at: usize,
     /// Backspace (-1) or Shift+Backspace (1) was pressed: step through the places visited.
     key_go: i8,
+    /// The sound heard last: its file, the sound and its outline (lowest and highest value per column).
+    wave: Option<(PathBuf, std::sync::Arc<cereal_engine::sample::Sample>, Vec<(f32, f32)>)>,
+}
+
+/// Columns in the outline of the sound heard last.
+const WAVE_COLS: usize = 240;
+
+impl State {
+    /// Remember the sound that is being played, for the strip at the foot of the browser.
+    pub(crate) fn heard(&mut self, path: &std::path::Path, s: &std::sync::Arc<cereal_engine::sample::Sample>) {
+        if self.wave.as_ref().is_some_and(|w| w.0 == path) {
+            return;
+        }
+        let f = &s.frames;
+        let cols = (0..WAVE_COLS)
+            .map(|i| {
+                let a = i * f.len() / WAVE_COLS;
+                let b = ((i + 1) * f.len() / WAVE_COLS).max(a + 1).min(f.len());
+                let stride = ((b.saturating_sub(a)) / 128).max(1);
+                f.get(a..b).unwrap_or(&[]).iter().step_by(stride).fold((0f32, 0f32), |(lo, hi), x| {
+                    let m = (x[0] + x[1]) * 0.5;
+                    (lo.min(m), hi.max(m))
+                })
+            })
+            .collect();
+        self.wave = Some((path.to_path_buf(), s.clone(), cols));
+    }
 }
 
 /// A plug-in dragged out of the plug-in page.
@@ -400,8 +427,36 @@ impl App {
         true
     }
 
+    /// The strip at the foot of the browser: the sound heard last; a click plays it from there.
+    fn browser_wave(&mut self, ui: &mut Ui) {
+        let Some((path, smp, cols)) = self.browser.wave.as_ref() else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let secs = smp.frames.len() as f32 / smp.rate.max(1) as f32;
+        ui.label(RichText::new(format!("{name}   {}:{:05.2}   {} Hz", (secs / 60.0) as u32, secs % 60.0, smp.rate)).small().color(TEXT_DIM));
+        let (rect, resp) = ui.allocate_exact_size(egui::Vec2::new(ui.available_width(), 44.0), Sense::click());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, crate::widgets::PANEL);
+        let (mid, half) = (rect.center().y, rect.height() * 0.5 - 2.0);
+        let n = rect.width().max(1.0) as usize;
+        for x in 0..n {
+            let (lo, hi) = cols[(x * cols.len() / n).min(cols.len() - 1)];
+            let px = rect.left() + x as f32;
+            p.line_segment([egui::pos2(px, mid - hi.min(1.0) * half), egui::pos2(px, mid - lo.max(-1.0) * half + 1.0)], egui::Stroke::new(1.0_f32, ACCENT));
+        }
+        let resp = resp.hint("Click to hear the sound from that place, right-click to stop it");
+        if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.clicked()) {
+            self.handle.send(cereal_engine::Cmd::PreviewFrom(smp.clone(), ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0)));
+        }
+        if resp.secondary_clicked() {
+            self.handle.send(cereal_engine::Cmd::StopPreview);
+        }
+    }
+
     pub(crate) fn browser_ui(&mut self, ui: &mut Ui) {
         self.browser.visible.clear();
+        if self.browser.wave.is_some() {
+            egui::TopBottomPanel::bottom("browser_wave").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 4))).show_inside(ui, |ui| self.browser_wave(ui));
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Browser").strong().color(TEXT));
             let b = &mut self.browser;

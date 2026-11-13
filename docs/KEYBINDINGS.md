@@ -234,7 +234,7 @@ keyboard off and outside the channel rack.
 | Star at the end of a row, right-click > Favorite | Mark as a favourite (Starred page) | yes |
 | Drag a plug-in from the plug-in page | Onto the rack: a new channel; onto a mixer track or slot: the effect goes there | yes |
 | Backspace / Shift+Backspace | Navigate back / forward | yes |
-| Alt+click, Shift+click a sound | Play it whole / from the pointer | part: every click plays the sound whole; there is no wave strip to start from |
+| Click a sound; click the wave strip at the foot of the browser | Play it whole; play it from the place clicked (right-click stops it) | yes |
 
 ## Wave Recorder (audio editor)
 

@@ -27,6 +27,8 @@ pub enum Cmd {
     Bend { chan: u16, octaves: f32 },
     /// Audition a sample (browser preview).
     Preview(Arc<Sample>),
+    /// Hear a sample from a place along it (0 = the start, 1 = the end).
+    PreviewFrom(Arc<Sample>, f32),
     StopPreview,
     /// Silence everything now.
     Panic,
@@ -2810,6 +2812,15 @@ impl Player {
                     let step = smp.rate as f64 / self.sr as f64;
                     let rel = 1.0 / (self.sr * 0.01);
                     self.start(Voice { sample: Some(smp), step, level: 1.0, attack: 1.0, release: rel, gl: 0.8, gr: 0.8, insert: 0, preview: true, ..Default::default() });
+                }
+                Cmd::PreviewFrom(smp, at) => {
+                    for v in self.voices.iter_mut().filter(|v| v.preview) {
+                        v.let_go();
+                    }
+                    let step = smp.rate as f64 / self.sr as f64;
+                    let rel = 1.0 / (self.sr * 0.01);
+                    let pos = (at.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64).floor();
+                    self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0 / (self.sr * 0.003), release: rel, gl: 0.8, gr: 0.8, insert: 0, preview: true, ..Default::default() });
                 }
                 Cmd::StopPreview => {
                     for v in self.voices.iter_mut().filter(|v| v.preview) {
