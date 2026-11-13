@@ -21,6 +21,7 @@ pub mod lossy;
 pub mod sf2;
 pub mod speech;
 pub mod notes;
+pub mod pitchedit;
 pub mod player;
 pub mod additive;
 pub mod analog;

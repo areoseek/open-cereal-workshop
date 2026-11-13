@@ -7,6 +7,7 @@ use std::sync::Arc;
 use egui::{Color32, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 use cereal_engine::sample::Sample;
+use cereal_engine::pitchedit as pe;
 use cereal_engine::waveed as ops;
 use cereal_engine::{Cmd, Handle};
 
@@ -17,6 +18,8 @@ pub enum WaveAct {
     ToPlaylist(PathBuf),
     ToChannel(PathBuf),
     Status(String),
+    /// Found notes for the piano roll: start and length in seconds, and the key (60 = middle C).
+    Notes(Vec<(f64, f64, u8)>),
 }
 
 pub struct WaveEd {
@@ -62,6 +65,16 @@ pub struct WaveEd {
     /// Counts the changes, so the frequency picture knows when it is stale.
     rev: u64,
     spec_tex: Option<((usize, usize, usize, u64), egui::TextureHandle)>,
+    /// The followed pitch and the found notes, with the change count they were read at.
+    pe: Option<(u64, pe::Track, Vec<pe::PNote>)>,
+    pe_moves: Vec<pe::Move>,
+    pe_glide: f32,
+    pe_min: f32,
+    pe_pick: Option<usize>,
+    pe_drag: Option<(usize, f32, f32)>,
+    /// Time pins: where a moment is, and where it is to go.
+    pins: Vec<(usize, usize)>,
+    pin_drag: Option<usize>,
 }
 
 /// One step back.
@@ -74,7 +87,7 @@ struct Snap {
 
 impl Default for WaveEd {
     fn default() -> Self {
-        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, claw_bpm: 120.0, claw_beats: 1.0, claw_every: 4, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None }
+        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, claw_bpm: 120.0, claw_beats: 1.0, claw_every: 4, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None, pe: None, pe_moves: Vec::new(), pe_glide: 20.0, pe_min: 60.0, pe_pick: None, pe_drag: None, pins: Vec::new(), pin_drag: None }
     }
 }
 
@@ -190,6 +203,180 @@ impl WaveEd {
         let cap = if self.frames.len() > 20_000_000 { 2 } else { 12 };
         while self.undo.len() > cap {
             self.undo.remove(0);
+        }
+    }
+
+    /// Keep one tool's settings on show, for the units that are this window with one job.
+    pub fn pin_tool(&mut self, k: u8) {
+        self.tool = Some(k);
+    }
+
+    /// The found notes over a grid of keys, sharing the wave's view; a note is dragged to move it.
+    fn pitch_strip(&mut self, ui: &mut Ui) {
+        if self.pe.as_ref().is_none_or(|p| p.0 != self.rev) {
+            let t = pe::track(&self.frames, self.rate);
+            let ns = pe::notes(&t, self.rate, self.pe_min);
+            self.pe_moves = vec![pe::Move::default(); ns.len()];
+            self.pe_pick = None;
+            self.pe = Some((self.rev, t, ns));
+        }
+        let Some((_, t, ns)) = &self.pe else { return };
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(780.0, 170.0), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, PANEL_DARK);
+        let (v0, v1) = self.view;
+        let span = (v1 - v0).max(1) as f32;
+        let x_of = |at: usize| rect.left() + (at as f32 - v0 as f32) / span * rect.width();
+        let (mut lo, mut hi) = (127.0f32, 0.0f32);
+        for (n, m) in ns.iter().zip(self.pe_moves.iter()) {
+            lo = lo.min(n.key.min(n.key + m.semis));
+            hi = hi.max(n.key.max(n.key + m.semis));
+        }
+        if lo > hi {
+            (lo, hi) = (57.0, 69.0);
+        }
+        let (lo, hi) = ((lo - 3.0).floor(), (hi + 3.0).ceil().max(lo + 9.0));
+        let row = rect.height() / (hi - lo + 1.0);
+        let y_of = |key: f32| rect.bottom() - (key - lo + 0.5) * row;
+        for k in lo as i32..=hi as i32 {
+            let y = y_of(k as f32);
+            if matches!(k.rem_euclid(12), 1 | 3 | 6 | 8 | 10) {
+                p.rect_filled(egui::Rect::from_min_max(Pos2::new(rect.left(), y - row * 0.5), Pos2::new(rect.right(), y + row * 0.5)), 0.0, Color32::from_black_alpha(50));
+            }
+            if k.rem_euclid(12) == 0 {
+                p.line_segment([Pos2::new(rect.left(), y + row * 0.5), Pos2::new(rect.right(), y + row * 0.5)], Stroke::new(1.0_f32, LINE_SOFT));
+                p.text(Pos2::new(rect.left() + 3.0, y), egui::Align2::LEFT_CENTER, format!("C{}", k / 12), egui::FontId::proportional(9.0), TEXT_DIM);
+            }
+        }
+        let ptr = resp.interact_pointer_pos().or(resp.hover_pos());
+        let mut over = None;
+        // a drag belongs to the note it started on, wherever the pointer is by the time it counts as a drag
+        let origin = ui.input(|i| i.pointer.press_origin());
+        let mut grabbed = None;
+        for (i, (n, m)) in ns.iter().zip(self.pe_moves.iter()).enumerate() {
+            if n.b < v0 || n.a > v1 {
+                continue;
+            }
+            let y = y_of(n.key + m.semis);
+            let r = egui::Rect::from_min_max(Pos2::new(x_of(n.a.max(v0)), y - row * 0.5), Pos2::new(x_of(n.b.min(v1)).max(x_of(n.a.max(v0)) + 2.0), y + row * 0.5));
+            if ptr.is_some_and(|q| r.expand(1.0).contains(q)) {
+                over = Some(i);
+            }
+            if origin.is_some_and(|q| r.expand(1.0).contains(q)) {
+                grabbed = Some(i);
+            }
+            let moved = m.semis != 0.0 || m.wobble != 1.0;
+            let col = if moved { Color32::from_rgb(110, 190, 240) } else { ACCENT };
+            p.rect_filled(r, 2.0, col.gamma_multiply(if self.pe_pick == Some(i) { 0.9 } else { 0.55 }));
+            // the line the voice really takes through the note
+            let pts: Vec<Pos2> = (n.a / t.hop..(n.b / t.hop).min(t.hz.len()))
+                .filter(|h| t.hz[*h] > 0.0 && h * t.hop >= v0 && h * t.hop <= v1)
+                .map(|h| {
+                    let k = pe::key_of(t.hz[h]);
+                    Pos2::new(x_of(h * t.hop), y_of(n.key + m.semis + (k - n.key) * m.wobble))
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.8))));
+        }
+        if resp.drag_started() || resp.clicked() {
+            self.pe_pick = if resp.drag_started() { grabbed } else { over };
+            self.pe_drag = match (grabbed, origin) {
+                (Some(i), Some(q)) if resp.drag_started() => Some((i, self.pe_moves[i].semis, q.y)),
+                _ => None,
+            };
+        }
+        if let (Some((i, from, y0)), Some(q)) = (self.pe_drag, ptr) {
+            if resp.dragged() && i < ns.len() {
+                let want = from + (y0 - q.y) / row;
+                let free = ui.input(|i| i.modifiers.alt);
+                self.pe_moves[i].semis = if free { want } else { (ns[i].key + want).round() - ns[i].key }.clamp(-24.0, 24.0);
+            }
+        }
+        if resp.drag_stopped() {
+            self.pe_drag = None;
+        }
+        if resp.double_clicked() {
+            if let Some(i) = over {
+                self.pe_moves[i].semis = ns[i].key.round() - ns[i].key;
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(i) = over {
+                self.pe_moves[i] = pe::Move::default();
+            }
+        }
+        if ns.is_empty() {
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, "No clear notes found in this sound", egui::FontId::proportional(12.0), TEXT_DIM);
+        }
+    }
+
+    /// The time pins over the wave's view: a faint line where the moment is, a handle where it goes.
+    fn pin_strip(&mut self, ui: &mut Ui) {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(780.0, 34.0), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, PANEL_DARK);
+        let (v0, v1) = self.view;
+        let span = (v1 - v0).max(1) as f32;
+        let x_of = |at: usize| rect.left() + (at as f32 - v0 as f32) / span * rect.width();
+        let at_x = |x: f32| (v0 as f32 + (x - rect.left()) / rect.width() * span).max(1.0) as usize;
+        // the beat grid the pins snap to
+        let grid = (60.0 / self.claw_bpm * self.claw_beats * self.rate as f32).max(64.0);
+        if span / grid < 200.0 {
+            let mut g = (v0 as f32 / grid).ceil() * grid;
+            while g < v1 as f32 {
+                p.line_segment([Pos2::new(x_of(g as usize), rect.top()), Pos2::new(x_of(g as usize), rect.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+                g += grid;
+            }
+        }
+        let ptr = resp.interact_pointer_pos().or(resp.hover_pos());
+        let mut over = None;
+        for (i, pin) in self.pins.iter().enumerate() {
+            let (xa, xb) = (x_of(pin.0), x_of(pin.1));
+            p.line_segment([Pos2::new(xa, rect.bottom()), Pos2::new(xb, rect.top() + 10.0)], Stroke::new(1.0_f32, TEXT_DIM));
+            let moved = pin.0 != pin.1;
+            p.circle_filled(Pos2::new(xb, rect.top() + 8.0), 5.0, if moved { Color32::from_rgb(110, 190, 240) } else { ACCENT });
+            if ptr.is_some_and(|q| (q.x - xb).abs() < 7.0) {
+                over = Some(i);
+            }
+        }
+        if resp.drag_started() {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            self.pin_drag = self.pins.iter().position(|pin| origin.is_some_and(|q| (q.x - x_of(pin.1)).abs() < 7.0));
+        }
+        if let (Some(i), Some(q)) = (self.pin_drag, ptr) {
+            if resp.dragged() && i < self.pins.len() {
+                let mut to = at_x(q.x);
+                if !ui.input(|i| i.modifiers.alt) && ui.input(|i| i.modifiers.shift) {
+                    to = ((to as f32 / grid).round() * grid) as usize;
+                }
+                // a pin stays between its neighbours
+                let lo = if i > 0 { self.pins[i - 1].1 + 64 } else { 1 };
+                let hi = self.pins.get(i + 1).map_or(usize::MAX, |n| n.1.saturating_sub(64));
+                self.pins[i].1 = to.clamp(lo, hi.max(lo));
+            }
+        }
+        if resp.drag_stopped() {
+            self.pin_drag = None;
+        }
+        if resp.double_clicked() && over.is_none() {
+            if let Some(q) = ptr {
+                let at = at_x(q.x);
+                // a new pin sits where the sound there already goes
+                let i = self.pins.partition_point(|p| p.1 < at);
+                let (l, r) = (if i > 0 { self.pins[i - 1] } else { (0, 0) }, self.pins.get(i).copied());
+                let from = match r {
+                    Some(r) if r.1 > l.1 => l.0 + ((at - l.1) as f64 / (r.1 - l.1) as f64 * (r.0 - l.0) as f64) as usize,
+                    _ => l.0 + (at - l.1.min(at)),
+                };
+                if from > 0 && from < self.frames.len() {
+                    self.pins.insert(i, (from, at));
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(i) = over {
+                self.pins.remove(i);
+            }
         }
     }
 
@@ -338,6 +525,8 @@ impl WaveEd {
                         (54, "Equalise... (Ctrl+Q)"),
                         (55, "Tune the loop... (Ctrl+L)"),
                         (56, "Claw machine... (Alt+W)"),
+                        (57, "Correct the pitch..."),
+                        (58, "Warp the time..."),
                     ] {
                         if ui.button(name).clicked() {
                             self.tool = Some(k);
@@ -417,6 +606,57 @@ impl WaveEd {
                         ui.label("at");
                         ui.add(egui::DragValue::new(&mut self.claw_bpm).range(20.0..=400.0).speed(0.1).suffix(" BPM"));
                     }
+                    57 => {
+                        ui.label("Correct the pitch: drag a note up or down (Alt = free).");
+                        if ui.button("Snap to the keys").hint("Move every note onto the nearest key.").clicked() {
+                            if let Some((_, _, ns)) = &self.pe {
+                                for (m, n) in self.pe_moves.iter_mut().zip(ns.iter()) {
+                                    m.semis = (n.key + m.semis).round() - n.key;
+                                }
+                            }
+                        }
+                        let all = self.pe_pick.is_none();
+                        let mut w = self.pe_pick.and_then(|i| self.pe_moves.get(i)).or(self.pe_moves.first()).map_or(1.0, |m| m.wobble) * 100.0;
+                        if ui.add(egui::DragValue::new(&mut w).range(0.0..=200.0).speed(0.5).prefix(if all { "all: variation " } else { "note: variation " }).suffix(" %")).hint("How much of the note's own wobble is kept. 0 is dead level.").changed() {
+                            for (i, m) in self.pe_moves.iter_mut().enumerate() {
+                                if all || self.pe_pick == Some(i) {
+                                    m.wobble = w / 100.0;
+                                }
+                            }
+                        }
+                        ui.add(egui::DragValue::new(&mut self.pe_glide).range(0.0..=300.0).speed(0.5).prefix("transition ").suffix(" ms"));
+                        if ui.add(egui::DragValue::new(&mut self.pe_min).range(20.0..=500.0).speed(0.5).prefix("shortest note ").suffix(" ms")).changed() {
+                            self.pe = None;
+                        }
+                        if ui.button("Reset").clicked() {
+                            self.pe_moves.iter_mut().for_each(|m| *m = pe::Move::default());
+                        }
+                        if ui.button("Notes to the piano roll").hint("Write the found notes, as moved, into the pattern of the selected channel.").clicked() {
+                            if let Some((_, _, ns)) = &self.pe {
+                                let r = self.rate as f64;
+                                let out = ns.iter().zip(self.pe_moves.iter()).map(|(n, m)| (n.a as f64 / r, (n.b - n.a) as f64 / r, (n.key + m.semis).round().clamp(0.0, 127.0) as u8)).collect();
+                                act = Some(WaveAct::Notes(out));
+                            }
+                        }
+                    }
+                    58 => {
+                        ui.label("Warp the time: double-click the strip for a pin, drag it, right-click removes it.");
+                        if ui.button("Pins at the hits").clicked() {
+                            let n = self.frames.len();
+                            self.pins = ops::onsets(&self.frames, 0, n, self.rate, 0.5).into_iter().filter(|a| *a > 0).map(|a| (a, a)).collect();
+                        }
+                        ui.add(egui::DragValue::new(&mut self.claw_bpm).range(20.0..=400.0).speed(0.1).suffix(" BPM"));
+                        ui.add(egui::DragValue::new(&mut self.claw_beats).range(0.0625..=4.0).speed(0.01).suffix(" beats"));
+                        if ui.button("Snap the pins").hint("Move every pin onto the nearest line of this beat grid.").clicked() {
+                            let grid = (60.0 / self.claw_bpm * self.claw_beats * self.rate as f32).max(64.0);
+                            for p in &mut self.pins {
+                                p.1 = ((p.1 as f32 / grid).round() * grid) as usize;
+                            }
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.pins.clear();
+                        }
+                    }
                     _ => {
                         ui.label("Tune the loop (or the marked stretch) so its end runs into its start. Join:");
                         ui.add(egui::DragValue::new(&mut self.join_ms).range(1.0..=2000.0).speed(0.5).suffix(" ms"));
@@ -429,6 +669,14 @@ impl WaveEd {
                     self.tool = None;
                 }
             });
+        }
+        if self.view.1 > self.frames.len() || self.view.1 <= self.view.0 {
+            self.fit();
+        }
+        match self.tool {
+            Some(57) if has => self.pitch_strip(ui),
+            Some(58) if has => self.pin_strip(ui),
+            _ => {}
         }
         // the picture
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(780.0, 230.0), Sense::click_and_drag());
@@ -852,6 +1100,30 @@ impl WaveEd {
                                 self.sel = (0, 0);
                                 self.fit();
                             }
+                        }
+                        57 => {
+                            if let Some((_, t, ns)) = &self.pe {
+                                self.frames = pe::retune(&self.frames, self.rate, t, ns, &self.pe_moves, self.pe_glide);
+                            }
+                            self.pe = None;
+                        }
+                        58 => {
+                            let was = self.frames.len();
+                            self.frames = pe::warp(&self.frames, self.rate, &self.pins);
+                            // the flags move with the sound around them
+                            let mut pins = vec![(0usize, 0usize)];
+                            pins.extend(self.pins.iter().copied());
+                            pins.sort_unstable();
+                            pins.push((was, self.frames.len()));
+                            for m in &mut self.marks {
+                                let i = pins.partition_point(|p| p.0 <= m.at).clamp(1, pins.len() - 1);
+                                let (l, r) = (pins[i - 1], pins[i]);
+                                let t = (m.at - l.0.min(m.at)) as f64 / (r.0 - l.0).max(1) as f64;
+                                m.at = l.1 + (t * r.1.saturating_sub(l.1) as f64) as usize;
+                            }
+                            self.pins.clear();
+                            self.sel = (0, 0);
+                            self.fit();
                         }
                         50 => {
                             let new = ops::stretch(&self.frames[a..b], self.time, self.semis, self.rate);

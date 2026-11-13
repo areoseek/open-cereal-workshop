@@ -124,8 +124,8 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; pitch loop, follower, freeze and peak filter not run)
 - [~] Maximus (built as Band Maximiser; drawn lines read and edited in the line editor, look-ahead and second state not run)
 - [~] Multiband Delay (built as Band Delay, approximate)
-- [~] Newtime
-- [~] Newtone
+- [x] Newtime (Time Editor: pins at the hits or by hand, drag or snap to a beat grid, each stretch re-timed at its own pitch)
+- [x] Newtone (Pitch Editor: notes found in the sound, drag to move, snap to keys, variation, transition, notes to the piano roll)
 - [~] Patcher (held effects run along the sound cables and can be edited, setting cables work as in the instrument entry; side inputs and rewiring by hand are not built)
 - [~] Pitcher (built as Voice Tuner; automatic correction only, note-driven modes, harmony voices, formant and gender not run)
 - [~] Pitch Shifter (built as Grain Shifter; formant setting not run)

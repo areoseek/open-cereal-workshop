@@ -1,7 +1,7 @@
 //! The plain operations of the wave editor, on stereo frames. Every one takes the stretch `a..b` it works on
 //! and leaves the rest alone.
 
-type Frames = Vec<[f32; 2]>;
+pub type Frames = Vec<[f32; 2]>;
 
 fn span(f: &Frames, a: usize, b: usize) -> (usize, usize) {
     let b = b.min(f.len());

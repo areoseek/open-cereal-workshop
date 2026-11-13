@@ -149,6 +149,8 @@ impl App {
             p if p.eq_ignore_ascii_case("Fruity dB Meter") => 4,
             p if p.eq_ignore_ascii_case("Fruity Spectroman") => 5,
             p if p.eq_ignore_ascii_case("Fruity Big Clock") => 6,
+            p if p.eq_ignore_ascii_case("Newtone") => 7,
+            p if p.eq_ignore_ascii_case("Newtime") => 8,
             _ => 0,
         };
         self.handle.transport.watch_slot((meter != 0 && meter != 6).then_some((ins, slot)));
@@ -203,8 +205,15 @@ impl App {
                 ui.data_mut(|d| d.insert_temp(id, (count, since)));
                 let quiet = now - since > 0.25;
                 let frames = if quiet { vec![[0.0; 2]; frames.len()] } else { frames };
-                if meter == 3 {
-                    wave_act = self.wave_eds.entry((ins, slot)).or_default().ui(ui, &self.handle, (ins, slot), rate, &take_dir);
+                if matches!(meter, 3 | 7 | 8) {
+                    let ed = self.wave_eds.entry((ins, slot)).or_default();
+                    // the pitch and time editors are the wave window with their one tool held open
+                    match meter {
+                        7 => ed.pin_tool(57),
+                        8 => ed.pin_tool(58),
+                        _ => {}
+                    }
+                    wave_act = ed.ui(ui, &self.handle, (ins, slot), rate, &take_dir);
                     return;
                 }
                 match meter {
@@ -663,6 +672,19 @@ impl App {
                 self.status = format!("Loaded {}", p.display());
             }
             Some(crate::waveed::WaveAct::Status(s)) => self.status = s,
+            Some(crate::waveed::WaveAct::Notes(found)) => {
+                let pat = self.handle.transport.pattern();
+                let chan = self.sel_chan as u16;
+                let per_sec = self.song.tempo as f64 / 60.0 * self.song.ppq as f64;
+                if let Some(p) = self.song.patterns.get_mut(pat) {
+                    for (at, len, key) in &found {
+                        p.notes.push(cereal_engine::song::Note { pos: (at * per_sec).round() as u32, len: ((len * per_sec).round() as u32).max(1), chan, key: *key, ..Default::default() });
+                    }
+                    p.sort();
+                    self.dirty = true;
+                }
+                self.status = format!("{} notes written to the pattern", found.len());
+            }
             None => {}
         }
         if cab_changed {
