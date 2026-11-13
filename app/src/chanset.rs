@@ -567,6 +567,7 @@ impl App {
                     let f = &mut c.smp;
                     section(ui, "LOOP");
                     rebake |= ui.checkbox(&mut f.use_loop, "Use loop points").on_hover_text("Go round the loop stored in the sample while the note is held").changed();
+                    rebake |= ui.checkbox(&mut f.ping_pong, "Ping pong loop").on_hover_text("Play the loop forth and back instead of jumping to its start").changed();
                     section(ui, "PRECOMPUTED EFFECTS");
                     ui.horizontal_wrapped(|ui| {
                         rebake |= ui.checkbox(&mut f.normalize, "Normalize").changed();

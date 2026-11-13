@@ -28,7 +28,11 @@ pub mod id {
     /// 1 when the playlist is in performance mode.
     pub const PERFORMANCE: u8 = 31;
     pub const TIMESIG_BEAT: u8 = 18;
-    pub const CHAN_ZIPPED: u8 = 20;
+    pub const CHAN_ZIPPED: u8 = 15;
+    /// The sample's loop goes back and forth.
+    pub const CHAN_PING_PONG: u8 = 20;
+    /// Fine tune of the root note in cents (signed).
+    pub const CHAN_FINE_TUNE: u8 = 142;
     pub const CHAN_GROUP: u8 = 145;
     pub const CUR_GROUP: u8 = 146;
     pub const GROUP_NAME: u8 = 231;
@@ -433,6 +437,8 @@ pub struct FlpChannel {
     /// Which of the rack's named groups the channel is filed under.
     pub rack_group: u32,
     pub zipped: bool,
+    pub ping_pong: bool,
+    pub fine_tune: i32,
     pub time_shift: u16,
     /// Arpeggiator: direction (0 off, up, down, up-down, up-down with the ends twice, random), range in
     /// octaves, chord (-1 from the held notes, -2 the same but lone notes hold, 0 none, then the chord list), time
@@ -1214,6 +1220,8 @@ impl Flp {
                         (id::CHAN_CUT_GROUP, Value::Int(v)) => c.cut_group = ((*v & 0xffff) as u16, (*v >> 16) as u16),
                         (id::CHAN_GROUP, Value::Int(v)) => c.rack_group = *v,
                         (id::CHAN_ZIPPED, Value::Byte(v)) => c.zipped = *v != 0,
+                        (id::CHAN_PING_PONG, Value::Byte(v)) => c.ping_pong = *v != 0,
+                        (id::CHAN_FINE_TUNE, Value::Int(v)) => c.fine_tune = (*v as i32).clamp(-100, 100),
                         (id::CHAN_ROOT, Value::Int(v)) if *v > 0 && *v < 132 && version_tuple(&flp.version) < (12, 0, 0, 0) => c.root_key = *v,
                         (id::CHAN_ECHO, Value::Data(d)) if d.len() >= 20 => {
                             for k in 0..5 {

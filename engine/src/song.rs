@@ -27,6 +27,8 @@ pub struct Chan {
     pub pan: f32,
     pub pitch_cents: f32,
     pub root_key: u8,
+    /// Cents the root note is tuned by.
+    pub root_fine: f32,
     /// Mixer insert, 0 = master.
     pub insert: usize,
     /// When the volume envelope is on, notes stop at their end; otherwise one-shots play out.
@@ -146,6 +148,8 @@ pub struct Sampler {
     pub invert: bool,
     /// Play the loop stored in the sample for as long as the note is held.
     pub use_loop: bool,
+    /// The loop goes back and forth instead of jumping to its start.
+    pub ping_pong: bool,
     /// A note here silences sounding notes of channels whose `cut_by` matches. 0 = none.
     pub cut: u16,
     pub cut_by: u16,
@@ -249,6 +253,7 @@ impl Default for Sampler {
             normalize: false,
             invert: false,
             use_loop: false,
+            ping_pong: false,
             cut: 0,
             cut_by: 0,
             mono: false,
@@ -310,6 +315,7 @@ impl Sampler {
             normalize: c.normalize,
             invert: c.invert,
             use_loop: c.sample_flags & 8 != 0,
+            ping_pong: c.ping_pong,
             cut: c.cut_group.0,
             cut_by: c.cut_group.1,
             mono: c.poly.2 & 1 != 0,
@@ -530,7 +536,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, insert: 0, env_on: false, group: usize::MAX, zipped: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, root_fine: 0.0, insert: 0, env_on: false, group: usize::MAX, zipped: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
     }
 }
 
@@ -1725,6 +1731,7 @@ impl Song {
                     pan: (c.pan as f32 - 6400.0) / 6400.0,
                     pitch_cents: c.pitch_cents as f32,
                     root_key: c.root_key.min(131) as u8,
+                    root_fine: c.fine_tune as f32,
                     insert: if c.insert < 0 || c.insert as usize >= n_inserts { 0 } else { c.insert as usize },
                     env_on: c.envelopes.get(1).map(|e| e.enabled).unwrap_or(false),
                     src: Some(pos as u16),

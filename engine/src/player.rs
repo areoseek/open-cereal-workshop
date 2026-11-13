@@ -890,6 +890,8 @@ struct Voice {
     pos: f64,
     /// Frames the reading wraps between while the note sounds.
     loop_pts: Option<(f64, f64)>,
+    /// The loop is read forth and back.
+    ping: bool,
     /// Source frames per output frame at the note's own pitch, and where a glide is taking it.
     step: f64,
     step_to: f64,
@@ -1142,7 +1144,7 @@ impl Voice {
             }
             let mut s = match &self.sample {
                 Some(smp) => {
-                    if self.pos >= smp.frames.len() as f64 {
+                    if self.pos >= smp.frames.len() as f64 && !(self.ping && self.loop_pts.is_some()) {
                         self.active = false;
                         break;
                     }
@@ -1162,10 +1164,19 @@ impl Voice {
                         }
                         [sa[0] + (sb[0] - sa[0]) * wb, sa[1] + (sb[1] - sa[1]) * wb]
                     } else {
-                        let s = smp.at(self.pos);
+                        // going back, the place counts on past the loop's end and is read mirrored
+                        let s = match self.loop_pts {
+                            Some((_, b)) if self.ping && self.pos > b - 1.0 => smp.at((2.0 * (b - 1.0) - self.pos).max(0.0)),
+                            _ => smp.at(self.pos),
+                        };
                         self.pos += self.step_now;
                         if let Some((a, b)) = self.loop_pts {
-                            if self.pos >= b {
+                            if self.ping {
+                                let l = (b - 1.0 - a).max(1.0);
+                                if self.pos >= a + 2.0 * l {
+                                    self.pos = a + (self.pos - a) % (2.0 * l);
+                                }
+                            } else if self.pos >= b {
                                 self.pos = a + (self.pos - b) % (b - a).max(1.0);
                             }
                         }
@@ -2058,7 +2069,7 @@ impl Player {
         match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => {
                 let Some(smp) = ch.sample.clone() else { return };
-                let cents = (n.key as f32 - ch.root_key as f32) * 100.0 + ch.pitch_cents + n.fine_cents + f.stretch_cents;
+                let cents = (n.key as f32 - ch.root_key as f32) * 100.0 - ch.root_fine + ch.pitch_cents + n.fine_cents + f.stretch_cents;
                 let step = smp.rate as f64 / sr as f64 * 2f64.powf(cents as f64 / 1200.0);
                 let venv = Env { on: ch.env_on, ..f.vol_env };
                 // without a volume envelope a sampler plays its sample out whatever the note length
@@ -2096,6 +2107,7 @@ impl Player {
                     self.start(Voice {
                         sample: Some(smp.clone()),
                         loop_pts,
+                        ping: f.ping_pong,
                         step,
                         level: 1.0,
                         attack: 1.0,
@@ -5113,6 +5125,27 @@ mod tests {
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
         s.channels[0].root_key = 72;
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
+    }
+
+    #[test]
+    fn a_ping_pong_loop_turns_round_instead_of_jumping() {
+        let mut s = Song::new();
+        let ramp: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0 * 0.8).collect();
+        let mut smp = Sample::from_mono("ramp", 48_000, &ramp);
+        smp.loop_pts = Some((0, 1000));
+        s.channels[0].sample = Some(Arc::new(smp));
+        s.channels[0].smp.use_loop = true;
+        s.patterns[0].notes.push(Note { len: s.ppq * 2, ..Note::step(0, 0) });
+        let jump = |s: &Song| {
+            let out = crate::render_song(s, 48_000.0, false, 0, 0.0);
+            let l: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
+            l[500..8000].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max)
+        };
+        let straight = jump(&s);
+        s.channels[0].smp.ping_pong = true;
+        let turned = jump(&s);
+        assert!(straight > 0.1, "{straight}");
+        assert!(turned < 0.01, "{turned}");
     }
 
     #[test]

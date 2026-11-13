@@ -152,7 +152,7 @@ fn blank_channel(index: u16, unicode: bool, word_insert: bool) -> Vec<Event> {
         ev.push(Event::data(id::CHAN_ENVELOPE, d));
     }
     ev.push(Event::int(id::SAMPLE_FLAGS, 3));
-    ev.push(Event::byte(id::CHAN_ZIPPED, 0));
+    ev.push(Event::byte(id::CHAN_PING_PONG, 0));
     ev
 }
 
@@ -509,7 +509,7 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 (Some(i), false) => ev[i] = text_event(id::SAMPLE_PATH, &now.sample_path, unicode),
                 (None, true) => {}
                 (None, false) => {
-                    let at = find(ev, end, id::CHAN_ZIPPED).map(|i| i + 1).unwrap_or(end);
+                    let at = find(ev, end, id::CHAN_PING_PONG).map(|i| i + 1).unwrap_or(end);
                     ev.insert(at, text_event(id::SAMPLE_PATH, &now.sample_path, unicode));
                     end += 1;
                 }
@@ -1201,6 +1201,15 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
                         put_u32(d, 108, if a.5 { -1i32 as u32 } else { 0 });
                     }
                 }
+            }
+        }
+    }
+    if now.ping_pong != was.ping_pong {
+        match (start..end).find(|&i| ev[i].id == id::CHAN_PING_PONG) {
+            Some(i) => ev[i].value = Value::Byte(now.ping_pong as u8),
+            None => {
+                ev.insert(end, Event::byte(id::CHAN_PING_PONG, now.ping_pong as u8));
+                end += 1;
             }
         }
     }
