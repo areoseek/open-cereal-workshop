@@ -4998,7 +4998,7 @@ mod tests {
         let mut duck = crate::song::Slot::with_fx(0, crate::fx::Kind::Peak);
         if let Some(f) = duck.fx.as_mut() {
             f.p[1] = -256.0;
-            f.p[10] = 65536.0;
+            f.p[10] = 0.0;
         }
         s2.inserts[0].slots.push(duck);
         s2.ctl_links.push(crate::song::CtlLink { ins: 0, slot: 0, out: 1, target: Target::InsertVolume(0) });

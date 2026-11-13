@@ -617,6 +617,15 @@ impl App {
                 changed |= bank_player_ui(ui, f);
             }
             let mut shown: Vec<usize> = if f.kind == Kind::Gm { vec![] } else { (0..d.params.len()).collect() };
+            if f.kind == Kind::Peak && f.p.len() > 10 {
+                // the switch word is shown as its one switch
+                shown.retain(|&k| k != 10);
+                let mut mute = (f.p[10] as i32 >> 16) & 1 == 1;
+                if ui.checkbox(&mut mute, RichText::new("Mute").small()).hint("Silence the sound on its way through this unit, so it only drives what is linked to it").changed() {
+                    f.p[10] = ((f.p[10] as i32 & !0x1_0000) | if mute { 0x1_0000 } else { 0 }) as f32;
+                    changed = true;
+                }
+            }
             let mut cut = 0;
             if let Some((head, per, names)) = paged {
                 let id = egui::Id::new(("fxpage", ins, slot));

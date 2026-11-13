@@ -804,7 +804,7 @@ pub static DEFS: &[Def] = &[
             p("Sweep speed", 28, 0, 65536, 32950),
             p("Sweep shape", 32, 0, 4, 0),
             p("Sweep phase", 36, 0, 65535, 0),
-            p("Switches", 38, 0, 0x0101_0000, 0),
+            p("Switches", 38, 0, 0x0101_0000, 0x0001_0000),
         ],
     },
     Def {
@@ -5240,8 +5240,9 @@ impl Unit {
                 };
                 let sweep = p[4] / 65536.0 + p[5] / 256.0 * shaped(wave, p[6]);
                 self.out = [(peak + sweep).clamp(0.0, 1.0), peak.clamp(0.0, 1.0), sweep.clamp(0.0, 1.0)];
-                // muted unless the pass switch is on
-                if (p[10] as i32 >> 16) & 1 == 0 {
+                // the mute switch silences the sound on its way through (a trigger nobody is meant to hear);
+                // projects whose master track carries one with the switch byte clear play, which settles its sense
+                if (p[10] as i32 >> 16) & 1 == 1 {
                     io.fill([0.0; 2]);
                 }
             }
