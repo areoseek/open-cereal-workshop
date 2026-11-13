@@ -1382,6 +1382,9 @@ impl ToneState {
         if let (Some(p), Some(v)) = (&tone.mini, &mut self.mini) {
             return v.release(p);
         }
+        if let (Some(p), Some(v)) = (&tone.add, &mut self.add) {
+            return v.release(p);
+        }
         match (&tone.fm, &mut self.fm) {
             (Some(p), Some(v)) => {
                 v.release();

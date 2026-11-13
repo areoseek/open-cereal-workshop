@@ -68,6 +68,7 @@ pub mod ix {
     pub const LFO_SPEED: usize = 85;
     pub const CHORUS_TYPE: usize = 86;
     pub const CHORUS_MIX: usize = 87;
+    pub const DELAY_TYPE: usize = 88;
     pub const DELAY_VOL: usize = 89;
     pub const DELAY_FB: usize = 90;
     pub const DELAY_TIME: usize = 91;
@@ -82,7 +83,8 @@ pub const TIMBRES: [&str; 12] = ["Saw", "Square", "Soft saw", "Triangle", "Pulse
 pub const LFO_SHAPES: [&str; 14] =
     ["Sine", "Triangle", "Saw up", "Saw down", "Square", "Random", "Smooth random", "Half sine", "Filter envelope", "Filter frequency", "Voice random", "Velocity", "Key", "Pitch"];
 
-/// The chorus, echo and room after the voices. They have no switch: a knob at nothing takes one out. The
+/// The chorus, echo and room after the voices. Each one's type at 0 is off (a fresh one plays dry against
+/// the reference, and the first type of each is the only one that does), as is a knob at nothing. The
 /// chorus styles and room sizes are our own (the reference names none); the echo time is stored in ticks of
 /// a 96-tick beat.
 pub fn tail(p: &[f32]) -> crate::tailfx::Set {
@@ -93,12 +95,13 @@ pub fn tail(p: &[f32]) -> crate::tailfx::Set {
     let u = |i: usize| (p[i] / 1000.0).clamp(0.0, 1.0);
     const STYLES: [(f32, f32); 10] = [(0.5, 0.6), (0.3, 0.3), (0.7, 0.4), (0.4, 1.2), (0.8, 0.8), (0.2, 2.5), (0.6, 0.15), (0.9, 0.25), (0.35, 4.0), (1.0, 0.5)];
     const ROOMS: [f32; 7] = [0.5, 0.9, 1.4, 2.0, 2.8, 4.0, 6.0];
-    let style = STYLES[(p[ix::CHORUS_TYPE].max(0.0) as usize).min(9)];
+    let kind = |i: usize| p[i].max(0.0) as usize;
+    let style = STYLES[kind(ix::CHORUS_TYPE).clamp(1, 10) - 1];
     let steps = p[ix::DELAY_TIME].clamp(1.0, 384.0) / 24.0;
     Set {
-        chorus: (u(ix::CHORUS_MIX) > 0.0).then(|| Chorus { depth: style.0, hz: style.1, wet: u(ix::CHORUS_MIX) }),
-        delay: (u(ix::DELAY_VOL) > 0.0).then(|| Delay { left: steps, right: steps, fb: u(ix::DELAY_FB) * 0.95, high_hz: 6000.0, wet: u(ix::DELAY_VOL) * u(ix::DELAY_VOL), ..Default::default() }),
-        reverb: (u(ix::REVERB_VOL) > 0.0).then(|| Reverb { secs: ROOMS[(p[ix::REVERB_TYPE].max(0.0) as usize).min(6)], high_hz: 6000.0, wet: u(ix::REVERB_VOL) * u(ix::REVERB_VOL) }),
+        chorus: (kind(ix::CHORUS_TYPE) > 0 && u(ix::CHORUS_MIX) > 0.0).then(|| Chorus { depth: style.0, hz: style.1, wet: u(ix::CHORUS_MIX) }),
+        delay: (kind(ix::DELAY_TYPE) > 0 && u(ix::DELAY_VOL) > 0.0).then(|| Delay { left: steps, right: steps, fb: u(ix::DELAY_FB) * 0.95, high_hz: 6000.0, wet: u(ix::DELAY_VOL) * u(ix::DELAY_VOL), ..Default::default() }),
+        reverb: (kind(ix::REVERB_TYPE) > 0 && u(ix::REVERB_VOL) > 0.0).then(|| Reverb { secs: ROOMS[kind(ix::REVERB_TYPE).clamp(1, 7) - 1], high_hz: 6000.0, wet: u(ix::REVERB_VOL) * u(ix::REVERB_VOL) }),
         ..Default::default()
     }
 }
@@ -175,12 +178,13 @@ impl Patch {
 
     /// Seconds for the level to rise at the start of a note.
     pub fn attack_s(&self) -> f32 {
-        (3.0 * (self.v(ix::ATTACK) / 1000.0).powi(3)).max(0.0015)
+        3.0 * (self.v(ix::ATTACK) / 1000.0).powi(3)
     }
 
-    /// Seconds for the level to fall once the note is let go.
+    /// Time constant, in seconds, of the fall once the note is let go. Measured on the factory test: a
+    /// quarter of the knob falls 613 dB a second.
     pub fn release_s(&self) -> f32 {
-        (4.0 * (self.v(ix::RELEASE) / 1000.0).powi(2)).max(0.006)
+        (0.2267 * (self.v(ix::RELEASE) / 1000.0).powi(2)).max(0.001)
     }
 }
 
@@ -259,6 +263,12 @@ pub struct Voice {
     pitch_mul: f32,
     level: f32,
     trem: f32,
+    /// The note's own rise and fall: the target, what it is multiplied by each frame once let go, and the
+    /// smoothed level that is heard (measured: a lag follows every move, longer on the way down).
+    env: f32,
+    env_mul: f32,
+    env_out: f32,
+    held: bool,
     lfo_ph: f32,
     lfo_hold: f32,
     lfo_prev: f32,
@@ -305,6 +315,10 @@ impl Voice {
             pitch_mul: 1.0,
             level: 1.0,
             trem: 0.0,
+            env: 0.0,
+            env_mul: 1.0,
+            env_out: 0.0,
+            held: true,
             lfo_ph: 0.0,
             lfo_hold: 0.0,
             lfo_prev: 0.0,
@@ -329,7 +343,8 @@ impl Voice {
             let side = if u % 2 == 0 { s.abs() } else { -s.abs() } * pan;
             v.gl[u] = g * (1.0 - side.max(0.0));
             v.gr[u] = g * (1.0 + side.min(0.0));
-            v.ph[u] = (free + if u > 0 { rnd(&mut seed) * uph } else { 0.0 }).fract();
+            // measured: a note starts half a cycle in, at the middle of the saw's ramp (the table holds two cycles)
+            v.ph[u] = (0.25 + free + if u > 0 { rnd(&mut seed) * uph } else { 0.0 }).fract();
         }
         v.seed = seed;
         v
@@ -375,8 +390,9 @@ impl Voice {
 
         // filter envelope
         let fa = 3.0 * (patch.v(ix::F_ATTACK) / 1000.0).powi(3);
-        let fd = (6.0 * (patch.v(ix::F_DECAY) / 1000.0).powi(3)).max(0.002);
-        let fenv = if t < fa { t / fa } else { (-(t - fa) * 4.0 / fd).exp() };
+        // measured on the factory test: the fall is a straight line in octaves, two a second at the rest settings
+        let fd = (10.9 * (patch.v(ix::F_DECAY) / 1000.0).powi(3)).max(0.002);
+        let fenv = if t < fa { t / fa } else { (1.0 - (t - fa) / fd).max(0.0) };
         let lfo = self.lfo(patch, t, fenv);
 
         // level and pitch movement
@@ -395,7 +411,7 @@ impl Voice {
         // filter position, in octaves above 20 Hz
         let filter_on = patch.v(ix::FILTER_ON) != 0.0;
         let cut = patch.v(ix::CUTOFF) / 8192.0 * 10.0
-            + patch.v(ix::F_AMOUNT) / 1000.0 * 8.0 * fenv
+            + patch.v(ix::F_AMOUNT) / 1000.0 * 5.343 * fenv
             + patch.v(ix::CUTOFF_LFO) / 1000.0 * 4.0 * lfo
             + patch.v(ix::KEY_TRACK) / 1000.0 * (self.key - 60.0) / 12.0;
         let res = patch.v(ix::RESONANCE) / 1000.0;
@@ -434,7 +450,8 @@ impl Voice {
         let kind = patch.v(ix::TIMBRE) as u8;
         let custom = patch.custom.as_ref().filter(|_| kind == 11);
         let lhp = patch.v(ix::LHP) / 256.0;
-        let slope = [8.0f32, 4.0, 3.0, 2.0, 1.0][(patch.v(ix::FILTER_TYPE) as usize).min(4)];
+        let ftype = (patch.v(ix::FILTER_TYPE) as usize).min(4);
+        let slope = [8.0f32, 4.0, 3.0, 2.0, 1.0][ftype];
         let fc = 20.0 * 2f32.powf(cut.clamp(-2.0, 11.0));
         let res_at = (fc * 2f32.powf(patch.v(ix::RES_OFFSET) / 1200.0)).max(1.0);
         let eq: [f32; 6] = std::array::from_fn(|b| {
@@ -486,7 +503,8 @@ impl Voice {
             }
             if !open {
                 let f = kf * f0;
-                let low = 1.0 / (1.0 + (f / fc).powf(2.0 * slope)).sqrt();
+                // the first type measured as a straight 18 dB an octave from a sharp corner
+                let low = if ftype == 0 { (fc / f).powi(3).min(1.0) } else { 1.0 / (1.0 + (f / fc).powf(2.0 * slope)).sqrt() };
                 let d = (f / res_at).log2() / 0.18;
                 a *= low + res * 5.0 * (-d * d).exp();
             }
@@ -545,6 +563,14 @@ impl Voice {
         self.primed = true;
     }
 
+    /// Let the note go; returns the seconds it still sounds.
+    pub fn release(&mut self, patch: &Patch) -> f32 {
+        let tau = patch.release_s();
+        self.held = false;
+        self.env_mul = (-1.0 / (tau * self.sr)).exp();
+        tau * 9.2 + 0.05
+    }
+
     /// One frame. `dphase` is the note's cycles per frame.
     #[inline]
     pub fn frame(&mut self, patch: &Patch, dphase: f32) -> [f32; 2] {
@@ -580,7 +606,15 @@ impl Voice {
         if self.blend {
             self.fade = (self.fade + 1.0 / TICK as f32).min(1.0);
         }
-        let g = self.level * 0.4;
+        if self.held {
+            let a = patch.attack_s() * self.sr;
+            self.env = if a < 1.0 { 1.0 } else { (self.env + 1.0 / a).min(1.0) };
+        } else {
+            self.env *= self.env_mul;
+        }
+        let lag = if self.held { 0.00215 } else { 0.006 };
+        self.env_out += (self.env - self.env_out) * (1.0 - (-1.0 / (lag * self.sr)).exp());
+        let g = self.level * 0.5304 * self.env_out;
         [out[0] * g * (1.0 - self.trem.max(0.0)), out[1] * g * (1.0 + self.trem.min(0.0))]
     }
 }
@@ -597,6 +631,11 @@ mod tests {
     #[test]
     fn the_effects_follow_their_knobs() {
         let mut g = crate::synth::Gen::new(crate::synth::Kind::Additive);
+        // a fresh one has all three switched off
+        assert!(!g.tail().any());
+        for i in [ix::CHORUS_TYPE, ix::DELAY_TYPE, ix::REVERB_TYPE] {
+            g.p[i] = 1.0;
+        }
         let t = g.tail();
         // the echo of a fresh one is a beat and a half long
         assert_eq!(t.delay.unwrap().left, 6.0);

@@ -2397,10 +2397,10 @@ impl Player {
                         v.release = ms(8.84);
                         v.delay += 2;
                     }
-                    if let Some(p) = &tone.add {
-                        // this instrument brings its own rise and fall
-                        v.attack = ms(p.attack_s() * 1000.0);
-                        v.release = ms(p.release_s() * 1000.0);
+                    if tone.add.is_some() {
+                        // this instrument brings its own rise and fall; ours only closes what is left of the tail
+                        v.attack = 1.0;
+                        v.release = ms(5.0);
                     }
                     v.tone = Some(tone);
                     v.step = 1.0;
