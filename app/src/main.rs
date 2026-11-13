@@ -289,6 +289,7 @@ pub(crate) struct App {
     show_info: bool,
     /// The load monitor: its window, the rows shown (name, share of real time) and when they were last counted.
     show_load: bool,
+    speech_dlg: Option<cereal_engine::speech::Voice>,
     load_rows: Vec<(String, f32)>,
     load_at: Option<std::time::Instant>,
     pub(crate) prefs_win: settings::State,
@@ -506,6 +507,7 @@ impl App {
             hist_pending: false,
             show_info: false,
             show_load: false,
+            speech_dlg: None,
             load_rows: vec![],
             load_at: None,
             prefs_win: Default::default(),
@@ -2263,6 +2265,73 @@ impl App {
     }
 
     /// How much of the processor each instrument and effect takes, heaviest first.
+    /// Words typed here are spoken by our own voice. Listen plays them; Accept writes a speech preset beside
+    /// the recordings and opens it in a new channel.
+    fn speech_window(&mut self, ctx: &egui::Context) {
+        use cereal_engine::speech;
+        let Some(mut v) = self.speech_dlg.take() else { return };
+        let (mut open, mut listen, mut accept) = (true, false, false);
+        egui::Window::new("Text to speech").open(&mut open).collapsible(false).resizable(false).default_width(380.0).show(ctx, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut v.text).desired_rows(3).desired_width(f32::INFINITY));
+            egui::Grid::new("speech_grid").num_columns(2).show(ui, |ui| {
+                ui.label("Personality");
+                egui::ComboBox::from_id_salt("speech_person").selected_text(speech::PERSONALITIES[(v.personality as usize).min(19)]).show_ui(ui, |ui| {
+                    for (i, n) in speech::PERSONALITIES.iter().enumerate() {
+                        ui.selectable_value(&mut v.personality, i as u8, *n);
+                    }
+                });
+                ui.end_row();
+                ui.label("Style");
+                egui::ComboBox::from_id_salt("speech_style").selected_text(speech::STYLES[(v.style as usize).min(4)]).show_ui(ui, |ui| {
+                    for (i, n) in speech::STYLES.iter().enumerate() {
+                        ui.selectable_value(&mut v.style, i as u8, *n);
+                    }
+                });
+                ui.end_row();
+                ui.label("Mode");
+                egui::ComboBox::from_id_salt("speech_mode").selected_text(speech::MODES[(v.mode as usize).min(2)]).show_ui(ui, |ui| {
+                    for (i, n) in speech::MODES.iter().enumerate() {
+                        ui.selectable_value(&mut v.mode, i as u8, *n);
+                    }
+                });
+                ui.end_row();
+                ui.label("Pitch");
+                ui.add(egui::Slider::new(&mut v.pitch, 40.0..=400.0).suffix(" Hz").fixed_decimals(0));
+                ui.end_row();
+                ui.label("Rate");
+                ui.add(egui::Slider::new(&mut v.rate, 60.0..=300.0).fixed_decimals(0));
+                ui.end_row();
+            });
+            ui.horizontal(|ui| {
+                listen = ui.button("Listen").clicked();
+                accept = ui.button("Accept").clicked();
+            });
+        });
+        if listen {
+            let wave = speech::render(&v, 44_100);
+            self.handle.send(Cmd::Preview(std::sync::Arc::new(cereal_engine::sample::Sample::from_mono("Speech", 44_100, &wave))));
+        }
+        if accept {
+            let dir = record::folder(self.path.as_deref());
+            let stem: String = v.text.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').take(24).collect();
+            let stem = if stem.trim().is_empty() { "Speech".to_string() } else { stem.trim().to_string() };
+            let mut path = dir.join(format!("{stem}.speech"));
+            let mut n = 2;
+            while path.exists() {
+                path = dir.join(format!("{stem} {n}.speech"));
+                n += 1;
+            }
+            match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, speech::write(&v))) {
+                Ok(()) => self.actions.push(Action::LoadSample(path, None)),
+                Err(e) => self.status = format!("{}: {e}", path.display()),
+            }
+            return;
+        }
+        if open {
+            self.speech_dlg = Some(v);
+        }
+    }
+
     fn load_window(&mut self, ctx: &egui::Context) {
         let tr = self.handle.transport.clone();
         if !self.show_load {
@@ -3231,6 +3300,10 @@ impl App {
                             });
                         });
                     }
+                    if ui.button("Text to speech").hint("Type words and have them spoken into a new channel").clicked() {
+                        self.speech_dlg.get_or_insert_with(Default::default);
+                        ui.close_menu();
+                    }
                     ui.menu_button("One-click audio recording", |ui| {
                         if ui.button("Into the audio editor").hint("A Wave Recorder on the selected mixer track starts taking down what arrives there").clicked() {
                             let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
@@ -3766,6 +3839,7 @@ impl App {
 
         self.render_window(ctx);
         self.load_window(ctx);
+        self.speech_window(ctx);
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
         }

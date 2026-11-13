@@ -142,6 +142,10 @@ impl Sample {
         if let Some(wave) = crate::dsfile::render(&bytes) {
             return Ok(Self { name, ..Self::from_mono("", 44_100, &wave) });
         }
+        // a speech preset is spoken here
+        if let Some(v) = crate::speech::parse(&bytes) {
+            return Ok(Self { name, ..Self::from_mono("", 44_100, &crate::speech::render(&v, 44_100)) });
+        }
         // a packed wave says how many frames it really holds; the packed stream rounds that up
         let mut true_len = None;
         let (bytes, ext) = match ogg_inside_wav(&bytes) {
