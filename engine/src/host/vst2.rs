@@ -699,11 +699,21 @@ pub enum Saved<'a> {
 
 impl<'a> Saved<'a> {
     pub fn read(state: &'a [u8]) -> Option<Saved<'a>> {
+        let word = |at: usize| state.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        if state.get(..4)? == [0xf9, 0xff, 0xff, 0xff] {
+            // the layout of early versions: a lump when its length is not nothing, else the settings
+            let (len, program) = (word(5)? as usize, word(9)?);
+            if len > 0 {
+                return Some(Saved::Lump { program, data: state.get(13..13usize.checked_add(len)?)? });
+            }
+            let n = word(13)? as usize;
+            let body = state.get(17..17usize.checked_add(n.checked_mul(4)?)?)?;
+            return Some(Saved::Travel { program, values: body.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect() });
+        }
         if state.get(..4)? != [0xf7, 0xff, 0xff, 0xff] {
             return None;
         }
         let kind = *state.get(4)?;
-        let word = |at: usize| state.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         // the longer form carries a marker and a length of eight bytes where the short one has four
         let (len, at) = if word(5)? == 0xffff_fffe { (u64::from_le_bytes(state.get(9..17)?.try_into().ok()?) as usize, 17) } else { (word(5)? as usize, 9) };
         let program = word(at)?;
@@ -717,6 +727,29 @@ impl<'a> Saved<'a> {
             _ => None,
         }
     }
+}
+
+/// A wrapper block of early versions, which names the plug-in by the name it was listed under and
+/// carries its four-letter number after its state.
+pub struct Old<'a> {
+    pub name: String,
+    pub unique: Option<u32>,
+    pub state: &'a [u8],
+}
+
+pub fn old(block: &[u8]) -> Option<Old<'_>> {
+    let word = |at: usize| block.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    if (word(0)?, word(4)?, word(8)?, word(12)?) != (4, u32::MAX, 1, 0) {
+        return None;
+    }
+    let len = *block.get(20)? as usize;
+    let name = String::from_utf8_lossy(block.get(21..21 + len)?).trim().to_string();
+    let at = 21 + len;
+    let size = word(at)? as usize;
+    let state = block.get(at + 4..(at + 4).checked_add(size)?)?;
+    let after = at + 4 + size;
+    let unique = (word(after) == Some(4)).then(|| word(after + 4)).flatten();
+    (!name.is_empty()).then_some(Old { name, unique, state })
 }
 
 #[cfg(test)]
@@ -739,6 +772,19 @@ mod tests {
         long.extend_from_slice(&0.25f32.to_le_bytes());
         assert_eq!(Saved::read(&long), Some(Saved::Travel { program: 1, values: vec![0.25] }));
         assert_eq!(Saved::read(b"0\x000\x00"), None);
+        // the early layout, inside the early block
+        let mut block = vec![4, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 4];
+        block.extend_from_slice(b"Tone");
+        let early = [0xf9, 0xff, 0xff, 0xff, 0, 2, 0, 0, 0, 5, 0, 0, 0, b'h', b'i'];
+        block.extend_from_slice(&(early.len() as u32).to_le_bytes());
+        block.extend_from_slice(&early);
+        block.extend_from_slice(&[4, 0, 0, 0, b'd', b'c', b'b', b'a', 11, 0, 0, 0]);
+        let got = old(&block).expect("an early block");
+        assert_eq!((got.name.as_str(), got.unique), ("Tone", Some(u32::from_be_bytes(*b"abcd"))));
+        assert_eq!(Saved::read(got.state), Some(Saved::Lump { program: 5, data: b"hi" }));
+        let mut early = vec![0xf9, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0];
+        early.extend_from_slice(&0.75f32.to_le_bytes());
+        assert_eq!(Saved::read(&early), Some(Saved::Travel { program: 3, values: vec![0.75] }));
         assert_eq!(std::mem::size_of::<MidiEvent>(), 32);
         #[cfg(target_pointer_width = "64")]
         assert_eq!(std::mem::size_of::<Effect>(), 192);

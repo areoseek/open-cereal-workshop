@@ -442,6 +442,15 @@ fn from_parts(parts: &[(u32, &[u8])]) -> Option<(PathBuf, String)> {
 /// Open the plug-in a wrapper block names and hand it what it saved. Only installed plug-ins are opened:
 /// the one with the block's identifier, wherever it lives on this machine.
 pub fn from_block(state: &[u8]) -> Option<Arc<Instance>> {
+    if let Some(early) = vst2::old(state) {
+        let known = known();
+        let two = || known.iter().filter(|f| f.id.starts_with("vst2:"));
+        let named = |f: &&Found| f.name.eq_ignore_ascii_case(&early.name) || f.path.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(&early.name));
+        let hit = early.unique.and_then(|u| two().find(|f| f.id == vst2::ident(u))).or_else(|| two().find(named))?;
+        let inst = Instance::open(&hit.path, &hit.id)?;
+        inst.restore(early.state);
+        return Some(inst);
+    }
     let parts = pieces(state)?;
     let (path, id) = from_parts(&parts)?;
     let known = known();
@@ -1777,6 +1786,22 @@ mod tests {
             assert_eq!(back.value(1), Some(0.25));
             // left alone, the block is written back as it came
             assert_eq!(block(&back, Some(&other)) == other, unique == b"tWCO");
+        }
+        // a block of an early version: the listed name, the state, then the number
+        for (name, unique) in [("Test-Tone", &b"xxxx"[..]), ("Something else", b"tWCO")] {
+            let mut early = vec![4, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0, 0, 0, 0];
+            early.extend_from_slice(&(name.len() as u32 + 6).to_le_bytes());
+            early.push(name.len() as u8);
+            early.extend_from_slice(name.as_bytes());
+            let mut inner = vec![0xf9, 0xff, 0xff, 0xff, 0, 12, 0, 0, 0, 0, 0, 0, 0];
+            inner.extend_from_slice(&state[13..]);
+            early.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+            early.extend_from_slice(&inner);
+            early.extend_from_slice(&[4, 0, 0, 0]);
+            early.extend_from_slice(unique);
+            early.extend_from_slice(&[11, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 1]);
+            let back = from_block(&early).expect("found again from an early block");
+            assert_eq!((back.value(0), back.value(1)), (Some(1.0), Some(0.25)));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
