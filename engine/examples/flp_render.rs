@@ -1,6 +1,6 @@
 //! Render a project file to a WAV without opening the app.
 //!
-//!   cargo run --release -p cereal-engine --example flp_render -- song.flp out.wav [--pattern N] [--track N] [--tail seconds] [--dry]
+//!   cargo run --release -p cereal-engine --example flp_render -- song.flp out.wav [--pattern N] [--track N] [--chan N] [--tail seconds] [--dry]
 //!
 //! Samples are looked up through CEREAL_FACTORY_DATA and CEREAL_SAMPLE_DIRS.
 
@@ -27,6 +27,14 @@ fn main() {
         for ins in song.inserts.iter_mut() {
             for s in ins.slots.iter_mut() {
                 s.enabled = false;
+            }
+        }
+    }
+    // --chan N renders one rack channel alone (automation clips stay on)
+    if let Some(only) = args.iter().position(|a| a == "--chan").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<usize>().ok()) {
+        for (i, c) in song.channels.iter_mut().enumerate() {
+            if i != only && c.auto.is_none() {
+                c.enabled = false;
             }
         }
     }
