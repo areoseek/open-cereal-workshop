@@ -4731,9 +4731,10 @@ impl Unit {
                 if p.len() < MEQ_HEAD + 9 * MEQ_BANDS * 2 || self.lines.len() < 2 {
                     return;
                 }
-                // every band is a pair of band-pass stages; neighbours are summed with opposite signs so they
-                // add up where they cross
-                let kq = 0.2316 * (p[5] / 100.0).clamp(0.3, 3.0);
+                // the sound is cut into bands a third of an octave apart, each a plain band-pass, all summed the
+                // same way up; what the bands up to 8 kHz leave over goes through at the level of the top bands
+                const CUT: usize = 27;
+                let kq = 0.5965 * (p[5] / 150.0).clamp(0.2, 2.0);
                 let pos = (p[1] / 1000.0).clamp(0.0, 7.0);
                 let (ba, t) = ((pos as usize).min(7), pos.fract());
                 let bb = (ba + 1).min(7);
@@ -4744,24 +4745,9 @@ impl Unit {
                     let j = (i + 1).min(MEQ_BANDS - 1);
                     p[MEQ_HEAD + bank * 62 + i * 2 + k] * (1.0 - fr) + p[MEQ_HEAD + bank * 62 + j * 2 + k] * fr
                 };
-                // what the flat sum comes to, measured between and on the bands around 1 kHz
-                let mut norm = 0.0f32;
-                for probe in [1000.0f32, 1122.0] {
-                    let (mut re, mut im) = (0.0f32, 0.0f32);
-                    for i in 0..MEQ_BANDS {
-                        let r = probe / (20.0 * 2f32.powf(i as f32 / 3.0));
-                        // one stage: j k r / (1 - r^2 + j k r)
-                        let (dr, di) = (1.0 - r * r, kq * r);
-                        let den = dr * dr + di * di;
-                        let (hr, hi) = (di * di / den, kq * r * dr / den);
-                        let (sr2, si2) = (hr * hr - hi * hi, 2.0 * hr * hi);
-                        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                        re += sign * sr2;
-                        im += sign * si2;
-                    }
-                    norm += 0.5 * (re * re + im * im).sqrt();
-                }
-                let out = p[3] / 128.0 / norm.max(0.05);
+                // evenly spaced band-passes of this width add up to this much
+                let flat = (0.1471 / kq).min(1.0);
+                let out = p[3] / 128.0;
                 let mut g = [0.0f32; MEQ_BANDS];
                 let mut want = [[0.0f32; 2]; MEQ_BANDS];
                 for i in 0..MEQ_BANDS {
@@ -4769,29 +4755,39 @@ impl Unit {
                     let x = i as f32 - shift;
                     let vol = (at(ba, x, 0) * (1.0 - t) + at(bb, x, 0) * t) * at(8, i as f32, 0);
                     let pan = (at(ba, x, 1) * (1.0 - t) + at(bb, x, 1) * t + at(8, i as f32, 1) - 1.0).clamp(0.0, 2.0);
-                    let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                    let lv = vol * vol * out * sign;
+                    let lv = vol.max(0.0).powf(2.2) * out;
                     want[i] = [lv * (2.0 - pan).min(1.0), lv * pan.min(1.0)];
+                }
+                // the left-over's level sits in the first band above the cut
+                for c in 0..2 {
+                    want[CUT][c] = 0.5 * (want[CUT][c] + want[CUT + 1][c]);
                 }
                 let (st, rest) = self.lines.split_at_mut(1);
                 let (st, cur) = (&mut st[0], &mut rest[0]);
                 if cur[0] == -1.0 && cur[1] == -1.0 {
-                    for i in 0..MEQ_BANDS {
-                        cur[i * 2] = want[i][0];
-                        cur[i * 2 + 1] = want[i][1];
-                    }
+                    // it starts out flat and moves to its settings
+                    cur.fill(out);
                 }
-                let glide = 1.0 - (-1.0 / ((0.002 + p[2] / 170.0 * 0.08) * sr)).exp();
+                let glide = 1.0 - (-1.0 / ((0.002 + p[2] / 170.0 * 0.048) * sr)).exp();
+                let add = p[4] >= 0.5;
                 for f in io.iter_mut() {
                     let mut acc = [0.0f32; 2];
-                    for i in 0..MEQ_BANDS {
-                        for c in 0..2 {
+                    for c in 0..2 {
+                        let mut all = 0.0f32;
+                        for i in 0..CUT {
                             let k = i * 8 + c * 4;
-                            let (_, b1, _) = svf(&mut st[k..k + 2], f[c], g[i], kq);
-                            let (_, b2, _) = svf(&mut st[k + 2..k + 4], b1 * kq, g[i], kq);
+                            let (_, b, _) = svf(&mut st[k..k + 2], f[c], g[i], kq);
+                            let b = b * kq * flat;
                             let lv = &mut cur[i * 2 + c];
                             *lv += glide * (want[i][c] - *lv);
-                            acc[c] += b2 * kq * *lv;
+                            acc[c] += b * *lv;
+                            all += b;
+                        }
+                        let lv = &mut cur[CUT * 2 + c];
+                        *lv += glide * (want[CUT][c] - *lv);
+                        acc[c] += (f[c] - all) * *lv;
+                        if add {
+                            acc[c] += f[c];
                         }
                     }
                     *f = acc;
@@ -6154,12 +6150,14 @@ mod tests {
             let level = rms(&run(fx.clone(), tone, 32768)[16384..]);
             assert!((level / 0.3535 - 1.0).abs() < 0.2, "{hz} Hz comes out at {level}");
         }
-        // silence the bands from 250 Hz up on the first curve: 440 Hz goes away
+        // silence the bands from 250 Hz up on the first curve: 440 Hz mostly goes away
         let mut cut = fx.clone();
         for band in 11..MEQ_BANDS {
             cut.p[MEQ_HEAD + band * 2] = 0.0;
         }
-        assert!(rms(&run(cut, sine, 32768)[16384..]) < 0.02);
+        // (the bands are wide, so the ones left below still pass a little of it)
+        let (left, whole) = (rms(&run(cut, sine, 32768)[16384..]), rms(&run(fx, sine, 32768)[16384..]));
+        assert!(left < whole * 0.4, "{left} of {whole}");
     }
 
     #[test]
