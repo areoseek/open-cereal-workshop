@@ -451,6 +451,33 @@ impl App {
                             ui.close_menu();
                         }
                         ui.separator();
+                        ui.menu_button("Insert", |ui| {
+                            let before = self.song.channels.len();
+                            self.instrument_menu(ui);
+                            if self.song.channels.len() == before + 1 {
+                                // the new channel comes to sit just above this one
+                                for k in (ci..before).rev() {
+                                    self.song.swap_channels(k, k + 1);
+                                }
+                                self.sel_chan = ci;
+                            }
+                        });
+                        ui.menu_button("Replace", |ui| {
+                            let before = self.song.channels.len();
+                            self.instrument_menu(ui);
+                            if self.song.channels.len() == before + 1 {
+                                // the notes, the mixer track and the place in the rack stay; the instrument changes
+                                if let Some(mut new) = self.song.channels.pop() {
+                                    let old = &self.song.channels[ci];
+                                    new.insert = old.insert;
+                                    new.color = old.color;
+                                    new.group = old.group.clone();
+                                    self.song.channels[ci] = new;
+                                }
+                                self.sel_chan = ci;
+                            }
+                        });
+                        ui.separator();
                         if ui.button("Rename, color and icon...                F2").clicked() {
                             self.rack.rename = Some((ci, self.song.channels[ci].name.clone()));
                             ui.close_menu();

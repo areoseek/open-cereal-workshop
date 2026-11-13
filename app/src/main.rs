@@ -287,6 +287,10 @@ pub(crate) struct App {
     /// An edit is under way (mouse still down); it becomes one history step when it ends.
     hist_pending: bool,
     show_info: bool,
+    /// The load monitor: its window, the rows shown (name, share of real time) and when they were last counted.
+    show_load: bool,
+    load_rows: Vec<(String, f32)>,
+    load_at: Option<std::time::Instant>,
     pub(crate) prefs_win: settings::State,
     show_about: bool,
     /// What did not come across when the project was opened, shown once.
@@ -501,6 +505,9 @@ impl App {
             hist_at: 0,
             hist_pending: false,
             show_info: false,
+            show_load: false,
+            load_rows: vec![],
+            load_at: None,
             prefs_win: Default::default(),
             show_about: false,
             problems: Vec::new(),
@@ -2255,6 +2262,60 @@ impl App {
         }
     }
 
+    /// How much of the processor each instrument and effect takes, heaviest first.
+    fn load_window(&mut self, ctx: &egui::Context) {
+        let tr = self.handle.transport.clone();
+        if !self.show_load {
+            if self.load_at.take().is_some() {
+                tr.set_load(false);
+            }
+            return;
+        }
+        if self.load_at.is_none() {
+            tr.set_load(true);
+            tr.take_load();
+            self.load_at = Some(std::time::Instant::now());
+        }
+        if self.load_at.is_some_and(|t| t.elapsed().as_secs_f32() >= 0.5) {
+            self.load_at = Some(std::time::Instant::now());
+            let (frames, chans, slots) = tr.take_load();
+            let played = frames as f64 / OUT_RATE.load(std::sync::atomic::Ordering::Relaxed).max(1) as f64;
+            if played > 0.0 {
+                let mut rows: Vec<(String, f32)> = vec![];
+                for (c, secs) in chans {
+                    let name = self.song.channels.get(c).map(|ch| if ch.name.is_empty() { format!("Channel {}", c + 1) } else { ch.name.clone() }).unwrap_or_else(|| format!("Channel {}", c + 1));
+                    rows.push((name, (secs / played * 100.0) as f32));
+                }
+                for ((i, k), secs) in slots {
+                    let unit = self.song.inserts.get(i).and_then(|t| t.slots.iter().find(|x| x.index as usize == k)).and_then(|x| x.fx.as_ref()).map(|f| cereal_engine::fx::def(f.kind).title).unwrap_or("Effect");
+                    rows.push((format!("{} > {} (slot {})", self.song.insert_name(i), unit, k + 1), (secs / played * 100.0) as f32));
+                }
+                rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+                self.load_rows = rows;
+            }
+        }
+        let mut open = true;
+        egui::Window::new("Plug-in load monitor").open(&mut open).default_pos([520.0, 140.0]).default_width(360.0).show(ctx, |ui| {
+            let total: f32 = self.load_rows.iter().map(|r| r.1).sum();
+            ui.label(RichText::new(format!("Instruments and effects together: {total:.1}% of one processor core")).small().color(widgets::TEXT_DIM));
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                egui::Grid::new("loadgrid").striped(true).num_columns(3).show(ui, |ui| {
+                    for (name, pct) in &self.load_rows {
+                        ui.label(name);
+                        ui.label(format!("{pct:.1}%"));
+                        ui.add(egui::ProgressBar::new((pct / 25.0).clamp(0.0, 1.0)).desired_width(110.0));
+                        ui.end_row();
+                    }
+                });
+                if self.load_rows.is_empty() {
+                    ui.label("Nothing is sounding.");
+                }
+            });
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        self.show_load = open;
+    }
+
     fn save_preset_file(&mut self, ident: &str, generator: bool) {
         let state = if generator {
             self.song.channels.get(self.sel_chan).and_then(|c| c.gen.as_ref()).filter(|g| cereal_engine::synth::def(g.kind).ident == ident).map(|g| g.encode(None))
@@ -3026,6 +3087,7 @@ impl App {
                     ui.checkbox(&mut self.show_info, "Project info       F11");
                     ui.checkbox(&mut self.show_events, "Event editor");
                     ui.checkbox(&mut self.show_picker, "Plug-in picker     F8");
+                    ui.checkbox(&mut self.show_load, "Plug-in load monitor");
                     ui.checkbox(&mut self.show_project, "Project picker    Ctrl+F8");
                     ui.separator();
                     ui.menu_button("Layout", |ui| {
@@ -3703,6 +3765,7 @@ impl App {
         }
 
         self.render_window(ctx);
+        self.load_window(ctx);
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
         }

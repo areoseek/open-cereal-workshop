@@ -16,6 +16,7 @@ use crate::song::{Env, ClipSrc, Note, Song, Target};
 
 pub const MAX_VOICES: usize = 256;
 pub const MAX_METERS: usize = 256;
+const LOAD_CHANS: usize = 1024;
 const BLOCK: usize = 256;
 
 /// Things the UI asks of the audio thread outside the song itself.
@@ -83,6 +84,12 @@ struct PerfTrack {
 
 /// Play state both threads can see.
 pub struct Transport {
+    /// The load monitor: time spent in every channel's voices and in every effect slot, in billionths of a
+    /// second, and the frames played meanwhile. Counted only while someone is looking.
+    load_on: AtomicBool,
+    load_chan: Vec<AtomicU64>,
+    load_slot: Vec<AtomicU64>,
+    load_frames: AtomicU64,
     playing: AtomicBool,
     song_mode: AtomicBool,
     looping: AtomicBool,
@@ -257,8 +264,26 @@ pub fn score_notes(evs: &[Played], now: f64, ticks_per_sec: f64) -> Vec<crate::s
 }
 
 impl Transport {
+    /// Switch the load monitor's counting on or off.
+    pub fn set_load(&self, on: bool) {
+        self.load_on.store(on, Relaxed);
+    }
+
+    /// What was counted since the last call: frames played, then seconds spent by channel and by
+    /// (mixer track, slot). Entries that spent nothing are left out.
+    pub fn take_load(&self) -> (u64, Vec<(usize, f64)>, Vec<((usize, usize), f64)>) {
+        let frames = self.load_frames.swap(0, Relaxed);
+        let chans = self.load_chan.iter().enumerate().filter_map(|(i, a)| Some((i, a.swap(0, Relaxed))).filter(|x| x.1 > 0).map(|(i, v)| (i, v as f64 / 1e9))).collect();
+        let slots = self.load_slot.iter().enumerate().filter_map(|(i, a)| Some((i, a.swap(0, Relaxed))).filter(|x| x.1 > 0).map(|(i, v)| ((i / 16, i % 16), v as f64 / 1e9))).collect();
+        (frames, chans, slots)
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            load_on: AtomicBool::new(false),
+            load_chan: (0..LOAD_CHANS).map(|_| AtomicU64::new(0)).collect(),
+            load_slot: (0..MAX_METERS * 16).map(|_| AtomicU64::new(0)).collect(),
+            load_frames: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             song_mode: AtomicBool::new(false),
             looping: AtomicBool::new(true),
@@ -3378,8 +3403,18 @@ impl Player {
         let mut live = 0;
         let follow = self.ov.any_chan;
         let main = song.main_pitch as f32 / 1200.0;
+        let load = self.transport.load_on.load(Relaxed);
+        if load {
+            self.transport.load_frames.fetch_add(n as u64, Relaxed);
+        }
         for v in self.voices.iter_mut().filter(|v| v.active) {
             live += 1;
+            let t0 = load.then(std::time::Instant::now);
+            let spent = |t0: Option<std::time::Instant>, tr: &Transport, c: u16| {
+                if let (Some(t), Some(a)) = (t0, tr.load_chan.get(c as usize)) {
+                    a.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+                }
+            };
             if !v.preview {
                 v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0) + main;
             }
@@ -3402,12 +3437,14 @@ impl Player {
                 if into.is_some_and(|b| v.render(b)) {
                     cf.dirty = true;
                 }
+                spent(t0, &self.transport, v.chan);
                 continue;
             }
             let i = if v.insert < ni { v.insert } else { 0 };
             if v.render(&mut self.buses[i][..n]) {
                 self.dirty[i] = true;
             }
+            spent(t0, &self.transport, v.chan);
         }
         // where the song stands in sixteenth notes, for effects that keep step with it
         let at_step = self.transport.playing().then(|| self.pos / song.step().max(1) as f64);
@@ -3489,7 +3526,11 @@ impl Player {
             }
             let buf = &mut self.host_buf[..n];
             buf.fill([0.0; 2]);
+            let t0 = load.then(std::time::Instant::now);
             let sounded = h.0.process(buf, &self.host_evs, &cx.clock, self.sr) && ch.enabled;
+            if let (Some(t), Some(a)) = (t0, self.transport.load_chan.get(c)) {
+                a.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+            }
             if !sounded {
                 buf.fill([0.0; 2]);
             }
@@ -3687,7 +3728,21 @@ impl Player {
                     *units = want.map(|s| (s.index, fx::Unit::new(s.fx.clone().unwrap(), self.sr))).collect();
                 }
                 let mut tail = 0;
+                // the load monitor: the time up to the next slot's turn belongs to the slot before it
+                let mut lap: Option<(std::time::Instant, usize)> = None;
+                let tr = self.transport.clone();
+                let lap_end = |lap: &mut Option<(std::time::Instant, usize)>| {
+                    if let Some((t, k)) = lap.take() {
+                        if let Some(a) = tr.load_slot.get(k) {
+                            a.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+                        }
+                    }
+                };
                 for (s, u) in ins.slots.iter().filter(|s| s.fx.is_some()).zip(units.iter_mut()) {
+                    lap_end(&mut lap);
+                    if load && i < MAX_METERS {
+                        lap = Some((std::time::Instant::now(), i * 16 + (s.index as usize).min(15)));
+                    }
                     if let Some(f) = &s.fx {
                         if u.1.fx != *f {
                             if u.1.fx.kind == f.kind && u.1.fx.p.len() == f.p.len() {
@@ -3809,6 +3864,7 @@ impl Player {
                         }
                     }
                 }
+                lap_end(&mut lap);
                 if !self.driven.is_empty() {
                     self.ov.fit(song);
                     for k in 0..self.driven.len() {
