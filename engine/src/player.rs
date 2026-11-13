@@ -915,6 +915,8 @@ struct Voice {
     attack: f32,
     /// The release falls along half a cosine instead of a straight line.
     ease: bool,
+    /// Its fade out follows the falling curve of a cut slice.
+    droop: bool,
     release: f32,
     releasing: bool,
     /// Stop with the short linear fade whatever the envelope says.
@@ -1190,7 +1192,14 @@ impl Voice {
             if self.fon {
                 s = self.filter(s);
             }
-            let level = if self.ease && self.releasing { 0.5 - 0.5 * (std::f32::consts::PI * self.level).cos() } else { self.level };
+            let level = if self.droop && self.releasing {
+                // falls like a discharge with a time constant of 650 frames, cut off where it would have reached 1%
+                (((self.level - 1.0) * 4.54).exp() - 0.010_67) / 0.989_33
+            } else if self.ease && self.releasing {
+                0.5 - 0.5 * (std::f32::consts::PI * self.level).cos()
+            } else {
+                self.level
+            };
             let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
@@ -2187,9 +2196,20 @@ impl Player {
                 let note_gain = law::velocity_gain(n.vel);
                 let note_pan = n.pan;
                 let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
-                let gain = chan_vol * note_gain;
+                // measured: a slice comes out 3 dB under the same loop in a sampler channel
+                let gain = chan_vol * note_gain * std::f32::consts::FRAC_1_SQRT_2;
                 let frames = (len as f64 * scale / step) as u64;
                 let step = step * dir;
+                // in a cut group, a slice stops the ones it replaces as it starts
+                for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.sample.is_some()) {
+                    if f.cut != 0 && song.channels.get(v.chan as usize).is_some_and(|c| c.smp.cut_by == f.cut) {
+                        v.kill = true;
+                        // measured: the old slice dies away along a curve, gone after 2950 frames at 44.1 kHz
+                        v.release = ms(66.9);
+                        v.droop = true;
+                        v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
+                    }
+                }
                 self.start(Voice {
                     sample: Some(smp),
                     pos: first,
