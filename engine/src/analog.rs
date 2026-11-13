@@ -16,6 +16,8 @@ pub enum Shape {
     Sine,
     Triangle,
     Noise,
+    /// A saw that stays level and then plunges to its jump (see `bent`).
+    Bent,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -123,6 +125,13 @@ pub struct Set {
     pub vel_cut: f32,
     /// Some(true): oscillators drift a few cents and start anywhere; Some(false): they start together.
     pub drift: Option<bool>,
+    /// A steady level under the oscillators. With it the low cut moves behind the level envelope and runs twice
+    /// over: it takes the level away over the start of each note and swings back as the note leaves.
+    pub dc: f32,
+    /// How fast the level follows its envelope, per frame, held and let go (0 for the usual 0.02).
+    pub follow: [f32; 2],
+    /// Let go, the level stays for the first time and then falls in a straight line over the second (seconds).
+    pub leave: Option<(f32, f32)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -170,6 +179,7 @@ pub struct Voice {
     lfo: [f32; 3],
     lfo_hold: [f32; 3],
     hp: f32,
+    hp2: f32,
     hpc: f32,
     ens: Option<Box<Ensemble>>,
     seed: u32,
@@ -188,6 +198,8 @@ pub struct Voice {
     off: [f32; 2],
     one: f32,
     lvl: f32,
+    /// Frames since the note was let go, and the level it had then.
+    gone: Option<(u32, f32)>,
 }
 
 /// The ensemble of the old string machines and polys: one short delay swept slowly, heard a little early on one
@@ -249,8 +261,59 @@ fn blep(t: f32, dt: f32) -> f32 {
     }
 }
 
+/// The bent saw, read from tables built once from its measured harmonics: each is as loud as a plain saw's
+/// times a gain that is largest at the second (about 5 dB) and settles by the twentieth, and all but the lowest
+/// four sit 19 degrees behind a plain saw's. One table per half octave so nothing folds back.
+fn bent(ph: f32, dt: f32) -> f32 {
+    const N: usize = 2048;
+    const TOP: f32 = 682.0;
+    static TABLES: std::sync::OnceLock<Vec<Vec<f32>>> = std::sync::OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        const LOW: [f32; 20] = [0.7, 5.2, 3.55, 2.85, 2.4, 2.0, 1.6, 1.3, 0.95, 0.7, 0.45, 0.25, 0.1, 0.0, -0.1, -0.2, -0.3, -0.3, -0.4, -0.45];
+        const HIGH: [(f32, f32); 8] = [(20.0, -0.45), (30.0, -0.2), (40.0, 0.0), (60.0, 1.0), (80.0, 2.2), (100.0, 3.3), (130.0, 4.5), (160.0, 3.5)];
+        const TURN: [f32; 4] = [-0.488, -0.350, -0.313, -0.308];
+        let part = |k: usize| -> (f32, f32) {
+            let db = if k <= 20 {
+                LOW[k - 1]
+            } else {
+                let x = k as f32;
+                let mut y = HIGH[7].1;
+                for w in HIGH.windows(2) {
+                    if x < w[1].0 {
+                        y = w[0].1 + (w[1].1 - w[0].1) * (x - w[0].0) / (w[1].0 - w[0].0);
+                        break;
+                    }
+                }
+                y
+            };
+            let turn = if k <= 4 { TURN[k - 1] } else { -0.304 - 0.007 * (-((k as f32 - 9.0) / 5.0).powi(2)).exp() };
+            (10f32.powf(db / 20.0) * 2.0 / (PI_F * k as f32), turn * TAU)
+        };
+        (0..20)
+            .map(|n| {
+                let top = ((TOP / 2f32.powf(n as f32 * 0.5)) as usize).max(1);
+                let mut t = vec![0f32; N + 1];
+                for k in 1..=top {
+                    let (a, turn) = part(k);
+                    for (i, y) in t.iter_mut().enumerate() {
+                        *y += a * (TAU * (k * i % N) as f32 / N as f32 + turn).cos();
+                    }
+                }
+                t
+            })
+            .collect()
+    });
+    let room = 0.45 / dt.abs().max(1e-6);
+    let n = if room >= TOP { 0 } else { ((TOP / room).log2() * 2.0).ceil() as usize }.min(19);
+    let x = ph.rem_euclid(1.0) * N as f32;
+    let i = (x as usize).min(N - 1);
+    let t = &tables[n];
+    t[i] + (t[i + 1] - t[i]) * (x - i as f32)
+}
+
 fn wave(shape: Shape, ph: f32, dt: f32, width: f32, seed: &mut u32) -> f32 {
     match shape {
+        Shape::Bent => bent(ph, dt),
         Shape::Saw => 2.0 * ph - 1.0 - blep(ph, dt),
         Shape::Pulse => {
             let duty = 0.5 - 0.45 * width.clamp(0.0, 1.0);
@@ -301,7 +364,11 @@ impl Voice {
     pub fn release(&mut self, set: &Set) -> f32 {
         self.amp.stage = 2;
         self.fenv.stage = 2;
-        set.amp.r.max(0.005) * 1.5
+        if let Some((stay, fall)) = set.leave {
+            self.gone = Some((0, self.a));
+            return stay + fall + 0.002;
+        }
+        set.amp.r.max(0.005) * 1.5 + if set.dc != 0.0 { 0.15 } else { 0.0 }
     }
 
     fn control(&mut self, set: &Set) {
@@ -336,7 +403,7 @@ impl Voice {
             self.lfo[k] = (before + l.hz * dt).fract();
             let ph = self.lfo[k];
             let x = match l.shape {
-                Shape::Saw => 1.0 - 2.0 * ph,
+                Shape::Saw | Shape::Bent => 1.0 - 2.0 * ph,
                 Shape::Pulse | Shape::Square => {
                     if ph < 0.5 {
                         1.0
@@ -380,7 +447,12 @@ impl Voice {
             self.control(set);
         }
         self.t = self.t.wrapping_add(1);
-        self.a += (self.a_to - self.a) * 0.02;
+        let follow = set.follow[(self.amp.stage == 2) as usize];
+        self.a += (self.a_to - self.a) * if follow > 0.0 { follow } else { 0.02 };
+        if let (Some((n, from)), Some((stay, fall))) = (self.gone.as_mut(), set.leave) {
+            *n += 1;
+            self.a = *from * (1.0 - (*n as f32 / self.sr - stay) / fall).clamp(0.0, 1.0);
+        }
         let width = self.width;
         let step = |semis: f32| (dphase * 2f32.powf(semis / 12.0)).min(0.45);
         // the pitch factors change only with the control values, but the power is cheap next to the filter
@@ -414,8 +486,8 @@ impl Voice {
         if set.noise > 0.0 {
             x += rnd(&mut self.seed) * set.noise;
         }
-        x *= 0.5;
-        if self.hpc > 0.0 {
+        x = x * 0.5 + set.dc;
+        if self.hpc > 0.0 && set.dc == 0.0 {
             self.hp += (x - self.hp) * self.hpc;
             x -= self.hp;
         }
@@ -446,6 +518,12 @@ impl Voice {
             Filter::High => stage(&mut self.z[2..4], hp, 1.6).2,
         };
         let mut y = y * self.a;
+        if set.dc != 0.0 {
+            for z in [&mut self.hp, &mut self.hp2] {
+                *z += (y - *z) * self.hpc;
+                y -= *z;
+            }
+        }
         if let Some((drive, tone)) = set.drive {
             let pre = 1.0 + drive * 24.0;
             y = (y * pre).tanh() / (1.0 + drive * 2.0);
@@ -616,9 +694,10 @@ pub fn saw(p: &[f32]) -> Set {
             _ => 0.0,
         }
     };
-    let time = |i: usize| 0.002 + v(i).powi(3) * 8.0;
+    let time = |i: usize| 0.0002 + v(i).powi(3) * 8.0;
     let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2), r: time(i + 3) };
-    let tune = ((v(6) - 0.5) * 48.0).round() + (v(7) - 0.5) * 2.0;
+    // measured: it sounds an octave under the key with everything centred
+    let tune = ((v(6) - 0.5) * 48.0).round() + (v(7) - 0.5) * 2.0 - 12.0108;
     let voices = 1 + (v(14) * 7.0).round() as u32;
     let apart = if voices > 1 { v(15) * 0.3 } else { 0.0 };
     let (main, sub) = if full { (v(17), v(19)) } else { (1.0, 0.0) };
@@ -631,7 +710,7 @@ pub fn saw(p: &[f32]) -> Set {
         width = (2.0 * v(18) - 1.0).abs().min(0.95);
         [Osc { shape: Shape::Pulse, semis: tune + apart, level: both }, Osc { shape: Shape::Saw, semis: tune - apart, level: (main - sub).abs() }, Osc::default()]
     } else {
-        [Osc { shape: Shape::Saw, semis: tune + apart, level: main }, Osc { shape: Shape::Saw, semis: tune - apart, level: sub }, Osc::default()]
+        [Osc { shape: Shape::Bent, semis: tune + apart, level: main }, Osc { shape: Shape::Bent, semis: tune - apart, level: sub }, Osc::default()]
     };
     Set {
         osc,
@@ -644,7 +723,12 @@ pub fn saw(p: &[f32]) -> Set {
         res: v(28) * 0.9,
         env_oct: v(36) * 6.0,
         track: v(29),
-        gain: 0.1 + v(0) * 0.4,
+        hpf_hz: 9.24,
+        dc: -0.548 * (main + sub),
+        follow: [1.0 / 244.0, 1.0 / 70.0],
+        // measured with the restart switch on: every note begins just after the jump
+        drift: if v(21) >= 0.5 { Some(false) } else { None },
+        gain: (0.1 + v(0) * 0.4) * 0.741,
         ..Default::default()
     }
 }
