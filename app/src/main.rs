@@ -439,6 +439,9 @@ impl App {
         handle.transport.set_count_bars(settings.count_bars.max(1));
         cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
         handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
+        if settings.gm_bank.is_some() {
+            cereal_engine::gm::set_bank(settings.gm_bank.clone());
+        }
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -4465,6 +4468,11 @@ impl eframe::App for App {
         self.small_windows(ctx);
         self.run_actions();
         self.autosave_tick(ctx);
+        let bank = cereal_engine::gm::picked();
+        if bank != self.settings.gm_bank {
+            self.settings.gm_bank = bank;
+            let _ = self.settings.save();
+        }
         self.leave_window(ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);

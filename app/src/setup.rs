@@ -74,6 +74,8 @@ pub struct Settings {
     pub undo_levels: u32,
     /// How samples are read between their frames while playing (None = 4-point Hermite).
     pub resample: Option<u8>,
+    /// The General MIDI bank file picked for the bank player.
+    pub gm_bank: Option<PathBuf>,
     /// Sound the notes already running where playing starts; none = yes.
     pub late_notes: Option<bool>,
     /// The plug-ins marked as favourites: 'g:' or 'f:' and the title.
@@ -176,6 +178,7 @@ impl Settings {
                 Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
                 Some(("click", v)) => s.click_kind = v.trim().parse().unwrap_or(0),
                 Some(("resample", v)) => s.resample = v.trim().parse().ok(),
+                Some(("gm_bank", v)) => s.gm_bank = Some(PathBuf::from(v.trim())),
                 Some(("late_notes", v)) => s.late_notes = Some(v.trim() == "1"),
                 Some(("count_bars", v)) => s.count_bars = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
@@ -269,6 +272,9 @@ impl Settings {
         }
         if let Some(l) = self.late_notes {
             out += &format!("late_notes={}\n", l as u8);
+        }
+        if let Some(b) = &self.gm_bank {
+            out += &format!("gm_bank={}\n", b.display());
         }
         if let Some(r) = self.resample {
             out += &format!("resample={r}\n");

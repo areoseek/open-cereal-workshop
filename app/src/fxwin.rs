@@ -1545,8 +1545,21 @@ fn bank_player_ui(ui: &mut egui::Ui, f: &mut fx::Fx) -> bool {
             f.p[0] = port as f32;
             changed = true;
         }
-        let from = if gm::has_bank() { "sounds from the General MIDI bank on this machine" } else { "no General MIDI bank found: stand-in voices play" };
+        let picked = gm::picked();
+        let from = match &picked {
+            Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            None if gm::has_bank() => "sounds from the General MIDI bank on this machine".to_string(),
+            None => "no General MIDI bank found: stand-in voices play".to_string(),
+        };
         ui.label(RichText::new(from).small().color(TEXT_DIM));
+        if ui.small_button("Bank file...").clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("Sound bank", &["sf2", "SF2", "dls", "DLS"]).pick_file() {
+                gm::set_bank(Some(p));
+            }
+        }
+        if picked.is_some() && ui.small_button("Default").clicked() {
+            gm::set_bank(None);
+        }
     });
     egui::Grid::new("bankplayer").num_columns(4).spacing([10.0, 3.0]).show(ui, |ui| {
         for half in 0..8 {

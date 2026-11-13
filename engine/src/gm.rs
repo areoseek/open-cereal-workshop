@@ -7,7 +7,7 @@ use crate::sample::Sample;
 use crate::song::Env;
 use crate::zones::{Map, Zone};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// The bank player's file identifier.
 pub const IDENT: &str = "Fruity LSD";
@@ -424,19 +424,47 @@ fn candidates() -> Vec<std::path::PathBuf> {
     v
 }
 
-fn bank() -> Option<&'static Bank> {
-    static BANK: OnceLock<Option<Bank>> = OnceLock::new();
-    BANK.get_or_init(|| {
-        candidates().into_iter().find_map(|p| {
-            let data = std::fs::read(&p).ok()?;
-            if data.len() >= 12 && &data[8..12] == b"DLS " {
-                Dls::parse(data).map(Bank::Dls)
-            } else {
-                crate::sf2::Bank::parse(data).map(Bank::Sf2)
-            }
-        })
-    })
-    .as_ref()
+fn load(p: &std::path::Path) -> Option<Bank> {
+    let data = std::fs::read(p).ok()?;
+    if data.len() >= 12 && &data[8..12] == b"DLS " {
+        Dls::parse(data).map(Bank::Dls)
+    } else {
+        crate::sf2::Bank::parse(data).map(Bank::Sf2)
+    }
+}
+
+/// The bank in use (found on first need) and the file picked by hand, if one was.
+type Held = (Option<Option<Arc<Bank>>>, Option<std::path::PathBuf>);
+static BANK: Mutex<Held> = Mutex::new((None, None));
+static MADE: Mutex<Option<HashMap<u32, Voice>>> = Mutex::new(None);
+
+fn bank() -> Option<Arc<Bank>> {
+    let mut b = BANK.lock().unwrap_or_else(|e| e.into_inner());
+    if b.0.is_none() {
+        let found = b.1.as_deref().and_then(load).or_else(|| candidates().into_iter().find_map(|p| load(&p)));
+        b.0 = Some(found.map(Arc::new));
+    }
+    b.0.clone().flatten()
+}
+
+/// Take the sounds from this bank file (DLS or SF2) from now on; none = whatever is found on the machine.
+/// False when the file is not a bank, in which case nothing changes.
+pub fn set_bank(path: Option<std::path::PathBuf>) -> bool {
+    let read = match &path {
+        Some(p) => match load(p) {
+            Some(b) => Some(Some(Arc::new(b))),
+            None => return false,
+        },
+        None => None,
+    };
+    *BANK.lock().unwrap_or_else(|e| e.into_inner()) = (read, path);
+    *MADE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    true
+}
+
+/// The bank file picked by hand, if one was.
+pub fn picked() -> Option<std::path::PathBuf> {
+    BANK.lock().unwrap_or_else(|e| e.into_inner()).1.clone()
 }
 
 /// Whether the sounds come from a bank file on this machine (otherwise our stand-ins play).
@@ -446,7 +474,6 @@ pub fn has_bank() -> bool {
 
 /// The voice of one patch word of the bank player.
 pub fn voice(patch: u32) -> Voice {
-    static MADE: Mutex<Option<HashMap<u32, Voice>>> = Mutex::new(None);
     let (drum, num) = (patch & DRUMS != 0, patch & 127);
     let key = if drum { DRUMS | num } else { num };
     let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
@@ -454,7 +481,7 @@ pub fn voice(patch: u32) -> Voice {
     if let Some(v) = made.get(&key) {
         return v.clone();
     }
-    let zones = match bank() {
+    let zones = match bank().as_deref() {
         Some(Bank::Dls(d)) => d.zones(drum, num),
         Some(Bank::Sf2(b)) => b.zones(if drum { 128 } else { 0 }, num as u16),
         None => vec![],
