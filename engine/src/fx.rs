@@ -5116,17 +5116,19 @@ impl Unit {
                 let g_lo = svf_g(hz(p[20]), sr);
                 let g_hi = svf_g(hz(p[3]), sr);
                 // per band: state, threshold dB, slope, knee dB, attack, release, gain
+                // (threshold and slope laws are fitted to one reference render at the default settings; the band
+                // gain knob is a squared law, 0.8 of its travel giving +8.2 dB)
                 let band = |b: usize| {
                     let o = [4usize, 13, 21][b];
-                    let x = (p[o + 1] / 65536.0).clamp(0.0, 1.0);
+                    let x = 1.0 - (1.0 - (p[o + 1] / 65536.0).clamp(0.0, 1.0)).powf(1.5);
                     (
                         p[[2usize, 10, 19][b]] as i32,
-                        -60.0 * (p[o] / 65536.0).clamp(0.0, 1.0),
+                        -73.0 * (p[o] / 65536.0).clamp(0.0, 1.0),
                         x,
                         (p[o + 2] / 65536.0).clamp(0.0, 1.0) * 24.0,
                         (-1.0 / ((p[o + 3] / 10.0).max(0.05) * 0.001 * sr)).exp(),
                         (-1.0 / ((p[o + 4] / 10.0).max(1.0) * 0.001 * sr)).exp(),
-                        p[o + 5] / 52429.0,
+                        (p[o + 5] / 32768.0).powi(2),
                     )
                 };
                 let bands = [band(0), band(1), band(2)];

@@ -1,6 +1,6 @@
 //! Render a project file to a WAV without opening the app.
 //!
-//!   cargo run --release -p cereal-engine --example flp_render -- song.flp out.wav [--pattern N] [--track N] [--tail seconds]
+//!   cargo run --release -p cereal-engine --example flp_render -- song.flp out.wav [--pattern N] [--track N] [--tail seconds] [--dry]
 //!
 //! Samples are looked up through CEREAL_FACTORY_DATA and CEREAL_SAMPLE_DIRS.
 
@@ -21,6 +21,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // --dry renders with every effect slot switched off, for comparing a unit against its input
+    let mut song = song;
+    if args.iter().any(|a| a == "--dry") {
+        for ins in song.inserts.iter_mut() {
+            for s in ins.slots.iter_mut() {
+                s.enabled = false;
+            }
+        }
+    }
     let loaded = song.channels.iter().filter(|c| c.sample.is_some()).count();
     eprintln!("{} bpm, {} channels ({} with samples), {} patterns, {} clips, {} bars", song.tempo, song.channels.len(), loaded, song.patterns.len(), song.clips.len(), song.length() / song.bar());
     for m in &lib.missing {
