@@ -449,6 +449,8 @@ impl Library {
             }
         } else if first.len() == 2 && first.ends_with(':') {
             // a Windows drive path: try it as an absolute path, and under each known root
+            #[cfg(windows)]
+            tries.push((PathBuf::from(format!("{}\\", parts[0])), &parts[1..]));
             tries.push((PathBuf::from("/"), &parts[1..]));
         } else if stored.starts_with('/') {
             tries.push((PathBuf::from("/"), &parts[..]));
@@ -609,6 +611,11 @@ mod tests {
         let mut lib = Library::default();
         lib.factory_roots.push(dir.clone());
         let got = lib.resolve("%FLStudioFactoryData%\\data\\PATCHES\\Packs\\tone.WAV", None).unwrap();
+        // (a file system that ignores letter case hands the path back as it was asked for)
+        let flat = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
+        assert!(got.is_file());
+        assert_eq!(flat(&got), flat(&path));
+        #[cfg(not(windows))]
         assert_eq!(got, path);
         assert!(lib.load_stored("%FLStudioFactoryData%\\Data\\Patches\\Packs\\Tone.wav", None).is_some());
         assert!(lib.load_stored("%FLStudioFactoryData%\\Data\\Nope.wav", None).is_none());
