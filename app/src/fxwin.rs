@@ -1455,12 +1455,67 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
         End::Bay => bay.to_string(),
         End::Node(i) => format!("{}", i + 1),
     };
-    let cables: Vec<String> = sub.cables.iter().map(|c| format!("{} > {}", end(c.from, "in"), end(c.to, "out"))).collect();
     ui.label(RichText::new(format!("{} units, {} sound cables", sub.nodes.len(), sub.cables.len())).small().color(TEXT_DIM));
-    if !cables.is_empty() {
-        ui.add(egui::Label::new(RichText::new(cables.join("   ")).small().color(TEXT_DIM)).wrap());
-    }
     ui.set_max_width(520.0);
+    // the sound cables, to pull, lay and turn by hand
+    egui::CollapsingHeader::new(RichText::new("Sound cables").small()).id_salt("baycables").show(ui, |ui| {
+        let ends = |bay: &str| -> Vec<(End, String)> {
+            let mut v = vec![(End::Bay, bay.to_string())];
+            v.extend((0..sub.nodes.len()).filter(|&i| sub.can_cable(i)).map(|i| (End::Node(i), format!("{}. {}", i + 1, title(&sub.nodes[i])))));
+            v
+        };
+        let (starts, stops) = (ends("Bay input"), ends("Bay output"));
+        let mut work = sub.cables.clone();
+        let mut touched = false;
+        let mut pull = None;
+        for (k, c) in work.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} > {}", end(c.from, "in"), end(c.to, "out"))).small());
+                let mut pct = c.level * 100.0;
+                if ui.add(egui::DragValue::new(&mut pct).range(0.0..=100.0).speed(0.5).suffix(" %")).hint("Cable level").changed() {
+                    c.level = (pct / 100.0).clamp(0.0, 1.0);
+                    touched = true;
+                }
+                if ui.small_button("x").hint("Pull this cable").clicked() {
+                    pull = Some(k);
+                }
+            });
+        }
+        if let Some(k) = pull {
+            work.remove(k);
+            touched = true;
+        }
+        let id = ui.id().with("baynewcable");
+        let (mut a, mut b): (usize, usize) = ui.data(|d| d.get_temp(id)).unwrap_or((0, 0));
+        a = a.min(starts.len() - 1);
+        b = b.min(stops.len() - 1);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("baycablefrom").width(150.0).selected_text(RichText::new(&starts[a].1).small()).show_ui(ui, |ui| {
+                for (k, e) in starts.iter().enumerate() {
+                    ui.selectable_value(&mut a, k, &e.1);
+                }
+            });
+            ui.label(RichText::new(">").small());
+            egui::ComboBox::from_id_salt("baycableto").width(150.0).selected_text(RichText::new(&stops[b].1).small()).show_ui(ui, |ui| {
+                for (k, e) in stops.iter().enumerate() {
+                    ui.selectable_value(&mut b, k, &e.1);
+                }
+            });
+            let (from, to) = (starts[a].0, stops[b].0);
+            let fresh = !work.iter().any(|c| c.from == from && c.to == to) && (from == End::Bay || from != to);
+            if ui.add_enabled(fresh, egui::Button::new(RichText::new("Lay cable").small())).clicked() {
+                work.push(cereal_engine::fxpatch::Cable::new(from, to, 1.0));
+                touched = true;
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(id, (a, b)));
+        if touched {
+            let p = std::sync::Arc::make_mut(sub);
+            p.cables = work;
+            p.rewire();
+            changed = true;
+        }
+    });
     // the boards first: they are what the bay is played from
     for i in 0..sub.nodes.len() {
         if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface) {

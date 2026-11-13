@@ -68,11 +68,26 @@ pub enum End {
     Node(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Cable {
     pub from: End,
     pub to: End,
     pub level: f32,
+    /// The sockets it was stored between (from, to), or zeros for a cable laid here: a unit with several
+    /// outputs keeps the one its cable left from when the wiring is written again.
+    pub via: (u64, u64),
+}
+
+impl PartialEq for Cable {
+    fn eq(&self, o: &Cable) -> bool {
+        (self.from, self.to, self.level) == (o.from, o.to, o.level)
+    }
+}
+
+impl Cable {
+    pub fn new(from: End, to: End, level: f32) -> Self {
+        Cable { from, to, level, via: (0, 0) }
+    }
 }
 
 /// A setting cable: an output of one unit moves a setting of another.
@@ -97,6 +112,8 @@ pub struct Patch {
     pub shape: Vec<(usize, Vec<crate::noteshape::Link>)>,
     /// Setting cables between held units.
     pub sets: Vec<SetCable>,
+    /// The sound cables were changed by hand and are to be written anew.
+    pub rewired: bool,
 }
 
 fn u32at(b: &[u8], at: usize) -> Option<u32> {
@@ -288,6 +305,7 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
     let mut cables = Vec::new();
     let mut sets = Vec::new();
     for (to, from, level) in raw {
+        let via = (from, to);
         // a setting cable runs from a unit's output socket (role 10) to a setting's socket (role 11)
         if let (Some(&(a, 2, out, 10)), Some(&(b, 2, k, 11))) = (pins.get(&from), pins.get(&to)) {
             if a != b && out < 4096 && k < 65536 {
@@ -309,15 +327,15 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
             None if Some(to) == main_out => End::Bay,
             None => continue,
         };
-        cables.push(Cable { from, to, level });
+        cables.push(Cable { from, to, level, via });
     }
     // a unit runs after the ones that send it settings, too
     let mut deps = cables.clone();
-    deps.extend(sets.iter().map(|s| Cable { from: End::Node(s.from.0), to: End::Node(s.to.0), level: 1.0 }));
+    deps.extend(sets.iter().map(|s| Cable::new(End::Node(s.from.0), End::Node(s.to.0), 1.0)));
     let order = sort(nodes.len(), &deps);
     let feeds: Vec<usize> = layers.iter().map(|l| l.0).collect();
     shape.retain(|s| lead.as_ref().is_some_and(|l| l.0 == s.0) || feeds.contains(&s.0));
-    Some((Patch { nodes, cables, order, feeds, shape, sets }, lead, layers))
+    Some((Patch { nodes, cables, order, feeds, shape, sets, rewired: false }, lead, layers))
 }
 
 /// Units in an order where each comes after the ones feeding it. Units caught in a loop of cables go last,
@@ -359,6 +377,14 @@ fn sort(n: usize, cables: &[Cable]) -> Vec<usize> {
 /// else is carried over byte for byte.
 pub fn encode(p: &Patch, base: Option<&[u8]>) -> Vec<u8> {
     let Some(base) = base else { return fresh() };
+    let rewired;
+    let base = match Some(()).filter(|_| p.rewired).and_then(|_| recable(base, &p.cables)) {
+        Some(b) => {
+            rewired = b;
+            &rewired[..]
+        }
+        None => base,
+    };
     let Some(top) = chunks(base, 4) else { return base.to_vec() };
     let mut out = base[..4].to_vec();
     let mut k = 0;
@@ -386,6 +412,142 @@ pub fn encode(p: &Patch, base: Option<&[u8]>) -> Vec<u8> {
         put(&mut out, 0, &body);
     }
     out
+}
+
+/// The block with its sound cables taken out and `cables` written in their place. Note and setting cables,
+/// and sound cables to sockets we do not use, stay as they are. A cable whose end has no socket is left out.
+fn recable(base: &[u8], cables: &[Cable]) -> Option<Vec<u8>> {
+    use std::collections::HashMap;
+    let top = chunks(base, 4)?;
+    let mut pins: HashMap<u64, (usize, u32, u32, u32)> = HashMap::new();
+    let mut own: HashMap<u64, (u32, u32)> = HashMap::new();
+    // where each cable group lies among the top chunks, with its ends and the two words after its level
+    let mut raw: Vec<(usize, u64, u64, u32)> = Vec::new();
+    let mut units = 0;
+    for (at, (id, r)) in top.iter().enumerate() {
+        if *id != 0 || r.is_empty() {
+            continue;
+        }
+        let g = &base[r.clone()];
+        let inner = chunks(g, 0)?;
+        match inner.first().map(|c| c.0) {
+            Some(5000) => {
+                for (j, q) in &inner {
+                    if *j == 5009 {
+                        let d = &g[q.clone()];
+                        pins.insert(u64at(d, 8)?, (units, u32at(d, 0)?, u32at(d, 4)? & 0xff_ffff, u32at(d, 16)?));
+                    }
+                }
+                units += 1;
+            }
+            Some(1400) => {
+                let d = &g[inner[0].1.clone()];
+                own.insert(u64at(d, 0)?, (u32at(d, 8)?, u32at(d, 12)?));
+            }
+            Some(1300) => {
+                let d = &g[inner[0].1.clone()];
+                raw.push((at, u64at(d, 0)?, u64at(d, 8)?, u32at(d, 20).unwrap_or(0)));
+            }
+            _ => {}
+        }
+    }
+    let sound = |id: &u64| own.get(id).is_some_and(|o| o.0 == 0);
+    // the bay's own sockets as the reader picks them, or by their direction when no cable touches them yet
+    let side = |flag: u32| own.iter().filter(|(_, o)| o.0 == 0 && o.1 == flag).map(|(id, _)| *id).min();
+    let main_in = raw.iter().map(|c| c.2).filter(sound).min().or_else(|| side(7));
+    let main_out = raw.iter().map(|c| c.1).filter(sound).min().or_else(|| side(6));
+    // the cable groups the reader takes for sound cables: these are the ones replaced
+    let ours = |to: u64, from: u64| {
+        let a = match pins.get(&from) {
+            Some(&(_, 0, _, _)) => true,
+            Some(_) => false,
+            None => Some(from) == main_in,
+        };
+        let b = match pins.get(&to) {
+            Some(&(_, 0, 0, _)) => true,
+            Some(_) => false,
+            None => Some(to) == main_out,
+        };
+        a && b
+    };
+    let gone: Vec<usize> = raw.iter().filter(|c| ours(c.1, c.2)).map(|c| c.0).collect();
+    let word = raw.first().map(|c| c.3).unwrap_or(2);
+    // a unit's sockets carry a word whose lowest bit says input and the next says in use
+    let socket = |n: usize, input: u32| pins.iter().filter(|(_, v)| v.0 == n && v.1 == 0 && v.3 & 1 == input).map(|(id, v)| (v.2, *id)).min().map(|x| x.1);
+    let fits = |id: u64, end: End, input: u32| match (end, pins.get(&id)) {
+        (End::Node(n), Some(&(m, 0, _, role))) => m == n && (role & 1 == input || input == 0),
+        (End::Bay, None) => own.get(&id).is_some_and(|o| o.0 == 0),
+        _ => false,
+    };
+    let mut fresh = Vec::new();
+    let mut used: Vec<u64> = Vec::new();
+    for c in cables {
+        let from = Some(c.via.0).filter(|&id| fits(id, c.from, 0)).or(match c.from {
+            End::Bay => main_in,
+            End::Node(n) => socket(n, 0),
+        });
+        let to = Some(c.via.1).filter(|&id| fits(id, c.to, 1)).or(match c.to {
+            End::Bay => main_out,
+            End::Node(n) => socket(n, 1),
+        });
+        let (Some(from), Some(to)) = (from, to) else { continue };
+        used.extend([from, to]);
+        let mut d = to.to_le_bytes().to_vec();
+        d.extend(from.to_le_bytes());
+        d.extend(c.level.to_le_bytes());
+        d.extend(word.to_le_bytes());
+        d.extend([0u8; 8]);
+        let mut g = Vec::new();
+        put(&mut g, 1300, &d);
+        put(&mut g, 1301, &[]);
+        put(&mut fresh, 0, &g);
+    }
+    // the new cables go where the first cable lay, or ahead of the view chunk that follows the cables
+    let spot = raw.first().map(|c| c.0).or_else(|| top.iter().position(|c| c.0 == 1500)).unwrap_or(top.len());
+    let mut out = base[..4].to_vec();
+    for (at, (id, r)) in top.iter().enumerate() {
+        if at == spot {
+            out.extend(&fresh);
+        }
+        if gone.contains(&at) {
+            continue;
+        }
+        let g = &base[r.clone()];
+        let inner = if *id == 0 { chunks(g, 0).filter(|c| c.first().map(|c| c.0) == Some(5000)) } else { None };
+        let Some(inner) = inner else {
+            put(&mut out, *id, g);
+            continue;
+        };
+        // a socket a cable now ends at is marked as in use
+        let mut body = Vec::with_capacity(g.len());
+        for (j, q) in inner {
+            let mut d = g[q].to_vec();
+            if j == 5009 && d.len() >= 20 && u32at(&d, 0) == Some(0) && u64at(&d, 8).is_some_and(|s| used.contains(&s)) {
+                d[16] |= 2;
+            }
+            put(&mut body, j, &d);
+        }
+        put(&mut out, 0, &body);
+    }
+    if spot == top.len() {
+        out.extend(&fresh);
+    }
+    Some(out)
+}
+
+impl Patch {
+    /// After cables were changed by hand: put the units back in an order that follows them.
+    pub fn rewire(&mut self) {
+        let mut deps = self.cables.clone();
+        deps.extend(self.sets.iter().map(|s| Cable::new(End::Node(s.from.0), End::Node(s.to.0), 1.0)));
+        self.order = sort(self.nodes.len(), &deps);
+        self.rewired = true;
+    }
+
+    /// Whether a unit takes sound in and gives sound out (what a hand-laid cable can reach).
+    pub fn can_cable(&self, n: usize) -> bool {
+        self.nodes.get(n).is_some_and(|u| u.fx.is_some())
+    }
 }
 
 /// An empty bay: sound in cabled straight to sound out.
@@ -601,7 +763,7 @@ mod tests {
         let b = fresh();
         let p = decode(&b).expect("reads back");
         assert!(p.nodes.is_empty());
-        assert_eq!(p.cables, vec![Cable { from: End::Bay, to: End::Bay, level: 1.0 }]);
+        assert_eq!(p.cables, vec![Cable::new(End::Bay, End::Bay, 1.0)]);
         assert_eq!(encode(&p, Some(&b)), b);
         let mut st = State::new(&p, 44100.0);
         let mut io = vec![[0.25, -0.5]; 2000];
@@ -613,7 +775,7 @@ mod tests {
         use crate::fx::Kind;
         let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)), notes: None }).collect();
         nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)), notes: None });
-        let c = |a, b| Cable { from: a, to: b, level: 1.0 };
+        let c = |a, b| Cable::new(a, b, 1.0);
         Patch {
             cables: vec![c(End::Bay, End::Node(senders)), c(End::Node(senders), End::Bay)],
             order: (0..=senders).collect(),
@@ -718,6 +880,72 @@ mod tests {
 
     /// With CEREAL_FLP_CORPUS set: the boards in the stock bays have the outputs their cables start from.
     #[test]
+    fn a_fresh_bay_can_be_uncabled_and_cabled_again() {
+        let base = fresh();
+        let mut p = decode(&base).unwrap();
+        assert_eq!(p.cables.len(), 1);
+        p.cables.clear();
+        p.rewire();
+        let bare = encode(&p, Some(&base));
+        assert!(decode(&bare).unwrap().cables.is_empty());
+        p.cables.push(Cable::new(End::Bay, End::Bay, 0.5));
+        let again = encode(&p, Some(&bare));
+        assert_eq!(decode(&again).unwrap().cables, p.cables);
+        assert_eq!(again.len(), base.len());
+    }
+
+    #[test]
+    fn stock_bays_take_new_wiring() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Effects/Patcher")];
+        let (mut bays, mut kept) = (0, 0);
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(f) = crate::preset::read(&path).ok() else { continue };
+                let Some(mut p) = decode(&f.state) else { continue };
+                if p.cables.is_empty() {
+                    continue;
+                }
+                bays += 1;
+                // the wiring written out again as it stands reads back the same, whatever the sockets used
+                let same = recable(&f.state, &p.cables).and_then(|b| decode(&b)).unwrap();
+                let key = |c: &Cable| format!("{:?}", c);
+                let (mut a, mut b): (Vec<String>, Vec<String>) = (p.cables.iter().map(key).collect(), same.cables.iter().map(key).collect());
+                a.sort();
+                a.dedup();
+                b.sort();
+                b.dedup();
+                kept += (a == b) as usize;
+                assert_eq!(same.cables.len(), p.cables.len(), "{}", path.display());
+                assert_eq!(same.sets, p.sets, "{}", path.display());
+                assert_eq!(same.nodes.len(), p.nodes.len());
+                // one cable less, and a level turned
+                p.cables.pop();
+                if let Some(c) = p.cables.first_mut() {
+                    c.level = 0.25;
+                }
+                p.rewire();
+                let back = decode(&encode(&p, Some(&f.state))).unwrap();
+                assert_eq!(back.cables.len(), p.cables.len(), "{}", path.display());
+                if let Some(c) = back.cables.iter().find(|c| c.level == 0.25) {
+                    assert_eq!((c.from, c.to), (p.cables[0].from, p.cables[0].to));
+                } else {
+                    assert!(p.cables.is_empty(), "{}", path.display());
+                }
+            }
+        }
+        if bays > 0 {
+            eprintln!("{kept} of {bays} bays keep their wiring when it is written anew");
+            assert!(kept * 20 >= bays * 19);
+        }
+    }
+
+    #[test]
     fn stock_bays_cable_their_boards() {
         let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
         let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Effects/Patcher")];
@@ -802,7 +1030,7 @@ mod tests {
 
     #[test]
     fn units_run_after_their_feeders() {
-        let c = |a, b| Cable { from: a, to: b, level: 1.0 };
+        let c = |a, b| Cable::new(a, b, 1.0);
         let order = sort(3, &[c(End::Bay, End::Node(2)), c(End::Node(2), End::Node(0)), c(End::Node(0), End::Node(1)), c(End::Node(1), End::Bay)]);
         assert_eq!(order, vec![2, 0, 1]);
         // a loop still lists every unit once
