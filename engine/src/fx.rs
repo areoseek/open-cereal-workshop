@@ -2397,6 +2397,34 @@ pub struct Ctx {
     pub clock: crate::host::Clock,
 }
 
+/// The loudener is the band maximiser at one of four fixed settings. Those settings are files in the user's own
+/// install; they are read from there when it is known and never kept in this program. Without them the unit falls
+/// back to a plain fitted three-band push.
+fn loud_settings() -> Option<std::sync::Arc<[Vec<f32>; 4]>> {
+    static S: std::sync::Mutex<Option<std::sync::Arc<[Vec<f32>; 4]>>> = std::sync::Mutex::new(None);
+    let mut s = S.lock().unwrap();
+    if s.is_none() {
+        'roots: for root in crate::keys::roots() {
+            for sub in ["Data/Patches", "Patches"] {
+                let dir = root.join(sub).join("Plugin presets/Effects/Maximus/Soundgoodizer presets");
+                let mut all: [Vec<f32>; 4] = Default::default();
+                let mut ok = true;
+                for (i, name) in ["a.fst", "b.fst", "c.fst", "d.fst"].iter().enumerate() {
+                    match crate::preset::read(&dir.join(name)).ok().and_then(|pre| Fx::decode(&pre.ident, &pre.state)) {
+                        Some(fx) if fx.kind == Kind::Maxi => all[i] = fx.p,
+                        _ => ok = false,
+                    }
+                }
+                if ok {
+                    *s = Some(std::sync::Arc::new(all));
+                    break 'roots;
+                }
+            }
+        }
+    }
+    s.clone()
+}
+
 /// The classic units run on the processor of their successor. This gives the successor's kind for one of them.
 fn successor(kind: Kind) -> Option<Kind> {
     match kind {
@@ -2815,7 +2843,10 @@ fn fast_dist_b(row: &[f32; 49], u: f32) -> f32 {
 
 impl Unit {
     pub fn new(fx: Fx, sr: f32) -> Self {
-        let inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
+        let mut inner = successor(fx.kind).map(|k| Box::new(Unit::new(Fx::new(k), sr)));
+        if fx.kind == Kind::Loud && loud_settings().is_some() {
+            inner = Some(Box::new(Unit::new(Fx::new(Kind::Maxi), sr)));
+        }
         let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
@@ -3022,6 +3053,20 @@ impl Unit {
     }
 
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
+        if self.fx.kind == Kind::Loud {
+            if let (Some(u), Some(set)) = (&mut self.inner, loud_settings()) {
+                let q = &set[(self.fx.p[0] as usize).min(3)];
+                if u.fx.p.len() == q.len() {
+                    u.fx.p.copy_from_slice(q);
+                } else {
+                    u.fx.p = q.clone();
+                }
+                // the one knob is the maximiser's band mix
+                u.fx.p[5] = self.fx.p[1].clamp(0.0, 1000.0);
+                u.process(io, cx);
+                return;
+            }
+        }
         if let Some(u) = &mut self.inner {
             translate(self.fx.kind, &self.fx.p, &mut u.fx.p, cx);
             u.process(io, cx);
@@ -3556,8 +3601,8 @@ impl Unit {
                         };
                         let c = if lv > z[0] { k.att } else { k.rel };
                         z[0] = lv + (z[0] - lv) * c;
-                        let at = (z[0] * 0.5).clamp(1.0 / 512.0, 1.0);
                         let table = &p[59 + b * CURVE_N..59 + (b + 1) * CURVE_N];
+                        let at = (z[0] * 0.5).clamp(1.0 / 512.0, 1.0);
                         let x = at * top;
                         let i = (x as usize).min(CURVE_N - 2);
                         let out = table[i] + (table[i + 1] - table[i]) * (x - i as f32);
@@ -3614,12 +3659,12 @@ impl Unit {
                     }
                     let mut sum = [0f32; 2];
                     for b in 0..3 {
+                        // the band mix blends each band with its own untouched half, so the blend stays in step
                         let y = run(b, part[b], &mut z[40 + b * 2..42 + b * 2]);
-                        sum[0] += y[0];
-                        sum[1] += y[1];
+                        sum[0] += part[b][0] + (y[0] - part[b][0]) * mix;
+                        sum[1] += part[b][1] + (y[1] - part[b][1]) * mix;
                     }
-                    let into = [dry[0] + (sum[0] - dry[0]) * mix, dry[1] + (sum[1] - dry[1]) * mix];
-                    *f = run(3, into, &mut z[46..48]);
+                    *f = run(3, sum, &mut z[46..48]);
                 }
             }
             Kind::Pad => {
