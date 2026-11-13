@@ -23,6 +23,7 @@ pub mod speech;
 pub mod notes;
 pub mod pitchedit;
 pub mod player;
+pub mod psola;
 pub mod additive;
 pub mod analog;
 pub mod duo;

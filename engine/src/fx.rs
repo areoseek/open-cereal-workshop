@@ -789,7 +789,7 @@ pub static DEFS: &[Def] = &[
         kind: Kind::Warp,
         ident: "Gross Beat",
         title: "Beat Juggler",
-        size: 6960,
+        size: 13032,
         fixed: &[],
         params: &[
             p("Time slot", 4, 0, 35, 0),
@@ -1676,20 +1676,131 @@ fn meq_tables(state: &[u8], p: &mut Vec<f32>) -> Option<()> {
     Some(())
 }
 
-/// A fresh beat juggler block: every slot holds a level line (no time shift, full volume).
+/// The ready-made lines a new beat juggler starts with, all our own: (beat, height, segment type) points over
+/// the four beats of the bar. For time, the top is now and the bottom two bars back; for volume, the top is full.
+/// Type 0 runs straight to its point, type 2 waits and jumps there.
+fn warp_shape(slot: usize, volume: bool) -> Vec<(f64, f64, u8)> {
+    // how far back, in beats, as a height
+    let back = |beats: f64| 1.0 - beats / 8.0;
+    let mut v = vec![(0.0, 1.0, 0u8)];
+    // the same figure again and again: `len` beats long, from `a` to `b`, straight or as a held step
+    let every = |v: &mut Vec<(f64, f64, u8)>, len: f64, a: f64, b: f64| {
+        v.clear();
+        let mut x = 0.0;
+        while x < 4.0 - 1e-9 {
+            v.push((x, a, 0));
+            v.push((x + len, b, 0));
+            x += len;
+        }
+    };
+    // a gate: open for the first `share` of every `len` beats
+    let gate = |v: &mut Vec<(f64, f64, u8)>, len: f64, share: f64, first_open: bool| {
+        v.clear();
+        let (on, off) = if first_open { (1.0, 0.0) } else { (0.0, 1.0) };
+        v.push((0.0, on, 0));
+        let mut x = 0.0;
+        while x < 4.0 - 1e-9 {
+            v.push((x + len * share, off, 2));
+            v.push((x + len, on, 2));
+            x += len;
+        }
+    };
+    if !volume {
+        match slot {
+            // half speed: over the bar, over half a bar, over a beat
+            1 => every(&mut v, 4.0, 1.0, back(2.0)),
+            2 => every(&mut v, 2.0, 1.0, back(1.0)),
+            3 => every(&mut v, 1.0, 1.0, back(0.5)),
+            // the first beat, half beat or quarter beat said again and again
+            4 | 5 | 6 => {
+                let len = [1.0, 0.5, 0.25][slot - 4];
+                let mut k = 1.0;
+                while k * len < 4.0 - 1e-9 {
+                    v.push((k * len, back(k * len), 2));
+                    k += 1.0;
+                }
+                v.push((4.0, back((k - 1.0) * len), 0));
+            }
+            // the first half of the bar twice
+            7 => v.extend([(2.0, back(2.0), 2), (4.0, back(2.0), 0)]),
+            // the third beat's last quarter beats said again to fill the fourth
+            8 => v.extend([(3.0, 1.0, 0), (3.25, back(0.25), 2), (3.5, back(0.5), 2), (3.75, back(0.75), 2), (4.0, back(0.75), 0)]),
+            // the record slowing to a stop over the bar, and over the last beat
+            9 => v.extend((1..=16).map(|k| (k as f64 / 4.0, back((k as f64 / 4.0).powi(2) / 8.0), 0))),
+            10 => {
+                v.push((3.0, 1.0, 0));
+                v.extend((1..=8).map(|k| (3.0 + k as f64 / 8.0, back((k as f64 / 8.0).powi(2) / 2.0), 0)));
+            }
+            // backwards: the whole bar, then beat by beat, then half beat by half beat
+            11 => every(&mut v, 4.0, 1.0, back(8.0)),
+            12 => every(&mut v, 1.0, 1.0, back(2.0)),
+            13 => every(&mut v, 0.5, 1.0, back(1.0)),
+            // forwards for three beats, the last one backwards
+            14 => v.extend([(3.0, 1.0, 0), (4.0, back(2.0), 0)]),
+            // a wobble: the hand rocking the record once a beat
+            15 => {
+                v.clear();
+                v.extend((0..=32).map(|k| (k as f64 / 8.0, back(0.25 - 0.25 * (k as f64 / 8.0 * std::f64::consts::TAU).cos()), 0)));
+            }
+            _ => v.push((4.0, 1.0, 0)),
+        }
+    } else {
+        match slot {
+            // gates: by the beat, the half beat, the quarter beat, and the off-beat alone
+            1 => gate(&mut v, 1.0, 0.5, true),
+            2 => gate(&mut v, 0.5, 0.5, true),
+            3 => gate(&mut v, 0.25, 0.5, true),
+            4 => gate(&mut v, 1.0, 0.5, false),
+            5 => gate(&mut v, 0.5, 0.5, false),
+            // short stabs
+            6 => gate(&mut v, 1.0, 0.25, true),
+            7 => gate(&mut v, 0.5, 0.25, true),
+            // the pump: down on the beat and back up, by the beat and by the half beat
+            8 => every(&mut v, 1.0, 0.0, 1.0),
+            9 => every(&mut v, 0.5, 0.0, 1.0),
+            // fading away within each beat
+            10 => every(&mut v, 1.0, 1.0, 0.0),
+            // in and out over the bar
+            11 => v = vec![(0.0, 0.0, 0), (4.0, 1.0, 0)],
+            12 => v.push((4.0, 0.0, 0)),
+            // the last beat left out, the first half left out
+            13 => v.extend([(3.0, 0.0, 2), (4.0, 0.0, 0)]),
+            14 => v = vec![(0.0, 0.0, 0), (2.0, 1.0, 2), (4.0, 1.0, 0)],
+            // a pattern of sixteen steps
+            15 => {
+                v.clear();
+                let steps = [1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0];
+                v.push((0.0, 1.0, 0));
+                for (k, on) in steps.iter().enumerate().skip(1) {
+                    v.push((k as f64 / 4.0, *on as f64, 2));
+                }
+                v.push((4.0, 0.0, 0));
+            }
+            _ => v.push((4.0, 1.0, 0)),
+        }
+    }
+    v
+}
+
+/// A fresh beat juggler block: the first slot of each kind is level (no time shift, full volume), the next
+/// fifteen hold our ready-made lines, the rest are level.
 fn warp_fresh() -> Vec<u8> {
-    let mut v = Vec::with_capacity(6960);
+    let mut v = Vec::with_capacity(13032);
     for x in [4i32, 0, 0, 256, 256, 1765, 5000, 0, 0, 65536, 0, 0x0101_0000] {
         v.extend_from_slice(&x.to_le_bytes());
     }
-    for _ in 0..2 * WARP_SLOTS {
-        for x in [1280i32, 1280, 0, 0, 3, 2, 2] {
+    for k in 0..2 * WARP_SLOTS {
+        let pts = warp_shape(k % WARP_SLOTS, k >= WARP_SLOTS);
+        for x in [1280i32, 1280, 0, 0, 3, 2, pts.len() as i32] {
             v.extend_from_slice(&x.to_le_bytes());
         }
-        for x in [0f64, 4.0] {
-            v.extend_from_slice(&x.to_le_bytes());
-            v.extend_from_slice(&1f64.to_le_bytes());
-            v.extend_from_slice(&[0, 0, 0, 0, 2, 0, 0, 0]);
+        let mut last = 0.0;
+        for (x, y, kind) in pts {
+            // a point is kept as its distance from the one before
+            v.extend_from_slice(&(x - last).max(0.0).to_le_bytes());
+            v.extend_from_slice(&y.clamp(0.0, 1.0).to_le_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, kind, 0, 0, 0]);
+            last = x;
         }
         for x in [0i32, -1, -1, -1, -1] {
             v.extend_from_slice(&x.to_le_bytes());
@@ -2526,6 +2637,7 @@ pub struct Unit {
     /// What a send tap took off the signal in the last block, for the player to add to the target track.
     pub tap: Vec<[f32; 2]>,
     patch: Option<Box<crate::fxpatch::State>>,
+    psola: Option<Box<crate::psola::Shifter>>,
 }
 
 /// Comb and all-pass times of the pad reverb, in ms (four combs, then two all-passes).
@@ -2845,11 +2957,17 @@ impl Unit {
         if fx.kind == Kind::Loud && loud_settings().is_some() {
             inner = Some(Box::new(Unit::new(Fx::new(Kind::Maxi), sr)));
         }
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None, psola: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
         match u.fx.kind {
+            Kind::Plush => {
+                // the ring of the loop's shifter, the loop's own delay a side, and a work bench
+                u.buf = vec![[0.0; 2]; (sr * 0.1) as usize + 8];
+                u.lines = vec![vec![0.0; (sr * 4.0) as usize + 8], vec![0.0; (sr * 4.0) as usize + 8], vec![]];
+                u.lpos.push(0);
+            }
             Kind::Delay => {
                 u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8];
                 u.lines = vec![vec![0.0; (sr * 0.5) as usize + 8]];
@@ -2949,7 +3067,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None, psola: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -3051,6 +3169,111 @@ impl Unit {
         self.patch.as_deref_mut()
     }
 
+    /// The plush reverb: the room reverb's tank with a pitched loop round it, a hold, a follower that turns the
+    /// tail down or up with the playing, and a bell on the tail.
+    fn plush(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
+        let sr = cx.sr;
+        let p = &self.fx.p;
+        let lvl = |v: f32| if v <= -600.0 { 0.0 } else { db((v - 746.0) * 0.05) };
+        let on = p[3] >= 0.5;
+        // the tail's level follows the tank's own level law, as it did when the tank set it
+        let (g_dry, g_wet) = (knob_amp(lvl(p[32])), if on { (lvl(p[0]) * lvl(p[33])).powf(1.5) } else { 0.0 });
+        let hold = p[13] >= 0.5;
+        let beat = cx.step * 4.0;
+        let sw = p[39] as i32;
+        let loop_on = p[15] >= 0.5 && p[19] > 0.0;
+        let loop_gain = (p[19] / 1000.0).clamp(0.0, 1.0);
+        let loop_mix = (p[22] / 1000.0).clamp(0.0, 1.0);
+        let n_line = self.lines[0].len();
+        let loop_len = (if sw & 0x100 != 0 { p[18] / 192.0 * beat } else { p[17] / 10_000.0 * sr } as usize).clamp(16, n_line - 2);
+        let ratio = (p[16] / 120.0).exp2();
+        let (g_hc, g_lc) = (svf_g(p[20].clamp(700.0, 5000.0) * 4.0, sr), svf_g(p[21].clamp(20.0, 3000.0), sr));
+        let f_scale = (p[23] / 1000.0).clamp(-1.0, 1.0);
+        let f_thr = p[24] / 100.0;
+        let coef = |ms: f32| 1.0 - (-1.0 / (ms.max(0.1) * 0.001 * sr)).exp();
+        let (f_att, f_rel, f_smooth) = (coef(p[25] / 10.0), coef(p[26]), coef(p[31] / 10.0));
+        let g_fl = svf_g(p[30].clamp(20.0, 1000.0), sr);
+        let bell = db(p[35] / 100.0) - 1.0;
+        let g_pk = svf_g(p[34].clamp(40.0, 8000.0), sr);
+        let k_pk = (p[36] / 1000.0).clamp(0.05, 4.0);
+        let Some(inner) = self.inner.as_mut() else { return };
+        translate(Kind::Plush, &self.fx.p, &mut inner.fx.p, cx);
+        // the tank gives its tail alone, at its own level; the levels are set out here, after the loop
+        inner.fx.p[10] = 0.0;
+        inner.fx.p[11] = 32.0;
+        inner.fx.p[12] = 64.0;
+        if hold {
+            inner.fx.p[5] = 1.0e7;
+            inner.fx.p[6] = 221.0;
+            inner.fx.p[7] = 100.0;
+        }
+        let z = &mut self.z;
+        let n = self.buf.len();
+        let grain = (0.06 * sr).min(n as f32 - 8.0);
+        let (line, rest) = self.lines.split_at_mut(2);
+        let work = &mut rest[0];
+        let step = 32.min(loop_len);
+        for chunk in io.chunks_mut(step) {
+            work.resize(chunk.len() * 2, 0.0);
+            // what goes into the tank: the playing, unless held, and what the loop brings round
+            let mut feed = [[0.0f32; 2]; 32];
+            let lp = self.lpos[0];
+            for (i, f) in chunk.iter().enumerate() {
+                work[i * 2] = f[0];
+                work[i * 2 + 1] = f[1];
+                let back = (lp + i + n_line - loop_len) % n_line;
+                let live = if hold { 0.0 } else { 1.0 };
+                feed[i] = [f[0] * live + line[0][back], f[1] * live + line[1][back]];
+            }
+            let wet = &mut feed[..chunk.len()];
+            inner.process(wet, cx);
+            for (i, f) in chunk.iter_mut().enumerate() {
+                let dry = [work[i * 2], work[i * 2 + 1]];
+                let w = wet[i];
+                // the loop: the tail moved in pitch, thinned top and bottom, sent round again
+                let mut round = [0.0f32; 2];
+                if loop_on {
+                    self.buf[self.pos] = w;
+                    let mut y = [0f32; 2];
+                    for k in 0..2 {
+                        let ph = (self.ph + k as f32 * 0.5).fract();
+                        let win = 0.5 - 0.5 * (ph * TAU).cos();
+                        let at = self.pos as f32 + n as f32 - (ph * grain + 1.0);
+                        let j = at as usize;
+                        let fr = at - j as f32;
+                        for c in 0..2 {
+                            y[c] += (self.buf[j % n][c] * (1.0 - fr) + self.buf[(j + 1) % n][c] * fr) * win;
+                        }
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    self.ph = (self.ph + (1.0 - ratio) / grain).rem_euclid(1.0);
+                    for c in 0..2 {
+                        let v = w[c] * (1.0 - loop_mix) + y[c] * loop_mix;
+                        let low = svf(&mut z[c * 4..], v, g_hc, 1.414).0;
+                        let high = svf(&mut z[c * 4 + 2..], low, g_lc, 1.414).2;
+                        // it can never run away: past full level the loop gives no more
+                        round[c] = (high * loop_gain).tanh();
+                    }
+                }
+                let at = (lp + i) % n_line;
+                line[0][at] = round[0];
+                line[1][at] = round[1];
+                // the follower: how loud the playing is over its threshold moves the tail
+                let side = svf(&mut z[8..], (dry[0] + dry[1]) * 0.5, g_fl, 1.414).2.abs();
+                z[10] += (side - z[10]) * if side > z[10] { f_att } else { f_rel };
+                let over = ((20.0 * z[10].max(1e-6).log10() - f_thr) / 24.0).clamp(0.0, 1.0);
+                z[11] += ((1.0 + f_scale * over) - z[11]) * f_smooth;
+                let follow = if f_scale == 0.0 { 1.0 } else { z[11] };
+                for c in 0..2 {
+                    let band = svf(&mut z[12 + c * 2..], w[c], g_pk, k_pk).1;
+                    let tail = w[c] + bell * k_pk * band;
+                    f[c] = dry[c] * g_dry + tail * g_wet * follow;
+                }
+            }
+            self.lpos[0] = (lp + chunk.len()) % n_line;
+        }
+    }
+
     pub fn process(&mut self, io: &mut [[f32; 2]], cx: &Ctx) {
         if self.fx.kind == Kind::Loud {
             if let (Some(u), Some(set)) = (&mut self.inner, loud_settings()) {
@@ -3065,6 +3288,10 @@ impl Unit {
                 u.process(io, cx);
                 return;
             }
+        }
+        if self.fx.kind == Kind::Plush && self.inner.is_some() && self.lines.len() == 3 {
+            self.plush(io, cx);
+            return;
         }
         if let Some(u) = &mut self.inner {
             translate(self.fx.kind, &self.fx.p, &mut u.fx.p, cx);
@@ -3935,6 +4162,15 @@ impl Unit {
                     // z[4] is the shift in octaves, sliding toward the wanted one
                     z[4] += (z[6] - z[4]) * a;
                     let ratio = z[4].exp2();
+                    if p[7] >= 5000.0 {
+                        // the colour of the voice is kept: whole cycles are laid closer or wider, and the gender
+                        // knob plays them faster or slower
+                        let period = if z[3] > 0.0 { sr / z[3] } else { 0.0 };
+                        let colour = ((p[2] / 5000.0 - 1.0) * 0.5).exp2();
+                        let sh = self.psola.get_or_insert_with(|| Box::new(crate::psola::Shifter::new(sr)));
+                        *f = sh.step(*f, period, ratio, colour, sr);
+                        continue;
+                    }
                     let grain = if z[5] > 0.0 { z[5] } else { sr * 0.02 }.min(n as f32 - 8.0);
                     self.buf[self.pos] = *f;
                     let mut out = [0f32; 2];
@@ -5046,6 +5282,13 @@ impl Unit {
                     if p[0].abs() < 0.5 {
                         // no shift asked for: the newest frame, not a blend of delayed ones
                         y = self.buf[self.pos];
+                    }
+                    if p[1].abs() >= 0.5 {
+                        // a colour of its own: the cycles of the sound are found and laid down afresh
+                        let x = self.buf[self.pos];
+                        let sh = self.psola.get_or_insert_with(|| Box::new(crate::psola::Shifter::new(sr)));
+                        let period = sh.listen(x, sr);
+                        y = sh.step(x, period, ratio, (p[1] / 1200.0).exp2(), sr);
                     }
                     if plain {
                         y = [y[0] + echo[0], y[1] + echo[1]];
@@ -6256,12 +6499,34 @@ mod tests {
     }
 
     #[test]
+    fn the_ready_made_juggler_lines_span_the_bar() {
+        for volume in [false, true] {
+            for slot in 0..WARP_SLOTS {
+                let pts = warp_shape(slot, volume);
+                assert!(pts.len() >= 2, "{slot}");
+                assert_eq!(pts[0].0, 0.0);
+                assert!((pts.last().unwrap().0 - 4.0).abs() < 1e-9, "{slot} {volume}");
+                assert!(pts.windows(2).all(|w| w[1].0 >= w[0].0), "{slot} {volume}");
+                assert!(pts.iter().all(|q| (0.0..=1.0).contains(&q.1)), "{slot} {volume}");
+            }
+        }
+        // the first-beat repeat reads the first beat four times: one beat in, it looks one beat back
+        let fx = Fx::new(Kind::Warp);
+        let at = |slot: usize, beat: f64| fx.p[7 + slot * WARP_N + (beat / 4.0 * (WARP_N - 1) as f64).round() as usize];
+        assert!((at(4, 1.5) - (1.0 - 1.0 / 8.0)).abs() < 0.01, "{}", at(4, 1.5));
+        assert!((at(4, 3.5) - (1.0 - 3.0 / 8.0)).abs() < 0.01, "{}", at(4, 3.5));
+        // the beat gate is open in the first half of a beat and shut in the second
+        let vol = |slot: usize, beat: f64| fx.p[7 + (WARP_SLOTS + slot) * WARP_N + (beat / 4.0 * (WARP_N - 1) as f64).round() as usize];
+        assert!(vol(1, 0.25) > 0.9 && vol(1, 0.75) < 0.1 && vol(1, 2.25) > 0.9, "{} {}", vol(1, 0.25), vol(1, 0.75));
+    }
+
+    #[test]
     fn beat_juggler_repeats_and_gates() {
         // a fresh one changes nothing and writes a block that reads back
         let fresh = Fx::new(Kind::Warp);
         assert_eq!(fresh.p.len(), 7 + 72 * WARP_N);
         let block = fresh.encode(None);
-        assert_eq!(block.len(), 6960);
+        assert_eq!(block.len(), 13032);
         assert_eq!(Fx::decode("Gross Beat", &block).unwrap(), fresh);
         // time slot 0: from beat 2 on, read two beats back; volume slot 0: shut for the last beat
         let mut fx = fresh.clone();
@@ -6344,10 +6609,40 @@ mod tests {
         let out = run(wet_only, click, 22050);
         assert_eq!(out[0][0], 0.0);
         assert!(rms(&out[2000..]) > 1e-5);
-        let mut dry_only = fx;
+        let mut dry_only = fx.clone();
         dry_only.p[33] = -600.0;
         let out = run(dry_only, click, 4096);
         assert!((out[0][0] - 1.0).abs() < 1e-3 && rms(&out[64..]) < 1e-6);
+        // held, the tail of a burst stays up where it would have died away
+        let burst = |i: usize| if i < 4000 { [((i * 7919 % 1000) as f32 / 500.0 - 1.0) * 0.5; 2] } else { [0.0; 2] };
+        let mut short = fx.clone();
+        short.p[32] = -600.0;
+        short.p[4] = 3000.0;
+        let free = run(short.clone(), burst, 132_300);
+        // the hold comes on with sound already in the tank
+        let mut u = Unit::new(short.clone(), 44100.0);
+        let cx = Ctx { sr: 44100.0, step: 5512.5, clock: Default::default() };
+        let mut a: Vec<[f32; 2]> = (0..22_050).map(burst).collect();
+        u.process(&mut a, &cx);
+        u.fx.p[13] = 1.0;
+        let mut b = vec![[0.0f32; 2]; 110_250];
+        u.process(&mut b, &cx);
+        assert!(rms(&b[88_200..]) > 20.0 * rms(&free[110_250..]), "{} {}", rms(&b[88_200..]), rms(&free[110_250..]));
+        // the loop sends the tail round an octave up: more comes back than without it
+        let mut looped = short.clone();
+        looped.p[15] = 1.0;
+        looped.p[19] = 900.0;
+        let with = run(looped, burst, 132_300);
+        assert!(rms(&with[66_150..]) > 1.5 * rms(&free[66_150..]) && with.iter().all(|f| f[0].abs() < 4.0));
+        // the follower turns the tail down while the playing is loud
+        let mut duck = fx.clone();
+        duck.p[32] = -600.0;
+        duck.p[23] = -1000.0;
+        duck.p[24] = -4000.0;
+        let noise = |i: usize| [((i * 7919 % 1000) as f32 / 500.0 - 1.0) * 0.5; 2];
+        let plain_tail = run({ let mut f = fx.clone(); f.p[32] = -600.0; f }, noise, 44_100);
+        let ducked = run(duck, noise, 44_100);
+        assert!(rms(&ducked[22_050..]) < 0.3 * rms(&plain_tail[22_050..]));
 
         // pad effects: fresh block reads back, every effect stays bounded, bypass passes
         let fx = Fx::new(Kind::Pad);
@@ -6367,6 +6662,12 @@ mod tests {
         assert_eq!(Fx::decode("Pitcher", &fx.encode(None)).unwrap(), fx);
         let sharp = |i: usize| [(i as f32 * 450.0 * TAU / 44100.0).sin() * 0.5; 2];
         let out = run(fx, sharp, 88200);
+        let ups = out[44100..].windows(2).filter(|w| w[0][0] < 0.0 && w[1][0] >= 0.0).count() as f32;
+        assert!((ups - 440.0).abs() < 3.0, "{ups}");
+        // and with the colour kept it lands on A as well
+        let mut keep = Fx::new(Kind::Tuner);
+        keep.p[7] = 10000.0;
+        let out = run(keep, sharp, 88200);
         let ups = out[44100..].windows(2).filter(|w| w[0][0] < 0.0 && w[1][0] >= 0.0).count() as f32;
         assert!((ups - 440.0).abs() < 3.0, "{ups}");
 
