@@ -232,6 +232,7 @@ pub static DEFS: &[Def] = &[
             p("Slope 6", 136, -3, 3, 0),
             p("Slope 7", 140, -3, 3, 0),
             p("Main level", 144, -1800, 1800, 0),
+            p("High quality", 292, 0, 1, 1),
         ],
     },
     Def {
@@ -2217,7 +2218,9 @@ fn eq_fresh(d: &Def) -> Vec<u8> {
     for q in d.params {
         let x = (q.def as i32).to_le_bytes();
         v[q.off..q.off + 4].copy_from_slice(&x);
-        v[q.off + 144..q.off + 148].copy_from_slice(&x);
+        if q.off < 148 {
+            v[q.off + 144..q.off + 148].copy_from_slice(&x);
+        }
     }
     v[292] = 1;
     v[300] = 1;
@@ -2384,6 +2387,7 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
             q[..28].copy_from_slice(&p[..28]);
             q[28..35].fill(0.0);
             q[35] = 2000.0 * (p[28].max(1.0) / 128.0).log10();
+            q[36] = 0.0;
         }
         Kind::OldReverb => {
             let cut = |v: f32| if v >= 65536.0 { 221.0 } else { 5.0 + v / 65536.0 * 215.0 };
@@ -2521,20 +2525,33 @@ fn band_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5
 
 /// Band of the seven band unit, laws as measured: the bell spans 0.1 to 5 octaves between its half-gain points,
 /// band pass and notch use that width over and times root two, the passes run from sharp to heavily damped.
-fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5] {
+fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, part: usize) -> [f32; 5] {
     let w = TAU * (hz / sr).clamp(0.0001, 0.49);
     let (s, c) = w.sin_cos();
     let a = 10f32.powf(gain_db / 40.0);
     let x = width.clamp(0.0, 1.0);
     let oct = 0.1 + 4.9 * x;
     let q_of = |bw: f32| 1.0 / (2.0 * (std::f32::consts::LN_2 / 2.0 * bw).sinh());
+    // the band widths stretch towards the top of the range the way the textbook bell does
+    let warp = w / s.max(1e-6);
     let q_band = match kind {
-        2 => q_of(oct / std::f32::consts::SQRT_2),
-        4 => q_of(oct * std::f32::consts::SQRT_2),
-        _ => q_of(oct),
+        2 => q_of(oct / std::f32::consts::SQRT_2 * warp),
+        4 => q_of(oct * std::f32::consts::SQRT_2 * warp),
+        _ => q_of(oct * warp),
     };
-    let q_res = q_of((-1.5945 + 3.7278 * x - 0.0986 * x * x).exp());
-    let q_shelf = 0.454 + (1.0 - x) * 0.8;
+    let mut q_res = q_of((-1.5945 + 3.7278 * x - 0.0986 * x * x).exp());
+    // steeper passes: more sections, either all alike (gentle) or spread the maximally flat way (steep)
+    let extra = order.unsigned_abs().min(3) as usize;
+    if extra > 0 {
+        let n = (extra + 1) as f32;
+        if order > 0 {
+            q_res = (q_res * 0.5f32.powf(extra as f32 * 0.5)).powf(1.0 / n);
+        } else {
+            const FLAT: [[f32; 4]; 3] = [[0.5412, 1.3066, 0.0, 0.0], [0.5176, 0.7071, 1.9319, 0.0], [0.5098, 0.6013, 0.9, 2.5629]];
+            q_res = FLAT[extra - 1][part.min(extra)] * (q_res / 0.7071).powf(1.0 / n);
+        }
+    }
+    let q_shelf = (0.498 + x * (-1.78917 + x * (1.39575 - 1.16708 * x))).exp();
     band_raw(kind, s, c, a, q_band, q_res, q_shelf)
 }
 
@@ -5090,10 +5107,13 @@ impl Unit {
             Kind::Eq => {
                 // runs at twice the rate between two half-band filters, so bands near the top keep their shape
                 let main = db(p[35] / 100.0);
-                if self.lines.len() != 1 || self.lines[0].len() != 32 {
-                    self.lines = vec![vec![0.0; 32]];
+                const BANDS: usize = 32;
+                if self.lines.len() != 1 || self.lines[0].len() != BANDS + 7 * 16 {
+                    self.lines = vec![vec![0.0; BANDS + 7 * 16]];
                 }
-                let mut bands = [([0f32; 5], 0usize, 0usize); 7];
+                let high = p[36] >= 0.5;
+                let rate = if high { sr * 2.0 } else { sr };
+                let mut bands = [([[0f32; 5]; 4], 0usize, 0usize); 7];
                 let mut nb = 0;
                 for b in 0..7 {
                     let kind = p[21 + b] as i32;
@@ -5101,25 +5121,28 @@ impl Unit {
                     if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain.abs() < 0.005) {
                         continue;
                     }
-                    let c = eq_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, sr * 2.0);
-                    // steeper slopes on the pass types run the section more than once
-                    let passes = if matches!(kind, 1 | 3) { (1 + (p[28 + b].abs() as usize)).min(2) } else { 1 };
-                    bands[nb] = (c, b * 8, passes);
+                    let order = if matches!(kind, 1 | 3) { p[28 + b] as i32 } else { 0 };
+                    let parts = 1 + order.unsigned_abs().min(3) as usize;
+                    let mut c = [[0f32; 5]; 4];
+                    for (k, c) in c.iter_mut().enumerate().take(parts) {
+                        *c = eq_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, rate, order, k);
+                    }
+                    bands[nb] = (c, BANDS + b * 16, parts);
                     nb += 1;
                 }
                 let st = &mut self.lines[0];
                 for f in io.iter_mut() {
                     for ch in 0..2 {
                         let h = ch * 16;
-                        let mut two = [hb_chain(&HB_EVEN, &mut st[h..h + 4], f[ch]), hb_chain(&HB_ODD, &mut st[h + 4..h + 8], f[ch])];
-                        for v in two.iter_mut() {
-                            for (c, zo, passes) in &bands[..nb] {
-                                for k in 0..*passes {
-                                    *v = biquad(c, &mut z[zo + k * 4 + ch * 2..], *v);
+                        let mut two = if high { [hb_chain(&HB_EVEN, &mut st[h..h + 4], f[ch]), hb_chain(&HB_ODD, &mut st[h + 4..h + 8], f[ch])] } else { [f[ch], 0.0] };
+                        for v in two.iter_mut().take(if high { 2 } else { 1 }) {
+                            for (c, zo, parts) in &bands[..nb] {
+                                for k in 0..*parts {
+                                    *v = biquad(&c[k], &mut st[zo + k * 4 + ch * 2..], *v);
                                 }
                             }
                         }
-                        f[ch] = 0.5 * (hb_chain(&HB_EVEN, &mut st[h + 8..h + 12], two[1]) + hb_chain(&HB_ODD, &mut st[h + 12..h + 16], two[0])) * main;
+                        f[ch] = main * if high { 0.5 * (hb_chain(&HB_EVEN, &mut st[h + 8..h + 12], two[1]) + hb_chain(&HB_ODD, &mut st[h + 12..h + 16], two[0])) } else { two[0] };
                     }
                 }
             }
