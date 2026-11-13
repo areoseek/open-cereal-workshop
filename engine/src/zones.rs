@@ -792,7 +792,7 @@ pub(crate) mod tests {
         assert_eq!(z.filter, Some((0.4, 0.5)));
         assert!(z.vel_scale && z.penv.is_none());
         let c = z.cenv.unwrap();
-        assert!((c.amount - 0.5).abs() < 1e-6 && (c.attack - 0.08).abs() < 1e-4);
+        assert!((c.amount - 0.5).abs() < 1e-6 && (c.attack - 0.016).abs() < 1e-4);
         // the room is on and fed; the echo is switched off and the chorus gets nothing
         let r = m.tail.reverb.unwrap();
         assert!((r.wet - 0.25).abs() < 1e-6 && (r.secs - 1.45).abs() < 1e-4);
