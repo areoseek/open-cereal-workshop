@@ -1522,6 +1522,37 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
             changed = true;
         }
     });
+    // the units held, to take out or add to by hand
+    egui::CollapsingHeader::new(RichText::new("Units").small()).id_salt("bayunits").show(ui, |ui| {
+        let mut out = None;
+        for i in 0..sub.nodes.len() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{}. {}", i + 1, title(&sub.nodes[i]))).small());
+                if sub.can_remove(i) && ui.small_button("Take out").on_hover_text("Take this unit out with its cables").clicked() {
+                    out = Some(i);
+                }
+            });
+        }
+        if let Some(i) = out {
+            changed |= std::sync::Arc::make_mut(sub).remove_unit(i);
+        }
+        let defs = cereal_engine::fxpatch::addable();
+        let id = ui.id().with("bayadd");
+        let mut pick: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0).min(defs.len().saturating_sub(1));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("bayaddkind").width(190.0).selected_text(RichText::new(defs.get(pick).map_or("", |d| d.title)).small()).show_ui(ui, |ui| {
+                for (k, d) in defs.iter().enumerate() {
+                    ui.selectable_value(&mut pick, k, d.title);
+                }
+            });
+            if ui.add_enabled(!defs.is_empty(), egui::Button::new(RichText::new("Add unit").small())).on_hover_text("Hold one more unit; cable it under Sound cables").clicked() {
+                let d = defs[pick];
+                std::sync::Arc::make_mut(sub).add_unit(d.ident, fx::Fx::new(d.kind));
+                changed = true;
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(id, pick));
+    });
     // the boards first: they are what the bay is played from
     for i in 0..sub.nodes.len() {
         if sub.nodes[i].fx.as_ref().is_some_and(|g| g.kind == Kind::Surface) {

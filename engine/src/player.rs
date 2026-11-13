@@ -4423,7 +4423,7 @@ mod tests {
             crate::script::allow(&src);
             let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
             ch.plugin = crate::song::BAY.to_string();
-            let node = |fx| Node { ident: String::new(), name: String::new(), fx, notes: None };
+            let node = |fx| Node { ident: String::new(), name: String::new(), fx, notes: None, uid: 0 };
             let c = |a, b| Cable::new(a, b, 1.0);
             let patch = crate::fxpatch::Patch {
                 nodes: vec![node(None), node(None), node(Some(fx::Fx::new(fx::Kind::Balance)))],
@@ -4461,7 +4461,7 @@ mod tests {
             crate::script::allow(&src);
             let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
             ch.plugin = crate::song::BAY.to_string();
-            let node = |fx| Node { ident: String::new(), name: String::new(), fx, notes: None };
+            let node = |fx| Node { ident: String::new(), name: String::new(), fx, notes: None, uid: 0 };
             // only the layered instrument (unit 2) is cabled to the way out; the script's output goes to its first coarse tuning
             let patch = crate::fxpatch::Patch {
                 nodes: vec![node(None), node(None), node(None)],
@@ -4500,7 +4500,7 @@ mod tests {
         let raw = crate::fm::tests::sender_block();
         let mut ch = crate::song::Chan::instrument(crate::synth::Kind::Osc3);
         ch.plugin = crate::song::BAY.to_string();
-        let node = |ident: &str, fx| Node { ident: ident.to_string(), name: String::new(), fx, notes: None };
+        let node = |ident: &str, fx| Node { ident: ident.to_string(), name: String::new(), fx, notes: None, uid: 0 };
         let c = |a, b| Cable::new(a, b, 1.0);
         // the instrument sounds through a level unit, whose level the sender's third output holds
         let patch = crate::fxpatch::Patch {

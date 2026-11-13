@@ -26,6 +26,8 @@ pub struct Node {
     pub fx: Option<Fx>,
     /// The stored block of a unit that works on notes, as it stands now; the note cables read from it.
     pub notes: Option<Vec<u8>>,
+    /// The number the unit is stored under; 0 for one added here and not written yet.
+    pub uid: u64,
 }
 
 impl Patch {
@@ -219,6 +221,7 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
         match inner.first().map(|c| c.0) {
             Some(5000) => {
                 let (mut ident, mut name, mut block) = (String::new(), String::new(), &g[0..0]);
+                let uid = u64at(&g[inner[0].1.clone()], 4).unwrap_or(0);
                 for (j, q) in &inner {
                     match j {
                         5008 => ident = text(&g[q.clone()]),
@@ -232,7 +235,7 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
                     }
                 }
                 // one unit goes by a longer name here than in a project's own slots
-                let mut node = Node { ident, name, fx: None, notes: None };
+                let mut node = Node { ident, name, fx: None, notes: None, uid };
                 node.fx = node.fx_before(block);
                 if node.fx.as_ref().is_none_or(|f| f.kind == crate::fx::Kind::Thru) && crate::noteshape::Shaper::decode(&node.ident, block).is_some() {
                     node.notes = Some(block.to_vec());
@@ -391,7 +394,23 @@ fn sort(n: usize, cables: &[Cable]) -> Vec<usize> {
 /// The block again, with the settings of any held unit that changed written into its own block. Everything
 /// else is carried over byte for byte.
 pub fn encode(p: &Patch, base: Option<&[u8]>) -> Vec<u8> {
-    let Some(base) = base else { return fresh() };
+    // a bay made here and not stored yet starts from the empty one
+    let empty;
+    let base = match base {
+        Some(b) => b,
+        None => {
+            empty = fresh();
+            &empty[..]
+        }
+    };
+    let reunited;
+    let base = match reunit(base, p) {
+        Some(b) => {
+            reunited = b;
+            &reunited[..]
+        }
+        None => base,
+    };
     let rewired;
     let base = match Some(()).filter(|_| p.rewired).and_then(|_| recable(base, &p.cables)) {
         Some(b) => {
@@ -427,6 +446,135 @@ pub fn encode(p: &Patch, base: Option<&[u8]>) -> Vec<u8> {
         put(&mut out, 0, &body);
     }
     out
+}
+
+/// The block holding the units of `p`: stored units `p` no longer has are taken out with their cables, and
+/// units added by hand are written after the last one stored. Nothing when the units are as stored.
+fn reunit(base: &[u8], p: &Patch) -> Option<Vec<u8>> {
+    use std::collections::HashSet;
+    let top = chunks(base, 4)?;
+    let wide = u32at(base, 0)? >= 4;
+    let keep: HashSet<u64> = p.nodes.iter().map(|n| n.uid).filter(|&u| u != 0).collect();
+    let added: Vec<(&Node, &Fx)> = p.nodes.iter().filter(|n| n.uid == 0).filter_map(|n| n.fx.as_ref().map(|f| (n, f))).collect();
+    let (mut gone, mut gone_pins) = (HashSet::new(), HashSet::new());
+    let (mut last_held, mut first_group, mut top_id) = (None, None, 999u64);
+    for (i, (id, r)) in top.iter().enumerate() {
+        if *id != 0 {
+            continue;
+        }
+        first_group.get_or_insert(i);
+        let g = &base[r.clone()];
+        let Some(inner) = chunks(g, 0) else { continue };
+        match inner.first().map(|c| c.0) {
+            Some(5000) => {
+                let uid = u64at(&g[inner[0].1.clone()], 4)?;
+                top_id = top_id.max(uid);
+                last_held = Some(i);
+                for (_, q) in inner.iter().filter(|c| c.0 == 5009) {
+                    let pin = u64at(&g[q.clone()], 8)?;
+                    top_id = top_id.max(pin);
+                    if !keep.contains(&uid) {
+                        gone_pins.insert(pin);
+                    }
+                }
+                if !keep.contains(&uid) {
+                    gone.insert(uid);
+                }
+            }
+            Some(1400) => top_id = top_id.max(u64at(&g[inner[0].1.clone()], 0)?),
+            _ => {}
+        }
+    }
+    if gone.is_empty() && added.is_empty() {
+        return None;
+    }
+    let mut next = top_id + 1;
+    if let Some((_, r)) = top.iter().find(|c| c.0 == 1000) {
+        next = next.max(u32at(&base[r.clone()], 0)? as u64);
+    }
+    let s = |t: &str| -> Vec<u8> {
+        if wide {
+            t.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
+        } else {
+            t.bytes().collect()
+        }
+    };
+    let (mut groups, mut places) = (Vec::new(), Vec::new());
+    for (k, (n, f)) in added.iter().enumerate() {
+        let uid = next;
+        next += 7;
+        let mut g = Vec::new();
+        let mut d = Vec::new();
+        for v in [2u32, uid as u32, 0, 0, 1, 5, 0, 0, 0, 0] {
+            d.extend(v.to_le_bytes());
+        }
+        put(&mut g, 5000, &d);
+        put(&mut g, 5004, &s(&n.ident));
+        put(&mut g, 5008, &s(&n.ident));
+        put(&mut g, 5010, &s(if n.name.is_empty() { &n.ident } else { &n.name }));
+        put(&mut g, 5005, &f.encode(None));
+        let mut d = 1.0f32.to_le_bytes().to_vec();
+        for v in [u32::MAX, 0, 0, 0x7fff_ffff, 60, 0, 0, 0, 0] {
+            d.extend(v.to_le_bytes());
+        }
+        put(&mut g, 5007, &d);
+        // one sound input, then the sound outputs
+        for (j, (index, role)) in [(0u32, 1u32), (0, 0), (1, 0), (2, 0), (3, 0), (4, 0)].into_iter().enumerate() {
+            let mut d = 0u32.to_le_bytes().to_vec();
+            d.extend(index.to_le_bytes());
+            d.extend((uid + 1 + j as u64).to_le_bytes());
+            d.extend(role.to_le_bytes());
+            d.extend([0u8; 8]);
+            put(&mut g, 5009, &d);
+        }
+        put(&mut g, 5001, &[]);
+        groups.push(g);
+        let mut d = uid.to_le_bytes().to_vec();
+        d.extend((220.0 + 36.0 * (k % 8) as f32).to_le_bytes());
+        d.extend((90.0 + 36.0 * (k % 8) as f32).to_le_bytes());
+        d.extend([0u8; 8]);
+        let mut g = Vec::new();
+        put(&mut g, 1600, &d);
+        places.push(g);
+    }
+    let mut out = base[..4].to_vec();
+    let mut placed = false;
+    for (i, (id, r)) in top.iter().enumerate() {
+        let g = &base[r.clone()];
+        if last_held.is_none() && first_group == Some(i) {
+            groups.drain(..).for_each(|n| put(&mut out, 0, &n));
+        }
+        if *id == 1001 && r.is_empty() && i + 1 == top.len() {
+            places.drain(..).for_each(|n| put(&mut out, 0, &n));
+            placed = true;
+        }
+        let inner = if *id == 0 { chunks(g, 0) } else { None };
+        let first = inner.as_ref().and_then(|c| c.first().cloned());
+        let drop = match first {
+            Some((5000, q)) => gone.contains(&u64at(&g[q], 4)?),
+            Some((1300, q)) => gone_pins.contains(&u64at(&g[q.clone()], 0)?) || gone_pins.contains(&u64at(&g[q], 8)?),
+            Some((1600, q)) => gone.contains(&u64at(&g[q], 0)?),
+            _ => false,
+        };
+        if drop {
+            continue;
+        }
+        if *id == 1000 && g.len() >= 4 {
+            let mut d = g.to_vec();
+            d[..4].copy_from_slice(&(next as u32).to_le_bytes());
+            put(&mut out, 1000, &d);
+        } else {
+            put(&mut out, *id, g);
+        }
+        if last_held == Some(i) {
+            groups.drain(..).for_each(|n| put(&mut out, 0, &n));
+        }
+    }
+    groups.drain(..).for_each(|n| put(&mut out, 0, &n));
+    if !placed {
+        places.drain(..).for_each(|n| put(&mut out, 0, &n));
+    }
+    Some(out)
 }
 
 /// The block with its sound cables taken out and `cables` written in their place. Note and setting cables,
@@ -560,10 +708,53 @@ impl Patch {
         self.rewired = true;
     }
 
+    /// Hold one more unit, not cabled to anything yet. Gives its number.
+    pub fn add_unit(&mut self, ident: &str, fx: Fx) -> usize {
+        self.nodes.push(Node { ident: ident.to_string(), name: String::new(), fx: Some(fx), notes: None, uid: 0 });
+        self.rewire();
+        self.nodes.len() - 1
+    }
+
+    /// Whether unit `i` can be taken out by hand: only in a bay of nothing but sound units.
+    pub fn can_remove(&self, i: usize) -> bool {
+        i < self.nodes.len() && self.feeds.is_empty() && self.shape.is_empty() && self.nodes.iter().all(|n| n.fx.is_some() && n.notes.is_none())
+    }
+
+    /// Take unit `i` out with every cable that touches it.
+    pub fn remove_unit(&mut self, i: usize) -> bool {
+        if !self.can_remove(i) {
+            return false;
+        }
+        self.nodes.remove(i);
+        let down = |e: End| match e {
+            End::Node(j) if j > i => End::Node(j - 1),
+            e => e,
+        };
+        self.cables.retain(|c| c.from != End::Node(i) && c.to != End::Node(i));
+        for c in &mut self.cables {
+            (c.from, c.to) = (down(c.from), down(c.to));
+        }
+        self.sets.retain(|s| s.from.0 != i && s.to.0 != i);
+        for s in &mut self.sets {
+            s.from.0 -= (s.from.0 > i) as usize;
+            s.to.0 -= (s.to.0 > i) as usize;
+        }
+        self.rewire();
+        true
+    }
+
     /// Whether a unit takes sound in and gives sound out (what a hand-laid cable can reach).
     pub fn can_cable(&self, n: usize) -> bool {
         self.nodes.get(n).is_some_and(|u| u.fx.is_some())
     }
+}
+
+/// The kinds of unit that can be added to a bay by hand, by title.
+pub fn addable() -> Vec<&'static crate::fx::Def> {
+    use crate::fx::Kind;
+    let mut v: Vec<_> = crate::fx::DEFS.iter().filter(|d| !d.ident.starts_with('(') && !matches!(d.kind, Kind::Thru | Kind::Notes)).collect();
+    v.sort_by_key(|d| d.title);
+    v
 }
 
 /// An empty bay: sound in cabled straight to sound out.
@@ -629,6 +820,7 @@ pub struct State {
     pub song_at: (f64, f32),
     /// Settings sent to held instruments, which are played outside: the unit, the setting, the value.
     pub gen_sets: Vec<(usize, u16, f32)>,
+    sr: f32,
 }
 
 impl State {
@@ -644,6 +836,7 @@ impl State {
             seen: None,
             song_at: (0.0, 130.0),
             gen_sets: Vec::new(),
+            sr,
         }
     }
 
@@ -667,6 +860,15 @@ impl State {
     pub fn sync(&mut self, p: &std::sync::Arc<Patch>) {
         // only when the patch itself was changed: in between, cables move the units' settings and they stay moved
         if self.seen.as_ref().is_some_and(|s| std::sync::Arc::ptr_eq(s, p)) {
+            return;
+        }
+        // units added or taken out by hand: the bay is set up anew
+        let held = |q: &Patch| q.nodes.iter().map(|n| (n.uid, n.fx.as_ref().map(|f| f.kind))).collect::<Vec<_>>();
+        if self.seen.as_ref().is_some_and(|s| held(s) != held(p)) {
+            let (song_at, sr) = (self.song_at, self.sr);
+            *self = State::new(p, sr);
+            self.song_at = song_at;
+            self.seen = Some(p.clone());
             return;
         }
         let before = self.seen.replace(p.clone());
@@ -812,8 +1014,8 @@ mod tests {
 
     fn bay(senders: usize) -> Patch {
         use crate::fx::Kind;
-        let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)), notes: None }).collect();
-        nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)), notes: None });
+        let mut nodes: Vec<Node> = (0..senders).map(|_| Node { ident: "Fruity X-Y Controller".into(), name: "s".into(), fx: Some(Fx::new(Kind::Xy)), notes: None, uid: 0 }).collect();
+        nodes.push(Node { ident: "Fruity Balance".into(), name: "b".into(), fx: Some(Fx::new(Kind::Balance)), notes: None, uid: 0 });
         let c = |a, b| Cable::new(a, b, 1.0);
         Patch {
             cables: vec![c(End::Bay, End::Node(senders)), c(End::Node(senders), End::Bay)],
@@ -931,6 +1133,104 @@ mod tests {
         let again = encode(&p, Some(&bare));
         assert_eq!(decode(&again).unwrap().cables, p.cables);
         assert_eq!(again.len(), base.len());
+    }
+
+    #[test]
+    fn units_are_added_and_taken_out_by_hand() {
+        let base = fresh();
+        let mut p = decode(&base).unwrap();
+        let mut quiet = Fx::new(crate::fx::Kind::Balance);
+        quiet.p[1] = 0.0;
+        let k = p.add_unit("Fruity Balance", quiet);
+        let k2 = p.add_unit("Fruity Balance", Fx::new(crate::fx::Kind::Balance));
+        p.cables = vec![Cable::new(End::Bay, End::Node(k), 1.0), Cable::new(End::Node(k), End::Node(k2), 1.0), Cable::new(End::Node(k2), End::Bay, 1.0)];
+        p.rewire();
+        let held = encode(&p, Some(&base));
+        assert_eq!(encode(&p, None), held);
+        let back = decode(&held).unwrap();
+        assert_eq!(back.nodes.len(), 2);
+        assert!(back.nodes.iter().all(|n| n.uid >= 1000 && n.ident == "Fruity Balance") && back.nodes[0].uid != back.nodes[1].uid);
+        assert_eq!(back.nodes[0].fx, p.nodes[0].fx);
+        assert_eq!(back.cables, p.cables);
+        assert_eq!(back.order, vec![0, 1]);
+        // every kind of unit on offer comes back as itself
+        for d in addable() {
+            let mut one = decode(&base).unwrap();
+            one.add_unit(d.ident, Fx::new(d.kind));
+            let got = decode(&encode(&one, Some(&base))).unwrap();
+            assert_eq!(got.nodes[0].fx.as_ref().map(|f| f.kind), Some(d.kind), "{}", d.ident);
+        }
+        // written again as read, nothing moves; written again from the stale patch, the same bay comes out
+        assert_eq!(encode(&back, Some(&held)), held);
+        let twice = decode(&encode(&p, Some(&held))).unwrap();
+        assert_eq!((twice.nodes.len(), &twice.cables), (2, &p.cables));
+        // the running bay follows: silent through the turned-down unit, sound again once it is out
+        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
+        let run = |st: &mut State, p: &std::sync::Arc<Patch>| {
+            let mut io = vec![[0.5f32; 2]; 256];
+            st.sync(p);
+            process(p, st, &mut io, &cx);
+            io.iter().map(|f| f[0].abs()).fold(0.0f32, f32::max)
+        };
+        let mut live = std::sync::Arc::new(decode(&base).unwrap());
+        let mut st = State::new(&live, 48000.0);
+        assert!(run(&mut st, &live) > 0.4);
+        live = std::sync::Arc::new(back.clone());
+        assert!(run(&mut st, &live) < 1e-4);
+        let mut less = back.clone();
+        assert!(less.remove_unit(0));
+        assert_eq!(less.cables, vec![Cable::new(End::Node(0), End::Bay, 1.0)]);
+        less.cables.push(Cable::new(End::Bay, End::Node(0), 1.0));
+        less.rewire();
+        live = std::sync::Arc::new(less.clone());
+        assert!(run(&mut st, &live) > 0.4);
+        let small = decode(&encode(&less, Some(&held))).unwrap();
+        assert_eq!(small.nodes.len(), 1);
+        assert_eq!(small.nodes[0].uid, back.nodes[1].uid);
+        assert_eq!(small.cables.len(), 2);
+    }
+
+    #[test]
+    fn stock_bays_take_and_lose_units() {
+        let Ok(root) = std::env::var("CEREAL_FLP_CORPUS") else { return };
+        let mut stack = vec![std::path::Path::new(&root).join("Patches/Plugin presets/Effects/Patcher")];
+        let (mut bays, mut cut) = (0, 0);
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(f) = crate::preset::read(&path).ok() else { continue };
+                let Some(p) = decode(&f.state) else { continue };
+                bays += 1;
+                assert_eq!(encode(&p, Some(&f.state)), f.state, "{}", path.display());
+                let mut more = p.clone();
+                let k = more.add_unit("Fruity Balance", Fx::new(crate::fx::Kind::Balance));
+                more.cables.push(Cable::new(End::Bay, End::Node(k), 1.0));
+                more.cables.push(Cable::new(End::Node(k), End::Bay, 0.5));
+                more.rewire();
+                let bytes = encode(&more, Some(&f.state));
+                let back = decode(&bytes).unwrap();
+                assert_eq!(back.nodes.len(), p.nodes.len() + 1, "{}", path.display());
+                assert_eq!(back.sets, p.sets, "{}", path.display());
+                assert!(back.cables.iter().any(|c| c.from == End::Node(k) && c.to == End::Bay && c.level == 0.5), "{}", path.display());
+                assert_eq!(encode(&back, Some(&bytes)), bytes);
+                if more.can_remove(0) {
+                    let mut less = back.clone();
+                    assert!(less.remove_unit(0));
+                    let small = decode(&encode(&less, Some(&bytes))).unwrap();
+                    assert_eq!(small.nodes.len(), p.nodes.len(), "{}", path.display());
+                    assert_eq!(small.nodes.iter().map(|n| n.uid).collect::<Vec<_>>(), back.nodes[1..].iter().map(|n| n.uid).collect::<Vec<_>>());
+                    assert_eq!(small.cables.len(), less.cables.len(), "{}", path.display());
+                    cut += 1;
+                }
+            }
+        }
+        if bays > 0 {
+            eprintln!("{bays} stock bays took one more unit; {cut} gave one up");
+        }
     }
 
     #[test]
@@ -1068,7 +1368,7 @@ mod tests {
     }
 
     fn one_unit(fx: Fx, cables: Vec<Cable>) -> Patch {
-        Patch { nodes: vec![Node { ident: String::new(), name: String::new(), fx: Some(fx), notes: None }], cables, order: vec![0], ..Default::default() }
+        Patch { nodes: vec![Node { ident: String::new(), name: String::new(), fx: Some(fx), notes: None, uid: 0 }], cables, order: vec![0], ..Default::default() }
     }
 
     fn level_out(p: &Patch, hz: f32) -> f32 {
