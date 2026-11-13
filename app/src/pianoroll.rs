@@ -38,7 +38,7 @@ pub struct HelperRun {
 }
 
 /// The helper tools in menu order: label with its key, and the Alt+key that opens it.
-const HELPERS: [(&str, Key); 13] = [
+const HELPERS: [(&str, Key); 14] = [
     ("Riff machine                Alt+E", Key::E),
     ("Quantise...                 Alt+Q", Key::Q),
     ("Chop...                     Alt+U", Key::U),
@@ -52,6 +52,7 @@ const HELPERS: [(&str, Key); 13] = [
     ("Scale levels...             Alt+X", Key::X),
     ("LFO...                      Alt+O", Key::O),
     ("Articulate...               Alt+L", Key::L),
+    ("Chord progression...", Key::F35),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -857,10 +858,11 @@ impl App {
             9 => Helper::Random { amount: [0.3, 0.0, 0.0, 0.0, 0.0, 0.0], seed: 1, notes: 0, every: step, len: step, lo: 48, hi: 72, root, scale, bars: 1 },
             10 => Helper::Levels { prop: Prop::Vel, offset: 0.0, mul: 1.0, tension: 0.0 },
             11 => Helper::Lfo { prop: Prop::Vel, base: 0.6, depth: 0.5, period: ppq * 4, shape: 0, phase: 0.0 },
-            _ => Helper::Articulate { mul: 1.0, gap: 0, vary: 0.0, seed: 1 },
+            12 => Helper::Articulate { mul: 1.0, gap: 0, vary: 0.0, seed: 1 },
+            _ => Helper::Chords { root, scale: if scale == 0 { 1 } else { scale }, count: 4, each: self.song.bar().max(1), notes: 3, octave: 4, close: true, bass: false, gate: 1.0, seed: 1 },
         };
         // the riff machine writes its own notes, so with nothing selected it replaces nothing
-        let targets = if which == 0 && self.piano.sel.is_empty() { vec![] } else { self.pr_targets(pat) };
+        let targets = if (which == 0 || which == 13) && self.piano.sel.is_empty() { vec![] } else { self.pr_targets(pat) };
         self.piano.helper = Some(HelperRun { h, base: self.song.patterns[pat].notes.clone(), targets, pat, chan: self.sel_chan as u16, fresh: true });
         self.piano.sel.clear();
     }
@@ -871,7 +873,7 @@ impl App {
         if run.pat >= self.song.patterns.len() {
             return;
         }
-        let (ppq, step) = (self.song.ppq, self.song.step().max(1));
+        let (ppq, step, bar) = (self.song.ppq, self.song.step().max(1), self.song.bar().max(1));
         let before = run.h.clone();
         let (mut accept, mut cancel) = (false, false);
         let mut open = true;
@@ -1056,6 +1058,34 @@ impl App {
                     unit(ui, "Density", density, 0.0, 1.0);
                     ui.label("Chord");
                     ui.add(egui::Slider::new(chord, 1..=4).suffix(" notes"));
+                    ui.end_row();
+                    seed_row(ui, seed);
+                }
+                Helper::Chords { root, scale, count, each, notes, octave, close, bass, gate, seed } => {
+                    scale_pick(ui, root, scale);
+                    ui.label("Chords");
+                    ui.add(egui::Slider::new(count, 1..=16));
+                    ui.end_row();
+                    ui.label("Chord length");
+                    let lens = [("1 beat", ppq), ("2 beats", ppq * 2), ("1 bar", bar), ("2 bars", bar * 2), ("4 bars", bar * 4)];
+                    egui::ComboBox::from_id_salt("hp_each").selected_text(lens.iter().find(|l| l.1 == *each).map(|l| l.0).unwrap_or("Other")).show_ui(ui, |ui| {
+                        for (n, t) in lens {
+                            ui.selectable_value(each, t, n);
+                        }
+                    });
+                    ui.end_row();
+                    unit(ui, "Gate", gate, 0.05, 1.0);
+                    ui.label("Notes");
+                    ui.add(egui::Slider::new(notes, 2..=5));
+                    ui.end_row();
+                    ui.label("Octave");
+                    ui.add(egui::Slider::new(octave, 1..=8));
+                    ui.end_row();
+                    ui.label("Voicing");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(close, "Close");
+                        ui.checkbox(bass, "Bass note");
+                    });
                     ui.end_row();
                     seed_row(ui, seed);
                 }

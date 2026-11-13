@@ -74,6 +74,9 @@ pub struct State {
     /// Pixels per tick at 96 ppq.
     zoom: f32,
     track_h: f32,
+    /// A track being dragged taller or shorter by the lower edge of its name: the track, where the drag began
+    /// and the size it had.
+    size_drag: Option<(usize, f32, f32)>,
     drag: Option<Drag>,
     pub tool: Tool,
     snap: usize,
@@ -109,7 +112,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, size_drag: None, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -494,6 +497,20 @@ impl App {
                 if tr > 0 {
                     changed |= ui.checkbox(&mut t.grouped, "Group with above track").changed();
                 }
+                ui.menu_button("Size", |ui| {
+                    for pc in [25u32, 50, 75, 100, 150, 200, 300, 400] {
+                        if ui.radio(((t.size * 100.0).round() as u32) == pc, format!("{pc}%")).clicked() {
+                            t.size = pc as f32 / 100.0;
+                            changed = true;
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Resize all tracks").hint("Give every track this one's height").clicked() {
+                        act = Some(9);
+                        ui.close_menu();
+                    }
+                });
                 changed |= ui.checkbox(&mut t.lock_content, "Lock to content").on_hover_text("Drawing on this track puts down the clip that already lies on it").changed();
                 ui.separator();
                 ui.label(RichText::new("Performance settings").color(TEXT_DIM).small());
@@ -524,6 +541,10 @@ impl App {
             let n = self.song.tracks.len();
             let first = self.song.clips.iter().filter(|c| c.track as usize == tr).min_by_key(|c| c.pos).map(|c| c.src);
             match k {
+                9 => {
+                    let size = self.song.tracks[tr].size;
+                    self.song.tracks.iter_mut().for_each(|t| t.size = size);
+                }
                 0 => {
                     if let Some(src) = first {
                         self.song.tracks[tr].name = match src {
@@ -837,6 +858,14 @@ impl App {
         let ruler = Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(rect.right(), grid.top()));
         let th = self.playlist.track_h;
         let ntracks = self.song.tracks.len();
+        // where each track starts, counted from the first: tracks may each have their own height
+        let mut tops: Vec<f32> = Vec::with_capacity(ntracks + 1);
+        tops.push(0.0);
+        for t in &self.song.tracks {
+            tops.push(tops[tops.len() - 1] + (t.size.clamp(0.01, 8.0) * th).max(6.0).round());
+        }
+        let all_h = tops[ntracks];
+        let row_at = |off: f32| tops.partition_point(|&t| t <= off).saturating_sub(1).min(ntracks.saturating_sub(1));
         // performance mode: the clips ahead of the start marker are played by hand
         let zone = self.song.perf_start();
 
@@ -844,7 +873,7 @@ impl App {
             // Shift and the wheel over a track name moves the track; with Alt as well, over a clip, it nudges the clip
             if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
                 if heads.contains(pp) {
-                    let tr = (((pp.y - grid.top() + self.playlist.scroll_y) / th).floor().max(0.0) as usize).min(ntracks.saturating_sub(1));
+                    let tr = row_at(pp.y - grid.top() + self.playlist.scroll_y);
                     self.wheel_over = Some(crate::keys::WheelMove::Track(tr, false));
                 } else if let Some((_, Some(i))) = self.playlist.hover {
                     self.wheel_over = Some(crate::keys::WheelMove::Clip(i, false));
@@ -876,12 +905,13 @@ impl App {
         }
         let px = self.playlist.zoom * 96.0 / ppq;
         self.playlist.scroll_x = self.playlist.scroll_x.max(0.0);
-        self.playlist.scroll_y = self.playlist.scroll_y.clamp(0.0, (ntracks as f32 * th - grid.height()).max(0.0));
+        self.playlist.scroll_y = self.playlist.scroll_y.clamp(0.0, (all_h - grid.height()).max(0.0));
         let (sx, sy) = (self.playlist.scroll_x, self.playlist.scroll_y);
         let x_of = |tick: f32| grid.left() + tick * px - sx;
         let tick_of = |x: f32| ((x - grid.left() + sx) / px).max(0.0);
-        let y_of = |track: usize| grid.top() + track as f32 * th - sy;
-        let track_of = |y: f32| (((y - grid.top() + sy) / th).floor().max(0.0) as usize).min(ntracks.saturating_sub(1));
+        let y_of = |track: usize| grid.top() + tops[track.min(ntracks)] - sy;
+        let h_of = |track: usize| tops[(track + 1).min(ntracks)] - tops[track.min(ntracks)];
+        let track_of = |y: f32| row_at(y - grid.top() + sy);
 
         let p = ui.painter_at(rect);
         let (grid_dark, grid_light) = crate::widgets::grid_colours(self.settings.grid);
@@ -931,7 +961,7 @@ impl App {
             if tr < first_track || tr > last_track {
                 continue;
             }
-            let r = Rect::from_min_max(Pos2::new(x_of(c.pos as f32), y_of(tr) + 1.0), Pos2::new(x_of((c.pos + c.len) as f32) - 1.0, y_of(tr) + th));
+            let r = Rect::from_min_max(Pos2::new(x_of(c.pos as f32), y_of(tr) + 1.0), Pos2::new(x_of((c.pos + c.len) as f32) - 1.0, y_of(tr) + h_of(tr)));
             if r.right() < grid.left() || r.left() > grid.right() {
                 continue;
             }
@@ -1105,7 +1135,14 @@ impl App {
         let clicked = resp.clicked();
         for tr in first_track..=last_track {
             let y = y_of(tr);
-            let r = Rect::from_min_max(Pos2::new(heads.left(), y + 1.0), Pos2::new(heads.right() - 1.0, y + th));
+            let r = Rect::from_min_max(Pos2::new(heads.left(), y + 1.0), Pos2::new(heads.right() - 1.0, y + h_of(tr)));
+            // the lower edge of a name drags the track taller or shorter
+            if let Some(pp) = pointer.filter(|pp| self.playlist.size_drag.is_none() && resp.hovered() && heads.contains(*pp) && (pp.y - r.bottom()).abs() <= 3.0) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                if ui.input(|i| i.pointer.primary_pressed()) {
+                    self.playlist.size_drag = Some((tr, pp.y, self.song.tracks[tr].size));
+                }
+            }
             let t = &self.song.tracks[tr];
             hp.rect_filled(r, 2.0, rgb(t.color).gamma_multiply(if t.enabled { 1.0 } else { 0.5 }));
             let name = if t.name.is_empty() { format!("Track {}", tr + 1) } else { t.name.clone() };
@@ -1124,6 +1161,20 @@ impl App {
                 if resp.secondary_clicked() {
                     self.playlist.track_menu = Some((tr, pp));
                 }
+            }
+        }
+        if let Some((tr, y0, was)) = self.playlist.size_drag {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            toggle = None;
+            match pointer.filter(|_| ui.input(|i| i.pointer.primary_down())) {
+                Some(pp) if tr < ntracks => {
+                    let size = (was + (pp.y - y0) / th.max(1.0)).clamp(0.2, 8.0);
+                    if (size - self.song.tracks[tr].size).abs() > 0.004 {
+                        self.song.tracks[tr].size = size;
+                        self.dirty = true;
+                    }
+                }
+                _ => self.playlist.size_drag = None,
             }
         }
         if let Some(tr) = toggle {

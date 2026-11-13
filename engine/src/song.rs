@@ -680,11 +680,13 @@ pub struct Track {
     pub grouped: bool,
     /// Locked to its content: drawing on the track puts down the clip that already lies on it.
     pub lock_content: bool,
+    /// Height on the playlist, 1 being the usual one.
+    pub size: f32,
 }
 
 impl Default for Track {
     fn default() -> Self {
-        Self { name: String::new(), color: [72, 81, 86], enabled: true, perf: Perf::default(), grouped: false, lock_content: false }
+        Self { name: String::new(), color: [72, 81, 86], enabled: true, perf: Perf::default(), grouped: false, lock_content: false, size: 1.0 }
     }
 }
 
@@ -1946,7 +1948,7 @@ impl Song {
         let mut clips = vec![];
         {
             if !a.tracks.is_empty() {
-                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped, lock_content: t.content_locked }).collect();
+                tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped, lock_content: t.content_locked, size: if t.height > 0.0 { t.height } else { 1.0 } }).collect();
             }
             for it in &a.items {
                 let (src, offset) = match it.source {

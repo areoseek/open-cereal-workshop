@@ -102,6 +102,9 @@ pub enum Helper {
     Claw { period: u8, skip: u8 },
     /// Write a riff from nothing.
     Riff { root: u8, scale: usize, bars: u8, every: u32, gate: f32, range: u8, density: f32, chord: u8, seed: u32 },
+    /// Write a run of chords from the scale. `each` is one chord's length in ticks, `close` keeps every chord
+    /// inside one octave, `bass` adds the chord's root an octave below.
+    Chords { root: u8, scale: usize, count: u8, each: u32, notes: u8, octave: u8, close: bool, bass: bool, gate: f32, seed: u32 },
 }
 
 impl Helper {
@@ -120,6 +123,7 @@ impl Helper {
             Helper::Articulate { .. } => "Articulate",
             Helper::Claw { .. } => "Claw machine",
             Helper::Riff { .. } => "Riff machine",
+            Helper::Chords { .. } => "Chord progression",
         }
     }
 }
@@ -415,6 +419,47 @@ pub fn apply(h: &Helper, base: &[Note], targets: &[usize], chan: u16, ppq: u32) 
             }
             out
         }
+        Helper::Chords { root, scale, count, each, notes, octave, close, bass, gate, seed } => {
+            let mut rng = Rng::new(seed);
+            let low = (12 * octave.min(9) + root % 12).min(119);
+            let tones: Vec<u8> = (low..=131u8).filter(|&k| in_scale(k, root, scale)).collect();
+            let per = tones.iter().take_while(|&&k| k < low + 12).count().max(1);
+            // where each degree likes to go next: the home chord anywhere, the others towards home
+            const NEXT: [&[usize]; 7] = [&[3, 4, 5, 1, 2, 6], &[4, 4, 6, 3], &[5, 3, 5, 1], &[4, 0, 1, 4, 5], &[0, 0, 5, 3], &[3, 1, 4, 3, 2], &[0, 2, 0]];
+            let mut out = vec![];
+            let mut deg = 0usize;
+            let count = count.max(1) as u32;
+            for c in 0..count {
+                if c > 0 {
+                    let to = NEXT[deg % 7];
+                    deg = to[rng.below(to.len())] % per;
+                    // the last chord leans on the fifth or fourth so the loop turns round
+                    if c + 1 == count && count > 2 && per == 7 && rng.next() < 0.6 {
+                        deg = if rng.next() < 0.65 { 4 } else { 3 };
+                    }
+                }
+                let len = ((each.max(1) as f32 * gate) as u32).max(1);
+                let mut keys: Vec<u8> = (0..notes.clamp(2, 5) as usize).filter_map(|k| tones.get(deg + k * 2).copied()).collect();
+                if close {
+                    for k in keys.iter_mut() {
+                        while *k >= low + 12 {
+                            *k -= 12;
+                        }
+                    }
+                }
+                if bass {
+                    if let Some(b) = tones.get(deg).and_then(|k| k.checked_sub(12)) {
+                        keys.push(b);
+                    }
+                }
+                keys.sort_unstable();
+                keys.dedup();
+                for key in keys {
+                    out.push(Note { pos: first + c * each.max(1), len, chan, key, vel: 0.78, ..Default::default() });
+                }
+            }
+            out
+        }
     };
     rest.extend(made);
     rest.sort_by_key(|n| (n.pos, n.chan, n.key));
@@ -427,6 +472,19 @@ mod tests {
 
     fn chord() -> Vec<Note> {
         [60u8, 64, 67].iter().map(|&key| Note { pos: 0, len: 96, key, ..Default::default() }).collect()
+    }
+
+    #[test]
+    fn a_chord_run_starts_at_home_and_stays_in_the_scale() {
+        let h = Helper::Chords { root: 2, scale: 1, count: 4, each: 384, notes: 3, octave: 4, close: true, bass: true, gate: 1.0, seed: 3 };
+        let made = apply(&h, &[], &[], 1, 96);
+        assert_eq!(made.len(), 16, "four chords of three notes and a bass note");
+        assert!(made.iter().all(|n| in_scale(n.key, 2, 1) && n.chan == 1 && n.len == 384));
+        let first: Vec<u8> = made.iter().filter(|n| n.pos == 0).map(|n| n.key).collect();
+        assert_eq!(first, vec![38, 50, 54, 57], "D major on its root, with the D below");
+        assert_eq!(made.iter().map(|n| n.pos).max(), Some(3 * 384));
+        // close voicing never leaves the octave above the root
+        assert!(made.iter().filter(|n| n.key >= 50).all(|n| n.key < 62));
     }
 
     #[test]

@@ -1842,6 +1842,9 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
             if now.lock_content != was.lock_content && d.len() > 21 {
                 d[21] = now.lock_content as u8;
             }
+            if now.size != was.size && d.len() >= 17 {
+                d[13..17].copy_from_slice(&now.size.to_le_bytes());
+            }
             if (now.perf != was.perf || now.grouped != was.grouped) && d.len() >= 47 {
                 put_u32(d, 22, now.perf.motion as u32);
                 put_u32(d, 26, now.perf.press as u32);
@@ -2769,6 +2772,7 @@ mod tests {
         r.tracks[2].perf = crate::song::Perf { press: 3, motion: 5, sync: 2, pos_sync: 4, queue: true, tolerant: false };
         r.tracks[3].grouped = true;
         r.tracks[4].lock_content = true;
+        r.tracks[2].size = 1.75;
         let (bytes2, _) = save(&mut r, Some(&f)).unwrap();
         let (r2, _) = reload(&bytes2);
         assert!(r2.performance);
@@ -2777,6 +2781,7 @@ mod tests {
         assert_eq!(r2.tracks[1].perf, crate::song::Perf::default());
         assert!(r2.tracks[3].grouped && !r2.tracks[2].grouped);
         assert!(r2.tracks[4].lock_content && !r2.tracks[3].lock_content);
+        assert_eq!((r2.tracks[2].size, r2.tracks[3].size), (1.75, 1.0));
     }
 
     #[test]
