@@ -913,6 +913,8 @@ struct Voice {
     remaining: Option<u64>,
     level: f32,
     attack: f32,
+    /// The release falls along half a cosine instead of a straight line.
+    ease: bool,
     release: f32,
     releasing: bool,
     /// Stop with the short linear fade whatever the envelope says.
@@ -1188,7 +1190,8 @@ impl Voice {
             if self.fon {
                 s = self.filter(s);
             }
-            let g = self.level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
+            let level = if self.ease && self.releasing { 0.5 - 0.5 * (std::f32::consts::PI * self.level).cos() } else { self.level };
+            let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
             let side = self.mo[2] + self.sc[2];
@@ -2378,8 +2381,11 @@ impl Player {
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
                     // the three-oscillator instrument starts at full level on its first sample (measured)
-                    v.attack = if g.kind == crate::synth::Kind::Osc3 { 1.0 } else { ms(1.5) };
-                    v.release = ms(12.0);
+                    let osc3 = g.kind == crate::synth::Kind::Osc3;
+                    v.attack = if osc3 { 1.0 } else { ms(1.5) };
+                    // (measured: let go, it fades over 10 ms along half a cosine)
+                    v.release = ms(if osc3 { 10.0 } else { 12.0 });
+                    v.ease = osc3;
                     if let Some(p) = &tone.add {
                         // this instrument brings its own rise and fall
                         v.attack = ms(p.attack_s() * 1000.0);

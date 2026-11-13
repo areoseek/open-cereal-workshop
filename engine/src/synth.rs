@@ -1421,7 +1421,16 @@ impl ToneState {
                 for (c, d) in [(0usize, base / half), (1usize, base * half)] {
                     let d = d.min(0.49);
                     let p = &mut self.ph[k][c];
-                    o[k][c] = wave(osc.shape, *p, d);
+                    // each frame is the mean of three plain readings a third of a step apart (measured: the
+                    // edges land on thirds of the full jump and nothing is rounded off)
+                    let third = d / 3.0;
+                    let at = |q: f32| if q >= 1.0 { q - 1.0 } else { q };
+                    o[k][c] = if osc.shape == 0 {
+                        // the sine's three readings sit around the frame instead of after it
+                        (wave(0, *p, 0.0) + wave(0, *p + third, 0.0) + wave(0, *p - third, 0.0)) / 3.0
+                    } else {
+                        (wave(osc.shape, *p, 0.0) + wave(osc.shape, at(*p + third), 0.0) + wave(osc.shape, at(*p + 2.0 * third), 0.0)) / 3.0
+                    };
                     *p += d;
                     if *p >= 1.0 {
                         *p -= 1.0;
@@ -1443,7 +1452,7 @@ impl ToneState {
                 a * (1.0 + (o[2][c] - 1.0) * tone.mix3)
             } else {
                 a + (o[2][c] - a) * tone.mix3
-            } * 0.5;
+            } * 0.498_21; // measured level
         }
         out
     }
