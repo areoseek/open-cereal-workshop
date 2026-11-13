@@ -29,7 +29,7 @@ Current state
 - Instruments and effects: every stock plug-in a project can name has a unit of our own that reads the same
   stored settings, under a name of our own. How close each one is, and what is still an estimate, is listed
   per unit in docs/PARITY.md.
-- Other makers' plug-ins: CLAP and VST3 hosting.
+- Other makers' plug-ins: CLAP, VST3 and VST2 hosting, and projects that name an installed plug-in open with its saved sound.
 - Audio and MIDI recording, MIDI keyboards and controllers with learned links, MIDI output, a built-in audio
   editor.
 - Export to WAV, FLAC, MP3, Ogg Vorbis and MIDI, whole song, pattern, time selection or one file per mixer

@@ -7,6 +7,7 @@
 pub mod abi;
 pub mod abi3;
 mod view3;
+mod vst2;
 mod vst3;
 
 use std::collections::HashMap;
@@ -127,6 +128,9 @@ pub fn inside(path: &Path) -> Vec<Found> {
     if is_vst3(path) {
         return vst3::inside(path);
     }
+    if vst2::is_file(path) {
+        return vst2::inside(path);
+    }
     let Some(l) = load(path) else { return vec![] };
     let mut out = Vec::new();
     // SAFETY: the factory's own functions, called as the standard describes.
@@ -158,6 +162,12 @@ pub fn folders() -> Vec<PathBuf> {
         v.extend(std::env::split_paths(&list));
     }
     if cfg!(windows) {
+        for k in ["PROGRAMFILES", "COMMONPROGRAMFILES"] {
+            if let Some(d) = std::env::var_os(k) {
+                let d = PathBuf::from(d);
+                v.extend(if k == "PROGRAMFILES" { vec![d.join("VSTPlugins"), d.join("Steinberg").join("VSTPlugins"), d.join("Common Files").join("VST2")] } else { vec![d.join("VST2"), d.join("Steinberg").join("VST2")] });
+            }
+        }
         for k in ["COMMONPROGRAMFILES", "LOCALAPPDATA"] {
             if let Some(d) = std::env::var_os(k) {
                 let d = PathBuf::from(d);
@@ -169,9 +179,14 @@ pub fn folders() -> Vec<PathBuf> {
     } else {
         if let Some(h) = std::env::var_os("HOME") {
             v.push(PathBuf::from(&h).join(".clap"));
-            v.push(PathBuf::from(h).join(".vst3"));
+            v.push(PathBuf::from(&h).join(".vst3"));
+            v.push(PathBuf::from(&h).join(".vst"));
+            v.push(PathBuf::from(h).join(".lxvst"));
         }
-        for kind in ["clap", "vst3"] {
+        if let Some(list) = std::env::var_os("VST_PATH") {
+            v.extend(std::env::split_paths(&list));
+        }
+        for kind in ["clap", "vst3", "vst", "lxvst"] {
             for at in ["/usr/lib", "/usr/local/lib", "/usr/lib64"] {
                 v.push(Path::new(at).join(kind));
             }
@@ -382,6 +397,7 @@ fn pieces(state: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     (at == state.len() && !out.is_empty()).then_some(out)
 }
 
+const P_UNIQUE: u32 = 51;
 const P_ID: u32 = 52;
 const P_STATE: u32 = 53;
 const P_NAME: u32 = 54;
@@ -395,6 +411,7 @@ pub fn block(inst: &Instance, base: Option<&[u8]>) -> Vec<u8> {
     let path = inst.found.path.to_string_lossy().into_owned();
     let mut parts: Vec<(u32, Vec<u8>)> = match base.and_then(pieces) {
         Some(p) if from_parts(&p).is_some_and(|(_, id)| id == inst.found.id) => p.into_iter().map(|(i, d)| (i, d.to_vec())).collect(),
+        _ if matches!(inst.v3, Some(Alt::Two(_))) => vec![(P_UNIQUE, u32::from_str_radix(inst.found.id.trim_start_matches("vst2:"), 16).unwrap_or(0).to_le_bytes().to_vec()), (P_NAME, inst.found.name.clone().into_bytes()), (P_PATH, path.into_bytes()), (P_VENDOR, inst.found.vendor.clone().into_bytes())],
         _ => vec![(P_ID, inst.found.id.clone().into_bytes()), (P_NAME, inst.found.name.clone().into_bytes()), (P_PATH, path.into_bytes()), (P_VENDOR, inst.found.vendor.clone().into_bytes())],
     };
     parts.retain(|p| p.0 != P_STATE);
@@ -412,10 +429,14 @@ pub fn block(inst: &Instance, base: Option<&[u8]>) -> Vec<u8> {
 fn from_parts(parts: &[(u32, &[u8])]) -> Option<(PathBuf, String)> {
     let text = |want: u32| parts.iter().find(|p| p.0 == want).map(|p| String::from_utf8_lossy(p.1).trim_end_matches('\0').to_string());
     let path = PathBuf::from(text(P_PATH)?);
-    if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) && !is_vst3(&path) {
-        return None;
+    if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) || is_vst3(&path) {
+        return Some((path, text(P_ID).unwrap_or_default()));
     }
-    Some((path, text(P_ID).unwrap_or_default()))
+    // the older kind is known by a number of four letters; the file may be named for another system
+    let unique = parts.iter().find(|p| p.0 == P_UNIQUE && p.1.len() == 4).map(|p| u32::from_le_bytes([p.1[0], p.1[1], p.1[2], p.1[3]]))?;
+    let named = path.to_string_lossy().rsplit(['\\', '/']).next().unwrap_or_default().to_string();
+    let ext = Path::new(&named).extension()?.to_ascii_lowercase();
+    (ext == "dll" || ext == "so").then(|| (PathBuf::from(named), vst2::ident(unique)))
 }
 
 /// Open the plug-in a wrapper block names and hand it what it saved. Only installed plug-ins are opened:
@@ -425,12 +446,61 @@ pub fn from_block(state: &[u8]) -> Option<Arc<Instance>> {
     let (path, id) = from_parts(&parts)?;
     let known = known();
     let name = path.file_name();
-    let hit = known.iter().find(|f| f.id == id && f.path == path).or_else(|| known.iter().find(|f| !id.is_empty() && f.id == id)).or_else(|| known.iter().find(|f| id.is_empty() && f.path.file_name() == name))?;
+    let hit = known.iter().find(|f| f.id == id && f.path == path).or_else(|| known.iter().find(|f| !id.is_empty() && f.id == id)).or_else(|| known.iter().find(|f| id.is_empty() && f.path.file_name() == name)).or_else(|| known.iter().find(|f| id.starts_with("vst2:") && f.id.starts_with("vst2:") && same_stem(&f.path, &path)))?;
     let inst = Instance::open(&hit.path, &hit.id)?;
     if let Some((_, saved)) = parts.iter().find(|p| p.0 == P_STATE).filter(|p| !p.1.is_empty()) {
         inst.restore(saved);
     }
     Some(inst)
+}
+
+/// Whether two files carry the same name, whatever the case and the ending.
+fn same_stem(a: &Path, b: &Path) -> bool {
+    match (a.file_stem(), b.file_stem()) {
+        (Some(a), Some(b)) => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => false,
+    }
+}
+
+/// Either of the kinds that come as one object with the whole plug-in behind it.
+enum Alt {
+    Three(vst3::Plug),
+    Two(vst2::Plug),
+}
+
+macro_rules! both {
+    ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        impl Alt {
+            $(fn $name(&self, $($arg: $ty),*) -> $ret {
+                match self {
+                    Alt::Three(p) => p.$name($($arg),*),
+                    Alt::Two(p) => p.$name($($arg),*),
+                }
+            })*
+        }
+    };
+}
+
+both! {
+    rate() -> Option<f32>;
+    takes_sound() -> bool;
+    activate(rate: f32, offline: bool) -> bool;
+    process(io: &mut [[f32; 2]], evs: &[Ev], clock: &Clock, rate: f32) -> bool;
+    params() -> Vec<Param>;
+    value(id: u32) -> Option<f64>;
+    value_text(id: u32, value: f64) -> Option<String>;
+    set(id: u32, value: f64) -> ();
+    changed() -> Vec<(u32, f64)>;
+    save() -> Option<Vec<u8>>;
+    restore(state: &[u8]) -> bool;
+    take_dirty() -> bool;
+    take_rescan() -> bool;
+    latency() -> u32;
+    has_window() -> bool;
+    show_window(title: &str) -> bool;
+    hide_window() -> ();
+    window_open() -> bool;
+    idle(stalled: bool) -> ();
 }
 
 /// Every plug-in file under the install folders.
@@ -446,7 +516,7 @@ pub fn files() -> Vec<PathBuf> {
                 if depth < 4 {
                     walk(&p, depth + 1, out);
                 }
-            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) {
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")) || vst2::is_file(&p) {
                 out.push(p);
             }
         }
@@ -679,7 +749,7 @@ pub struct Instance {
     latency: AtomicU32,
     pub has_note_in: bool,
     /// Set when the plug-in is of the VST3 kind; the fields above then stay empty.
-    v3: Option<vst3::Plug>,
+    v3: Option<Alt>,
     /// The settings in the plug-in's own order as last listed, and the travel last sent to each, for
     /// clips and controllers that drive a setting by its place.
     table: Mutex<(Vec<Param>, Vec<f32>)>,
@@ -705,8 +775,15 @@ impl Instance {
     }
 
     fn open_raw(path: &Path, id: &str) -> Option<Arc<Instance>> {
-        if is_vst3(path) {
-            let (plug, found) = vst3::Plug::open(path, id)?;
+        if is_vst3(path) || vst2::is_file(path) {
+            let (plug, found, has_note_in) = if is_vst3(path) {
+                let (plug, found) = vst3::Plug::open(path, id)?;
+                let notes = plug.has_note_in;
+                (Alt::Three(plug), found, notes)
+            } else {
+                let (plug, found) = vst2::Plug::open(path, id)?;
+                (Alt::Two(plug), found, true)
+            };
             let none = std::ptr::null();
             let proc = Proc { rate: 0.0, active: false, processing: false, ins: vec![], outs: vec![], in_data: vec![], out_data: vec![], in_ptrs: vec![], out_ptrs: vec![], in_bufs: vec![], out_bufs: vec![], events: Vec::new(), steady: 0, midi_notes: false };
             return Some(Arc::new(Instance {
@@ -727,7 +804,7 @@ impl Instance {
                 gui_open: AtomicBool::new(false),
                 offline: AtomicBool::new(false),
                 latency: AtomicU32::new(0),
-                has_note_in: plug.has_note_in,
+                has_note_in,
                 v3: Some(plug),
                 table: Mutex::new((Vec::new(), Vec::new())),
             }));
@@ -1496,7 +1573,7 @@ pub(crate) fn test_plugin() -> Option<PathBuf> {
 pub(crate) fn test_install(dir: &Path, kind: &str) -> Option<PathBuf> {
     let built = test_plugin()?;
     std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join(format!("test-tone.{kind}"));
+    let path = dir.join(format!("test-tone.{}", if kind == "vst2" { std::env::consts::DLL_EXTENSION } else { kind }));
     if kind == "vst3" && cfg!(not(windows)) {
         // a folder with the code some levels down
         let inner = path.join("Contents").join(format!("{}-linux", std::env::consts::ARCH));
@@ -1628,6 +1705,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_older_kind_loads_plays_and_keeps_its_state() {
+        let dir = std::env::temp_dir().join(format!("cereal-host-two-{}", std::process::id()));
+        let Some(path) = test_install(&dir, "vst2") else {
+            eprintln!("test plug-in not built; skipped");
+            return;
+        };
+        let found = inside(&path);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].instrument && found[0].name == "Test Tone Two" && found[0].vendor == "Open Cereal Workshop");
+        assert_eq!(found[0].id, "vst2:4f435774");
+        let inst = Instance::open(&path, "").expect("opens");
+        assert!(!inst.takes_sound() && !inst.has_window());
+        let params = inst.params();
+        assert_eq!(params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Level", "Tune", "Tempo seen"]);
+        assert_eq!((params[0].default, inst.value(0)), (0.5, Some(0.5)));
+        assert_eq!(inst.value_text(0, 0.5).as_deref(), Some("0.50 dB"));
+        assert_eq!(inst.value_text(0, 0.7), None);
+
+        let clock = Clock { playing: true, tempo: 137.0, beats: 0.0, sig: (4, 4), offline: false };
+        let mut io = vec![[0.0f32; 2]; 512];
+        assert!(!inst.process(&mut io, &[], &clock, 48_000.0));
+        assert!(inst.activate(48_000.0));
+        assert_eq!(inst.rate(), Some(48_000.0));
+        inst.set(0, 1.0);
+        assert!(inst.process(&mut io, &[Ev::NoteOn { at: 256, key: 69, chan: 0, vel: 1.0 }], &clock, 48_000.0));
+        assert!(io[..256].iter().all(|s| s[0] == 0.0));
+        assert!(io[256..].iter().any(|s| s[0] > 0.9) && io.iter().all(|s| s[0] == s[1]));
+        // the plug-in asked for the time and got the song's tempo
+        assert!((inst.value(2).unwrap() - 0.137).abs() < 1e-6);
+        // longer than one stretch the plug-in is given at a time
+        let mut io = vec![[0.0f32; 2]; MAX_FRAMES * 2 + 100];
+        assert!(inst.process(&mut io, &[Ev::NoteOff { at: (MAX_FRAMES + 50) as u32, key: 69, chan: 0 }], &clock, 48_000.0));
+        assert!(io[MAX_FRAMES..MAX_FRAMES + 50].iter().any(|s| s[0].abs() > 0.5));
+        assert!(io[MAX_FRAMES + 50..].iter().all(|s| s[0] == 0.0));
+
+        // its state, laid out the way project files keep it, and back through a wrapper block
+        inst.set(1, 0.25);
+        let state = inst.save().expect("has state");
+        assert_eq!(state[..13], [0xf7, 0xff, 0xff, 0xff, 13, 12, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&state[13..17], b"tone");
+        let wrapped = block(&inst, None);
+        let parts = pieces(&wrapped).expect("a wrapper block");
+        assert!(parts.iter().any(|p| p.0 == P_UNIQUE && p.1 == b"tWCO"));
+        add_folder(&dir);
+        let back = from_block(&wrapped).expect("found again by its number");
+        assert_eq!((back.value(0), back.value(1)), (Some(1.0), Some(0.25)));
+        // a file made on another system names the plug-in by a path that is not here
+        for unique in [&b"xxxx"[..], b"tWCO"] {
+            let mut other = 10u32.to_le_bytes().to_vec();
+            for (id, data) in [(P_UNIQUE, unique), (P_PATH, &br"C:\Program Files (x86)\VstPlugins\Test-Tone.dll"[..]), (P_STATE, &state[..])] {
+                other.extend_from_slice(&id.to_le_bytes());
+                other.extend_from_slice(&(data.len() as u64).to_le_bytes());
+                other.extend_from_slice(data);
+            }
+            let back = from_block(&other).expect("found again by its file name or its number");
+            assert_eq!(back.value(1), Some(0.25));
+            // left alone, the block is written back as it came
+            assert_eq!(block(&back, Some(&other)) == other, unique == b"tWCO");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Run every plug-in under the folders in CEREAL_PLUGIN_TRY: a check against other makers' work.
     #[test]
     #[ignore]
@@ -1695,7 +1835,7 @@ mod tests {
 
     #[test]
     fn a_plugin_is_loaded_played_set_and_saved() {
-        let Some(path) = test_plugin() else {
+        let Some(path) = test_install(&std::env::temp_dir().join(format!("cereal-host-one-{}", std::process::id())), "clap") else {
             eprintln!("test plug-in not built; skipped");
             return;
         };

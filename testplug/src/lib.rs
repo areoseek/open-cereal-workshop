@@ -5,6 +5,7 @@ use std::ffi::{c_char, c_void, CStr};
 
 use cereal_engine::host::abi::*;
 
+mod v2;
 mod v3;
 
 struct Tone {

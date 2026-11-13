@@ -5164,7 +5164,7 @@ mod tests {
 
     #[test]
     fn a_hosted_plugin_plays_a_channel_and_treats_a_track() {
-        let Some(path) = crate::host::test_plugin() else {
+        let Some(path) = crate::host::test_install(&std::env::temp_dir().join(format!("cereal-host-play-{}", std::process::id())), "clap") else {
             eprintln!("test plug-in not built; skipped");
             return;
         };

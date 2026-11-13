@@ -344,7 +344,7 @@ impl Frame {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-mod os {
+pub(super) mod os {
     use std::ffi::c_void;
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
@@ -450,7 +450,7 @@ mod os {
 }
 
 #[cfg(windows)]
-mod os {
+pub(super) mod os {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -605,7 +605,7 @@ mod os {
 }
 
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
-mod os {
+pub(super) mod os {
     use std::ffi::c_void;
 
     pub const KIND: Option<&'static [u8]> = None;
