@@ -145,7 +145,8 @@ enum Drag {
     Rect { from: Pos2, add: bool, what: RectUse },
     /// Delete (None) or set the mute state (Some) of what the pointer touches; `right` = started with the right button.
     Sweep { mute: Option<bool>, right: bool },
-    Slice { from: Pos2 },
+    /// `del`: drawn with the right button, the shorter piece of each cut note goes
+    Slice { from: Pos2, del: bool },
     Paint,
     Lane,
     Seek,
@@ -1871,7 +1872,7 @@ impl App {
                             let to = hit.map(|(i, _)| !self.song.patterns[pat].notes[i].muted).unwrap_or(true);
                             self.piano.drag = Some(Drag::Sweep { mute: Some(to), right: false });
                         }
-                        Tool::Slice => self.piano.drag = Some(Drag::Slice { from: pp }),
+                        Tool::Slice => self.piano.drag = Some(Drag::Slice { from: pp, del: false }),
                         Tool::Select => self.piano.drag = Some(Drag::Rect { from: pp, add: mods.shift, what: RectUse::Select }),
                         Tool::Zoom => self.piano.drag = Some(Drag::Rect { from: pp, add: false, what: RectUse::Zoom }),
                         Tool::Playback => self.piano.drag = Some(Drag::Seek),
@@ -1880,6 +1881,7 @@ impl App {
             } else if sec_pressed && self.piano.drag.is_none() && grid.contains(pp) {
                 match tool {
                     Tool::Mute if ralt => self.pr_quantise(),
+                    Tool::Slice => self.piano.drag = Some(Drag::Slice { from: pp, del: true }),
                     Tool::Zoom => {
                         let off = pp.x - grid.left();
                         let old = self.piano.zoom;
@@ -2008,8 +2010,9 @@ impl App {
                         }
                     }
                 }
-                Drag::Slice { from } => {
-                    if down {
+                Drag::Slice { from, del } => {
+                    let del = *del;
+                    if if del { sec_down } else { down } {
                         ui.painter_at(grid).line_segment([*from, pp], Stroke::new(1.5_f32, Color32::WHITE));
                     } else {
                         let (a, b) = (*from, pp);
@@ -2027,7 +2030,16 @@ impl App {
                             let t = tick_of(x);
                             let at = (((t / g as f32).round() as u32) * g).max(1);
                             let len = note_len(&notes[i], step);
-                            if at > notes[i].pos && at < notes[i].pos + len {
+                            if del && at > notes[i].pos && at < notes[i].pos + len {
+                                let (head, rest) = (at - notes[i].pos, notes[i].pos + len - at);
+                                if head >= rest {
+                                    notes[i].len = head;
+                                } else {
+                                    notes[i].pos = at;
+                                    notes[i].len = rest;
+                                }
+                                self.dirty = true;
+                            } else if at > notes[i].pos && at < notes[i].pos + len {
                                 let mut tail = notes[i].clone();
                                 tail.pos = at;
                                 tail.len = notes[i].pos + len - at;

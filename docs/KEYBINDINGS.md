@@ -166,7 +166,7 @@ keyboard off and outside the channel rack.
 | Shift+Ctrl+V | Paste from the MIDI clipboard | yes (the clipboard holds the path of a MIDI file) |
 | Shift+M, Shift+N | Select groups of notes at random; chord stamp off (the Stamp menu on the toolbar picks a chord the draw tool lays down) | yes |
 | Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
-| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; quick quantise | yes (slice-and-delete with the right button is not done) |
+| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; quick quantise | yes (with the right button the shorter piece of each cut note is dropped) |
 
 ## Playlist
 | Binding | Action | Done |
@@ -215,7 +215,7 @@ keyboard off and outside the channel rack.
 | Shift+M | Stretch mode: dragging an audio clip's end fits the sound to the new length, pitch kept | yes |
 | Shift+wheel on a track name | Move the track up / down | yes |
 | Shift+Alt+wheel | Nudge the clip under the pointer by the snap value | yes |
-| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; hear an audio clip | yes (slice-and-delete with the right button is not done) |
+| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; hear an audio clip | yes (with the right button the shorter piece of the cut clip is dropped) |
 
 ## Browser
 | Binding | Action | Done |

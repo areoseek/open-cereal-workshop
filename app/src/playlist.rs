@@ -51,7 +51,8 @@ enum Drag {
     Rect { from: Pos2, add: bool, zoom: bool },
     Sweep { mute: Option<bool>, right: bool },
     Paint,
-    Slice { tick: u32 },
+    /// `del`: held with the right button, the shorter piece of the cut clip goes
+    Slice { tick: u32, del: bool },
     Seek,
     /// Picking out a stretch of time on the ruler, from this tick.
     TimeSel { from: u32 },
@@ -1279,7 +1280,7 @@ impl App {
                         }
                         Tool::Slice => {
                             let t = tick_of(pp.x);
-                            self.playlist.drag = Some(Drag::Slice { tick: (((t / g as f32).round() as u32) * g).max(1) });
+                            self.playlist.drag = Some(Drag::Slice { tick: (((t / g as f32).round() as u32) * g).max(1), del: false });
                         }
                         Tool::Select => self.playlist.drag = Some(Drag::Rect { from: pp, add: mods.shift, zoom: false }),
                         Tool::Zoom => self.playlist.drag = Some(Drag::Rect { from: pp, add: false, zoom: true }),
@@ -1295,6 +1296,10 @@ impl App {
                                 self.handle.send(cereal_engine::Cmd::Preview(sm));
                             }
                         }
+                    }
+                    Tool::Slice => {
+                        let t = tick_of(pp.x);
+                        self.playlist.drag = Some(Drag::Slice { tick: (((t / g as f32).round() as u32) * g).max(1), del: true });
                     }
                     Tool::Zoom => {
                         let off = pp.x - grid.left();
@@ -1314,7 +1319,7 @@ impl App {
         self.playlist.hover = over.filter(|pp| grid.contains(*pp)).map(|pp| (snap(tick_of(pp.x)), hit.map(|h| h.0)));
 
         let mut done = false;
-        let mut cut: Option<(usize, u32)> = None;
+        let mut cut: Option<(usize, u32, bool)> = None;
         if let (Some(pp), Some(drag)) = (pointer, self.playlist.drag.as_ref()) {
             match drag {
                 Drag::Clips { mode, anchor_tick, anchor_track, orig } => {
@@ -1415,12 +1420,12 @@ impl App {
                         }
                     }
                 }
-                Drag::Slice { tick } => {
-                    if down {
+                Drag::Slice { tick, del } => {
+                    if if *del { sec_down } else { down } {
                         let x = x_of(*tick as f32);
                         ui.painter_at(grid).line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
                         if let Some((i, _)) = hit {
-                            cut = Some((i, *tick));
+                            cut = Some((i, *tick, *del));
                         }
                     } else {
                         done = true;
@@ -1525,8 +1530,21 @@ impl App {
         } else if self.playlist.drag.is_some() && !down && !sec_down {
             done = true;
         }
-        if let Some((i, at)) = cut {
-            self.pl_slice_clip(i, at);
+        if let Some((i, at, del)) = cut {
+            match self.song.clips.get_mut(i) {
+                Some(c) if del && at > c.pos && at < c.pos + c.len => {
+                    let (head, rest) = (at - c.pos, c.pos + c.len - at);
+                    if head >= rest {
+                        c.len = head;
+                    } else {
+                        c.offset += head;
+                        c.pos = at;
+                        c.len = rest;
+                    }
+                    self.dirty = true;
+                }
+                _ => self.pl_slice_clip(i, at),
+            }
         }
         if done {
             self.playlist.drag = None;

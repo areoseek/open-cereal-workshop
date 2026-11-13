@@ -5,6 +5,7 @@
 //! text=abc           typed text
 //! move=x,y           pointer to a point
 //! click=x,y          left click (rclick, dclick likewise)
+//! rdown=x,y, rup=x,y right button pressed, released
 //! down=x,y / up=x,y  press and release apart, for drags
 //! wheel=Shift+1      wheel notches (negative is towards the user) at the pointer, with modifiers
 
@@ -81,7 +82,7 @@ impl Script {
                 raw.events.push(Event::PointerMoved(self.at));
                 raw.events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: Vec2::new(0.0, last.parse().unwrap_or(0.0)), modifiers: mods });
             }
-            "move" | "click" | "rclick" | "dclick" | "down" | "up" => {
+            "move" | "click" | "rclick" | "dclick" | "down" | "up" | "rdown" | "rup" => {
                 let Some(at) = point(last) else { return };
                 self.at = at;
                 if mods != Modifiers::NONE {
@@ -96,6 +97,8 @@ impl Script {
                         button(raw, at, PointerButton::Primary, true, true);
                     }
                     "down" => button(raw, at, PointerButton::Primary, true, false),
+                    "rdown" => button(raw, at, PointerButton::Secondary, true, false),
+                    "rup" => button(raw, at, PointerButton::Secondary, false, true),
                     _ => button(raw, at, PointerButton::Primary, false, true),
                 }
             }
