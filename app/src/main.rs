@@ -14,6 +14,7 @@ mod midi;
 mod record;
 mod settings;
 mod setup;
+mod help;
 mod stems;
 mod unpack;
 mod waveed;
@@ -303,6 +304,7 @@ pub(crate) struct App {
     load_at: Option<std::time::Instant>,
     pub(crate) prefs_win: settings::State,
     show_about: bool,
+    help: help::State,
     /// What did not come across when the project was opened, shown once.
     problems: Vec<String>,
     /// The regions found in one audio channel's file, kept while its clip menu is used.
@@ -532,6 +534,7 @@ impl App {
             load_at: None,
             prefs_win: Default::default(),
             show_about: false,
+            help: Default::default(),
             problems: Vec::new(),
             regions: None,
             script_later: Vec::new(),
@@ -3024,7 +3027,13 @@ impl App {
                     }
                 }
                 Key::Enter if !repeat && self.show_playlist && matches!(self.focus, Win::Playlist | Win::None) => self.pl_max = !self.pl_max,
-                Key::F1 if !repeat => self.show_about = !self.show_about,
+                Key::F1 if !repeat => {
+                    if self.help.open {
+                        self.help.open = false;
+                    } else {
+                        self.help_open();
+                    }
+                }
                 Key::F8 if !repeat => self.show_picker = !self.show_picker,
                 Key::Slash => self.jump_bar(-1),
                 Key::Num0 if !self.typing_keys => self.jump_bar(1),
@@ -3631,6 +3640,10 @@ impl App {
                     });
                 });
                 ui.menu_button("HELP", |ui| {
+                    if ui.button("Keys and mouse      F1").clicked() {
+                        self.help_open();
+                        ui.close_menu();
+                    }
                     if ui.button("About").clicked() {
                         self.show_about = true;
                         ui.close_menu();
@@ -4111,6 +4124,7 @@ impl App {
             ui.label(RichText::new(&self.audio).color(TEXT_DIM).small());
         });
         self.show_about = open;
+        self.help_window(ctx);
         self.script_ask(ctx);
     }
 

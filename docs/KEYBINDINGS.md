@@ -67,7 +67,7 @@ keyboard off and outside the channel rack.
 | F10 | Settings | yes |
 | F11 | Project information | yes |
 | F12 | Close all windows | yes |
-| F1 | Help (the About window for now) | part |
+| F1 | Help: the bindings of the window in use, with a find box | yes |
 | Tab / Shift+Tab | On to the next / previous open window | yes |
 | Esc | Close the window that has the keys | yes |
 | Enter | Let the playlist fill the work area, and back | yes |
