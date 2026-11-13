@@ -19,6 +19,7 @@ pub mod synth;
 pub mod law;
 pub mod lossy;
 pub mod sf2;
+pub mod gm;
 pub mod speech;
 pub mod notes;
 pub mod pitchedit;

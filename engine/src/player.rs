@@ -2054,6 +2054,70 @@ impl Player {
                 None if live => self.midi_live.push((n.chan, n.key, off)),
                 None => self.midi_wait.push((delay as u64 + (self.sr * 0.25) as u64, off)),
             }
+            // a bank player on the sender's port sounds the note on its own mixer track
+            let Some(link) = ch.gm.clone() else { return };
+            let sr = self.sr;
+            let ms = |m: f32| 1.0 / (m * 0.001 * sr).max(1.0);
+            let chan_vol = law::channel_gain(self.ov.chan_volume(song, n.chan as usize));
+            let chan_pan = self.ov.chan_pan(song, n.chan as usize);
+            let note_gain = law::velocity_gain(n.vel);
+            let held = if live { len_frames } else { Some(len_frames.unwrap_or((sr * 0.12) as u64).max(1)) };
+            match link.voice(mc) {
+                Some(crate::gm::Voice::Map(map)) => {
+                    let fade = ms(4.0);
+                    for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.chan == n.chan && v.sample.is_some()) {
+                        if map.cuts(n.key, v.key) {
+                            v.kill = true;
+                            v.release = v.release.max(fade);
+                            v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
+                        }
+                    }
+                    let hits: Vec<crate::zones::Zone> = map.hit(n.key, vel).cloned().collect();
+                    for z in hits {
+                        let Some(smp) = z.sample.clone() else { continue };
+                        let keys = if z.track { (n.key as i32 - z.root) as f32 * 100.0 } else { 0.0 };
+                        let step = smp.rate as f64 / sr as f64 * 2f64.powf((keys + z.tune_cents + n.fine_cents) as f64 / 1200.0);
+                        let loop_pts = z.looped.filter(|l| l.1 > l.0 && l.1 <= smp.frames.len()).map(|l| (l.0 as f64, l.1 as f64));
+                        let (pl, pr) = law::pan((chan_pan + n.pan + z.pan).clamp(-1.0, 1.0));
+                        let gain = chan_vol * note_gain * z.gain;
+                        self.start(Voice {
+                            sample: Some(smp),
+                            loop_pts,
+                            step,
+                            step_to: step,
+                            step_now: step,
+                            level: if z.attack > 0.0 { 0.0 } else { 1.0 },
+                            attack: if z.attack > 0.0 { ms(z.attack * 1000.0) } else { 1.0 },
+                            release: ms(z.release * 1000.0),
+                            remaining: if z.one_shot { None } else { held },
+                            gl: gain * pl,
+                            gr: gain * pr,
+                            insert: link.insert,
+                            delay,
+                            chan: n.chan,
+                            key: n.key,
+                            live: live && !z.one_shot,
+                            note_gain: note_gain * z.gain,
+                            note_pan: n.pan,
+                            follow: z.track,
+                            venv: z.env.unwrap_or_default(),
+                            ..Default::default()
+                        });
+                    }
+                }
+                Some(crate::gm::Voice::Add(patch)) => {
+                    let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + n.fine_cents / 1200.0);
+                    let (pl, pr) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
+                    let gain = chan_vol * note_gain;
+                    let tone = crate::synth::Tone { add: Some(patch.clone()), ..Default::default() };
+                    let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: link.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
+                    v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
+                    v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
+                    v.tone = Some(tone);
+                    self.start(v);
+                }
+                None => {}
+            }
             return;
         }
         if ch.plugin.eq_ignore_ascii_case(crate::synth::KEY_SENDER) {
