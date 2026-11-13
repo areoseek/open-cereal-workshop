@@ -3092,8 +3092,11 @@ impl Unit {
         let z = &mut self.z;
         match self.fx.kind {
             Kind::Balance => {
+                // one render (pan -53, level 206) gave 0.7823 on the near side and 0.2578 on the far one, so
+                // neither law is a straight line; the curves through that point are a guess until both are swept
                 let (l, r) = balance(p[0] / 128.0);
-                let g = p[1] / 256.0;
+                let (l, r) = (l.powf(2.08), r.powf(2.08));
+                let g = (p[1] / 256.0).max(0.0).powf(1.13);
                 for f in io.iter_mut() {
                     f[0] *= l * g;
                     f[1] *= r * g;
@@ -4577,16 +4580,22 @@ impl Unit {
                 }
             }
             Kind::Phaser => {
-                let top = 2.0 + 8.0 * p[3] / 1024.0;
+                // fitted to one render (nine stages, feedback 0.4, half dry): the sweep is a sine in pitch that ran
+                // 1519 to 5971 Hz at 0.346 Hz with the sides 0.406 of a turn apart, the fed back part is one sample
+                // late and keeps its sign, and both parts came out 0.733 loud. How each knob bends is not measured
+                let top = 0.6914 * (1.0 + 4.0 * p[3] / 1024.0);
                 let inc = p[0] / 5000.0 * top / sr;
+                if z[62] == 0.0 {
+                    z[62] = 1.0;
+                    self.ph = 0.6245;
+                }
                 let (lo, hi) = (p[1] / 1000.0, p[2] / 1000.0);
-                let spread = p[4] / 1024.0;
+                let spread = p[4] / 512.0 * 0.4059;
                 let stages = (p[5] as usize).clamp(1, 23);
                 let fb = (p[6] / 1000.0).clamp(0.0, 0.98);
                 let dry = (p[7] / 1024.0).clamp(0.0, 1.0);
-                let gain = p[8] / 2500.0;
-                // odd stage counts turn the loop's sign over, so the fed back part keeps ringing the same way
-                let sign = if stages % 2 == 0 { 1.0 } else { -1.0 };
+                let gain = (p[8] / 2500.0).max(0.0).powf(0.814);
+                let sign = 1.0;
                 let mut co = [0.0f32; 2];
                 for (i, f) in io.iter_mut().enumerate() {
                     if i % 16 == 0 {
@@ -4596,7 +4605,7 @@ impl Unit {
                         }
                         for c in 0..2 {
                             let l = 0.5 - 0.5 * ((self.ph + spread * c as f32) * TAU).cos();
-                            let t = (PI * knob_hz(0.15 + 0.8 * (lo + (hi - lo) * l)) / sr).min(1.5).tan();
+                            let t = (PI * 1249.2 * 7.0685f32.powf(lo + (hi - lo) * l) / sr).min(1.5).tan();
                             co[c] = (t - 1.0) / (t + 1.0);
                         }
                     }
