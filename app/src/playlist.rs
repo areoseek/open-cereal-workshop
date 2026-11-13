@@ -180,6 +180,86 @@ impl App {
         let area = egui::Area::new(egui::Id::new("pl_clip_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(190.0);
+                if let Some(ch) = audio {
+                    if ui.button("Preview").hint("Hear the sound of this clip").clicked() {
+                        if let Some(sm) = self.song.channels[ch].sample.clone() {
+                            self.handle.send(cereal_engine::Cmd::Preview(sm));
+                        }
+                        close = true;
+                    }
+                }
+                if ui.button("Rename and color").clicked() {
+                    match clip.src {
+                        ClipSrc::Pattern(p) => {
+                            self.song.ensure_pattern(p);
+                            self.rename_pattern = Some((p, self.song.patterns[p].name.clone()));
+                        }
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                            if let Some(ch) = self.song.channels.get(c) {
+                                self.rack.rename = Some((c, ch.name.clone()));
+                                self.show_rack = true;
+                            }
+                        }
+                    }
+                    close = true;
+                }
+                if let Some(ch) = audio {
+                    ui.menu_button("Automate", |ui| {
+                        for (name, t) in [("Panning", Target::ChanPan(ch)), ("Volume", Target::ChanVolume(ch)), ("Pitch", Target::ChanPitch(ch))] {
+                            if ui.button(name).clicked() {
+                                self.make_auto_clip_at(t, Some((clip.pos, clip.len)));
+                                close = true;
+                            }
+                        }
+                    });
+                }
+                ui.menu_button("Chop", |ui| {
+                    for (name, grid) in [("In bars", self.song.bar()), ("In beats", self.song.beat_ticks()), ("In steps", self.song.step())] {
+                        if ui.button(name).clicked() {
+                            let g = grid.max(1);
+                            let cuts: Vec<u32> = ((clip.pos / g + 1)..).map(|k| k * g).take_while(|&t| t < clip.pos + clip.len).collect();
+                            self.pl_chop(i, &cuts);
+                            close = true;
+                        }
+                    }
+                    if let Some(ch) = audio {
+                        ui.separator();
+                        for (name, sense) in [("Dull auto-slicing", 0.25f32), ("Medium auto-slicing", 0.5), ("Sharp auto-slicing", 0.8)] {
+                            if ui.button(name).hint("Cut where the sound has its hits").clicked() {
+                                if let Some(sm) = self.song.channels[ch].sample.clone() {
+                                    // an unstretched clip: its ticks run at the song's tempo over the sound's own rate
+                                    let per_tick = sm.rate as f64 * 60.0 / (self.song.tempo as f64 * self.song.ppq as f64);
+                                    let cuts: Vec<u32> = cereal_engine::waveed::onsets(&sm.frames, 0, sm.frames.len(), sm.rate, sense)
+                                        .into_iter()
+                                        .map(|f| f as f64 / per_tick)
+                                        .filter(|&t| t > clip.offset as f64 + 1.0 && t < (clip.offset + clip.len) as f64 - 1.0)
+                                        .map(|t| clip.pos + (t - clip.offset as f64).round() as u32)
+                                        .collect();
+                                    self.pl_chop(i, &cuts);
+                                }
+                                close = true;
+                            }
+                        }
+                    }
+                });
+                match clip.src {
+                    ClipSrc::Pattern(p) => {
+                        if ui.button("Select source pattern").clicked() {
+                            self.handle.transport.set_pattern(p);
+                            close = true;
+                        }
+                    }
+                    ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                        if ui.button("Select source channel").clicked() {
+                            self.sel_chan = c;
+                            self.rack.sel.clear();
+                            self.rack.sel.insert(c);
+                            self.show_chanset = true;
+                            close = true;
+                        }
+                    }
+                }
+                ui.separator();
                 if ui.button("Select all similar clips").clicked() {
                     self.playlist.sel = (0..self.song.clips.len()).filter(|&k| self.song.clips[k].src == clip.src).collect();
                     close = true;
@@ -222,7 +302,10 @@ impl App {
                 }
             });
         });
-        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
+        // the sub-menus are layers of their own in front: a press on one of them is not a press outside
+        let outside = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten().map(|p| !area.response.rect.contains(p)))
+            .map(|out| out && ctx.pointer_interact_pos().and_then(|p| ctx.layer_id_at(p)).is_none_or(|l| l.order != egui::Order::Foreground))
+            .unwrap_or(false);
         if close || (outside && !ctx.input(|i| i.pointer.primary_down() && i.pointer.press_origin() == Some(at))) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.playlist.clip_menu = None;
         }
@@ -416,8 +499,13 @@ impl App {
     /// Make an automation clip for a control: a flat line at where the control stands now, as long as the song,
     /// on the first track with room for it.
     pub(crate) fn make_auto_clip(&mut self, t: Target) {
+        self.make_auto_clip_at(t, None);
+    }
+
+    /// The same over one stretch of the song (a clip's own span), or the whole song.
+    pub(crate) fn make_auto_clip_at(&mut self, t: Target, span: Option<(u32, u32)>) {
         let v = self.target_travel(t);
-        let len = self.song.length().max(self.song.bar() * 4);
+        let (pos, len) = span.unwrap_or((0, self.song.length().max(self.song.bar() * 4)));
         let pt = |tick: f64| cereal_engine::song::AutoPt { tick, value: v, tension: 0.0, mode: 0 };
         let mut c = cereal_engine::song::Chan::default();
         c.name = self.song.target_name(t);
@@ -427,7 +515,7 @@ impl App {
         let ci = self.song.channels.len() - 1;
         let ntracks = self.song.tracks.len().max(1) as u16;
         let track = (0..ntracks).find(|&tr| !self.song.clips.iter().any(|c| c.track == tr)).unwrap_or(0);
-        self.song.clips.push(Clip { pos: 0, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false, group: 0 });
+        self.song.clips.push(Clip { pos, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false, group: 0 });
         self.show_playlist = true;
         self.dirty = true;
         self.status = format!("Automation clip made for {}", self.song.target_name(t));
@@ -1434,6 +1522,18 @@ impl App {
             self.song.clips.push(tail);
             self.dirty = true;
         }
+    }
+
+    /// Cut one clip at each of these song positions.
+    fn pl_chop(&mut self, i: usize, cuts: &[u32]) {
+        let mut cuts = cuts.to_vec();
+        cuts.sort_unstable();
+        cuts.dedup();
+        // from the far end, so the clip at `i` stays the head that is cut next
+        for &at in cuts.iter().rev() {
+            self.pl_slice_clip(i, at);
+        }
+        self.playlist.sel.clear();
     }
 
     /// Shift one clip by the snap value.
