@@ -267,6 +267,8 @@ pub(crate) struct App {
     /// MIDI keyboards and pads.
     midi: midi::MidiIn,
     sel_insert: usize,
+    /// The channel that was picked a frame ago.
+    sel_chan_was: usize,
     /// Mixer tracks selected besides the one that has the keys; faders, pans and mutes move together.
     mixer_sel: std::collections::BTreeSet<usize>,
     rack: rack::State,
@@ -440,6 +442,7 @@ impl App {
         handle.transport.set_count_bars(settings.count_bars.max(1));
         cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
         handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
+        handle.transport.set_reset_fx(settings.opt(setup::OPT_RESET_FX));
         if settings.gm_bank.is_some() {
             cereal_engine::gm::set_bank(settings.gm_bank.clone());
         }
@@ -500,6 +503,7 @@ impl App {
             sel_chan: 0,
             midi,
             sel_insert: 0,
+            sel_chan_was: 0,
             mixer_sel: Default::default(),
             rack: Default::default(),
             piano: Default::default(),
@@ -1818,8 +1822,11 @@ impl App {
                         self.song.channels.len() - 1
                     }
                 };
+                let keep = into.is_some() && !self.settings.opt(setup::OPT_AUTO_NAME);
                 let c = &mut self.song.channels[ci];
-                c.name = s.name.clone();
+                if !keep || c.name.is_empty() {
+                    c.name = s.name.clone();
+                }
                 c.kind = ChannelKind::Sampler;
                 c.plugin.clear();
                 c.sample_path = path.to_string_lossy().to_string();
@@ -4570,6 +4577,16 @@ impl eframe::App for App {
         self.leave_window(ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ctx);
+        }
+        if self.sel_chan != self.sel_chan_was {
+            self.sel_chan_was = self.sel_chan;
+            if self.settings.opt(setup::OPT_AUTO_SELECT) && !self.fresh {
+                if let Some(c) = self.song.channels.get(self.sel_chan) {
+                    if c.insert < self.song.inserts.len() {
+                        self.sel_insert = c.insert;
+                    }
+                }
+            }
         }
         if self.dirty {
             self.dirty = false;

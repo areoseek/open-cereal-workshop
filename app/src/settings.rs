@@ -222,6 +222,12 @@ impl App {
             self.settings.late_notes = Some(late);
             let _ = self.settings.save();
         }
+        let mut reset = self.settings.opt(crate::setup::OPT_RESET_FX);
+        if ui.checkbox(&mut reset, "Reset plugins on transport").hint("Echoes and reverb tails are cut when the song stops or jumps").changed() {
+            self.handle.transport.set_reset_fx(reset);
+            self.settings.set_opt(crate::setup::OPT_RESET_FX, reset);
+            let _ = self.settings.save();
+        }
         ui.horizontal(|ui| {
             if ui.button("Rescan devices").clicked() {
                 self.prefs_win.outs = None;
@@ -258,6 +264,17 @@ impl App {
                 changed = true;
             }
         });
+        for (bit, name, hint) in [
+            (crate::setup::OPT_AUTO_NAME, "Auto name channels", "A sample put on a channel gives the channel its name"),
+            (crate::setup::OPT_AUTO_ZOOM, "Auto zoom in piano roll", "The piano roll shows the whole pattern when it turns to another pattern or channel"),
+            (crate::setup::OPT_AUTO_SELECT, "Auto select linked modules", "Picking a channel picks the mixer track it plays on"),
+        ] {
+            let mut on = self.settings.opt(bit);
+            if ui.checkbox(&mut on, name).hint(hint).changed() {
+                self.settings.set_opt(bit, on);
+                changed = true;
+            }
+        }
         ui.checkbox(&mut self.typing_keys, "Typing keyboard to piano");
         ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");
         let mut ask = !self.settings.never_ask;

@@ -156,6 +156,8 @@ enum Drag {
 }
 
 pub struct State {
+    /// The pattern and channel the roll showed last, for the auto zoom.
+    shown: Option<(usize, usize)>,
     scroll_x: f32,
     scroll_y: f32,
     /// Pixels per tick at 96 ppq; scaled for other resolutions.
@@ -204,6 +206,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            shown: None,
             scroll_x: 0.0,
             scroll_y: (131.0 - 72.0) * KEY_H,
             zoom: 0.5,
@@ -1531,6 +1534,19 @@ impl App {
         self.piano.grid_line = line;
         self.piano.left_tick = tick_of(grid.left()) as u32;
         self.piano.view_w = grid.width();
+        let shown = (self.pr_pat(), self.sel_chan);
+        if self.piano.shown != Some(shown) {
+            self.piano.shown = Some(shown);
+            if self.settings.opt(crate::setup::OPT_AUTO_ZOOM) {
+                self.pr_zoom_key(4);
+                // and the notes in the middle of the height
+                let keys = self.song.patterns.get(shown.0).map(|p| p.notes.iter().filter(|n| n.chan as usize == shown.1).map(|n| n.key as i32).collect::<Vec<_>>()).unwrap_or_default();
+                if let (Some(lo), Some(hi)) = (keys.iter().min(), keys.iter().max()) {
+                    let mid = (131 - (lo + hi) / 2) as f32 * KEY_H;
+                    self.piano.scroll_y = (mid - grid.height() * 0.5).max(0.0);
+                }
+            }
+        }
         let g = if mods.alt { 1 } else { self.pr_snap() };
         let snap_floor = |t: f32| ((t.max(0.0) as u32) / g) * g;
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;

@@ -78,6 +78,9 @@ pub struct Settings {
     pub toolbar_hidden: u8,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
+    /// Switches the user has moved (`opt_set`) and where they stand (`opt_val`); see the `OPT_` bits.
+    pub opt_set: u32,
+    pub opt_val: u32,
     /// How samples are read between their frames while playing (None = 4-point Hermite).
     pub resample: Option<u8>,
     /// The General MIDI bank file picked for the bank player.
@@ -172,7 +175,27 @@ pub fn trust_script(source: &str) {
     let _ = std::fs::write(dir.join(format!("{:016x}.py", std::hash::Hasher::finish(&h))), source);
 }
 
+/// A sample put on a channel names the channel.
+pub const OPT_AUTO_NAME: u32 = 1;
+/// The piano roll shows the whole pattern when it changes to another one.
+pub const OPT_AUTO_ZOOM: u32 = 2;
+/// Picking a channel picks its mixer track.
+pub const OPT_AUTO_SELECT: u32 = 4;
+/// Effects start afresh when the song stops or jumps.
+pub const OPT_RESET_FX: u32 = 8;
+/// The switches that are on until the user turns them off.
+const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT;
+
 impl Settings {
+    pub fn opt(&self, bit: u32) -> bool {
+        (if self.opt_set & bit != 0 { self.opt_val } else { OPT_DEFAULT }) & bit != 0
+    }
+
+    pub fn set_opt(&mut self, bit: u32, on: bool) {
+        self.opt_set |= bit;
+        self.opt_val = if on { self.opt_val | bit } else { self.opt_val & !bit };
+    }
+
     /// Every toolbar panel once, in the order asked for; ones the stored list leaves out follow in their usual order.
     pub fn toolbar_order(&self) -> Vec<u8> {
         let mut o: Vec<u8> = vec![];
@@ -201,6 +224,11 @@ impl Settings {
                 Some(("toolbar", v)) => s.toolbar = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 Some(("toolbar_hidden", v)) => s.toolbar_hidden = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
+                Some(("options", v)) => {
+                    let mut it = v.split(',').map(|x| x.trim().parse().unwrap_or(0));
+                    s.opt_set = it.next().unwrap_or(0);
+                    s.opt_val = it.next().unwrap_or(0);
+                }
                 Some(("autosave", v)) => s.autosave = v.trim().parse().ok(),
                 Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
                 Some(("tag", v)) => {
@@ -300,6 +328,9 @@ impl Settings {
         }
         if self.undo_levels > 0 {
             out += &format!("undo_levels={}\n", self.undo_levels);
+        }
+        if self.opt_set != 0 {
+            out += &format!("options={},{}\n", self.opt_set, self.opt_val);
         }
         if !self.toolbar.is_empty() {
             out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));

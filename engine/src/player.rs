@@ -112,6 +112,7 @@ pub struct Transport {
     recording: AtomicBool,
     countdown: AtomicBool,
     late_notes: AtomicBool,
+    reset_fx: AtomicBool,
     click_kind: std::sync::atomic::AtomicU8,
     count_bars: std::sync::atomic::AtomicU8,
     /// Notes played by hand are written down one grid step at a time while the song stands still.
@@ -299,6 +300,7 @@ impl Transport {
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
             late_notes: AtomicBool::new(false),
+            reset_fx: AtomicBool::new(false),
             click_kind: std::sync::atomic::AtomicU8::new(0),
             count_bars: std::sync::atomic::AtomicU8::new(1),
             step_edit: AtomicBool::new(false),
@@ -359,7 +361,13 @@ impl Transport {
     pub fn set_recording(&self, on: bool) {
         self.recording.store(on, Relaxed);
     }
-    /// Whether a bar of clicks is counted in before recording starts.
+    /// Whether effects start afresh (tails cut) when the song stops or jumps.
+    pub fn reset_fx(&self) -> bool {
+        self.reset_fx.load(Relaxed)
+    }
+    pub fn set_reset_fx(&self, on: bool) {
+        self.reset_fx.store(on, Relaxed);
+    }
     /// Whether notes already running where playing starts or jumps to are sounded.
     pub fn late_notes(&self) -> bool {
         self.late_notes.load(Relaxed)
@@ -3220,6 +3228,9 @@ impl Player {
             if playing {
                 self.silence(true);
             }
+            if tr.reset_fx() {
+                self.fx.iter_mut().for_each(|u| u.clear());
+            }
         }
         if playing && !self.was_playing {
             if let Some((a, b)) = tr.range() {
@@ -3247,6 +3258,9 @@ impl Player {
         }
         if !playing && self.was_playing {
             self.silence(false);
+            if tr.reset_fx() {
+                self.fx.iter_mut().for_each(|u| u.clear());
+            }
             self.perf_stop_all(tr.recording());
         }
         tr.perf_on.store(playing && tr.song_mode() && song.perf_start().is_some(), Relaxed);
