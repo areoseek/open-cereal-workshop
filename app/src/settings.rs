@@ -229,6 +229,21 @@ impl App {
             let _ = self.settings.save();
         }
         ui.horizontal(|ui| {
+            ui.label("Preview mixer track").hint("Sounds played from the browser and the metronome go through this mixer track");
+            let mut t = self.settings.preview_track;
+            let name = |t: u32| if t == 0 { "Master".to_string() } else { format!("Insert {t}") };
+            egui::ComboBox::from_id_salt("preview_track").width(140.0).selected_text(name(t)).show_ui(ui, |ui| {
+                for k in 0..self.song.inserts.len().clamp(1, 126) as u32 {
+                    ui.selectable_value(&mut t, k, name(k));
+                }
+            });
+            if t != self.settings.preview_track {
+                self.settings.preview_track = t;
+                self.handle.transport.set_preview_insert(t as usize);
+                let _ = self.settings.save();
+            }
+        });
+        ui.horizontal(|ui| {
             if ui.button("Rescan devices").clicked() {
                 self.prefs_win.outs = None;
             }
@@ -268,6 +283,7 @@ impl App {
             (crate::setup::OPT_AUTO_NAME, "Auto name channels", "A sample put on a channel gives the channel its name"),
             (crate::setup::OPT_AUTO_ZOOM, "Auto zoom in piano roll", "The piano roll shows the whole pattern when it turns to another pattern or channel"),
             (crate::setup::OPT_AUTO_SELECT, "Auto select linked modules", "Picking a channel picks the mixer track it plays on"),
+            (crate::setup::OPT_READ_TEMPO, "Read sample tempo information", "A loop that says how many beats it lasts is stretched to the project tempo when it lands in the playlist"),
         ] {
             let mut on = self.settings.opt(bit);
             if ui.checkbox(&mut on, name).hint(hint).changed() {

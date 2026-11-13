@@ -445,6 +445,7 @@ impl App {
         cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
         handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
         handle.transport.set_reset_fx(settings.opt(setup::OPT_RESET_FX));
+        handle.transport.set_preview_insert(settings.preview_track as usize);
         if settings.gm_bank.is_some() {
             cereal_engine::gm::set_bank(settings.gm_bank.clone());
         }
@@ -1742,10 +1743,17 @@ impl App {
                 return;
             }
         };
-        let len = ((smp.seconds() * self.song.tempo / 60.0 * self.song.ppq as f32).ceil() as u32).max(1);
+        let mut len = ((smp.seconds() * self.song.tempo / 60.0 * self.song.ppq as f32).ceil() as u32).max(1);
         let mut c = Chan::default();
         c.name = smp.name.clone();
         c.kind = ChannelKind::AudioClip;
+        let told = self.settings.opt(setup::OPT_READ_TEMPO).then(|| std::fs::read(path).ok()).flatten();
+        if let Some(beats) = told.and_then(|b| cereal_engine::waveed::tempo_beats(&b, &path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), smp.seconds())) {
+            c.smp.stretch_beats = beats;
+            c.smp.stretch_mul = 1.0;
+            c.smp.keep_pitch = true;
+            len = ((beats * self.song.ppq as f32).round() as u32).max(1);
+        }
         c.sample_path = path.to_string_lossy().to_string();
         c.set_sample(Some(smp));
         self.song.channels.push(c);
@@ -4034,6 +4042,22 @@ impl App {
                     }
                 });
                 self.song.time_sig = (n, d);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Timebase (PPQ)").hint("How many ticks a beat is cut into; everything in the project moves onto the new grid");
+                let was = self.song.ppq;
+                let mut ppq = was;
+                egui::ComboBox::from_id_salt("timebase").width(70.0).selected_text(ppq.to_string()).show_ui(ui, |ui| {
+                    for v in [24u32, 48, 72, 96, 120, 144, 168, 192, 384, 768, 960] {
+                        ui.selectable_value(&mut ppq, v, v.to_string());
+                    }
+                });
+                if ppq != was {
+                    let at = self.handle.transport.tick().max(0.0) as f64 * ppq as f64 / was.max(1) as f64;
+                    self.song.set_ppq(ppq);
+                    self.handle.transport.seek(at as u32);
+                    changed = true;
+                }
             });
             changed |= ui.checkbox(&mut self.song.truncated, "Play truncated notes in clips").changed();
             ui.horizontal(|ui| {

@@ -78,6 +78,8 @@ pub struct Settings {
     pub toolbar_hidden: u8,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
+    /// The mixer track browser previews and the metronome play through.
+    pub preview_track: u32,
     /// Switches the user has moved (`opt_set`) and where they stand (`opt_val`); see the `OPT_` bits.
     pub opt_set: u32,
     pub opt_val: u32,
@@ -184,7 +186,9 @@ pub const OPT_AUTO_SELECT: u32 = 4;
 /// Effects start afresh when the song stops or jumps.
 pub const OPT_RESET_FX: u32 = 8;
 /// The switches that are on until the user turns them off.
-const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT;
+/// A sound that says how many beats it lasts is fitted to the project tempo when it lands in the playlist.
+pub const OPT_READ_TEMPO: u32 = 16;
+const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT | OPT_READ_TEMPO;
 
 impl Settings {
     pub fn opt(&self, bit: u32) -> bool {
@@ -224,6 +228,7 @@ impl Settings {
                 Some(("toolbar", v)) => s.toolbar = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 Some(("toolbar_hidden", v)) => s.toolbar_hidden = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
+                Some(("preview_track", v)) => s.preview_track = v.trim().parse().unwrap_or(0),
                 Some(("options", v)) => {
                     let mut it = v.split(',').map(|x| x.trim().parse().unwrap_or(0));
                     s.opt_set = it.next().unwrap_or(0);
@@ -325,6 +330,9 @@ impl Settings {
         }
         if let Some(r) = self.resample {
             out += &format!("resample={r}\n");
+        }
+        if self.preview_track > 0 {
+            out += &format!("preview_track={}\n", self.preview_track);
         }
         if self.undo_levels > 0 {
             out += &format!("undo_levels={}\n", self.undo_levels);

@@ -1087,6 +1087,40 @@ impl Song {
         }
         out
     }
+    /// Change the timebase: every position and length in the project is counted afresh in ticks of the new
+    /// resolution, so the song sounds as before on a finer or coarser grid.
+    pub fn set_ppq(&mut self, ppq: u32) {
+        let (new, old) = (ppq.clamp(24, 960) as u64, self.ppq.max(1) as u64);
+        if new == old {
+            return;
+        }
+        let m = |t: u32| ((t as u64 * new + old / 2) / old) as u32;
+        let len = |t: u32| if t == 0 { 0 } else { m(t).max(1) };
+        for p in &mut self.patterns {
+            for n in &mut p.notes {
+                let end = m(n.pos + n.len);
+                n.pos = m(n.pos);
+                n.len = if n.len == 0 { 0 } else { end.saturating_sub(n.pos).max(1) };
+            }
+            p.events.iter_mut().for_each(|e| e.tick = m(e.tick));
+            p.markers.iter_mut().for_each(|k| k.pos = m(k.pos));
+        }
+        for c in &mut self.clips {
+            let end = m(c.pos + c.len);
+            c.pos = m(c.pos);
+            c.len = end.saturating_sub(c.pos).max(1);
+            c.offset = len(c.offset);
+        }
+        self.markers.iter_mut().for_each(|k| k.pos = m(k.pos));
+        for ch in &mut self.channels {
+            if let Some(a) = ch.auto.as_mut() {
+                Arc::make_mut(a).points.iter_mut().for_each(|p| p.tick = p.tick * new as f64 / old as f64);
+            }
+        }
+        self.ppq = new as u32;
+        self.prepare();
+    }
+
     /// Ticks in one step (a sixteenth).
     pub fn step(&self) -> u32 {
         (self.ppq / 4).max(1)
@@ -2215,6 +2249,22 @@ mod tests {
         assert_eq!((s.beat_ticks(), s.bar()), (192, 768));
         s.time_sig = (3, 4);
         assert_eq!((s.beat_ticks(), s.bar()), (96, 288));
+    }
+
+    #[test]
+    fn a_new_timebase_keeps_every_time_in_place() {
+        let mut s = Song::new();
+        s.patterns[0].notes.push(Note { pos: 36, len: 12, key: 60, ..Default::default() });
+        s.patterns[0].notes.push(Note { pos: 96, len: 0, key: 62, ..Default::default() });
+        s.clips.push(Clip { pos: 384, len: 100, track: 0, src: ClipSrc::Pattern(0), offset: 48, muted: false, group: 0 });
+        s.markers.push(TimeMarker { pos: 768, name: "x".into(), kind: 0, sig: (4, 4) });
+        s.set_ppq(192);
+        assert_eq!((s.ppq, s.bar()), (192, 768));
+        let n = &s.patterns[0].notes;
+        assert_eq!((n[0].pos, n[0].len, n[1].pos, n[1].len), (72, 24, 192, 0));
+        assert_eq!((s.clips[0].pos, s.clips[0].len, s.clips[0].offset, s.markers[0].pos), (768, 200, 96, 1536));
+        s.set_ppq(96);
+        assert_eq!((s.patterns[0].notes[0].pos, s.clips[0].len), (36, 100));
     }
 
     #[test]

@@ -2191,6 +2191,8 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     let ver = version_tuple(&orig.version);
     let unicode = ver >= (11, 5, 0, 0);
     let mut file = orig.file.clone();
+    // a changed timebase goes into the head first, so everything counted in ticks is seen as moved and rewritten
+    file.header.ppq = song.ppq.clamp(24, 960) as u16;
     restructure_channels(&mut file, orig, song, unicode);
 
     // from here the file and the song agree on which channel is which; compare and patch the rest
@@ -2938,6 +2940,23 @@ mod tests {
             let bytes = std::fs::read(&p).unwrap();
             let (song, f) = reload(&bytes);
             assert_eq!(to_bytes(&song, Some(&f)).unwrap(), bytes, "untouched save differs: {}", p.display());
+
+            // a new timebase is written out and every time comes back on the new grid
+            {
+                let mut s = song.clone();
+                s.set_ppq(song.ppq * 2);
+                let (back, _) = reload(&to_bytes(&s, Some(&f)).unwrap());
+                assert_eq!(back.ppq, s.ppq, "timebase lost: {}", p.display());
+                let at = |s: &Song| s.patterns.iter().map(|p| p.notes.iter().map(|n| (n.pos, n.len)).collect::<Vec<_>>()).collect::<Vec<_>>();
+                assert_eq!(at(&back), at(&s), "notes moved: {}", p.display());
+                let cl = |s: &Song| {
+                    let mut v = s.clips.iter().map(|c| (c.pos, c.track, c.len, c.offset)).collect::<Vec<_>>();
+                    v.sort();
+                    v
+                };
+                assert_eq!(cl(&back), cl(&s), "clips moved: {}", p.display());
+                assert!((back.length() as i64 - 2 * song.length() as i64).abs() <= 2, "length: {}", p.display());
+            }
 
             // a loop slicer's cut moved by hand comes back where it was put
             if let Some(ci) = song.channels.iter().position(|c| c.plugin.eq_ignore_ascii_case("Fruity Slicer") && c.slices.as_ref().is_some_and(|s| s.cuts.len() > 1)) {

@@ -115,6 +115,7 @@ pub struct Transport {
     countdown: AtomicBool,
     late_notes: AtomicBool,
     reset_fx: AtomicBool,
+    preview_insert: AtomicU32,
     click_kind: std::sync::atomic::AtomicU8,
     count_bars: std::sync::atomic::AtomicU8,
     /// Notes played by hand are written down one grid step at a time while the song stands still.
@@ -303,6 +304,7 @@ impl Transport {
             countdown: AtomicBool::new(false),
             late_notes: AtomicBool::new(false),
             reset_fx: AtomicBool::new(false),
+            preview_insert: AtomicU32::new(0),
             click_kind: std::sync::atomic::AtomicU8::new(0),
             count_bars: std::sync::atomic::AtomicU8::new(1),
             step_edit: AtomicBool::new(false),
@@ -364,6 +366,13 @@ impl Transport {
         self.recording.store(on, Relaxed);
     }
     /// Whether effects start afresh (tails cut) when the song stops or jumps.
+    /// The mixer track that browser previews and the metronome play through (0 is the master).
+    pub fn preview_insert(&self) -> usize {
+        self.preview_insert.load(Relaxed) as usize
+    }
+    pub fn set_preview_insert(&self, i: usize) {
+        self.preview_insert.store(i as u32, Relaxed);
+    }
     pub fn reset_fx(&self) -> bool {
         self.reset_fx.load(Relaxed)
     }
@@ -1627,6 +1636,10 @@ impl Player {
         self.sr
     }
 
+    fn preview_to(&self) -> usize {
+        self.transport.preview_insert().min(self.song.load().inserts.len().saturating_sub(1))
+    }
+
     fn start(&mut self, mut v: Voice) {
         self.born += 1;
         v.born = self.born;
@@ -2825,7 +2838,7 @@ impl Player {
                     }
                     let step = smp.rate as f64 / self.sr as f64;
                     let rel = 1.0 / (self.sr * 0.01);
-                    self.start(Voice { sample: Some(smp), step, level: 1.0, attack: 1.0, release: rel, gl: 0.8, gr: 0.8, insert: 0, preview: true, ..Default::default() });
+                    self.start(Voice { sample: Some(smp), step, level: 1.0, attack: 1.0, release: rel, gl: 0.8, gr: 0.8, insert: self.preview_to(), preview: true, ..Default::default() });
                 }
                 Cmd::PreviewFrom(smp, at) => {
                     for v in self.voices.iter_mut().filter(|v| v.preview) {
@@ -2834,7 +2847,7 @@ impl Player {
                     let step = smp.rate as f64 / self.sr as f64;
                     let rel = 1.0 / (self.sr * 0.01);
                     let pos = (at.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64).floor();
-                    self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0 / (self.sr * 0.003), release: rel, gl: 0.8, gr: 0.8, insert: 0, preview: true, ..Default::default() });
+                    self.start(Voice { sample: Some(smp), pos, step, level: 1.0, attack: 1.0 / (self.sr * 0.003), release: rel, gl: 0.8, gr: 0.8, insert: self.preview_to(), preview: true, ..Default::default() });
                 }
                 Cmd::StopPreview => {
                     for v in self.voices.iter_mut().filter(|v| v.preview) {
@@ -3308,7 +3321,7 @@ impl Player {
             while b < t1 && b < bar - 0.5 {
                 let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                 let smp = self.clicks[kind][if b % one < 0.5 { 0 } else { 1 }].clone();
-                self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+                self.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: self.preview_to(), delay, preview: true, ..Default::default() });
                 b += beat;
             }
             self.count_in -= n as f64 * tpf;
@@ -3437,7 +3450,7 @@ impl Player {
             let click = |me: &mut Self, at: f64, first: bool| {
                 let delay = (((at - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                 let smp = me.clicks[me.transport.click_kind() as usize % 4][if first { 0 } else { 1 }].clone();
-                me.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: 0, delay, preview: true, ..Default::default() });
+                me.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: me.preview_to(), delay, preview: true, ..Default::default() });
             };
             while b < t1 && b < until - 0.5 {
                 click(self, b, ((b - from) % bar) < 0.5);
@@ -5542,6 +5555,22 @@ mod tests {
         let after = side(0.6, 0.9, 0) / side(0.6, 0.9, 1).max(1e-9);
         assert!((before - 1.0).abs() < 0.2, "level at first: {before}");
         assert!(!(0.5..2.0).contains(&after), "one side falls away under the held note: {after}");
+    }
+
+    #[test]
+    fn previews_play_through_the_chosen_mixer_track() {
+        let mut s = tone_song(1.0);
+        s.inserts[3].enabled = false;
+        let smp = s.channels[0].sample.clone().unwrap();
+        let (handle, mut player) = crate::new_player(s, 48_000.0);
+        let mut buf = vec![0.0f32; 9600 * 2];
+        handle.send(Cmd::Preview(smp.clone()));
+        player.render(&mut buf, 2);
+        assert!(loud(&buf, 0.0, 0.2) > 0.1);
+        handle.transport.set_preview_insert(3);
+        handle.send(Cmd::Preview(smp));
+        player.render(&mut buf, 2);
+        assert!(loud(&buf, 0.1, 0.2) < 1e-4);
     }
 
     #[test]

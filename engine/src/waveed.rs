@@ -816,9 +816,56 @@ pub fn write_loop_info(wav: &mut Vec<u8>, frames: usize, rate: u32, tempo: f32, 
     wav[4..8].copy_from_slice(&total.to_le_bytes());
 }
 
+/// The beats a sound file says it lasts: from the tempo note inside a wave file, or failing that from a
+/// tempo written in the file's name ("... 140bpm ...") when the sound then comes out a whole number of beats.
+pub fn tempo_beats(bytes: &[u8], name: &str, seconds: f32) -> Option<f32> {
+    let mut at = 12;
+    while bytes.len() >= 12 && &bytes[..4] == b"RIFF" && at + 8 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().ok()?) as usize;
+        if &bytes[at..at + 4] == b"acid" && len >= 24 && at + 32 <= bytes.len() {
+            let b = at + 8;
+            let once = bytes[b] & 1 != 0;
+            let beats = u32::from_le_bytes(bytes[b + 12..b + 16].try_into().ok()?);
+            let tempo = f32::from_le_bytes(bytes[b + 20..b + 24].try_into().ok()?);
+            if !once && beats > 0 && beats < 100_000 {
+                return Some(beats as f32);
+            }
+            if !once && tempo.is_finite() && tempo > 10.0 && tempo < 1000.0 {
+                return Some((seconds * tempo / 60.0).round().max(1.0));
+            }
+            return None;
+        }
+        at += 8 + len + (len & 1);
+    }
+    let low = name.to_ascii_lowercase();
+    let end = low.find("bpm")?;
+    let head = low[..end].trim_end_matches([' ', '_', '-']);
+    let digits = head.len() - head.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let tempo: f32 = head[head.len() - digits..].parse().ok()?;
+    if !(40.0..=400.0).contains(&tempo) {
+        return None;
+    }
+    let beats = seconds * tempo / 60.0;
+    (beats >= 0.9 && (beats - beats.round()).abs() < 0.06).then(|| beats.round())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sound_says_how_many_beats_it_lasts() {
+        let mut wav = Vec::new();
+        crate::wav::write(&mut wav, &[0.0; 200], 44_100, 2, 16).unwrap();
+        assert_eq!(tempo_beats(&wav, "plain.wav", 2.0), None);
+        assert_eq!(tempo_beats(&wav, "Drums 120 BPM.wav", 2.0), Some(4.0));
+        assert_eq!(tempo_beats(&wav, "Drums_120bpm.wav", 2.3), None);
+        let mut once = wav.clone();
+        write_loop_info(&mut once, 100, 44_100, 140.0, 8, (4, 4), false);
+        assert_eq!(tempo_beats(&once, "Hit 120bpm.wav", 2.0), None);
+        write_loop_info(&mut wav, 100, 44_100, 140.0, 8, (4, 4), true);
+        assert_eq!(tempo_beats(&wav, "x.wav", 2.0), Some(8.0));
+    }
 
     #[test]
     fn loop_notes_are_added_as_whole_chunks() {
