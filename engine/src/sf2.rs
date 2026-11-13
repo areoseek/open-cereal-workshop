@@ -51,16 +51,17 @@ fn varint(b: &[u8], at: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// The block is a run of 4-byte numbers (version, a switch, patch, two send levels, bank, then eight
-/// overrides that are -1 when unused), the file's stored path with its length in front, and a tail of
-/// send and option settings. Which of the leading numbers is the patch and which the bank is taken from
-/// the few stored examples, all of which pick the first preset.
+/// The block is a run of 4-byte numbers (version, the patch counted from one, the bank, two send levels,
+/// the wheel, then eight overrides that are -1 when unused), the file's stored path with its length in
+/// front, and a tail of option settings. The patch number is borne out by many stored projects whose
+/// banks hold a single preset: the number is always that preset's patch plus one.
 pub fn setting(state: &[u8]) -> Option<Setting> {
     let n = |k: usize| state.get(k * 4..k * 4 + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
     n(0)?;
     let (len, at) = varint(state, PATH_AT)?;
     let path = String::from_utf8_lossy(state.get(at..at + len)?).to_string();
-    Some(Setting { path, bank: n(5)?.min(16383) as u16, patch: n(2)?.min(127) as u16 })
+    // The second number is the patch counted from one, the third the bank.
+    Some(Setting { path, bank: n(2)?.min(16383) as u16, patch: n(1)?.clamp(1, 128) as u16 - 1 })
 }
 
 /// The block with another file or preset written in.
@@ -73,8 +74,8 @@ pub fn with(state: &[u8], s: &Setting) -> Vec<u8> {
         h[44..48].copy_from_slice(&1u32.to_le_bytes());
         h
     });
-    head[8..12].copy_from_slice(&(s.patch as u32).to_le_bytes());
-    head[20..24].copy_from_slice(&(s.bank as u32).to_le_bytes());
+    head[4..8].copy_from_slice(&(s.patch as u32 + 1).to_le_bytes());
+    head[8..12].copy_from_slice(&(s.bank as u32).to_le_bytes());
     let tail: Vec<u8> = match varint(state, PATH_AT) {
         Some((len, at)) if at + len <= state.len() => state[at + len..].to_vec(),
         _ => vec![0xff, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0xff, 0, 0, 1, 1, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
@@ -367,6 +368,14 @@ pub fn open(ident: &str, state: &[u8], lib: Option<&mut Library>, project_dir: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_patch_is_stored_counted_from_one() {
+        let want = Setting { path: "C:\\Banks\\Choir.sf2".into(), bank: 3, patch: 52 };
+        let block = with(&[], &want);
+        assert_eq!(&block[4..12], &[53, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(setting(&block), Some(want));
+    }
 
     fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
         let mut v = id.to_vec();
