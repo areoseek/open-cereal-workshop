@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub struct Point {
     pub x: f32,
     pub y: f32,
-    /// The shape of the piece that arrives at this point: 0 half cosine, 1 straight, 2 handles, 3 tension,
+    /// The shape of the piece that leaves this point: 0 half cosine, 1 straight, 2 handles, 3 tension,
     /// 4 quarter sine, 5 quarter cosine.
     pub kind: u8,
     pub tension: f32,
@@ -29,8 +29,8 @@ impl Point {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phrase {
     pub name: String,
-    /// The phrase's length in steps when it keeps time with the song.
-    pub steps: f32,
+    /// The phrase's length in beats when it keeps time with the song (measured against a render).
+    pub beats: f32,
     /// The share of the sample's own speed a straight path plays at when it does not.
     pub speed: f32,
     pub own_speed: bool,
@@ -50,7 +50,7 @@ impl Default for Phrase {
     fn default() -> Self {
         Self {
             name: String::new(),
-            steps: 4.0,
+            beats: 4.0,
             speed: 1.0,
             own_speed: false,
             attack: 1.0,
@@ -114,15 +114,16 @@ impl Set {
         let mut at = 20 + int(s, 16)?.max(0) as usize;
         let mut phrases = Vec::new();
         while let (Some(2000), Some(size)) = (int(s, at), int(s, at + 4)) {
+            // the stored size does not always reach past the drawn points, so the phrase is read to its own end
             let end = at + 8 + size.max(0) as usize;
-            let r = s.get(..end)?;
+            let r = s;
             let mut q = at + 8;
             let key = int(r, q)?.clamp(0, 127) as u8;
             let name_len = int(r, q + 32)?.max(0) as usize;
             let name = String::from_utf8_lossy(r.get(q + 36..q + 36 + name_len)?).into_owned();
             let mut ph = Phrase {
                 name,
-                steps: real(r, q + 4)?,
+                beats: real(r, q + 4)?,
                 speed: real(r, q + 8)?,
                 attack: real(r, q + 12)?,
                 release: real(r, q + 16)?,
@@ -143,7 +144,7 @@ impl Set {
             ph.wave = points(r, &mut q)?;
             ph.level = points(r, &mut q)?;
             phrases.push((key, ph));
-            at = end;
+            at = if int(s, q) == Some(2000) || int(s, end) != Some(2000) { q } else { end };
         }
         Some(Self { shown, phrases })
     }
@@ -159,7 +160,7 @@ impl Set {
         for (key, ph) in &self.phrases {
             let mut r = Vec::new();
             r.extend_from_slice(&(*key as i32).to_le_bytes());
-            for v in [ph.steps, ph.speed, ph.attack, ph.release, ph.start, ph.end] {
+            for v in [ph.beats, ph.speed, ph.attack, ph.release, ph.start, ph.end] {
                 r.extend_from_slice(&v.to_le_bytes());
             }
             r.extend_from_slice(&(ph.own_speed as i32).to_le_bytes());
@@ -247,8 +248,12 @@ pub fn at(line: &[Point], x: f32) -> f32 {
         }
         let u = ((x - a.x) / span).clamp(0.0, 1.0);
         let half = std::f32::consts::FRAC_PI_2;
-        let s = match b.kind {
+        // measured against a render: a piece takes its shape from the point it leaves, and handles left
+        // where they rest give a plain half cosine
+        let rest = |h: &[f32; 2], x: f32| (h[0].abs() - x).abs() < 1e-3 && h[1].abs() < 1e-6;
+        let s = match a.kind {
             0 => (1.0 - (u * std::f32::consts::PI).cos()) * 0.5,
+            2 if rest(&a.after, 0.042) && rest(&b.before, 0.042) => (1.0 - (u * std::f32::consts::PI).cos()) * 0.5,
             2 => {
                 // the handles may lean past the ends; time only runs forward, so those parts are left out
                 let xs = [a.x, (a.x + a.after[0]).clamp(a.x, b.x), (b.x + b.before[0]).clamp(a.x, b.x), b.x];
@@ -266,7 +271,7 @@ pub fn at(line: &[Point], x: f32) -> f32 {
             }
             3 => {
                 // the handle sits where the piece stands at its middle
-                let t = b.tension.clamp(0.02, 0.98);
+                let t = a.tension.clamp(0.02, 0.98);
                 u.powf(t.ln() / 0.5f32.ln())
             }
             4 => (u * half).sin(),
@@ -297,6 +302,9 @@ pub struct Voice {
     held: bool,
     /// The muted stretches, smoothed.
     open: f32,
+    /// The rumble filter: its factor, and the last input and output of each side.
+    hp_k: f32,
+    hp: [[f32; 2]; 2],
 }
 
 impl Voice {
@@ -314,10 +322,10 @@ impl Voice {
         let secs = if ph.own_speed {
             (hi - lo).abs() * smp.frames.len() as f32 / smp.rate.max(1) as f32 / ph.speed.max(0.01)
         } else {
-            ph.steps.max(0.01) * 15.0 / tempo.max(1.0)
+            ph.beats.max(0.01) * 60.0 / tempo.max(1.0)
         };
         let fade = |ms: f32| 1.0 / (ms.clamp(0.1, 10_000.0) * 0.001 * sr).max(1.0);
-        Self { smp: smp.clone(), place, level, t: 0.0, dt: 1.0 / (secs.max(0.001) * sr) as f64, vel, gain: 0.0, up: fade(ph.attack), down: fade(ph.release), held: true, open: 1.0 }
+        Self { smp: smp.clone(), place, level, t: 0.0, dt: 1.0 / (secs.max(0.001) * sr) as f64, vel, gain: 0.0, up: fade(ph.attack), down: fade(ph.release), held: true, open: 1.0, hp_k: (-std::f32::consts::TAU * 18.0 / sr).exp(), hp: [[0.0; 2]; 2] }
     }
 
     /// Lets go of the key; hands back how long the voice still sounds.
@@ -340,11 +348,21 @@ impl Voice {
         self.gain = if self.held { (self.gain + self.up).min(1.0) } else { (self.gain - self.down).max(0.0) };
         self.t += self.dt;
         let fr = &self.smp.frames;
-        let k = (at as usize).min(fr.len() - 1);
-        let (a, b) = (fr[k], fr[(k + 1).min(fr.len() - 1)]);
+        let last = fr.len() - 1;
+        let k = (at as usize).min(last);
+        // a smooth curve through four frames: the head often creeps, and straight lines between frames dull that
+        let (a, b, c, d) = (fr[k.saturating_sub(1)], fr[k], fr[(k + 1).min(last)], fr[(k + 2).min(last)]);
         let m = at - k as f32;
-        let g = self.gain * self.open * self.vel;
-        [(a[0] + (b[0] - a[0]) * m) * g, (a[1] + (b[1] - a[1]) * m) * g]
+        // measured: the instrument sits 3 dB under the sample's own level, and a slow rumble filter follows it
+        let g = self.gain * self.open * self.vel * std::f32::consts::FRAC_1_SQRT_2;
+        let mut out = [0.0; 2];
+        for (i, o) in out.iter_mut().enumerate() {
+            let x = (b[i] + 0.5 * m * (c[i] - a[i] + m * (2.0 * a[i] - 5.0 * b[i] + 4.0 * c[i] - d[i] + m * (3.0 * (b[i] - c[i]) + d[i] - a[i])))) * g;
+            let y = self.hp_k * (self.hp[i][1] + x - self.hp[i][0]);
+            self.hp[i] = [x, y];
+            *o = y;
+        }
+        out
     }
 }
 
@@ -394,13 +412,13 @@ mod tests {
 
     #[test]
     fn a_stored_phrase_reads_back() {
-        let set = Set::parse(&block(62, &[(0.0, 0.0, 1), (0.5, 1.0, 0), (1.0, 0.0, 1)], &[(1, 0.0), (0, 0.5)]));
+        let set = Set::parse(&block(62, &[(0.0, 0.0, 0), (0.5, 1.0, 1), (1.0, 0.0, 1)], &[(1, 0.0), (0, 0.5)]));
         assert_eq!(set.shown, 62);
         let ph = set.phrase(62).unwrap();
-        assert_eq!((ph.name.as_str(), ph.steps, ph.start, ph.end), ("ab", 8.0, 0.25, 0.75));
+        assert_eq!((ph.name.as_str(), ph.beats, ph.start, ph.end), ("ab", 8.0, 0.25, 0.75));
         assert_eq!(ph.mutes, vec![(true, 0.0), (false, 0.5)]);
         assert_eq!(ph.wave.len(), 3);
-        // the half cosine eases out of the first point; the straight piece does not
+        // the half cosine eases out of the point it is set on; the straight piece does not
         assert!(at(&ph.wave, 0.05) < 0.05);
         assert!((at(&ph.wave, 0.25) - 0.5).abs() < 1e-4);
         assert!((at(&ph.wave, 0.75) - 0.5).abs() < 1e-4);
@@ -413,13 +431,16 @@ mod tests {
         let n = 48_000;
         let smp = Arc::new(Sample::from_mono("r", 48_000, &(0..n).map(|i| i as f32 / n as f32).collect::<Vec<_>>()));
         let set = Set::parse(&block(60, &[(0.0, 0.0, 1), (0.25, 1.0, 1), (0.5, 0.0, 1), (1.0, 1.0, 1)], &[(1, 0.0), (0, 0.5)]));
-        // 8 steps at 120 = one second
-        let mut v = Voice::start(&smp, set.phrase(60).unwrap(), 48_000.0, 1.0, 120.0);
+        // 8 beats at 480 = one second
+        let mut v = Voice::start(&smp, set.phrase(60).unwrap(), 48_000.0, 1.0, 480.0);
         let out: Vec<f32> = (0..48_000).map(|_| v.frame()[0]).collect();
-        assert!((out[6_000] - 0.5).abs() < 0.01, "{}", out[6_000]);
-        assert!((out[12_000] - 0.75).abs() < 0.01, "{}", out[12_000]);
-        assert!((out[18_000] - 0.5).abs() < 0.01, "{}", out[18_000]);
-        assert!(out[30_000].abs() < 1e-3 && out[47_000].abs() < 1e-3);
+        // the head is half way through the stretch (0.25 to 0.75 of the sample) an eighth of the way in
+        let frames = (n - 1) as f32;
+        assert!((v.place[TABLE / 8] / frames - 0.5).abs() < 0.01);
+        assert!((v.place[TABLE / 4] / frames - 0.75).abs() < 0.01);
+        assert!((v.place[TABLE * 3 / 8] / frames - 0.5).abs() < 0.01);
+        assert!(out[6_000] > 0.001, "{}", out[6_000]);
+        assert!(out[40_000].abs() < 1e-3 && out[47_000].abs() < 1e-3);
         assert_eq!(v.frame(), [0.0; 2]);
     }
 
@@ -439,7 +460,7 @@ mod tests {
             assert_eq!(crate::synth::sample_named_in("Wave Traveller", &again), crate::synth::sample_named_in("Wave Traveller", &pre.state));
             for (_, ph) in &set.phrases {
                 assert!(ph.wave.len() >= 2 && ph.level.len() >= 2 && !ph.mutes.is_empty(), "{}", e.path().display());
-                assert!(ph.wave.windows(2).all(|w| w[0].x <= w[1].x) && ph.steps > 0.0 && ph.start <= ph.end, "{}", e.path().display());
+                assert!(ph.wave.windows(2).all(|w| w[0].x <= w[1].x) && ph.beats > 0.0 && ph.start <= ph.end, "{}", e.path().display());
             }
             seen += 1;
         }

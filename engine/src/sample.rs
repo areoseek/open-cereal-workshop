@@ -138,8 +138,13 @@ impl Sample {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // a packed wave says how many frames it really holds; the packed stream rounds that up
+        let mut true_len = None;
         let (bytes, ext) = match ogg_inside_wav(&bytes) {
-            Some(range) => (first_ogg_stream(&bytes[range]), "ogg".to_string()),
+            Some(range) => {
+                true_len = wav_fact(&bytes);
+                (first_ogg_stream(&bytes[range]), "ogg".to_string())
+            }
             None => (bytes, ext),
         };
         let odd = odd_wav(&bytes);
@@ -153,6 +158,9 @@ impl Sample {
         let lp = if bytes.starts_with(b"RIFF") { wave_loop(&bytes) } else { None };
         let mut s = Self::decode(bytes, &ext).map_err(|e| format!("{}: {e}", path.display()))?;
         s.name = name;
+        if let Some(n) = true_len.filter(|&n| n > 0 && n < s.frames.len()) {
+            s.frames.truncate(n);
+        }
         s.loop_pts = lp.map(|(a, b)| (a as u32, b as u32 + 1)).filter(|l| l.1 > l.0 && l.1 as usize <= s.frames.len());
         Ok(s)
     }
@@ -219,6 +227,19 @@ impl Sample {
         }
         Ok(Self { name: String::new(), rate, mono, frames, loop_pts: None })
     }
+}
+
+/// The frame count a WAV states in its `fact` chunk.
+fn wav_fact(bytes: &[u8]) -> Option<usize> {
+    let mut i = 12;
+    while i + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().ok()?) as usize;
+        if &bytes[i..i + 4] == b"fact" && size >= 4 {
+            return Some(u32::from_le_bytes(bytes.get(i + 8..i + 12)?.try_into().ok()?) as usize);
+        }
+        i = i + 8 + size + (size & 1);
+    }
+    None
 }
 
 /// If `bytes` is a WAV whose data chunk is really an Ogg stream, give the range of that stream.

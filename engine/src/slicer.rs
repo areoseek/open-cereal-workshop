@@ -21,6 +21,8 @@ pub struct Slices {
     pub base: i32,
     /// Frames per second the cut points are counted in.
     pub rate: u32,
+    /// The second kind sounds its loop at full level; the first sits 3 dB under.
+    pub full: bool,
 }
 
 pub fn is_slicer(ident: &str) -> bool {
@@ -88,7 +90,7 @@ pub fn open(ident: &str, state: &[u8], mut lib: Option<&mut crate::sample::Libra
         cuts.push(Cut { pos: 0, key: -1, reverse: false, name: String::new() });
     }
     let f64_at = |o: usize| state.get(at + 4 + size + o..at + 12 + size + o).map(|b| f64::from_le_bytes(b.try_into().unwrap()) as f32);
-    Some((Slices { beats: f64_at(24).unwrap_or(0.0), bpm: 0.0, path, cuts, base: 60, rate }, smp))
+    Some((Slices { beats: f64_at(24).unwrap_or(0.0), bpm: 0.0, path, cuts, base: 60, rate, full: true }, smp))
 }
 
 impl Slices {
@@ -120,7 +122,7 @@ impl Slices {
         // after the cuts: a switch, the base key and the rate the cuts are counted in
         let base = int(at + 1).filter(|k| (0..128).contains(k)).unwrap_or(60);
         let rate = int(at + 5).filter(|r| (8000..=384000).contains(r)).unwrap_or(44100) as u32;
-        Some(Self { beats: flt(4)?, bpm: flt(8)?, path, cuts, base, rate })
+        Some(Self { beats: flt(4)?, bpm: flt(8)?, path, cuts, base, rate, full: false })
     }
 
     /// Write the cuts' places and reverse switches back into the block they were read from. The count and

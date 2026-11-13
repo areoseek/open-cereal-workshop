@@ -1616,12 +1616,12 @@ fn travel_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.add_space(6.0);
-            ui.checkbox(&mut ph.own_speed, "Own speed").hint("Off: the phrase lasts a number of steps at the song's tempo. On: it runs at a share of the sample's own speed");
+            ui.checkbox(&mut ph.own_speed, "Own speed").hint("Off: the phrase lasts a number of beats at the song's tempo. On: it runs at a share of the sample's own speed");
         });
         if ph.own_speed {
             cap_knob(ui, "Speed", &mut ph.speed, 0.05, 4.0, 1.0, |v| format!("Speed: {:.0} % of the sample's own with a straight path", v * 100.0));
         } else {
-            cap_knob(ui, "Length", &mut ph.steps, 0.25, 64.0, 4.0, |v| format!("Length: {v:.2} steps"));
+            cap_knob(ui, "Length", &mut ph.beats, 0.25, 64.0, 4.0, |v| format!("Length: {v:.2} beats"));
         }
         cap_knob(ui, "Start", &mut ph.start, 0.0, 1.0, 0.0, |v| format!("Start of the stretch the path moves in: {:.1} %", v * 100.0));
         cap_knob(ui, "End", &mut ph.end, 0.0, 1.0, 1.0, |v| format!("End of the stretch the path moves in: {:.1} %", v * 100.0));

@@ -2197,7 +2197,7 @@ impl Player {
                 let note_pan = n.pan;
                 let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                 // measured: a slice comes out 3 dB under the same loop in a sampler channel
-                let gain = chan_vol * note_gain * std::f32::consts::FRAC_1_SQRT_2;
+                let gain = chan_vol * note_gain * if sl.full { 1.0 } else { std::f32::consts::FRAC_1_SQRT_2 };
                 let frames = (len as f64 * scale / step) as u64;
                 let step = step * dir;
                 // in a cut group, a slice stops the ones it replaces as it starts
@@ -2421,6 +2421,10 @@ impl Player {
                         // this instrument brings its own rise and fall; ours only closes what is left of the tail
                         v.attack = 1.0;
                         v.release = ms(5.0);
+                    }
+                    if g.kind == crate::synth::Kind::Travel {
+                        // the path scratcher fades in by its own knob
+                        v.attack = 1.0;
                     }
                     v.tone = Some(tone);
                     v.step = 1.0;
@@ -5034,7 +5038,7 @@ mod tests {
         let mut s = tone_song(2.0);
         s.channels[0].kind = ChannelKind::Plugin;
         let cut = |pos| crate::slicer::Cut { pos, key: -1, reverse: false, name: String::new() };
-        s.channels[0].slices = Some(Arc::new(crate::slicer::Slices { beats: 4.0, bpm: 120.0, path: String::new(), cuts: vec![cut(0), cut(24_000), cut(48_000)], base: 60, rate: 48_000 }));
+        s.channels[0].slices = Some(Arc::new(crate::slicer::Slices { beats: 4.0, bpm: 120.0, path: String::new(), cuts: vec![cut(0), cut(24_000), cut(48_000)], base: 60, full: false, rate: 48_000 }));
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].key = 61;
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
