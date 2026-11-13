@@ -1796,11 +1796,17 @@ impl Player {
                             self.script_ctl.push((r.chan, node, k as u16, v));
                         }
                     }
-                    Out::Err(_) => {}
+                    Out::Err(e) => crate::script::note_output(&e.to_string()),
                 }
             }
             true
         });
+        // what they printed goes to the output window, a few times a second
+        if self.blockno % 64 == 0 {
+            if let Some(r) = runs.first() {
+                crate::script::note_output(&r.inst.printed());
+            }
+        }
         // a script may have been started by a note another script played
         runs.append(&mut self.scripts);
         self.scripts = runs;

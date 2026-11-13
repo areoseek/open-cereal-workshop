@@ -290,6 +290,10 @@ pub(crate) struct App {
     /// The load monitor: its window, the rows shown (name, share of real time) and when they were last counted.
     show_load: bool,
     show_touch: bool,
+    show_script_out: bool,
+    script_out: String,
+    /// Inputs tied to one channel whatever is selected: the device name ("" = the typing keyboard), the channel.
+    recv: Vec<(String, usize)>,
     touch_held: Option<(u16, u8)>,
     speech_dlg: Option<cereal_engine::speech::Voice>,
     load_rows: Vec<(String, f32)>,
@@ -510,6 +514,9 @@ impl App {
             show_info: false,
             show_load: false,
             show_touch: false,
+            show_script_out: false,
+            script_out: String::new(),
+            recv: Vec::new(),
             touch_held: None,
             speech_dlg: None,
             load_rows: vec![],
@@ -2414,6 +2421,39 @@ impl App {
         self.show_touch = open;
     }
 
+    /// What note scripts printed and the errors they stopped on.
+    fn script_out_window(&mut self, ctx: &egui::Context) {
+        let new = cereal_engine::script::take_output();
+        if !new.is_empty() {
+            self.script_out.push_str(&new);
+            // the oldest lines go when it grows long
+            if self.script_out.len() > 200_000 {
+                let cut = self.script_out.len() - 150_000;
+                let cut = self.script_out[cut..].find('\n').map_or(cut, |i| cut + i + 1);
+                self.script_out.drain(..cut);
+            }
+        }
+        if !self.show_script_out {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Script output").open(&mut open).default_size([520.0, 260.0]).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Clear").clicked() {
+                    self.script_out.clear();
+                }
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(self.script_out.clone());
+                }
+            });
+            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(if self.script_out.is_empty() { "Nothing printed yet" } else { &self.script_out }).monospace().size(11.0)).selectable(true));
+            });
+        });
+        self.show_script_out = open;
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
     fn load_window(&mut self, ctx: &egui::Context) {
         let tr = self.handle.transport.clone();
         if !self.show_load {
@@ -3008,7 +3048,7 @@ impl App {
                 _ => {
                     if self.typing_keys && !repeat {
                         if let Some((_, semi)) = TYPING.iter().find(|(k, _)| *k == key) {
-                            let chan = self.sel_chan as u16;
+                            let chan = self.recv.iter().find(|r| r.0.is_empty() && r.1 < self.song.channels.len()).map_or(self.sel_chan, |r| r.1) as u16;
                             let k = 60 + semi;
                             self.handle.send(Cmd::NoteOn { chan, key: k, vel: 1.0 });
                             self.held.insert(key, (chan, k));
@@ -3240,6 +3280,7 @@ impl App {
                     ui.checkbox(&mut self.show_picker, "Plug-in picker     F8");
                     ui.checkbox(&mut self.show_load, "Plug-in load monitor");
                     ui.checkbox(&mut self.show_touch, "Touch controllers");
+                    ui.checkbox(&mut self.show_script_out, "Script output");
                     ui.checkbox(&mut self.show_project, "Project picker    Ctrl+F8");
                     ui.separator();
                     ui.menu_button("Layout", |ui| {
@@ -3924,6 +3965,7 @@ impl App {
         self.load_window(ctx);
         self.speech_window(ctx);
         self.touch_window(ctx);
+        self.script_out_window(ctx);
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
         }

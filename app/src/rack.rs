@@ -508,6 +508,30 @@ impl App {
                                 ui.close_menu();
                             }
                         }
+                        ui.menu_button("Advanced fill", |ui| {
+                            let id = egui::Id::new("adv_fill");
+                            let (mut every, mut shift, mut keep): (u32, u32, bool) = ui.data(|d| d.get_temp(id)).unwrap_or((4, 0, false));
+                            egui::Grid::new("adv_fill_grid").num_columns(2).show(ui, |ui| {
+                                ui.label("A step every");
+                                ui.add(egui::DragValue::new(&mut every).range(1..=64).speed(0.1));
+                                ui.end_row();
+                                ui.label("Starting at step");
+                                ui.add(egui::DragValue::new(&mut shift).range(0..=63).speed(0.1));
+                                ui.end_row();
+                            });
+                            ui.checkbox(&mut keep, "Keep the steps already there");
+                            ui.data_mut(|d| d.insert_temp(id, (every, shift, keep)));
+                            if ui.button("Accept").clicked() {
+                                if !keep {
+                                    self.song.patterns[pat].notes.retain(|n| n.chan != ci as u16);
+                                }
+                                for s in (shift..nsteps as u32).step_by(every.max(1) as usize) {
+                                    self.song.patterns[pat].set_step_in(ci as u16, s * step, step, true);
+                                }
+                                self.dirty = true;
+                                ui.close_menu();
+                            }
+                        });
                         if ui.button("Clear steps").clicked() {
                             self.song.patterns[pat].notes.retain(|n| n.chan != ci as u16);
                             self.dirty = true;
@@ -549,6 +573,23 @@ impl App {
                             self.state_ask = Some(crate::StateAsk::SaveChan(ci));
                             ui.close_menu();
                         }
+                        ui.menu_button("Receive notes from", |ui| {
+                            ui.label(RichText::new("A device ticked here plays this channel whichever channel is selected").color(TEXT_DIM).small());
+                            let mut names = vec![String::new()];
+                            names.extend(crate::midi::inputs());
+                            for name in names {
+                                let mut on = self.recv.iter().any(|r| r.0 == name && r.1 == ci);
+                                let label = if name.is_empty() { "Typing keyboard".to_string() } else { name.clone() };
+                                if ui.checkbox(&mut on, label).clicked() {
+                                    self.recv.retain(|r| r.0 != name);
+                                    if on {
+                                        self.recv.push((name, ci));
+                                    }
+                                    crate::midi::set_routes(self.recv.iter().filter(|r| !r.0.is_empty()).map(|r| (r.0.clone(), r.1 as u16)).collect());
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                         ui.menu_button("Burn MIDI to", |ui| {
                             ui.label(RichText::new("The notes this channel really plays in the pattern, arpeggio steps and echoes written out").color(TEXT_DIM).small());
                             let names: Vec<String> = self.song.channels.iter().map(|c| c.name.clone()).collect();

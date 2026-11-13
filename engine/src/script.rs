@@ -94,6 +94,28 @@ pub fn allowed(source: &str) -> bool {
     }
 }
 
+static OUTPUT: Mutex<String> = Mutex::new(String::new());
+
+/// Something a note script printed, or the error it stopped on: kept for the output window.
+pub fn note_output(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(mut o) = OUTPUT.lock() {
+        if o.len() < 256 * 1024 {
+            o.push_str(text);
+            if !text.ends_with('\n') {
+                o.push('\n');
+            }
+        }
+    }
+}
+
+/// What the scripts printed since this was last asked.
+pub fn take_output() -> String {
+    OUTPUT.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
+}
+
 /// The programs that asked to run and were not let: for the application to put before the user.
 pub fn waiting() -> Vec<String> {
     ASKED.lock().unwrap().clone()

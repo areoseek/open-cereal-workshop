@@ -40,6 +40,22 @@ fn perf_note(to: &CmdSender, midi_chan: u8, key: u8, down: bool) -> bool {
     true
 }
 
+/// Devices tied to one channel whatever is selected: device name, channel.
+static ROUTES: std::sync::Mutex<Vec<(String, u16)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_routes(r: Vec<(String, u16)>) {
+    if let Ok(mut g) = ROUTES.lock() {
+        *g = r;
+    }
+}
+
+/// The channel a device's notes go to: its own when it is tied to one, else the selected one.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn routed(device: Option<&str>, selected: u16) -> u16 {
+    let Some(d) = device else { return selected };
+    ROUTES.lock().ok().and_then(|g| g.iter().find(|r| r.0 == d).map(|r| r.1)).unwrap_or(selected)
+}
+
 pub fn set_prefs(p: Prefs) {
     if let Ok(mut g) = PREFS.lock() {
         g.0 = p;
@@ -193,6 +209,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
     let mut input = seq.input();
     let mut since_scan = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut seen_prefs = u64::MAX;
+    let mut link_names: Vec<((i32, i32), String)> = Vec::new();
     loop {
         if since_scan.elapsed().as_secs() >= 2 || PREFS.lock().map(|g| g.1 != seen_prefs).unwrap_or(false) {
             since_scan = std::time::Instant::now();
@@ -200,6 +217,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
             seen_prefs = gen;
             let mut names = Vec::new();
             let mut found = Vec::new();
+            let mut found_names = Vec::new();
             for client in ClientIter::new(&seq) {
                 let id = client.get_client();
                 // not ourselves, not the system's own ports, not the loop-back port
@@ -213,6 +231,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                         let name = port_name(&client, &p);
                         if !pref.off.contains(&name) {
                             found.push((id, p.get_port()));
+                            found_names.push(((id, p.get_port()), name.clone()));
                         }
                         names.push(name);
                     }
@@ -235,6 +254,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 }
             }
             linked = found;
+            link_names = found_names;
         }
         if input.event_input_pending(true).unwrap_or(0) == 0 {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -242,7 +262,8 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
         }
         let Ok(ev) = input.event_input() else { continue };
         seen.fetch_add(1, Ordering::Relaxed);
-        let c = chan.load(Ordering::Relaxed) as u16;
+        let src = ev.get_source();
+        let c = routed(link_names.iter().find(|l| l.0 == (src.client, src.port)).map(|l| l.1.as_str()), chan.load(Ordering::Relaxed) as u16);
         match ev.get_type() {
             EventType::Noteon => {
                 if let Some(n) = ev.get_data::<EvNote>() {
@@ -355,14 +376,18 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
         seen: Arc<AtomicUsize>,
     }
 
-    extern "system" fn heard(_handle: isize, msg: u32, instance: usize, p1: usize, _p2: usize) {
+    /// The open inputs: handle and device name.
+    static OPEN: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
+
+    extern "system" fn heard(handle: isize, msg: u32, instance: usize, p1: usize, _p2: usize) {
         if msg != MIM_DATA || instance == 0 {
             return;
         }
         // SAFETY: `instance` is the leaked `Shared` below, which lives as long as the program.
         let sh = unsafe { &*(instance as *const Shared) };
         sh.seen.fetch_add(1, Ordering::Relaxed);
-        let c = sh.chan.load(Ordering::Relaxed) as u16;
+        let name = OPEN.try_lock().ok().and_then(|o| o.iter().find(|x| x.0 == handle).map(|x| x.1.clone()));
+        let c = routed(name.as_deref(), sh.chan.load(Ordering::Relaxed) as u16);
         if let Ok(mut h) = sh.held.lock() {
             h.message(&sh.to, c, p1 as u8, (p1 >> 8) as u8, (p1 >> 16) as u8);
         }
@@ -386,6 +411,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                     midiInClose(h);
                 }
             }
+            let mut opened = Vec::new();
             for id in 0..now {
                 if pref.off.contains(&names[id as usize]) {
                     continue;
@@ -395,7 +421,11 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 if ok == 0 {
                     unsafe { midiInStart(h) };
                     open.push(h);
+                    opened.push((h, names[id as usize].clone()));
                 }
+            }
+            if let Ok(mut o) = OPEN.lock() {
+                *o = opened;
             }
             count = now;
         }
