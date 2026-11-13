@@ -266,8 +266,27 @@ pub static DEFS: &[Def] = &[
         kind: Kind::Limiter,
         ident: "Fruity Limiter",
         title: "Limiter",
-        size: 76,
-        fixed: &[(0, 7)],
+        size: 169,
+        // the second run of numbers is carried by every stored block, at the values a new unit starts with
+        fixed: &[
+            (0, 7),
+            (76, 1000),
+            (80, 1000),
+            (84, 1000),
+            (88, 1115),
+            (92, 3),
+            (96, 5000),
+            (100, 3),
+            (104, 2882),
+            (108, 1000),
+            (124, 6666),
+            (128, 1),
+            (132, 650),
+            (136, 1000),
+            (144, 4187),
+            (148, 50),
+            (156, 0x0101_0101),
+        ],
         params: &[
             p("Gain", 4, 0, 2000, 1000),
             p("Saturation", 8, 0, 1000, 1000),
@@ -287,6 +306,7 @@ pub static DEFS: &[Def] = &[
             p("Attack curve", 20, 1, 8, 3),
             p("Release curve", 28, 1, 8, 3),
             p("Comp curve", 56, 1, 8, 1),
+            p("Sidechain", 164, 0, 64, 0),
         ],
     },
     Def {
@@ -2093,6 +2113,7 @@ impl Fx {
             Kind::Reverb => 56,
             Kind::Plush => 165,
             Kind::Conv => 22,
+            Kind::Limiter => 76,
             _ => need,
         };
         if state.len() < least {
@@ -2644,6 +2665,11 @@ pub struct Unit {
     oldvoc: Option<Box<crate::fxvoc::classic::State>>,
     /// What a send tap took off the signal in the last block, for the player to add to the target track.
     pub tap: Vec<[f32; 2]>,
+    /// A band splitter held in a patch bay: note every band in `tap` (low, mid, high) besides sending them on.
+    pub tap_all: bool,
+    /// The sound a compressor listens to in place of its own, when it was handed one for this block.
+    side: Vec<[f32; 2]>,
+    side_on: bool,
     patch: Option<Box<crate::fxpatch::State>>,
     psola: Option<Box<crate::psola::Shifter>>,
 }
@@ -2965,7 +2991,7 @@ impl Unit {
         if fx.kind == Kind::Loud && loud_settings().is_some() {
             inner = Some(Box::new(Unit::new(Fx::new(Kind::Maxi), sr)));
         }
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None, psola: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
@@ -3075,7 +3101,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), patch: None, psola: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -3147,7 +3173,12 @@ impl Unit {
     /// Mixer tracks this unit listens to besides its own: (modulator, carrier), counted from 1 among the
     /// tracks routed to its insert.
     pub fn side_wants(&self) -> Option<[i32; 2]> {
-        (self.fx.kind == Kind::Voc).then(|| crate::fxvoc::selectors(&self.fx.p))
+        match self.fx.kind {
+            Kind::Voc => Some(crate::fxvoc::selectors(&self.fx.p)),
+            // a compressor set to listen to another track
+            Kind::Limiter => self.fx.p.get(18).filter(|v| **v >= 1.0).map(|v| [*v as i32, 0]),
+            _ => None,
+        }
     }
     /// Hand over one block of a listened-to track.
     pub fn side_set(&mut self, which: usize, buf: &[[f32; 2]]) {
@@ -3155,6 +3186,11 @@ impl Unit {
             st.side[which].clear();
             st.side[which].extend_from_slice(buf);
             st.side_on[which] = true;
+        }
+        if self.fx.kind == Kind::Limiter && which == 0 {
+            self.side.clear();
+            self.side.extend_from_slice(buf);
+            self.side_on = true;
         }
     }
 
@@ -5325,8 +5361,9 @@ impl Unit {
                 // holds the low, mid and high bands one after the other
                 let away = [p.get(10).is_some_and(|v| *v >= 1.0), p.get(11).is_some_and(|v| *v >= 1.0), p.get(12).is_some_and(|v| *v >= 1.0)];
                 let n = io.len();
+                let noted = self.tap_all;
                 self.tap.clear();
-                if away.iter().any(|a| *a) {
+                if noted || away.iter().any(|a| *a) {
                     self.tap.resize(n * 3, [0.0; 2]);
                 }
                 let tap = &mut self.tap;
@@ -5343,8 +5380,10 @@ impl Unit {
                             low = z[16];
                         }
                         let mut part = |band: usize, v: f32| {
-                            if away[band] {
+                            if away[band] || noted {
                                 tap[band * n + i][c] = v;
+                            }
+                            if away[band] {
                                 0.0
                             } else {
                                 v
@@ -5841,13 +5880,16 @@ impl Unit {
                     let a = x.abs();
                     if a <= sat { x } else { (sat + (1.0 - sat) * (1.0 - (-(a - sat) / (1.0 - sat)).exp())).copysign(x) }
                 };
-                for f in io.iter_mut() {
+                // set to listen to another track, the compressor follows that one's level
+                let heard = std::mem::take(&mut self.side_on) && p.get(18).is_some_and(|v| *v >= 1.0) && self.side.len() >= io.len();
+                for (i, f) in io.iter_mut().enumerate() {
                     let l = f[0] * gain;
                     let r = f[1] * gain;
                     let mut cg = 1.0;
                     if comp_on {
                         // the level is the power of both sides, averaged over the window when one is set
-                        let pw = (f[0] * f[0] + f[1] * f[1]) * 0.5;
+                        let d = if heard { self.side[i] } else { *f };
+                        let pw = (d[0] * d[0] + d[1] * d[1]) * 0.5;
                         let mut lv = if c_win == 0 {
                             pw.sqrt()
                         } else {

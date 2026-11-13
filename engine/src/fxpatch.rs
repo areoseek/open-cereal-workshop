@@ -76,17 +76,21 @@ pub struct Cable {
     /// The sockets it was stored between (from, to), or zeros for a cable laid here: a unit with several
     /// outputs keeps the one its cable left from when the wiring is written again.
     pub via: (u64, u64),
+    /// Which sound output of the sending unit it leaves from (the first is 0; a band splitter's bands follow).
+    pub out: u8,
+    /// Which sound input it ends at: 0 the unit's own, 1 and up what a compressor listens to.
+    pub inp: u8,
 }
 
 impl PartialEq for Cable {
     fn eq(&self, o: &Cable) -> bool {
-        (self.from, self.to, self.level) == (o.from, o.to, o.level)
+        (self.from, self.to, self.level, self.out, self.inp) == (o.from, o.to, o.level, o.out, o.inp)
     }
 }
 
 impl Cable {
     pub fn new(from: End, to: End, level: f32) -> Self {
-        Cable { from, to, level, via: (0, 0) }
+        Cable { from, to, level, via: (0, 0), out: 0, inp: 0 }
     }
 }
 
@@ -313,21 +317,32 @@ fn read(state: &[u8], as_gen: bool) -> Option<(Patch, Option<(usize, crate::synt
             }
             continue;
         }
+        let (mut out, mut inp) = (0u8, 0u8);
         let from = match pins.get(&from) {
             Some(&(n, 0, _, _)) if lead.as_ref().is_some_and(|l| l.0 == n) => End::Bay,
-            Some(&(n, 0, _, _)) => End::Node(n),
+            Some(&(n, 0, k, role)) => {
+                // a socket's word says input in its lowest bit; an output past the first is a band of a splitter
+                if role & 1 == 0 {
+                    out = k.min(255) as u8;
+                }
+                End::Node(n)
+            }
             Some(_) => continue,
             None if Some(from) == main_in => End::Bay,
             None => continue,
         };
         let to = match pins.get(&to) {
-            // only a unit's first sound input; the others are side inputs we do not feed yet
             Some(&(n, 0, 0, _)) => End::Node(n),
+            // an input past the first is one the unit listens to without passing it on
+            Some(&(n, 0, k, role)) if role & 1 == 1 && k < 256 => {
+                inp = k as u8;
+                End::Node(n)
+            }
             Some(_) => continue,
             None if Some(to) == main_out => End::Bay,
             None => continue,
         };
-        cables.push(Cable { from, to, level, via });
+        cables.push(Cable { from, to, level, via, out, inp });
     }
     // a unit runs after the ones that send it settings, too
     let mut deps = cables.clone();
@@ -465,6 +480,7 @@ fn recable(base: &[u8], cables: &[Cable]) -> Option<Vec<u8>> {
         };
         let b = match pins.get(&to) {
             Some(&(_, 0, 0, _)) => true,
+            Some(&(_, 0, k, role)) => role & 1 == 1 && k < 256,
             Some(_) => false,
             None => Some(to) == main_out,
         };
@@ -599,6 +615,10 @@ pub struct State {
     units: Vec<Option<Unit>>,
     bufs: Vec<Vec<[f32; 2]>>,
     scratch: Vec<[f32; 2]>,
+    /// For a unit with more sound outputs than one: its other outputs, one after the other.
+    taps: Vec<Vec<[f32; 2]>>,
+    /// The sound gathered for a unit's listening input.
+    side: Vec<[f32; 2]>,
     /// Sound handed in for a held instrument this block: the unit, the sound, and whether any came.
     feeds: Vec<(usize, Vec<[f32; 2]>, bool)>,
     /// What each setting cable last carried; not a number until its sender has been heard once.
@@ -617,6 +637,8 @@ impl State {
             units: p.nodes.iter().map(|n| n.fx.clone().map(|f| Unit::new(f, sr))).collect(),
             bufs: vec![vec![[0.0; 2]; 1024]; p.nodes.len()],
             scratch: vec![[0.0; 2]; 1024],
+            taps: vec![Vec::new(); p.nodes.len()],
+            side: Vec::new(),
             feeds: p.feeds.iter().map(|&n| (n, vec![[0.0; 2]; 1024], false)).collect(),
             last: vec![f32::NAN; p.sets.len()],
             seen: None,
@@ -702,14 +724,17 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
         }
     }
     let song_at = st.song_at;
-    let State { units, bufs, scratch, feeds, last, gen_sets, .. } = st;
+    let State { units, bufs, scratch, taps, side, feeds, last, gen_sets, .. } = st;
     let sounds = p.cables.iter().any(|c| c.to == End::Bay);
-    let gather = |to: End, scratch: &mut [[f32; 2]], bufs: &[Vec<[f32; 2]>], io: &[[f32; 2]]| {
+    let gather = |to: End, inp: u8, scratch: &mut [[f32; 2]], bufs: &[Vec<[f32; 2]>], taps: &[Vec<[f32; 2]>], io: &[[f32; 2]]| {
         scratch.fill([0.0; 2]);
-        for c in p.cables.iter().filter(|c| c.to == to) {
+        let n = io.len();
+        for c in p.cables.iter().filter(|c| c.to == to && c.inp == inp) {
             let src: &[[f32; 2]] = match c.from {
                 End::Bay => io,
-                End::Node(j) => &bufs[j][..io.len()],
+                // a band of a splitter, when the unit keeps them apart
+                End::Node(j) if (1..=3).contains(&c.out) && taps[j].len() == 3 * n => &taps[j][(c.out as usize - 1) * n..c.out as usize * n],
+                End::Node(j) => &bufs[j][..n],
             };
             for (o, s) in scratch.iter_mut().zip(src) {
                 o[0] += s[0] * c.level;
@@ -718,7 +743,7 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
         }
     };
     for &i in &p.order {
-        gather(End::Node(i), &mut scratch[..n], bufs, io);
+        gather(End::Node(i), 0, &mut scratch[..n], bufs, taps, io);
         for f in feeds.iter_mut().filter(|f| f.0 == i && f.2) {
             for (o, s) in scratch[..n].iter_mut().zip(f.1.iter_mut()) {
                 o[0] += s[0];
@@ -729,7 +754,21 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
         }
         if let Some(u) = &mut units[i] {
             u.song_at = song_at;
+            // a compressor set to listen gets the sound cabled to that input
+            if let Some(k) = u.side_wants().map(|w| w[0]).filter(|k| (1..256).contains(k)) {
+                if p.cables.iter().any(|c| c.to == End::Node(i) && c.inp as i32 == k) {
+                    side.resize(n, [0.0; 2]);
+                    gather(End::Node(i), k as u8, &mut side[..n], bufs, taps, io);
+                    u.side_set(0, &side[..n]);
+                }
+            }
+            let split = u.fx.kind == crate::fx::Kind::BandSplit && p.cables.iter().any(|c| c.from == End::Node(i) && c.out >= 1);
+            u.tap_all = split;
             u.process(&mut scratch[..n], cx);
+            taps[i].clear();
+            if split && u.tap.len() >= n * 3 {
+                taps[i].extend_from_slice(&u.tap[..n * 3]);
+            }
         }
         bufs[i][..n].copy_from_slice(&scratch[..n]);
         // what the unit sends goes down its setting cables, each time it has changed; when two senders move
@@ -750,7 +789,7 @@ pub fn process(p: &Patch, st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     if !sounds {
         return;
     }
-    gather(End::Bay, &mut scratch[..n], bufs, io);
+    gather(End::Bay, 0, &mut scratch[..n], bufs, taps, io);
     io.copy_from_slice(&scratch[..n]);
 }
 
@@ -1026,6 +1065,49 @@ mod tests {
         }
         eprintln!("{bays} bays, {units} note units, {edited} edited and read back, {lines} lines put back");
         assert!(edited > 3);
+    }
+
+    fn one_unit(fx: Fx, cables: Vec<Cable>) -> Patch {
+        Patch { nodes: vec![Node { ident: String::new(), name: String::new(), fx: Some(fx), notes: None }], cables, order: vec![0], ..Default::default() }
+    }
+
+    fn level_out(p: &Patch, hz: f32) -> f32 {
+        let cx = Ctx { sr: 44100.0, step: 5000.0, clock: Default::default() };
+        let mut st = State::new(p, cx.sr);
+        let mut io: Vec<[f32; 2]> = (0..32768).map(|i| [(i as f32 * hz * std::f32::consts::TAU / 44100.0).sin() * 0.5; 2]).collect();
+        for c in io.chunks_mut(256) {
+            process(p, &mut st, c, &cx);
+        }
+        (io[16384..].iter().map(|f| f[0] * f[0]).sum::<f32>() / 16384.0).sqrt()
+    }
+
+    #[test]
+    fn a_splitter_in_a_bay_gives_each_band_its_own_cable() {
+        let split = Fx::new(crate::fx::Kind::BandSplit);
+        let band = |out: u8| one_unit(split.clone(), vec![Cable::new(End::Bay, End::Node(0), 1.0), Cable { out, ..Cable::new(End::Node(0), End::Bay, 1.0) }]);
+        // a high tone is all there on the first output and the high band's, and next to nothing on the low band's
+        let (all, low, high) = (level_out(&band(0), 9000.0), level_out(&band(1), 9000.0), level_out(&band(3), 9000.0));
+        assert!(all > 0.3 && high > 0.25 && low < 0.02, "{all} {low} {high}");
+        let (low, high) = (level_out(&band(1), 60.0), level_out(&band(3), 60.0));
+        assert!(low > 0.25 && high < 0.02, "{low} {high}");
+    }
+
+    #[test]
+    fn a_compressor_in_a_bay_follows_what_it_listens_to() {
+        let mut comp = Fx::new(crate::fx::Kind::Limiter);
+        comp.p[6] = 300.0;
+        comp.p[7] = 1000.0;
+        let quiet = Cable::new(End::Bay, End::Node(0), 0.02);
+        let out = Cable::new(End::Node(0), End::Bay, 1.0);
+        let listen = Cable { inp: 1, ..Cable::new(End::Bay, End::Node(0), 1.0) };
+        // the sound through it is far under the threshold; the loud sound on the listening input turns it down,
+        // but only once the unit is set to listen there
+        let alone = level_out(&one_unit(comp.clone(), vec![quiet, out]), 440.0);
+        let deaf = level_out(&one_unit(comp.clone(), vec![quiet, listen, out]), 440.0);
+        comp.p[18] = 1.0;
+        let ducked = level_out(&one_unit(comp, vec![quiet, listen, out]), 440.0);
+        assert!((alone - deaf).abs() < 1e-6, "{alone} {deaf}");
+        assert!(alone > 0.005 && ducked < alone * 0.5, "{alone} {ducked}");
     }
 
     #[test]

@@ -1965,6 +1965,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         None => ev.iter().enumerate().filter(|(_, e)| e.id == id::INSERT_FLAGS).map(|(i, _)| i).collect(),
     };
     let mut records: Vec<(u8, u16, i32)> = vec![];
+    let mut sends: Vec<(usize, u16, i32)> = vec![];
     // every slot's events as they stand in the file, so a moved slot takes its plugin with it untouched
     let mut groups: HashMap<(u16, u16), Vec<Event>> = HashMap::new();
     for (k, &open) in opens.iter().enumerate() {
@@ -2004,9 +2005,9 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
                 records.push((224 + b, cd, q(x.q, 65536.0)));
             }
         }
-        for d in 0..now.levels.len().max(was.levels.len()).min(128) {
+        for d in 0..now.levels.len().max(was.levels.len()).min(256) {
             if q(now.send_level(d), 12800.0) != q(was.send_level(d), 12800.0) {
-                records.push((64 + d as u8, cd, q(now.send_level(d), 12800.0)));
+                sends.push((d, cd, q(now.send_level(d), 12800.0)));
             }
         }
         if now.audio_in != was.audio_in {
@@ -2175,7 +2176,7 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         }
     }
 
-    if records.is_empty() {
+    if records.is_empty() && sends.is_empty() {
         return;
     }
     let at = match ev.iter().position(|e| e.id == id::MIXER_PARAMS) {
@@ -2187,7 +2188,11 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
         }
     };
     if let Value::Data(d) = &mut ev[at].value {
-        for (pid, cd, value) in records {
+        // later versions keep a route's level in a record kind of its own, numbered by the destination
+        let by_dest = d.chunks_exact(12).any(|r| r[5] == 0x20);
+        let records = records.into_iter().map(|(pid, cd, v)| (pid, 0x1fu8, cd, v));
+        let sends = sends.into_iter().filter(|s| by_dest || s.0 < 128).map(|(dest, cd, v)| if by_dest { (dest as u8, 0x20u8, cd, v) } else { (64 + dest as u8, 0x1f, cd, v) });
+        for (pid, kind, cd, value) in records.chain(sends).collect::<Vec<_>>() {
             let (pid, value) = if old {
                 match flp::old_mixer_record(pid, value) {
                     Some(r) => r,
@@ -2196,13 +2201,13 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
             } else {
                 (pid, value)
             };
-            let hit = (0..d.len() / 12).find(|r| d[r * 12 + 4] == pid && u16at(d, r * 12 + 6) == cd);
+            let hit = (0..d.len() / 12).find(|r| d[r * 12 + 4] == pid && d[r * 12 + 5] == kind && u16at(d, r * 12 + 6) == cd);
             match hit {
                 Some(r) => put_u32(d, r * 12 + 8, value as u32),
                 None => {
                     d.extend_from_slice(&0u32.to_le_bytes());
                     d.push(pid);
-                    d.push(0x1f);
+                    d.push(kind);
                     d.extend_from_slice(&cd.to_le_bytes());
                     d.extend_from_slice(&value.to_le_bytes());
                 }
@@ -2450,6 +2455,30 @@ mod tests {
     fn reload(bytes: &[u8]) -> (Song, Flp) {
         let f = flp::parse(bytes).expect("our own file parses");
         (Song::from_flp_with(&f, None, None), f)
+    }
+
+    /// Later versions keep a route's level in a record kind of its own, numbered by the destination insert.
+    #[test]
+    fn route_levels_of_later_versions_read_and_keep_their_form() {
+        let mut s = Song::new();
+        s.inserts[4].sends = vec![0, 3];
+        let mut file = flp::parse(&to_bytes(&s, None).unwrap()).unwrap().file;
+        let at = file.events.iter().position(|e| e.id == id::MIXER_PARAMS).unwrap();
+        if let Value::Data(d) = &mut file.events[at].value {
+            d.extend_from_slice(&[0, 0, 0, 0, 3, 0x20]);
+            d.extend_from_slice(&(((128 + 4) as u16) << 6).to_le_bytes());
+            d.extend_from_slice(&0i32.to_le_bytes());
+        }
+        let (mut r, f) = reload(&file.to_bytes());
+        assert_eq!(r.inserts[4].send_level(3), 0.0, "a route that only feeds a sidechain is silent");
+        assert_eq!(r.inserts[4].send_level(0), 1.0);
+        r.inserts[4].set_send_level(3, 0.75);
+        let (again, f2) = reload(&to_bytes(&r, Some(&f)).unwrap());
+        assert!((again.inserts[4].send_level(3) - 0.75).abs() < 1e-3);
+        let d = f2.file.events.iter().find(|e| e.id == id::MIXER_PARAMS).and_then(|e| e.bytes()).unwrap();
+        let cd = ((128 + 4) as u16) << 6;
+        assert_eq!(d.chunks_exact(12).filter(|r| r[5] == 0x20 && r[4] == 3 && u16at(r, 6) == cd).count(), 1);
+        assert!(!d.chunks_exact(12).any(|r| r[5] == 0x1f && r[4] == 67 && u16at(r, 6) == cd));
     }
 
     /// The mixer of the early versions: no opening event, effects first, their own parameter numbers.

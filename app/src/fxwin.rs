@@ -1470,7 +1470,13 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
         let mut pull = None;
         for (k, c) in work.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} > {}", end(c.from, "in"), end(c.to, "out"))).small());
+                let port = match (c.out, c.inp) {
+                    (0, 0) => String::new(),
+                    (o, 0) => format!("  (output {})", o + 1),
+                    (0, _) => "  (listening input)".to_string(),
+                    (o, _) => format!("  (output {}, listening input)", o + 1),
+                };
+                ui.label(RichText::new(format!("{} > {}{port}", end(c.from, "in"), end(c.to, "out"))).small());
                 let mut pct = c.level * 100.0;
                 if ui.add(egui::DragValue::new(&mut pct).range(0.0..=100.0).speed(0.5).suffix(" %")).hint("Cable level").changed() {
                     c.level = (pct / 100.0).clamp(0.0, 1.0);

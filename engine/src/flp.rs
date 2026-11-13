@@ -1475,12 +1475,21 @@ fn apply_mixer_params(inserts: &mut [FlpInsert], d: &[u8], base: usize) {
         let raw = (cd >> 6) as usize;
         let slot = cd & 63;
         let value = u32at(r, 8) as i32;
-        if raw < base || r[5] != 0x1f {
+        if raw < base || (r[5] != 0x1f && r[5] != 0x20) {
             continue;
         }
         let idx = raw - base;
         let idx = if idx < n { idx } else if n > 0 && base >= 448 { n - 1 } else { continue };
         let ins = &mut inserts[idx];
+        if r[5] == 0x20 {
+            // later versions: the level of the route to insert `pid`
+            let dest = pid as usize;
+            match ins.route_levels.iter_mut().find(|r| r.0 == dest) {
+                Some(r) => r.1 = value,
+                None => ins.route_levels.push((dest, value)),
+            }
+            continue;
+        }
         match pid {
             0 => {
                 if let Some(s) = ins.slots.iter_mut().find(|s| s.index == slot) {
