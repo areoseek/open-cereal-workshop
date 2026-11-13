@@ -131,6 +131,10 @@ pub type Tweaked = [Option<cereal_engine::song::Target>; 2];
 /// The right-click menu every automatable control has. The choice is left for the app to pick up after the
 /// frame, since the control itself is usually borrowed from the song while it is drawn.
 pub fn control_menu(resp: &Response, target: cereal_engine::song::Target) {
+    if resp.changed() {
+        // for the recorder: a control moved by hand this frame
+        resp.ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<cereal_engine::song::Target>>(egui::Id::new("moved")).push(target));
+    }
     if resp.changed() || resp.dragged() {
         // remembered for the TOOLS menu: the control moved last, and the one before it
         resp.ctx.data_mut(|d| {

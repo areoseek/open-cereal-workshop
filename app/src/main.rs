@@ -299,6 +299,11 @@ pub(crate) struct App {
     rec_held: Vec<(u16, u8, f64, f32)>,
     /// Record sound from the input device too while recording runs.
     rec_audio: bool,
+    /// The recording filter: whether hand-turned controls and played notes are taken down.
+    rec_automation: bool,
+    rec_score: bool,
+    /// Where each control being recorded was written last: (pattern, tick), keyed by its address.
+    rec_ctl: std::collections::HashMap<(u16, u16), (usize, u32)>,
     audio_rec: Option<record::AudioRec>,
     /// The sound card inputs, open while a mixer track listens to one; the flag stops retries after a failure.
     live_in: Option<record::LiveIn>,
@@ -488,6 +493,9 @@ impl App {
             render: None,
             rec_held: Vec::new(),
             rec_audio: false,
+            rec_automation: true,
+            rec_score: true,
+            rec_ctl: Default::default(),
             audio_rec: None,
             live_in: None,
             live_in_failed: false,
@@ -712,6 +720,65 @@ impl App {
         }
     }
 
+    /// Controls turned by hand while recording runs are written into the pattern as events, over whatever
+    /// the stretch they pass had before. In song mode they go into the clip of the current pattern under the
+    /// play position, or into a pattern of their own that spans the song when there is none.
+    fn record_controls(&mut self, moved: Vec<cereal_engine::song::Target>) {
+        use cereal_engine::song::{Clip, ClipSrc, PatEvent};
+        let tr = self.handle.transport.clone();
+        if !tr.playing() || !tr.recording() || !self.rec_automation {
+            self.rec_ctl.clear();
+            return;
+        }
+        if moved.is_empty() {
+            return;
+        }
+        let now = tr.tick().max(0.0);
+        let mut pat = tr.pattern();
+        let mut tick = now as u32;
+        if tr.song_mode() {
+            let under = self.song.clips.iter().find(|c| c.src == ClipSrc::Pattern(pat) && now >= c.pos as f64 && now < (c.pos + c.len) as f64).map(|c| (c.pos, c.offset));
+            match under {
+                Some((pos, offset)) => tick = tick - pos + offset,
+                None => {
+                    const NAME: &str = "Main automation";
+                    pat = match self.song.patterns.iter().position(|p| p.name == NAME) {
+                        Some(p) => p,
+                        None => {
+                            let p = self.song.next_empty_pattern();
+                            self.song.ensure_pattern(p);
+                            self.song.patterns[p].name = NAME.into();
+                            p
+                        }
+                    };
+                    let end = (self.song.length().max(tick) / self.song.bar().max(1) + 1) * self.song.bar().max(1);
+                    match self.song.clips.iter_mut().find(|c| c.src == ClipSrc::Pattern(pat) && c.pos == 0) {
+                        Some(c) => c.len = c.len.max(end),
+                        None => {
+                            let used: std::collections::BTreeSet<u16> = self.song.clips.iter().map(|c| c.track).collect();
+                            let track = (0..self.song.tracks.len() as u16).find(|t| !used.contains(t)).unwrap_or(0);
+                            self.song.clips.push(Clip { pos: 0, len: end, track, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0 });
+                        }
+                    }
+                }
+            }
+        }
+        self.song.ensure_pattern(pat);
+        for t in moved {
+            let (param, dest) = self.song.event_address(t);
+            let Some(raw) = self.song.event_raw(t) else { continue };
+            let from = match self.rec_ctl.insert((param, dest), (pat, tick)) {
+                Some((p, last)) if p == pat && last <= tick => last,
+                _ => tick,
+            };
+            let ev = &mut self.song.patterns[pat].events;
+            ev.retain(|e| (e.param, e.dest) != (param, dest) || e.tick < from || e.tick > tick || (e.tick == from && from != tick));
+            let at = ev.partition_point(|e| e.tick <= tick);
+            ev.insert(at, PatEvent { tick, param, dest, raw });
+            self.dirty = true;
+        }
+    }
+
     /// Write hand-played notes into the current pattern while recording runs. `flush` ends keys still held.
     fn record_notes(&mut self, flush: bool) {
         let tr = self.handle.transport.clone();
@@ -724,6 +791,9 @@ impl App {
             return self.step_notes(evs);
         }
         self.step_down = 0;
+        if !self.rec_score {
+            evs.clear();
+        }
         if !tr.playing() || !tr.recording() {
             self.rec_new.clear();
         }
@@ -2988,7 +3058,27 @@ impl App {
                     self.stop();
                 }
                 let rec = tr.recording();
-                if ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).hint("Record what you play into the current pattern (R)").clicked() {
+                let rec_btn = ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).hint("Record what you play into the current pattern (R)");
+                rec_btn.context_menu(|ui| {
+                    ui.label(RichText::new("Recording filter").color(TEXT_DIM).small());
+                    ui.checkbox(&mut self.rec_automation, "Automation").hint("Controls turned while recording are written into the pattern");
+                    ui.checkbox(&mut self.rec_score, "Notes");
+                    ui.checkbox(&mut self.rec_audio, "Audio").hint("Sound from the input device, as an audio clip on the playlist");
+                    ui.separator();
+                    let (mut count, mut wait, mut met) = (tr.countdown(), tr.waiting(), tr.metronome());
+                    if ui.checkbox(&mut count, "Recording countdown   Ctrl+P").changed() {
+                        tr.set_countdown(count);
+                    }
+                    if ui.checkbox(&mut wait, "Wait for input to start playing   Ctrl+I").changed() {
+                        tr.set_waiting(wait);
+                    }
+                    if ui.checkbox(&mut met, "Metronome   Ctrl+M").changed() {
+                        tr.set_metronome(met);
+                    }
+                    ui.checkbox(&mut self.rec_blend, "Blend recorded notes   Ctrl+B");
+                    ui.checkbox(&mut self.rec_quantise, "Snap recorded notes to the grid");
+                });
+                if rec_btn.clicked() {
                     tr.set_recording(!rec);
                 }
                 if ui.toggle_value(&mut self.rec_audio, "MIC").hint("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
@@ -3408,6 +3498,8 @@ impl eframe::App for App {
             self.keys(ctx);
         }
         self.midi.chan.store(self.sel_chan, std::sync::atomic::Ordering::Relaxed);
+        let moved: Vec<cereal_engine::song::Target> = ctx.data_mut(|d| d.remove_temp(egui::Id::new("moved"))).unwrap_or_default();
+        self.record_controls(moved);
         // what a control's right-click menu asked for last frame
         let ask_id = egui::Id::new("ctl_ask");
         if let Some((target, ask)) = ctx.data_mut(|d| d.remove_temp::<Option<(cereal_engine::song::Target, widgets::CtlAsk)>>(ask_id)).flatten() {
