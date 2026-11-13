@@ -2526,11 +2526,29 @@ fn band_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5
 /// Band of the seven band unit, laws as measured: the bell spans 0.1 to 5 octaves between its half-gain points,
 /// band pass and notch use that width over and times root two, the passes run from sharp to heavily damped.
 fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, part: usize) -> [f32; 5] {
+    const FLAT: [[f32; 4]; 3] = [[0.5412, 1.3066, 0.0, 0.0], [0.5176, 0.7071, 1.9319, 0.0], [0.5098, 0.6013, 0.9, 2.5629]];
+    // steep bells: narrower bells set side by side for a flat top, as (width factor, offset in widths)
+    const STAGGER: [[(f32, f32); 4]; 3] = [
+        [(0.5, 0.1248), (0.5, -0.1248), (0.0, 0.0), (0.0, 0.0)],
+        [(0.33, 0.17), (0.33, -0.17), (0.5, 0.0), (0.0, 0.0)],
+        [(0.25, 0.194), (0.25, -0.194), (0.3925, 0.075), (0.3925, -0.075)],
+    ];
+    const STAGGER_GAIN: [f32; 3] = [0.6425, 0.507, 0.4289];
+    let extra = order.unsigned_abs().min(3) as usize;
+    let x = width.clamp(0.0, 1.0);
+    let mut oct = 0.1 + 4.9 * x;
+    let mut hz = hz;
+    // bells and shelves of a higher order are equal shares of the gain in a row
+    let mut share = if matches!(kind, 5 | 6 | 7) { 1.0 / (extra + 1) as f32 } else { 1.0 };
+    if kind == 6 && order < 0 {
+        let (narrow, off) = STAGGER[extra - 1][part.min(extra)];
+        hz *= (off * oct).exp2();
+        oct *= narrow;
+        share = STAGGER_GAIN[extra - 1];
+    }
     let w = TAU * (hz / sr).clamp(0.0001, 0.49);
     let (s, c) = w.sin_cos();
-    let a = 10f32.powf(gain_db / 40.0);
-    let x = width.clamp(0.0, 1.0);
-    let oct = 0.1 + 4.9 * x;
+    let a = 10f32.powf(gain_db * share / 40.0);
     let q_of = |bw: f32| 1.0 / (2.0 * (std::f32::consts::LN_2 / 2.0 * bw).sinh());
     // the band widths stretch towards the top of the range the way the textbook bell does
     let warp = w / s.max(1e-6);
@@ -2539,19 +2557,19 @@ fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, 
         4 => q_of(oct * std::f32::consts::SQRT_2 * warp),
         _ => q_of(oct * warp),
     };
-    let mut q_res = q_of((-1.5945 + 3.7278 * x - 0.0986 * x * x).exp());
-    // steeper passes: more sections, either all alike (gentle) or spread the maximally flat way (steep)
-    let extra = order.unsigned_abs().min(3) as usize;
+    let mut q_res = q_of((-1.5930 + x * (3.3488 + x * (-1.8486 + x * (10.0978 + x * -7.9700)))).exp());
+    let mut q_shelf = (0.498 + x * (-1.78917 + x * (1.39575 - 1.16708 * x))).exp();
+    // steeper passes and shelves: more sections, either all alike (gentle) or spread the maximally flat way (steep)
     if extra > 0 {
         let n = (extra + 1) as f32;
         if order > 0 {
             q_res = (q_res * 0.5f32.powf(extra as f32 * 0.5)).powf(1.0 / n);
         } else {
-            const FLAT: [[f32; 4]; 3] = [[0.5412, 1.3066, 0.0, 0.0], [0.5176, 0.7071, 1.9319, 0.0], [0.5098, 0.6013, 0.9, 2.5629]];
-            q_res = FLAT[extra - 1][part.min(extra)] * (q_res / 0.7071).powf(1.0 / n);
+            let flat = FLAT[extra - 1][part.min(extra)];
+            q_res = flat * (q_res / 0.7071).powf(1.0 / n);
+            q_shelf = flat * (q_shelf / 0.7071).powf(1.0 / n);
         }
     }
-    let q_shelf = (0.498 + x * (-1.78917 + x * (1.39575 - 1.16708 * x))).exp();
     band_raw(kind, s, c, a, q_band, q_res, q_shelf)
 }
 
@@ -5121,7 +5139,7 @@ impl Unit {
                     if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain.abs() < 0.005) {
                         continue;
                     }
-                    let order = if matches!(kind, 1 | 3) { p[28 + b] as i32 } else { 0 };
+                    let order = if matches!(kind, 1 | 3 | 5 | 6 | 7) { p[28 + b] as i32 } else { 0 };
                     let parts = 1 + order.unsigned_abs().min(3) as usize;
                     let mut c = [[0f32; 5]; 4];
                     for (k, c) in c.iter_mut().enumerate().take(parts) {
