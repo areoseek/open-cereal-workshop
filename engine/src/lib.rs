@@ -83,6 +83,43 @@ pub fn load_flp(path: &Path, lib: &mut Library) -> Result<(Song, flp::Flp), Stri
     Ok((song, f))
 }
 
+/// What did not come across when a project was opened: sounds that were not found and plug-ins that
+/// are not on this machine, one line each.
+pub fn problems(song: &Song, f: &flp::Flp, lib: &Library) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in &lib.missing {
+        let line = format!("Sound not found: {m}");
+        if !out.contains(&line) {
+            out.push(line);
+        }
+    }
+    let what = |plugin: &str, state: &[u8]| {
+        if plugin.eq_ignore_ascii_case(song::WRAPPER) {
+            match host::block_name(state) {
+                Some(n) => format!("the plug-in \"{n}\" is not installed here"),
+                None => "a plug-in of a kind that cannot be hosted".to_string(),
+            }
+        } else {
+            format!("no unit for \"{plugin}\" yet")
+        }
+    };
+    if song.channels.len() >= f.channels.len() {
+        for (c, ch) in f.channels.iter().zip(&song.channels) {
+            if c.kind == flp::ChannelKind::Plugin && ch.gen.is_none() && ch.ext.is_none() && ch.bay.is_none() && ch.zones.is_none() && ch.slices.is_none() && !c.plugin.is_empty() {
+                out.push(format!("Channel \"{}\": {}", ch.name, what(&c.plugin, &c.state)));
+            }
+        }
+    }
+    for (i, ins) in song.inserts.iter().enumerate() {
+        for slot in ins.slots.iter().filter(|s| s.fx.is_none() && !s.plugin.is_empty()) {
+            let state = slot.src.and_then(|(a, b)| f.inserts.get(a as usize)?.slots.iter().find(|s| s.index == b)).map(|s| s.state.as_slice()).unwrap_or(&[]);
+            let at = if i == 0 { "Master".to_string() } else { format!("Insert {i}") };
+            out.push(format!("{at}, slot {}: {}", slot.index + 1, what(&slot.plugin, state)));
+        }
+    }
+    out
+}
+
 /// A project as one archive: the project file and every sound file it leads to, side by side. `roots` is a
 /// library that knows the same folders as the one in use; returns the archive and how many sounds went in.
 pub fn package(song: &mut Song, base: Option<&flp::Flp>, name: &str, roots: &Library, project_dir: Option<&Path>) -> Result<(Vec<u8>, usize), String> {

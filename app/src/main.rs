@@ -289,6 +289,8 @@ pub(crate) struct App {
     show_info: bool,
     pub(crate) prefs_win: settings::State,
     show_about: bool,
+    /// What did not come across when the project was opened, shown once.
+    problems: Vec<String>,
     /// Note scripts the user said "not now" to since the program started.
     script_later: Vec<String>,
     render: Option<RenderOpts>,
@@ -474,6 +476,7 @@ impl App {
             show_info: false,
             prefs_win: Default::default(),
             show_about: false,
+            problems: Vec::new(),
             script_later: Vec::new(),
             render: None,
             rec_held: Vec::new(),
@@ -880,6 +883,7 @@ impl App {
         match cereal_engine::load_flp(path, &mut self.lib) {
             Ok((song, f)) => {
                 let missing = self.lib.missing.len();
+                self.problems = cereal_engine::problems(&song, &f, &self.lib);
                 self.handle.transport.set_pattern((f.current_pattern as usize).saturating_sub(1).min(song.patterns.len().saturating_sub(1)));
                 self.handle.transport.set_song_mode(song.song_mode);
                 self.status = format!("Opened {} (made with {}){}", path.display(), f.version, if missing > 0 { format!(", {missing} samples not found") } else { String::new() });
@@ -3290,6 +3294,22 @@ impl App {
         }
         if let Some(ask) = self.state_ask.take() {
             self.state_file(ask);
+        }
+        if !self.problems.is_empty() {
+            let mut close = false;
+            egui::Window::new("There were problems opening the project").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label("The project is open, but these parts of it will not sound:");
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for p in &self.problems {
+                        ui.label(p);
+                    }
+                });
+                ui.separator();
+                close = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
+            });
+            if close {
+                self.problems.clear();
+            }
         }
         let mut open = self.show_about;
         egui::Window::new("About").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {

@@ -439,6 +439,16 @@ fn from_parts(parts: &[(u32, &[u8])]) -> Option<(PathBuf, String)> {
     (ext == "dll" || ext == "so").then(|| (PathBuf::from(named), vst2::ident(unique)))
 }
 
+/// The name a wrapper block gives the plug-in it stands for.
+pub fn block_name(state: &[u8]) -> Option<String> {
+    if let Some(early) = vst2::old(state) {
+        return Some(early.name);
+    }
+    let parts = pieces(state)?;
+    let text = |want: u32| parts.iter().find(|p| p.0 == want).map(|p| String::from_utf8_lossy(p.1).trim_end_matches('\0').trim().to_string()).filter(|t| !t.is_empty());
+    text(P_NAME).or_else(|| text(P_PATH).and_then(|p| p.rsplit(['\\', '/']).next().map(|n| n.rsplit_once('.').map_or(n, |x| x.0).to_string())))
+}
+
 /// Open the plug-in a wrapper block names and hand it what it saved. Only installed plug-ins are opened:
 /// the one with the block's identifier, wherever it lives on this machine.
 pub fn from_block(state: &[u8]) -> Option<Arc<Instance>> {
