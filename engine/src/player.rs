@@ -725,6 +725,7 @@ impl Handle {
             was_playing: false,
             chase: false,
             pickup: false,
+            seen: None,
             perf: Vec::new(),
             perf_out: Vec::new(),
             perf_rng: 0x9e37_79b9,
@@ -1575,6 +1576,8 @@ pub struct Player {
     chase: bool,
     /// Set after a start or a seek by hand (not a loop or marker jump): notes under the play head may be picked up.
     pickup: bool,
+    /// The song the last block was made from.
+    seen: Option<Arc<Song>>,
     /// Performance mode: what each playlist track is playing by hand.
     perf: Vec<PerfTrack>,
     perf_out: Vec<PerfSeg>,
@@ -4181,6 +4184,16 @@ impl Player {
     pub fn render(&mut self, out: &mut [f32], channels: usize) {
         let channels = channels.max(1);
         let song = self.song.load_full();
+        // an instrument's settings turned by hand reach its sounding notes
+        if !self.seen.as_ref().is_some_and(|old| Arc::ptr_eq(old, &song)) {
+            if let Some(old) = self.seen.replace(song.clone()) {
+                for (c, ch) in song.channels.iter().enumerate() {
+                    if ch.gen.is_some() && old.channels.get(c).is_some_and(|o| o.gen.as_ref().map(|g| g.kind) == ch.gen.as_ref().map(|g| g.kind) && o.gen != ch.gen) && !self.ov.gen_moved.contains(&c) {
+                        self.ov.gen_moved.push(c);
+                    }
+                }
+            }
+        }
         self.take_commands(&song);
         for x in out.iter_mut() {
             *x = 0.0;
@@ -5529,6 +5542,24 @@ mod tests {
         let after = side(0.6, 0.9, 0) / side(0.6, 0.9, 1).max(1e-9);
         assert!((before - 1.0).abs() < 0.2, "level at first: {before}");
         assert!(!(0.5..2.0).contains(&after), "one side falls away under the held note: {after}");
+    }
+
+    #[test]
+    fn an_instrument_setting_turned_by_hand_reaches_the_sounding_note() {
+        let mut s = tone_song(1.0);
+        s.channels[0].sample = None;
+        s.channels[0].kind = ChannelKind::Plugin;
+        s.channels[0].gen = Some(crate::synth::Gen::new(crate::synth::Kind::Osc3));
+        let (mut handle, mut player) = crate::new_player(s.clone(), 48_000.0);
+        handle.send(Cmd::NoteOn { chan: 0, key: 60, vel: 0.8 });
+        let mut buf = vec![0.0f32; 9600 * 2];
+        player.render(&mut buf, 2);
+        let ratio = |b: &[f32]| b.chunks(2).fold(0.0f32, |m, f| m.max(f[0].abs())) / b.chunks(2).fold(0.0f32, |m, f| m.max(f[1].abs())).max(1e-9);
+        assert!((ratio(&buf[9600..]) - 1.0).abs() < 0.2);
+        s.channels[0].gen.as_mut().unwrap().set_travel(0, 1.0);
+        handle.publish(s);
+        player.render(&mut buf, 2);
+        assert!(!(0.5..2.0).contains(&ratio(&buf[9600..])), "{}", ratio(&buf[9600..]));
     }
 
     #[test]
