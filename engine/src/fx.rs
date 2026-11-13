@@ -2386,9 +2386,7 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
         Kind::OldEq => {
             q[..28].copy_from_slice(&p[..28]);
             q[28..35].fill(0.0);
-            // measured: about 0.199 dB a step below the middle, 0.171 above
-            let d = p[28] - 128.0;
-            q[35] = d * if d < 0.0 { 19.875 } else { 17.125 };
+            q[35] = 2000.0 * knob_amp(p[28] / 128.0).max(1e-6).log10();
             q[36] = -1.0;
         }
         Kind::OldReverb => {
@@ -2485,6 +2483,11 @@ pub(crate) fn db(x: f32) -> f32 {
 }
 
 /// Knob position 0..=1 to Hz across the audible range.
+/// The level knob law shared by many units: nothing at 0, unity at 1, measured as (11^x - 1) / 10.
+fn knob_amp(x: f32) -> f32 {
+    (11f32.powf(x.max(0.0)) - 1.0) / 10.0
+}
+
 fn knob_hz(x: f32) -> f32 {
     20.0 * 1000f32.powf(x.clamp(0.0, 1.0))
 }
@@ -2884,7 +2887,7 @@ impl Unit {
                 let time = p[4] / 48.0 * cx.step;
                 // until the echoes are 60 dB down
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
-                (time * (n + 1.0)) as usize + 4096
+                (time * (n + 1.0)) as usize + 4096 + if p[5] != 0.0 { 24000 } else { 0 }
             }
             Kind::Echo => {
                 let fb = (p[11] / 6000.0).clamp(0.0, 0.97);
@@ -3206,31 +3209,31 @@ impl Unit {
                 }
             }
             Kind::Delay => {
+                // measured against renders: whole-sample times, the cut filter on everything entering the line,
+                // the stereo offset as one extra wait on one side, the level knobs on the common knob law
                 let n = self.buf.len();
                 let (il, ir) = balance(p[0] / 128.0);
-                let iv = p[1] / 128.0;
-                let dry = p[2] / 128.0;
-                let fb = (p[3] / 128.0).clamp(0.0, 0.98);
-                let time = (p[4] / 48.0 * cx.step).clamp(1.0, n as f32 - 2.0);
-                let off = p[5] / 512.0 * 0.5 * time;
-                let dl = ((time + (-off).max(0.0)) as usize).clamp(1, n - 1);
-                let dr = ((time + off.max(0.0)) as usize).clamp(1, n - 1);
+                let iv = knob_amp(p[1] / 128.0);
+                let dry = knob_amp(p[2] / 128.0);
+                let fb = (p[3] / 128.0).clamp(0.0, 1.0);
+                let off = (0.5 * sr * (1000f32.powf(p[5].abs() / 512.0) - 1.0) / 999.0).round() as usize;
+                let time = ((p[4] / 48.0 * cx.step).round() as usize).clamp(1, n - 2 - off.min(n / 2));
+                let ol = (time + if p[5] < 0.0 { off } else { 0 }).min(n - 1);
+                let or = (time + if p[5] > 0.0 { off } else { 0 }).min(n - 1);
                 let mode = p[6] as i32;
-                let cut = (p[7] / 128.0).clamp(0.0, 1.0);
-                let a = if cut >= 1.0 { 1.0 } else { 1.0 - (-TAU * knob_hz(cut) / sr).exp() };
+                let a = ((21f32.powf((p[7] / 128.0).clamp(0.0, 1.0)) - 1.0) / 20.0).clamp(0.0, 1.0);
                 for f in io.iter_mut() {
                     let x = [f[0] * il * iv, f[1] * ir * iv];
-                    let l = self.buf[(self.pos + n - dl) % n][0];
-                    let r = self.buf[(self.pos + n - dr) % n][1];
-                    z[0] += a * (l * fb - z[0]);
-                    z[1] += a * (r * fb - z[1]);
-                    self.buf[self.pos] = match mode {
-                        1 => [x[0] + z[1], x[1] + z[0]],
-                        2 => [(x[0] + x[1]) * 0.5 + z[1], z[0]],
-                        _ => [x[0] + z[0], x[1] + z[1]],
-                    };
+                    let back = self.buf[(self.pos + n - time) % n];
+                    let l = self.buf[(self.pos + n - ol) % n][0];
+                    let r = self.buf[(self.pos + n - or) % n][1];
+                    // ping pong: each side feeds the other
+                    let into = if mode == 2 { [x[1] + back[1] * fb, x[0] + back[0] * fb] } else { [x[0] + back[0] * fb, x[1] + back[1] * fb] };
+                    z[0] += a * (into[0] - z[0]);
+                    z[1] += a * (into[1] - z[1]);
+                    self.buf[self.pos] = [z[0], z[1]];
                     self.pos = (self.pos + 1) % n;
-                    *f = [f[0] * dry + l, f[1] * dry + r];
+                    *f = if mode == 1 { [f[0] * dry + r, f[1] * dry + l] } else { [f[0] * dry + l, f[1] * dry + r] };
                 }
                 for v in z[..2].iter_mut() {
                     if v.abs() < 1e-20 {
