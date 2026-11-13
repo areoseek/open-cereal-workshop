@@ -209,7 +209,8 @@ pub(crate) struct App {
     /// The toolbar's output picture: the wave, or the level of each frequency.
     scope_bars: bool,
     /// Toolbar parts taken off by the VIEW menu: the window buttons, the output monitor.
-    bar_hidden: [bool; 2],
+    /// The toolbar panels show their move and hide buttons.
+    bar_edit: bool,
     /// Minutes of hand-played keys the score log hands over.
     score_minutes: u32,
     scope_buf: Vec<f32>,
@@ -460,7 +461,7 @@ impl App {
             show_mixer: false,
             show_browser: true,
             scope_bars: false,
-            bar_hidden: [false; 2],
+            bar_edit: false,
             score_minutes: 2,
             scope_buf: Vec::new(),
             typing_keys: true,
@@ -3342,12 +3343,7 @@ impl App {
                         }
                     });
                     ui.menu_button("Toolbars", |ui| {
-                        for (k, label) in ["Window buttons", "Output monitor"].into_iter().enumerate() {
-                            let mut on = !self.bar_hidden[k];
-                            if ui.checkbox(&mut on, label).changed() {
-                                self.bar_hidden[k] = !on;
-                            }
-                        }
+                        self.toolbar_menu(ui);
                     });
                     ui.separator();
                     if ui.button("Close all windows     F12").clicked() {
@@ -3621,11 +3617,81 @@ impl App {
             });
             ui.add_space(2.0);
             // on a narrow screen the window buttons and the monitor take a second row
-            let narrow = ui.available_width() < 1450.0;
-            for row in 0..1 + narrow as usize {
-            ui.horizontal(|ui| {
-                let tr = self.handle.transport.clone();
-                if row == 0 {
+            let order = self.settings.toolbar_order();
+            let bg = ui.interact(ui.max_rect(), ui.id().with("toolbar_bg"), egui::Sense::click());
+            bg.context_menu(|ui| self.toolbar_menu(ui));
+            ui.horizontal_wrapped(|ui| {
+                let mut act = None;
+                for (i, &k) in order.iter().enumerate() {
+                    let hidden = self.settings.toolbar_hidden & (1 << k) != 0;
+                    if self.bar_edit {
+                        if ui.small_button("<").hint("Move this panel to the left").clicked() {
+                            act = Some((i, 0));
+                        }
+                        if ui.small_button(if hidden { "show" } else { "hide" }).hint(setup::TOOLBAR_PANELS[k as usize]).clicked() {
+                            act = Some((i, 2));
+                        }
+                        if ui.small_button(">").hint("Move this panel to the right").clicked() {
+                            act = Some((i, 1));
+                        }
+                        if hidden {
+                            ui.label(RichText::new(setup::TOOLBAR_PANELS[k as usize]).color(TEXT_DIM).small());
+                            ui.separator();
+                            continue;
+                        }
+                    } else if hidden {
+                        continue;
+                    }
+                    self.tb_panel(ui, k);
+                    ui.separator();
+                }
+                if self.bar_edit {
+                    if ui.button("Done").hint("Leave the toolbar as it is now").clicked() {
+                        self.bar_edit = false;
+                    }
+                    if ui.button("Reset").hint("The usual order, everything shown").clicked() {
+                        self.settings.toolbar.clear();
+                        self.settings.toolbar_hidden = 0;
+                        let _ = self.settings.save();
+                    }
+                }
+                if let Some((i, what)) = act {
+                    let mut o = order.clone();
+                    match what {
+                        0 if i > 0 => o.swap(i, i - 1),
+                        1 if i + 1 < o.len() => o.swap(i, i + 1),
+                        2 => self.settings.toolbar_hidden ^= 1 << o[i],
+                        _ => {}
+                    }
+                    self.settings.toolbar = o;
+                    let _ = self.settings.save();
+                }
+            });
+            ui.add_space(2.0);
+        });
+    }
+
+    /// The toolbar's own menu: which panels show, and the switch that lets them be moved.
+    fn toolbar_menu(&mut self, ui: &mut egui::Ui) {
+        for (k, label) in setup::TOOLBAR_PANELS.iter().enumerate() {
+            let mut on = self.settings.toolbar_hidden & (1 << k) == 0;
+            if ui.checkbox(&mut on, *label).changed() {
+                self.settings.toolbar_hidden ^= 1 << k;
+                let _ = self.settings.save();
+            }
+        }
+        ui.separator();
+        if ui.checkbox(&mut self.bar_edit, "Edit toolbars").hint("Move the panels left and right, hide and show them").changed() {
+            ui.close_menu();
+        }
+    }
+
+    /// One panel of the toolbar row; the settings hold their order and which are hidden.
+    fn tb_panel(&mut self, ui: &mut egui::Ui, k: u8) {
+        let tr = self.handle.transport.clone();
+        let (song_mode, playing, pat) = (tr.song_mode(), tr.playing(), tr.pattern());
+        match k {
+            0 => {
                 let song_mode = tr.song_mode();
                 if ui.selectable_label(!song_mode, RichText::new("PAT").strong()).hint("Pattern mode (L)").clicked() {
                     tr.set_song_mode(false);
@@ -3672,7 +3738,8 @@ impl App {
                 if ui.toggle_value(&mut self.rec_audio, "MIC").hint("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
                     self.record_audio();
                 }
-                ui.separator();
+            }
+            1 => {
                 let live = tr.tempo();
                 let mut tempo = if playing && song_mode && live > 0.0 { live } else { self.song.tempo };
                 let tempo_box = ui.add(egui::DragValue::new(&mut tempo).range(10.0..=522.0).speed(0.2).fixed_decimals(3)).hint("Tempo (right-click for more)");
@@ -3715,8 +3782,8 @@ impl App {
                     self.song.tempo = t.clamp(10.0, 522.0);
                     self.dirty = true;
                 }
-                ui.separator();
-                // pattern picker
+            }
+            2 => {
                 let pat = tr.pattern();
                 self.song.ensure_pattern(pat);
                 let picker = egui::ComboBox::from_id_salt("pattern").width(150.0).selected_text(self.song.pattern_name(pat)).show_ui(ui, |ui| {
@@ -3738,6 +3805,8 @@ impl App {
                 if ui.button("+").hint("New pattern (F4)").clicked() {
                     self.new_pattern();
                 }
+            }
+            3 => {
                 let mut met = tr.metronome();
                 let r = ui.toggle_value(&mut met, "Metro").hint("Metronome (Ctrl+M); right-click picks its sound");
                 if r.changed() {
@@ -3778,8 +3847,8 @@ impl App {
                     tr.set_step_edit(step_edit);
                 }
                 ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T)");
-                ui.separator();
-                // time
+            }
+            4 => {
                 let tick = tr.tick() as u32;
                 let step = self.song.step();
                 // in the song the bar count follows the time signature changes
@@ -3803,7 +3872,8 @@ impl App {
                 if ui.add(egui::Slider::new(&mut at, 0.0..=1.0).show_value(false)).hint("Song position").changed() {
                     tr.seek((at * total as f32) as u32);
                 }
-                ui.separator();
+            }
+            5 => {
                 let mut master = tr.master();
                 ui.label(RichText::new("Master").color(TEXT_DIM));
                 if knob(ui, &mut master, 0.0, 1.25, 1.0, 22.0).hint("Main volume").changed() {
@@ -3814,31 +3884,23 @@ impl App {
                     self.song.main_pitch = pitch.round() as i16;
                     self.dirty = true;
                 }
-                }
-                if row == narrow as usize {
-                if !narrow {
-                    ui.separator();
-                }
-                let buttons: &mut [(&mut bool, &str, &str)] = if self.bar_hidden[0] { &mut [] } else { &mut [
+            }
+            6 => {
+                let buttons: &mut [(&mut bool, &str, &str)] = &mut [
                     (&mut self.show_playlist, "Playlist", "F5"),
                     (&mut self.show_piano, "Piano roll", "F7"),
                     (&mut self.show_rack, "Channel rack", "F6"),
                     (&mut self.show_mixer, "Mixer", "F9"),
                     (&mut self.show_browser, "Browser", "Alt+F8"),
-                ] };
+                ];
                 for (flag, label, tip) in buttons.iter_mut() {
                     if ui.selectable_label(**flag, *label).hint(*tip).clicked() {
                         **flag = !**flag;
                     }
                 }
-                let monitor = !self.bar_hidden[1];
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !monitor {
-                        return;
-                    }
+            }
+            7 => {
                     let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
-                    ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
-                    ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
                     // what is going out: the wave, or after a click the level of each frequency
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 20.0), egui::Sense::click());
                     if resp.hint("Output: click to switch between the wave and the frequencies").clicked() {
@@ -3874,12 +3936,11 @@ impl App {
                             .collect();
                         paint.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, line)));
                     }
-                });
-                }
-            });
+                    ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
+                    ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
             }
-            ui.add_space(2.0);
-        });
+            _ => {}
+        }
     }
 }
 

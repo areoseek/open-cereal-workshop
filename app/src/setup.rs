@@ -31,6 +31,9 @@ struct Job {
     dest: PathBuf,
 }
 
+/// The panels of the toolbar row, by number.
+pub const TOOLBAR_PANELS: [&str; 8] = ["Transport", "Tempo", "Pattern picker", "Recording switches", "Time", "Main volume and pitch", "Window buttons", "Output monitor"];
+
 #[derive(Default)]
 pub struct Settings {
     pub content: Vec<PathBuf>,
@@ -70,6 +73,9 @@ pub struct Settings {
     /// The metronome's sound and the bars counted in before recording (0 = one).
     pub click_kind: u8,
     pub count_bars: u8,
+    /// The toolbar panels in the order they are laid out (empty = the usual order), and the hidden ones (one bit each).
+    pub toolbar: Vec<u8>,
+    pub toolbar_hidden: u8,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
     /// How samples are read between their frames while playing (None = 4-point Hermite).
@@ -167,6 +173,17 @@ pub fn trust_script(source: &str) {
 }
 
 impl Settings {
+    /// Every toolbar panel once, in the order asked for; ones the stored list leaves out follow in their usual order.
+    pub fn toolbar_order(&self) -> Vec<u8> {
+        let mut o: Vec<u8> = vec![];
+        for k in self.toolbar.iter().copied().chain(0..TOOLBAR_PANELS.len() as u8) {
+            if (k as usize) < TOOLBAR_PANELS.len() && !o.contains(&k) {
+                o.push(k);
+            }
+        }
+        o
+    }
+
     pub fn load() -> Self {
         let mut s = Self::default();
         let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
@@ -181,6 +198,8 @@ impl Settings {
                 Some(("gm_bank", v)) => s.gm_bank = Some(PathBuf::from(v.trim())),
                 Some(("late_notes", v)) => s.late_notes = Some(v.trim() == "1"),
                 Some(("count_bars", v)) => s.count_bars = v.trim().parse().unwrap_or(0),
+                Some(("toolbar", v)) => s.toolbar = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
+                Some(("toolbar_hidden", v)) => s.toolbar_hidden = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
                 Some(("autosave", v)) => s.autosave = v.trim().parse().ok(),
                 Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
@@ -281,6 +300,12 @@ impl Settings {
         }
         if self.undo_levels > 0 {
             out += &format!("undo_levels={}\n", self.undo_levels);
+        }
+        if !self.toolbar.is_empty() {
+            out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
+        }
+        if self.toolbar_hidden != 0 {
+            out += &format!("toolbar_hidden={}\n", self.toolbar_hidden);
         }
         if self.count_bars > 1 {
             out += &format!("count_bars={}\n", self.count_bars);
