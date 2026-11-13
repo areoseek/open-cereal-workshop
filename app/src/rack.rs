@@ -131,6 +131,70 @@ impl App {
                 })
                 .response
                 .hint("Group options");
+                ui.menu_button("Options", |ui| {
+                    use egui::{Key, Modifiers};
+                    const A: Modifiers = Modifiers::ALT;
+                    const C: Modifiers = Modifiers::COMMAND;
+                    const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
+                    let items: [(&str, Modifiers, Key); 12] = [
+                        ("Clone selected              Alt+C", A, Key::C),
+                        ("Delete selected...          Alt+Del", A, Key::Delete),
+                        ("Move selected up            Alt+Up", A, Key::ArrowUp),
+                        ("Move selected down          Alt+Down", A, Key::ArrowDown),
+                        ("Group selected...           Alt+G", A, Key::G),
+                        ("Zip selected                Alt+Z", A, Key::Z),
+                        ("Unzip                       Alt+U", A, Key::U),
+                        ("", A, Key::F35),
+                        ("Route selected to free mixer tracks  Ctrl+L", C, Key::L),
+                        ("Shift steps left            Shift+Ctrl+Left", CS, Key::ArrowLeft),
+                        ("Shift steps right           Shift+Ctrl+Right", CS, Key::ArrowRight),
+                        ("Restretch all               Ctrl+Alt+R", Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true }, Key::R),
+                    ];
+                    let mut press = None;
+                    for (label, m, k) in items {
+                        if label.is_empty() {
+                            ui.separator();
+                        } else if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
+                            press = Some((m, k));
+                            ui.close_menu();
+                        }
+                    }
+                    if let Some((m, k)) = press {
+                        self.rack_key(k, m, false);
+                    }
+                    ui.separator();
+                    let targets = self.rack_targets();
+                    ui.menu_button("Color selected", |ui| {
+                        if ui.button("Gradient").hint("From the first selected channel's colour to the last one's").clicked() {
+                            if let (Some(&a), Some(&b)) = (targets.first(), targets.last()) {
+                                let (ca, cb) = (self.song.channels[a].color, self.song.channels[b].color);
+                                let n = targets.len().max(2) - 1;
+                                for (i, &c) in targets.iter().enumerate() {
+                                    let f = i as f32 / n as f32;
+                                    self.song.channels[c].color = std::array::from_fn(|k| (ca[k] as f32 + (cb[k] as f32 - ca[k] as f32) * f).round() as u8);
+                                }
+                                self.dirty = true;
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Random").clicked() {
+                            let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+                            for &c in &targets {
+                                self.song.channels[c].color = std::array::from_fn(|_| {
+                                    seed ^= seed << 13;
+                                    seed ^= seed >> 17;
+                                    seed ^= seed << 5;
+                                    70 + (seed % 150) as u8
+                                });
+                            }
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.checkbox(&mut self.rack.hide_selectors, RichText::new("Hide the selectors          Alt+M").monospace().size(11.0));
+                })
+                .response
+                .hint("Channel options");
             });
         }
         self.rack.sel.retain(|c| *c < self.song.channels.len());
