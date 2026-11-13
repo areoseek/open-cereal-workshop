@@ -2422,8 +2422,8 @@ impl Player {
                         v.attack = 1.0;
                         v.release = ms(5.0);
                     }
-                    if g.kind == crate::synth::Kind::Travel {
-                        // the path scratcher fades in by its own knob
+                    if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2) {
+                        // these fade in by their own knob
                         v.attack = 1.0;
                     }
                     v.tone = Some(tone);

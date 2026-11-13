@@ -222,14 +222,16 @@ impl Voice {
                 let u = |k: usize| s[k] / 65535.0;
                 let mut v = Fm2::default();
                 let note = key as f32;
-                let l = (0.057_762_265 * (note + 2.0 * u(11) - 1.0)).exp();
+                let l = (0.057_762_265 * note).exp();
                 v.dcar = 8.175_799 * ifs * 2f32.powf(s[21] + 1.0) * l;
                 // follow the played pitch (slides, channel tuning) rather than the key number alone
-                let want = dphase * 2.0 * 2f32.powf(s[21]) * 2f32.powf((2.0 * u(11) - 1.0) / 12.0) * 2.0;
+                let want = dphase * 2.0 * 2f32.powf(s[21]) * 2.0;
                 if want.is_finite() && want > 0.0 {
                     v.dcar = want * 0.5;
                 }
-                let lk = l.min(50.0) * (64.0 + u(9) * (vel * 127.0 - 64.0));
+                // (measured: a default note reaches it as 78 of 127)
+                let touch = vel * 127.0 * 0.78;
+                let lk = l.min(50.0) * (64.0 + u(9) * (touch - 64.0));
                 let ratio = |c: f32, f: f32| {
                     let rati = (40.1 * c * c).floor();
                     let ratf = if f < 0.5 {
@@ -248,8 +250,8 @@ impl Voice {
                 for (k, at) in [(0usize, [3usize, 4, 5, 6, 7, 8]), (1, [15, 16, 17, 18, 19, 20])] {
                     let dmod = ratio(u(at[0]), u(at[1])) * v.dcar;
                     v.m[k] = [
-                        0.0,
-                        dmod.sin(),
+                        -dmod.sin(),
+                        -(2.0 * dmod).sin(),
                         2.0 * dmod.cos(),
                         0.0002 * u(at[2]) * u(at[2]) * lk,
                         0.0002 * u(at[4]) * u(at[4]) * lk,
@@ -258,14 +260,15 @@ impl Voice {
                     ];
                 }
                 v.catt = 1.0 - (-ifs * (8.0 - 8.0 * u(0)).exp()).exp();
+                v.car = 0.0;
                 v.cdec = if u(1) > 0.98 { 1.0 } else { (-ifs * (5.0 - 8.0 * u(1)).exp()).exp() };
                 v.crel = (-ifs * (5.0 - 5.0 * u(2)).exp()).exp();
-                v.rich = 0.5 - 3.0 * u(12) * u(12);
-                v.thru = 0.25 * u(13) * u(13);
+                v.rich = 0.5 - 3.0 * u(11) * u(11);
+                v.thru = 0.25 * u(12) * u(12);
                 v.vib = 0.001 * u(10) * u(10);
-                v.dlfo = 628.3 * ifs * 25.0 * u(14) * u(14);
+                v.dlfo = 628.3 * ifs * 25.0 * u(13) * u(13);
                 v.lfo = [0.0, 1.0];
-                v.env = (1.5 - u(12)) * 0.0035 * (vel * 127.0 + 10.0);
+                v.env = (1.5 - u(11)) * 0.0035 * (touch + 10.0);
                 Voice::Fm2(Box::new(v))
             }
             _ => {
@@ -494,7 +497,7 @@ impl Voice {
                 v.car = x;
                 let r = v.rich;
                 let o = v.cenv * (v.thru * thru + (x + x * x * x * (r * x * x - 1.0 - r)));
-                [o * 1.6; 2]
+                [o * 2.111; 2]
             }
             Voice::Pluck(v) => {
                 let _ = dphase;
