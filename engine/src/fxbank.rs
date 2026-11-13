@@ -312,6 +312,7 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             // the eight targets: pan, volume, cutoff, resonance, low, band, high, shaper mix
             let mut drawn = [0f32; TARGETS];
             let mut steady = [0f32; TARGETS];
+            let mut swing = 0f32;
             for a in 0..TARGETS {
                 let art = &tables[WS_N + a * ART..WS_N + (a + 1) * ART];
                 let len = art[0];
@@ -324,17 +325,22 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
                 } else {
                     None
                 };
-                // the slow wave: free speeds run on an estimated scale, tempo speeds double every 4850 units
-                // around one turn a beat
+                // the slow wave: free speeds run on an estimated scale (the one measured setting barely moved in half
+                // a second), tempo speeds double every 4850 units around one turn a bar
                 let wave = if art[1].abs() > 1e-4 {
-                    let per_frame = if art[3] >= 0.5 { ((art[2] - 31102.0) / 4850.0).exp2() / (cx.step * 4.0).max(1.0) } else { 0.05 * (art[2].clamp(0.0, 65536.0) / 65536.0 * 11.0).exp2() / sr };
+                    let per_frame = if art[3] >= 0.5 { 0.25 * ((art[2] - 31102.0) / 4850.0).exp2() / (cx.step * 4.0).max(1.0) } else { 0.002 * (art[2].clamp(0.0, 65536.0) / 65536.0 * 11.0).exp2() / sr };
                     let ph = &mut st.wave[b][a];
                     *ph = (*ph + per_frame * n as f32).fract();
                     Some((*ph * 2.0 * PI).sin())
                 } else {
                     None
                 };
-                if matches!(a, 0 | 2 | 3) {
+                if a == 2 {
+                    // the cutoff's pattern goes through the envelope knob; its slow wave does not
+                    drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5;
+                    swing = wave.map_or(0.0, |w| 0.5 * art[1] * w);
+                    steady[a] = 2.0 * (mx - 0.5 + my - 0.5);
+                } else if matches!(a, 0 | 3) {
                     drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5 + wave.map_or(0.0, |w| 0.5 * art[1] * w);
                     steady[a] = mx - 0.5 + my - 0.5;
                 } else {
@@ -342,12 +348,12 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
                     steady[a] = mx * my;
                 }
             }
-            let depth = (q[0] - 128.0) / 128.0;
-            let cut = q[1] / 256.0 + steady[2] + 2.0 * depth * drawn[2];
-            let hz = (20.0 * 1000f32.powf(cut.clamp(0.0, 1.0))).min(sr * 0.45);
+            let depth = 0.65 * q[0] / 128.0;
+            let cut = q[1] / 256.0 + steady[2] + depth * drawn[2] + swing + 0.02;
+            let hz = (20.0 * 1000f32.powf(cut.clamp(0.0, 1.0))).min(sr * 0.45).min(8450.0);
             let kind = q[13].round() as i32;
-            let res = (q[2] / 256.0 + steady[3] + drawn[3]).clamp(0.0, 1.0);
-            let quality = 0.5 * 20f32.powf(res) * if kind == 11 { 2.0 } else { 1.0 };
+            let res = (q[2] / 256.0 + 0.56 * steady[3] + drawn[3]).clamp(0.0, 1.0);
+            let quality = 0.5 * 9.55f32.powf(res) * if kind == 11 { 2.0 } else { 1.0 };
             let stages = [0usize, 1, 2, 3, 2, 3][(q[12].round() as usize).min(5)];
             let g = (PI * hz / sr).tan();
             let k = 1.0 / quality;
@@ -360,7 +366,7 @@ pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
             let two_sided = q[16] >= 0.5;
             let ws = &tables[..WS_N];
             let pan = (q[8] / 64.0 + 2.0 * (steady[0] + drawn[0])).clamp(-1.0, 1.0);
-            let vol = (q[9] / 128.0 * drawn[1] * steady[1]).max(0.0);
+            let vol = (0.6 * q[9] / 128.0 * drawn[1] * steady[1]).max(0.0);
             let want = [vol * (1.0 - pan).min(1.0), vol * (1.0 + pan).min(1.0)];
             if st.gain[b][0] < 0.0 {
                 st.gain[b] = want;
@@ -476,7 +482,7 @@ mod tests {
             process(&p, &mut st, &mut io, &cx);
             io[4800..].iter().fold(0f32, |m, f| m.max(f[0].abs()))
         };
-        assert!(level(100.0) > 0.4, "{}", level(100.0));
+        assert!(level(100.0) > 0.25, "{}", level(100.0));
         assert!(level(8000.0) < 0.05, "{}", level(8000.0));
     }
 
@@ -491,7 +497,7 @@ mod tests {
         let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
         let spread = |p: &[f32]| {
             let mut st = State::default();
-            let mut io: Vec<[f32; 2]> = (0..48000).map(|i| [(i as f32 * 200.0 / 48000.0 * 2.0 * PI).sin() * 0.5; 2]).collect();
+            let mut io: Vec<[f32; 2]> = (0..288000).map(|i| [(i as f32 * 200.0 / 48000.0 * 2.0 * PI).sin() * 0.5; 2]).collect();
             process(p, &mut st, &mut io, &cx);
             let tops: Vec<f32> = io[4800..].chunks(480).map(|c| c.iter().fold(0f32, |m, f| m.max(f[0].abs()))).collect();
             let (lo, hi) = tops.iter().fold((f32::MAX, 0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
