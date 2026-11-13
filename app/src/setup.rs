@@ -52,6 +52,15 @@ pub struct Settings {
     pub midi_sync: bool,
     /// The MIDI channel whose notes play the clips of a performance (1..=16), 0 for none.
     pub midi_perf: u8,
+    /// MIDI channels whose notes play the rack's channels one per key, switch them on and off, and jump to
+    /// time markers (1..=16), 0 for none.
+    pub midi_omni: u8,
+    pub midi_mute: u8,
+    pub midi_marker: u8,
+    /// Notes ignore how hard the key was struck.
+    pub midi_flat: bool,
+    /// The foot pedal does not hold notes.
+    pub midi_pedal_free: bool,
     /// Size of the whole interface; 0 = as the system says.
     pub scale: f32,
     /// The mixer's track width: 0 wide, 1 compact, 2 extra large.
@@ -191,6 +200,16 @@ pub const OPT_READ_TEMPO: u32 = 16;
 const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT | OPT_READ_TEMPO;
 
 impl Settings {
+    /// Hand the MIDI threads the channel jobs and switches.
+    pub fn midi_apply(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        crate::midi::PERF_CHAN.store(self.midi_perf as usize, Relaxed);
+        crate::midi::OMNI_CHAN.store(self.midi_omni as usize, Relaxed);
+        crate::midi::MUTE_CHAN.store(self.midi_mute as usize, Relaxed);
+        crate::midi::MARKER_CHAN.store(self.midi_marker as usize, Relaxed);
+        crate::midi::FLAT_VEL.store(self.midi_flat, Relaxed);
+        crate::midi::PEDAL_FREE.store(self.midi_pedal_free, Relaxed);
+    }
     pub fn opt(&self, bit: u32) -> bool {
         (if self.opt_set & bit != 0 { self.opt_val } else { OPT_DEFAULT }) & bit != 0
     }
@@ -279,6 +298,11 @@ impl Settings {
                 }
                 Some(("midi_sync", v)) => s.midi_sync = v.trim() == "1",
                 Some(("midi_perf", v)) => s.midi_perf = v.trim().parse::<u8>().unwrap_or(0).min(16),
+                Some(("midi_omni", v)) => s.midi_omni = v.trim().parse::<u8>().unwrap_or(0).min(16),
+                Some(("midi_mute", v)) => s.midi_mute = v.trim().parse::<u8>().unwrap_or(0).min(16),
+                Some(("midi_marker", v)) => s.midi_marker = v.trim().parse::<u8>().unwrap_or(0).min(16),
+                Some(("midi_flat", v)) => s.midi_flat = v.trim() == "1",
+                Some(("midi_pedal_free", v)) => s.midi_pedal_free = v.trim() == "1",
                 Some(("mixer_view", v)) => s.mixer_view = v.trim().parse().unwrap_or(0),
                 Some(("mixer_big", v)) => s.mixer_big = v.trim() == "1",
                 Some(("detached", v)) => s.detached = v.trim().parse().unwrap_or(0),
@@ -386,6 +410,11 @@ impl Settings {
         }
         if self.midi_perf > 0 {
             out += &format!("midi_perf={}\n", self.midi_perf);
+        }
+        for (k, v) in [("midi_omni", self.midi_omni), ("midi_mute", self.midi_mute), ("midi_marker", self.midi_marker), ("midi_flat", self.midi_flat as u8), ("midi_pedal_free", self.midi_pedal_free as u8)] {
+            if v > 0 {
+                out += &format!("{k}={v}\n");
+            }
         }
         if self.scale > 0.0 {
             out += &format!("scale={}\n", self.scale);

@@ -33,7 +33,7 @@ impl App {
     fn midi_prefs_changed(&mut self) {
         let s = &self.settings;
         midi::set_prefs(midi::Prefs { off: s.midi_off.clone(), out: s.midi_out.clone(), sync: s.midi_sync });
-        midi::PERF_CHAN.store(s.midi_perf as usize, std::sync::atomic::Ordering::Relaxed);
+        s.midi_apply();
         let _ = self.settings.save();
     }
 
@@ -127,6 +127,33 @@ impl App {
         })
         .response
         .hint("Notes on this channel play the clips of the performance zone: each octave is a track, each key a clip");
+        for (label, id, hint, v) in [
+            ("Omni preview MIDI channel", "midi_omni", "Notes on this channel play the channels of the rack, one per key: the middle C is the first channel", &mut self.settings.midi_omni),
+            ("Generator muting MIDI channel", "midi_mute", "Notes on this channel switch the channels of the rack on and off: the middle C is the first channel", &mut self.settings.midi_mute),
+            ("Song marker jump MIDI channel", "midi_marker", "Notes on this channel jump to the time markers of the song: the middle C is the first marker", &mut self.settings.midi_marker),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                let name = |c: u8| if c == 0 { "---".to_string() } else { format!("{c}") };
+                egui::ComboBox::from_id_salt(id).width(60.0).selected_text(name(*v)).show_ui(ui, |ui| {
+                    for c in 0..=16u8 {
+                        changed |= ui.selectable_value(v, c, name(c)).changed();
+                    }
+                });
+            })
+            .response
+            .hint(hint);
+        }
+        let mut link = !self.settings.midi_flat;
+        if ui.checkbox(&mut link, "Link note on velocity to velocity").hint("Off: every note plays at the default velocity, however hard the key is struck").changed() {
+            self.settings.midi_flat = !link;
+            changed = true;
+        }
+        let mut pedal = !self.settings.midi_pedal_free;
+        if ui.checkbox(&mut pedal, "Foot pedal controls note off").hint("Off: the pedal no longer holds notes and can be linked like any other controller").changed() {
+            self.settings.midi_pedal_free = !pedal;
+            changed = true;
+        }
         changed |= ui.checkbox(&mut self.settings.midi_sync, "Send master sync").hint("The clock, start and stop go to every output that has a port number").changed();
         if cfg!(target_os = "linux") {
             ui.label(RichText::new("Each port in use is also a port of \"Open Cereal Workshop Out\" that other programs can connect to.").color(TEXT_DIM).small());

@@ -29,9 +29,45 @@ pub static PPQ: AtomicUsize = AtomicUsize::new(96);
 /// The MIDI channel (1..=16) whose notes play the clips of a performance; 0 for none.
 pub static PERF_CHAN: AtomicUsize = AtomicUsize::new(0);
 
+/// MIDI channels (1..=16, 0 for none) with a job of their own: notes on the first play the rack's channels
+/// one per key, on the second they switch rack channels on and off, on the third they jump to time markers.
+/// The middle C stands for the first channel or marker.
+pub static OMNI_CHAN: AtomicUsize = AtomicUsize::new(0);
+pub static MUTE_CHAN: AtomicUsize = AtomicUsize::new(0);
+pub static MARKER_CHAN: AtomicUsize = AtomicUsize::new(0);
+/// Every note plays at the default velocity, however hard the key was struck.
+pub static FLAT_VEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The foot pedal is an ordinary controller that can be linked, not a note hold.
+pub static PEDAL_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Presses on the muting (0) and marker (1) channels since the app last looked, with the key's number from
+/// the middle C.
+static JOBS: std::sync::Mutex<Vec<(u8, u8)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn take_jobs() -> Vec<(u8, u8)> {
+    JOBS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
 /// A note on the performance channel while a performance runs plays a clip: each octave is a track, each
 /// key of it a clip of the zone. True when the note was taken.
 fn perf_note(to: &CmdSender, midi_chan: u8, key: u8, down: bool) -> bool {
+    let on = midi_chan as usize + 1;
+    if on == OMNI_CHAN.load(Ordering::Relaxed) {
+        if key >= 60 {
+            let chan = (key - 60) as u16;
+            to.send(if down { cereal_engine::Cmd::NoteOn { chan, key: 60, vel: 1.0 } } else { cereal_engine::Cmd::NoteOff { chan, key: 60 } });
+        }
+        return true;
+    }
+    for (kind, of) in [(0u8, &MUTE_CHAN), (1, &MARKER_CHAN)] {
+        if on == of.load(Ordering::Relaxed) {
+            if down && key >= 60 {
+                if let Ok(mut q) = JOBS.lock() {
+                    q.push((kind, key - 60));
+                }
+            }
+            return true;
+        }
+    }
     let want = PERF_CHAN.load(Ordering::Relaxed);
     if want == 0 || want != midi_chan as usize + 1 || !to.performing() {
         return false;
@@ -171,6 +207,7 @@ impl Held {
             to.send(cereal_engine::Cmd::NoteOff { chan: c, key: k });
         }
         self.down.push((key, chan));
+        let vel = if FLAT_VEL.load(Ordering::Relaxed) { 100 } else { vel };
         to.send(cereal_engine::Cmd::NoteOn { chan, key, vel: (vel as f32 / 127.0).powf(0.8) });
     }
 
@@ -290,7 +327,7 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
             }
             EventType::Controller => {
                 if let Some(cc) = ev.get_data::<EvCtrl>() {
-                    if cc.param == 64 {
+                    if cc.param == 64 && !PEDAL_FREE.load(Ordering::Relaxed) {
                         held.set_hold(&to, cc.value >= 64);
                     } else {
                         heard_control(cc.param.min(127) as u8, cc.value.clamp(0, 127) as u8);
@@ -324,7 +361,7 @@ impl Held {
         match status & 0xf0 {
             0x90 if d2 > 0 => self.on(to, chan, d1 & 127, d2 & 127),
             0x80 | 0x90 => self.off(to, d1 & 127),
-            0xb0 if d1 == 64 => self.set_hold(to, d2 >= 64),
+            0xb0 if d1 == 64 && !PEDAL_FREE.load(Ordering::Relaxed) => self.set_hold(to, d2 >= 64),
             0xb0 => heard_control(d1 & 127, d2 & 127),
             0xe0 => {
                 let v = ((d2 as i32 & 127) << 7 | (d1 as i32 & 127)) - 8192;

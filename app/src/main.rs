@@ -407,7 +407,7 @@ impl App {
         setup::load_trusted_scripts(&settings.content);
         record::set_input(&settings.audio_in);
         midi::set_prefs(midi::Prefs { off: settings.midi_off.clone(), out: settings.midi_out.clone(), sync: settings.midi_sync });
-        midi::PERF_CHAN.store(settings.midi_perf as usize, std::sync::atomic::Ordering::Relaxed);
+        settings.midi_apply();
         let mut made = None;
         let started = start_audio(&settings, |rate| {
             let (h, p) = new_player(Song::new(), rate);
@@ -1384,6 +1384,24 @@ impl App {
     /// Apply what the MIDI device's knobs and sliders sent, and run the "link to controller" window.
     fn controllers_ui(&mut self, ctx: &egui::Context) {
         let moves = midi::take_controls();
+        for (kind, n) in midi::take_jobs() {
+            let n = n as usize;
+            if kind == 0 {
+                if let Some(c) = self.song.channels.get_mut(n) {
+                    c.enabled = !c.enabled;
+                    self.dirty = true;
+                }
+            } else {
+                let mut at: Vec<u32> = self.song.markers.iter().map(|m| m.pos).collect();
+                at.sort_unstable();
+                if let Some(&to) = at.get(n) {
+                    if !self.handle.transport.song_mode() {
+                        self.handle.transport.set_song_mode(true);
+                    }
+                    self.handle.transport.seek(to);
+                }
+            }
+        }
         if let Some(t) = self.link_learn {
             let have = self.song.midi_links.iter().find(|l| l.target == t).map(|l| l.ctrl);
             let (mut open, mut done, mut unlink) = (true, false, false);
