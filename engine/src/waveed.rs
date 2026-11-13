@@ -203,6 +203,44 @@ pub fn loud_parts(f: &Frames, a: usize, b: usize, thresh: f32, rate: u32) -> Vec
     out
 }
 
+/// Turn the wave upside down.
+pub fn invert(f: &mut Frames, a: usize, b: usize) {
+    let (a, b) = span(f, a, b);
+    for s in &mut f[a..b] {
+        *s = [-s[0], -s[1]];
+    }
+}
+
+/// The height of a drawn line at one frame: straight between its points, level before the first and after
+/// the last, `rest` when there are none.
+pub fn line_at(pts: &[(usize, f32)], at: usize, rest: f32) -> f32 {
+    let i = pts.partition_point(|p| p.0 <= at);
+    match (i.checked_sub(1).map(|k| pts[k]), pts.get(i)) {
+        (Some(l), Some(r)) if r.0 > l.0 => l.1 + (r.1 - l.1) * (at - l.0) as f32 / (r.0 - l.0) as f32,
+        (Some(l), _) => l.1,
+        (None, Some(r)) => r.1,
+        (None, None) => rest,
+    }
+}
+
+/// Shape a stretch with a drawn line (points sorted by frame, heights 0..=1). `kind` 0: level, the top
+/// leaving the sound as it is. 1: panning, the middle leaving it. 2: stereo width, the bottom one channel,
+/// the middle unchanged, the top twice as wide.
+pub fn envelope(f: &mut Frames, a: usize, b: usize, pts: &[(usize, f32)], kind: u8) {
+    let (a, b) = span(f, a, b);
+    for (i, s) in f[a..b].iter_mut().enumerate() {
+        let v = line_at(pts, a + i, if kind == 0 { 1.0 } else { 0.5 }).clamp(0.0, 1.0);
+        match kind {
+            0 => *s = [s[0] * v * v, s[1] * v * v],
+            1 => *s = [s[0] * (2.0 - 2.0 * v).min(1.0), s[1] * (2.0 * v).min(1.0)],
+            _ => {
+                let (mid, side) = ((s[0] + s[1]) * 0.5, (s[0] - s[1]) * 0.5 * v * 2.0);
+                *s = [mid + side, mid - side];
+            }
+        }
+    }
+}
+
 /// Silence everything in the stretch that is quieter than `thresh`, with short fades at the joins.
 pub fn gate(f: &mut Frames, a: usize, b: usize, thresh: f32, rate: u32) {
     let (a, b) = span(f, a, b);
@@ -1063,5 +1101,25 @@ mod tests {
             assert!((got - bpm).abs() < 1.5, "{bpm} came out as {got}");
         }
         assert!(tempo(&vec![[0.0; 2]; 200_000], rate).is_none());
+    }
+
+    #[test]
+    fn a_drawn_line_shapes_level_pan_and_width() {
+        let mut f: Frames = vec![[1.0, 0.5]; 101];
+        // level falls from the top to nothing over the stretch
+        envelope(&mut f, 0, 101, &[(0, 1.0), (100, 0.0)], 0);
+        assert!((f[0][0] - 1.0).abs() < 1e-6 && (f[50][0] - 0.25).abs() < 1e-6 && f[100][0] == 0.0);
+        let mut f: Frames = vec![[1.0, 1.0]; 10];
+        envelope(&mut f, 0, 10, &[(0, 0.0), (9, 1.0)], 1);
+        assert_eq!((f[0], f[9]), ([1.0, 0.0], [0.0, 1.0]));
+        let mut f: Frames = vec![[1.0, 0.0]; 4];
+        envelope(&mut f, 0, 4, &[(0, 0.0)], 2);
+        assert_eq!(f[2], [0.5, 0.5]);
+        // no points at all leave the sound alone
+        let mut f: Frames = vec![[0.3, -0.2]; 4];
+        envelope(&mut f, 0, 4, &[], 2);
+        assert!((f[1][0] - 0.3).abs() < 1e-6 && (f[1][1] + 0.2).abs() < 1e-6);
+        invert(&mut f, 0, 4);
+        assert!(f[0][0] < 0.0 && f[0][1] > 0.0);
     }
 }

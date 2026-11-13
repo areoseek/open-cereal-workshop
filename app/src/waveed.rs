@@ -75,6 +75,11 @@ pub struct WaveEd {
     /// Time pins: where a moment is, and where it is to go.
     pins: Vec<(usize, usize)>,
     pin_drag: Option<usize>,
+    /// The drawn line of the envelope tool (frame, height 0..=1) and what it shapes: 0 level, 1 panning,
+    /// 2 stereo width.
+    env: Vec<(usize, f32)>,
+    env_kind: u8,
+    env_drag: Option<usize>,
 }
 
 /// One step back.
@@ -87,7 +92,7 @@ struct Snap {
 
 impl Default for WaveEd {
     fn default() -> Self {
-        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, claw_bpm: 120.0, claw_beats: 1.0, claw_every: 4, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None, pe: None, pe_moves: Vec::new(), pe_glide: 20.0, pe_min: 60.0, pe_pick: None, pe_drag: None, pins: Vec::new(), pin_drag: None }
+        Self { frames: Vec::new(), rate: 48_000, sel: (0, 0), view: (0, 0), undo: Vec::new(), clip: Vec::new(), name: "Take".into(), on_play: false, amp_db: 3.0, marks: Vec::new(), lp: (0, 0), thresh: 0.02, profile: Vec::new(), clean: 1.5, menu_mark: None, rename: None, tool: None, claw_bpm: 120.0, claw_beats: 1.0, claw_every: 4, time: 1.0, semis: 0.0, eq: [0.0; 10], blur: 0.5, room_secs: 1.5, room_wet: 0.3, room_clip: false, join_ms: 30.0, spec: false, rev: 0, spec_tex: None, pe: None, pe_moves: Vec::new(), pe_glide: 20.0, pe_min: 60.0, pe_pick: None, pe_drag: None, pins: Vec::new(), pin_drag: None, env: Vec::new(), env_kind: 0, env_drag: None }
     }
 }
 
@@ -380,6 +385,66 @@ impl WaveEd {
         }
     }
 
+    /// The envelope tool's line over the wave's view.
+    fn env_strip(&mut self, ui: &mut Ui) {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(780.0, 64.0), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, PANEL_DARK);
+        let (v0, v1) = self.view;
+        let span = (v1 - v0).max(1) as f32;
+        let (top, h) = (rect.top() + 5.0, rect.height() - 10.0);
+        let x_of = |at: usize| rect.left() + (at as f32 - v0 as f32) / span * rect.width();
+        let at_x = |x: f32| (v0 as f32 + (x - rect.left()) / rect.width() * span).max(0.0) as usize;
+        let y_of = |v: f32| top + (1.0 - v) * h;
+        let v_y = |y: f32| (1.0 - (y - top) / h).clamp(0.0, 1.0);
+        let rest = if self.env_kind == 0 { 1.0 } else { 0.5 };
+        p.line_segment([Pos2::new(rect.left(), y_of(rest)), Pos2::new(rect.right(), y_of(rest))], Stroke::new(1.0_f32, LINE_SOFT));
+        let cols = rect.width() as usize / 4;
+        let line: Vec<Pos2> = (0..=cols).map(|c| {
+            let x = rect.left() + c as f32 * 4.0;
+            Pos2::new(x, y_of(ops::line_at(&self.env, at_x(x), rest)))
+        }).collect();
+        p.add(egui::Shape::line(line, Stroke::new(1.5_f32, ACCENT)));
+        let ptr = resp.interact_pointer_pos().or(resp.hover_pos());
+        let near = |pt: &(usize, f32), q: Pos2| (q.x - x_of(pt.0)).abs() < 7.0 && (q.y - y_of(pt.1)).abs() < 9.0;
+        let mut over = None;
+        for (i, pt) in self.env.iter().enumerate() {
+            p.circle_filled(Pos2::new(x_of(pt.0), y_of(pt.1)), 4.0, ACCENT);
+            if ptr.is_some_and(|q| near(pt, q)) {
+                over = Some(i);
+            }
+        }
+        if resp.drag_started() {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            self.env_drag = self.env.iter().position(|pt| origin.is_some_and(|q| near(pt, q)));
+        }
+        if let (Some(i), Some(q)) = (self.env_drag, ptr) {
+            if resp.dragged() && i < self.env.len() {
+                // a point stays between its neighbours
+                let lo = if i > 0 { self.env[i - 1].0 + 1 } else { 0 };
+                let hi = self.env.get(i + 1).map_or(self.frames.len(), |n| n.0.saturating_sub(1));
+                self.env[i] = (at_x(q.x).clamp(lo, hi.max(lo)), v_y(q.y));
+            }
+        }
+        if resp.drag_stopped() {
+            self.env_drag = None;
+        }
+        if resp.double_clicked() && over.is_none() {
+            if let Some(q) = ptr {
+                let at = at_x(q.x);
+                let i = self.env.partition_point(|pt| pt.0 < at);
+                if self.env.get(i).is_none_or(|pt| pt.0 != at) {
+                    self.env.insert(i, (at, v_y(q.y)));
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(i) = over {
+                self.env.remove(i);
+            }
+        }
+    }
+
     fn fit(&mut self) {
         self.view = (0, self.frames.len());
     }
@@ -478,6 +543,7 @@ impl WaveEd {
                     (10, "Fade out", "Alt+F"),
                     (11, "Centre", "Take out a standing offset"),
                     (12, "Swap sides", "Left and right change places"),
+                    (18, "Reverse polarity", "Turn the wave upside down"),
                 ] {
                     if ui.button(name).hint(tip).clicked() {
                         edit = Some(k);
@@ -527,6 +593,7 @@ impl WaveEd {
                         (56, "Claw machine... (Alt+W)"),
                         (57, "Correct the pitch..."),
                         (58, "Warp the time..."),
+                        (59, "Envelope..."),
                     ] {
                         if ui.button(name).clicked() {
                             self.tool = Some(k);
@@ -657,6 +724,15 @@ impl WaveEd {
                             self.pins.clear();
                         }
                     }
+                    59 => {
+                        ui.label("Envelope: double-click the strip for a point, drag it, right-click removes it. It shapes");
+                        for (i, n) in ["the level", "the panning", "the stereo width"].iter().enumerate() {
+                            ui.selectable_value(&mut self.env_kind, i as u8, *n);
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.env.clear();
+                        }
+                    }
                     _ => {
                         ui.label("Tune the loop (or the marked stretch) so its end runs into its start. Join:");
                         ui.add(egui::DragValue::new(&mut self.join_ms).range(1.0..=2000.0).speed(0.5).suffix(" ms"));
@@ -676,6 +752,7 @@ impl WaveEd {
         match self.tool {
             Some(57) if has => self.pitch_strip(ui),
             Some(58) if has => self.pin_strip(ui),
+            Some(59) if has => self.env_strip(ui),
             _ => {}
         }
         // the picture
@@ -1159,6 +1236,8 @@ impl WaveEd {
                         10 => ops::fade(&mut self.frames, a, b, false),
                         11 => ops::centre(&mut self.frames, a, b),
                         12 => ops::swap(&mut self.frames, a, b),
+                        18 => ops::invert(&mut self.frames, a, b),
+                        59 => ops::envelope(&mut self.frames, a, b, &self.env, self.env_kind),
                         13 => ops::gain(&mut self.frames, a, b, 10f32.powf(self.amp_db / 20.0)),
                         _ => {}
                     }
