@@ -155,6 +155,18 @@ impl WaveEd {
         Ok(())
     }
 
+    /// Take over a sound that is already in memory.
+    pub fn take(&mut self, s: &Sample, name: &str) {
+        self.keep();
+        self.rate = s.rate;
+        self.name = name.to_string();
+        self.frames = s.frames.clone();
+        self.marks.clear();
+        self.lp = (0, 0);
+        self.sel = (0, 0);
+        self.fit();
+    }
+
     /// Put `new` where `a..b` was; the flags inside move in step with the change of length.
     fn swap_in(&mut self, a: usize, b: usize, new: Vec<[f32; 2]>) {
         let inside: Vec<ops::Mark> = self.marks.iter().filter(|m| m.at >= a && m.at < b).cloned().collect();

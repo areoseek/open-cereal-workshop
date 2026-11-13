@@ -169,6 +169,43 @@ impl App {
 
     /// The menu of a playlist track: its name and how it behaves in performance mode.
     /// The menu behind a clip's top left corner.
+    /// Stretch the sound of an audio clip over `beats` and give the clip that length.
+    fn fit_clip(&mut self, clip: usize, ch: usize, beats: f32) {
+        let f = &mut self.song.channels[ch].smp;
+        f.stretch_beats = beats;
+        f.stretch_mul = 1.0;
+        f.keep_pitch = true;
+        let ticks = (beats * self.song.ppq as f32).round().max(1.0) as u32;
+        for (n, c) in self.song.clips.iter_mut().enumerate() {
+            if c.src == ClipSrc::Audio(ch) && (n == clip || c.offset == 0) {
+                c.len = ticks;
+            }
+        }
+        self.dirty = true;
+        self.handle.publish(self.song.clone());
+    }
+
+    /// Open the sound of a channel in a Wave Recorder on its mixer track.
+    fn edit_clip_sample(&mut self, ch: usize) {
+        let Some(sm) = self.song.channels[ch].raw.clone().or_else(|| self.song.channels[ch].sample.clone()) else { return };
+        let ins = self.song.channels[ch].insert.min(self.song.inserts.len().saturating_sub(1));
+        let have = self.song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.plugin.eq_ignore_ascii_case("Edison")).map(|s| s.index));
+        let free = || (0..10u16).find(|n| !self.song.inserts[ins].slots.iter().any(|s| s.index == *n));
+        match have.or_else(free) {
+            Some(slot) => {
+                if have.is_none() {
+                    self.set_effect(ins, slot, cereal_engine::fx::Kind::Thru, "Edison");
+                    self.dirty = true;
+                    self.handle.publish(self.song.clone());
+                }
+                let name = self.song.channels[ch].name.clone();
+                self.wave_eds.entry((ins, slot)).or_default().take(&sm, &name);
+                self.fx_open = Some((ins, slot));
+            }
+            None => self.status = "No free effect slot on the mixer track of this channel".into(),
+        }
+    }
+
     fn clip_menu(&mut self, ctx: &egui::Context) {
         let Some((i, at)) = self.playlist.clip_menu else { return };
         let Some(clip) = self.song.clips.get(i).cloned() else {
@@ -184,6 +221,34 @@ impl App {
                     if ui.button("Preview").hint("Hear the sound of this clip").clicked() {
                         if let Some(sm) = self.song.channels[ch].sample.clone() {
                             self.handle.send(cereal_engine::Cmd::Preview(sm));
+                        }
+                        close = true;
+                    }
+                    if ui.button("Edit sample").hint("Open the sound in a Wave Recorder on the mixer track of its channel").clicked() {
+                        self.edit_clip_sample(ch);
+                        close = true;
+                    }
+                    if ui.button("Fit to tempo").hint("Stretch the sound to the nearest whole number of beats at the tempo of the song").clicked() {
+                        if let Some(sm) = self.song.channels[ch].sample.clone() {
+                            let beats = (sm.seconds() * self.song.tempo / 60.0).round().max(1.0);
+                            self.fit_clip(i, ch, beats);
+                            self.status = format!("Stretched to {beats:.0} beats");
+                        }
+                        close = true;
+                    }
+                    if ui.button("Detect tempo").hint("Find the tempo of the sound and stretch it to keep time with the song").clicked() {
+                        let sm = self.song.channels[ch].raw.clone().or_else(|| self.song.channels[ch].sample.clone());
+                        match sm.as_ref().and_then(|sm| cereal_engine::waveed::tempo(&sm.frames, sm.rate).map(|t| (t, sm.seconds()))) {
+                            Some((bpm, secs)) => {
+                                // half and double time sound alike to the ear: take the reading nearest the song
+                                let bpm = [bpm * 0.5, bpm, bpm * 2.0].into_iter().min_by(|a, b| (a / self.song.tempo).ln().abs().total_cmp(&(b / self.song.tempo).ln().abs())).unwrap_or(bpm);
+                                // a loop is cut on the beat far more often than not
+                                let own = secs * bpm / 60.0;
+                                let beats = if (own - own.round()).abs() < 0.12 { own.round() } else { own };
+                                self.fit_clip(i, ch, beats.max(0.25));
+                                self.status = format!("The sound runs at {bpm:.1} beats a minute; stretched to the song");
+                            }
+                            None => self.status = "No steady tempo found in this sound".into(),
                         }
                         close = true;
                     }

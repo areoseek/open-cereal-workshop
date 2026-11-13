@@ -221,6 +221,63 @@ pub fn gate(f: &mut Frames, a: usize, b: usize, thresh: f32, rate: u32) {
 
 /// Where new sounds start inside the stretch: places where the level jumps well above what went just before.
 /// `sense` runs from 0 (only the hardest hits) to 1 (the soft ones as well).
+/// The tempo the sound seems to keep, in beats a minute between 70 and 180, or nothing when it has no pulse
+/// and is too long to be a loop.
+///
+/// The rise of the loudness is laid over itself at every lag; the lag where it agrees best is the beat.
+pub fn tempo(f: &Frames, rate: u32) -> Option<f32> {
+    let hop = (rate as usize / 200).max(1);
+    let per_s = rate as f32 / hop as f32;
+    let env: Vec<f32> = f.chunks(hop).map(|c| (c.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>() / c.len() as f32).sqrt()).collect();
+    // a short sound with no clear pulse is most likely a loop of a bar or a few: the length alone names a tempo
+    let secs = f.len() as f32 / rate as f32;
+    let loud = env.iter().any(|x| *x > 1e-4);
+    let by_length = (loud && secs > 0.3 && secs < 16.0).then(|| {
+        let mut bpm = 240.0 / secs;
+        while bpm < 85.0 {
+            bpm *= 2.0;
+        }
+        while bpm >= 170.0 {
+            bpm *= 0.5;
+        }
+        bpm
+    });
+    if env.len() < (per_s * 1.5) as usize {
+        return by_length;
+    }
+    let rise: Vec<f32> = std::iter::once(0.0).chain(env.windows(2).map(|w| (w[1] - w[0]).max(0.0))).collect();
+    let mean = rise.iter().sum::<f32>() / rise.len() as f32;
+    let rise: Vec<f32> = rise.iter().map(|x| x - mean).collect();
+    let power: f32 = rise.iter().map(|x| x * x).sum();
+    if power <= 1e-12 {
+        return by_length;
+    }
+    let at = |lag: usize| -> f32 {
+        if lag == 0 || lag >= rise.len() {
+            return 0.0;
+        }
+        rise[lag..].iter().zip(&rise).map(|(a, b)| a * b).sum::<f32>() / power * rise.len() as f32 / (rise.len() - lag) as f32
+    };
+    let (lo, hi) = ((per_s * 60.0 / 180.0) as usize, ((per_s * 60.0 / 70.0) as usize).min(rise.len() / 2));
+    // a beat also agrees with itself two and four beats on, which tells it from a stray echo
+    let plain = |lag: usize| at(lag) + 0.5 * at(lag * 2) + 0.25 * at(lag * 4);
+    let score = |lag: usize| {
+        // a loop cut to a whole number of beats, better still of bars, speaks for the tempo that makes it so
+        let beats = secs * per_s / lag as f32;
+        let near = |unit: f32| 1.0 - ((beats / unit - (beats / unit).round()).abs() * unit * 4.0).min(1.0);
+        plain(lag).max(0.0) * (1.0 + 0.3 * near(1.0) + 0.3 * near(4.0))
+    };
+    let best = (lo..=hi).max_by(|a, b| score(*a).total_cmp(&score(*b)))?;
+    if plain(best) < 0.06 {
+        return by_length;
+    }
+    // settle between the steps of the grid
+    let (l, m, r) = (score(best - 1), score(best), score(best + 1));
+    let den = l - 2.0 * m + r;
+    let off = if den.abs() > 1e-9 { (0.5 * (l - r) / den).clamp(-0.5, 0.5) } else { 0.0 };
+    Some(60.0 * per_s / (best as f32 + off))
+}
+
 pub fn onsets(f: &Frames, a: usize, b: usize, rate: u32, sense: f32) -> Vec<usize> {
     let (a, b) = span(f, a, b);
     let hop = (rate as usize / 400).max(1);
@@ -941,5 +998,23 @@ mod tests {
         let brightest = col.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let hz = 30.0 * (24_000.0f32 / 30.0).powf(1.0 - (brightest as f32 + 0.5) / 64.0);
         assert!((hz / 1000.0).log2().abs() < 0.2, "{hz}");
+    }
+    #[test]
+    fn a_click_track_gives_its_tempo() {
+        let rate = 44_100u32;
+        for bpm in [90.0f32, 128.0, 174.0] {
+            let step = (rate as f32 * 60.0 / bpm) as usize;
+            let mut f = vec![[0.0f32; 2]; rate as usize * 8];
+            for (i, x) in f.iter_mut().enumerate() {
+                let k = i % step;
+                if k < 2000 {
+                    let v = (1.0 - k as f32 / 2000.0) * ((k as f32) * 0.3).sin();
+                    *x = [v, v];
+                }
+            }
+            let got = tempo(&f, rate).unwrap();
+            assert!((got - bpm).abs() < 1.5, "{bpm} came out as {got}");
+        }
+        assert!(tempo(&vec![[0.0; 2]; 200_000], rate).is_none());
     }
 }
