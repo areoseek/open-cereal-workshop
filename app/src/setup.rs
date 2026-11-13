@@ -197,7 +197,9 @@ pub const OPT_RESET_FX: u32 = 8;
 /// The switches that are on until the user turns them off.
 /// A sound that says how many beats it lasts is fitted to the project tempo when it lands in the playlist.
 pub const OPT_READ_TEMPO: u32 = 16;
-const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT | OPT_READ_TEMPO;
+/// Channels whose plug-in is not installed play a voice of our own instead of staying silent.
+pub const OPT_STAND_IN: u32 = 32;
+const OPT_DEFAULT: u32 = OPT_AUTO_NAME | OPT_AUTO_SELECT | OPT_READ_TEMPO | OPT_STAND_IN;
 
 impl Settings {
     /// Hand the MIDI threads the channel jobs and switches.

@@ -358,6 +358,11 @@ impl Sampler {
 }
 
 impl Chan {
+    /// A hosted plug-in this machine does not have: silent, or playing a voice of our own in its place.
+    pub fn missing_plugin(&self) -> bool {
+        self.kind == ChannelKind::Plugin && self.ext.is_none() && self.plugin.eq_ignore_ascii_case(WRAPPER)
+    }
+
     /// The patch bay this channel's instrument plays through, while the channel is still a bay.
     pub fn bay(&self) -> Option<&Bay> {
         self.bay.as_ref().filter(|_| self.kind == ChannelKind::Plugin && self.plugin.eq_ignore_ascii_case(BAY))
@@ -730,6 +735,17 @@ pub struct Slot {
     pub fx: Option<crate::fx::Fx>,
     /// Where the slot sits in the file the project came from (insert, slot); None for one added since.
     pub src: Option<(u16, u16)>,
+}
+
+static STAND_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether channels whose plug-in is not on this machine play a voice of our own (from the next project opened).
+pub fn set_stand_in_missing(on: bool) {
+    STAND_IN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn stand_in_missing() -> bool {
+    STAND_IN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A patch bay standing in a channel as its instrument.
@@ -1881,6 +1897,11 @@ impl Song {
                 };
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(WRAPPER) {
                     ch.ext = crate::host::from_block(&c.state).map(crate::host::Hosted);
+                    if ch.ext.is_none() && stand_in_missing() {
+                        if let Some(n) = crate::host::block_name(&c.state) {
+                            ch.gen = Some(crate::synth::missing_gen(&format!("{} {n}", ch.name), &c.state));
+                        }
+                    }
                 }
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(BAY) {
                     if let Some((p, lead, g, layers)) = crate::fxpatch::decode_gen(&c.state) {

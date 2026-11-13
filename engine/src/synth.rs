@@ -654,6 +654,12 @@ fn sub_patch(ident: &str, state: &[u8]) -> crate::additive::Patch {
     patch
 }
 
+/// The voice that plays for a hosted plug-in this machine does not have: picked from the words of the channel
+/// and plug-in names, with the stored block kept as it is.
+pub fn missing_gen(name: &str, state: &[u8]) -> Gen {
+    Gen { kind: Kind::Sub, p: Vec::new(), raw: state.to_vec(), fm: None, pre: Some(std::sync::Arc::new(stand_in(name))), img: None, smp: None }
+}
+
 /// A voice of our own for a pack preset we cannot read, picked from the words in its name.
 pub fn stand_in(name: &str) -> crate::additive::Patch {
     use crate::additive::ix;

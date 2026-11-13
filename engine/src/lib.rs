@@ -110,7 +110,7 @@ pub fn problems(song: &Song, f: &flp::Flp, lib: &Library) -> Vec<String> {
     };
     if song.channels.len() >= f.channels.len() {
         for (c, ch) in f.channels.iter().zip(&song.channels) {
-            if c.kind == flp::ChannelKind::Plugin && ch.gen.is_none() && ch.ext.is_none() && ch.bay.is_none() && ch.zones.is_none() && ch.slices.is_none() && !c.plugin.is_empty() {
+            if c.kind == flp::ChannelKind::Plugin && (ch.gen.is_none() || ch.missing_plugin()) && ch.ext.is_none() && ch.bay.is_none() && ch.zones.is_none() && ch.slices.is_none() && !c.plugin.is_empty() {
                 out.push(format!("Channel \"{}\": {}", ch.name, what(&c.plugin, &c.state)));
             }
         }

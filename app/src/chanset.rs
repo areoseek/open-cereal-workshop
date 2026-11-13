@@ -247,6 +247,7 @@ impl App {
                     ChannelKind::AutomationClip => "Automation clip".to_string(),
                     _ if c.bay().is_some() => format!("Patch Bay ({})", c.gen.as_ref().map_or("", |g| cereal_engine::synth::def(g.kind).title)),
                     _ if c.ext.is_some() => c.ext.as_ref().map(|h| h.0.found.name.clone()).unwrap_or_default(),
+                    _ if c.missing_plugin() => format!("{} (not installed)", cereal_engine::host::block_name(c.gen.as_ref().map_or(&[][..], |g| &g.raw)).unwrap_or_else(|| "Plug-in".into())),
                     _ => cereal_engine::synth::title_for(&c.plugin).map(str::to_string).unwrap_or_else(|| c.plugin.clone()),
                 };
                 ui.label(RichText::new(what).small().color(TEXT_DIM));
@@ -2533,7 +2534,10 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             ui.label(RichText::new("The wheels and key pressure are not worked yet, so links from them rest. A few stored settings are not placed yet: they are kept in the file as they are.").small().color(TEXT_DIM));
         }
         Kind::Sub => {
-            ui.label(RichText::new("Plays a stand-in voice of our own, shaped by the few stored settings we can read so far. Its block is kept untouched.").color(TEXT_DIM));
+            match cereal_engine::host::block_name(&g.raw) {
+                Some(n) => ui.label(RichText::new(format!("The plug-in \"{n}\" is not installed on this machine. A plain voice of ours plays its notes; its settings are kept untouched and it comes back once the plug-in is installed. Settings > Audio switches the stand-in voice off.")).color(TEXT_DIM)),
+                None => ui.label(RichText::new("Plays a stand-in voice of our own, shaped by the few stored settings we can read so far. Its block is kept untouched.").color(TEXT_DIM)),
+            };
         }
         Kind::Metal | Kind::MetalBank => {
             ui.label(RichText::new("Plays from its stored settings: seeds, fullness, decay, release, pitch and level. Editing pages are still to come.").color(TEXT_DIM));

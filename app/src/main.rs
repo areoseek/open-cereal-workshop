@@ -456,6 +456,7 @@ impl App {
         cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
         handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
         handle.transport.set_reset_fx(settings.opt(setup::OPT_RESET_FX));
+        cereal_engine::song::set_stand_in_missing(settings.opt(setup::OPT_STAND_IN));
         handle.transport.set_preview_insert(settings.preview_track as usize);
         if settings.gm_bank.is_some() {
             cereal_engine::gm::set_bank(settings.gm_bank.clone());

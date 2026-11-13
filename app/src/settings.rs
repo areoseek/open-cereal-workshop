@@ -249,6 +249,12 @@ impl App {
             self.settings.late_notes = Some(late);
             let _ = self.settings.save();
         }
+        let mut stand = self.settings.opt(crate::setup::OPT_STAND_IN);
+        if ui.checkbox(&mut stand, "Stand-in voice for missing plug-ins").hint("A channel whose plug-in is not installed plays a plain voice of ours instead of staying silent (from the next project opened)").changed() {
+            cereal_engine::song::set_stand_in_missing(stand);
+            self.settings.set_opt(crate::setup::OPT_STAND_IN, stand);
+            let _ = self.settings.save();
+        }
         let mut reset = self.settings.opt(crate::setup::OPT_RESET_FX);
         if ui.checkbox(&mut reset, "Reset plugins on transport").hint("Echoes and reverb tails are cut when the song stops or jumps").changed() {
             self.handle.transport.set_reset_fx(reset);

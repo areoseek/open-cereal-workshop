@@ -42,7 +42,7 @@ fn main() {
                     continue;
                 }
                 chans += 1;
-                let plays = c.gen.is_some() || c.ext.is_some() || c.slices.is_some() && c.sample.is_some() || c.zones.as_ref().is_some_and(|z| z.zones.iter().any(|z| z.sample.is_some()));
+                let plays = c.gen.is_some() && !c.missing_plugin() || c.ext.is_some() || c.slices.is_some() && c.sample.is_some() || c.zones.as_ref().is_some_and(|z| z.zones.iter().any(|z| z.sample.is_some()));
                 if !plays {
                     silent += 1;
                     let mut what = c.plugin.to_lowercase();
