@@ -2377,7 +2377,8 @@ impl Player {
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
-                    v.attack = ms(1.5);
+                    // the three-oscillator instrument starts at full level on its first sample (measured)
+                    v.attack = if g.kind == crate::synth::Kind::Osc3 { 1.0 } else { ms(1.5) };
                     v.release = ms(12.0);
                     if let Some(p) = &tone.add {
                         // this instrument brings its own rise and fall

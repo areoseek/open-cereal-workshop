@@ -1561,6 +1561,20 @@ pub(crate) fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec
                         0.0
                     }
                 }
+                // stairs: the tension sets how many equal steps the segment takes, the last one landing on
+                // the end value (measured points: 0.515 -> 16, 0.425 -> 32, 0.375 -> 48, 0.335 -> 64)
+                3 | 4 => {
+                    let steps = (5.0 + (0.42695 - b.2) / 0.091).exp2().round().clamp(2.0, 4096.0);
+                    let at = t * steps;
+                    let k = at.floor().min(steps - 1.0);
+                    let part = if b.3 == 4 {
+                        let u = (at - k).clamp(0.0, 1.0);
+                        u * u * (3.0 - 2.0 * u) - 1.0
+                    } else {
+                        0.0
+                    };
+                    ((k + part.max(-k)) / (steps - 1.0)).clamp(0.0, 1.0)
+                }
                 9 => 0.5 - 0.5 * (t * PI).cos(),
                 10 => t * t * (3.0 - 2.0 * t),
                 _ => crate::fm::bend(t, b.2),
@@ -4760,7 +4774,9 @@ impl Unit {
                     let w = x - i as f32;
                     // a drawn jump stays a jump; a slope is followed smoothly
                     let (a, b) = (time[i], time[i + 1]);
-                    let y = if (b - a).abs() > 1.0 / 64.0 { a } else { a + (b - a) * w };
+                    let d = (b - a).abs();
+                    let near = (a - time[i.saturating_sub(1)]).abs().max((time[(i + 2).min(WARP_N - 1)] - b).abs());
+                    let y = if d > 1.0 / 64.0 || (d > 1e-4 && d > 4.0 * near) { a } else { a + (b - a) * w };
                     let back = (1.0 - y) * span;
                     // z[1] is the distance in use, z[2] the one being faded out, z[3] the fade
                     if (back - z[1]).abs() > 48.0 {
