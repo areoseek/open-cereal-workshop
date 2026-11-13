@@ -80,19 +80,15 @@ pub struct Fm2 {
     done: bool,
 }
 
-/// A plucked string: a loop of noise that wears down, then three tone bands.
+/// A plucked bass string as a handful of partials, shaped on what the factory test of the original gave: it
+/// sounds two octaves under the key, the partials follow a pluck near the end of the string (one strong lobe, a
+/// gap, a weak second lobe), the upper ones die sooner, and a let go note is gone in a few thousandths.
 #[derive(Debug, Clone, Default)]
 pub struct Pluck {
-    line: Vec<f32>,
-    pos: usize,
-    frac: f32,
-    last: f32,
-    damp: f32,
-    keep: f32,
-    z: [f32; 4],
-    g: [f32; 3],
-    f: [f32; 2],
-    vel: f32,
+    /// Phase, phase step, level and what the level is multiplied by each frame, per partial.
+    parts: Vec<[f32; 4]>,
+    gain: f32,
+    fall: f32,
     held: bool,
 }
 
@@ -273,33 +269,35 @@ impl Voice {
                 Voice::Fm2(Box::new(v))
             }
             _ => {
-                let hz = (dphase * sr).clamp(16.0, 4000.0);
-                let n = sr / hz;
-                let len = (n.floor() as usize).max(2);
-                let mut seed = seed | 1;
-                // the pluck: noise with the top taken off, so low notes do not buzz
-                let mut line = vec![0.0f32; len];
-                let mut lp = 0.0;
-                for x in line.iter_mut() {
-                    lp += 0.45 * (rnd(&mut seed) - lp);
-                    *x = lp;
-                }
+                // measured a touch sharp of two octaves down
+                let hz = (dphase * sr * 0.25 * 1.0046).clamp(4.0, 4000.0);
                 let u = |k: usize| s[k] / 32767.0 - 1.0;
-                let band = |hz: f32| 1.0 - (-TAU * hz / sr).exp();
-                Voice::Pluck(Box::new(Pluck {
-                    line,
-                    pos: 0,
-                    frac: n - len as f32,
-                    last: 0.0,
-                    damp: 0.5,
-                    // a low string rings for a couple of seconds, a high one less
-                    keep: 0.001f32.powf(1.0 / (hz * (2.6 - (hz / 400.0).min(1.6)))),
-                    z: [0.0; 4],
-                    g: [crate::fx::db(u(0) * 12.0), crate::fx::db(u(1) * 12.0), crate::fx::db(u(2) * 12.0)],
-                    f: [band(220.0), band(1400.0)],
-                    vel,
-                    held: true,
-                }))
+                let g = [crate::fx::db(u(0) * 12.0), crate::fx::db(u(1) * 12.0), crate::fx::db(u(2) * 12.0)];
+                // higher strings are shorter of breath: the same shape over fewer partials, a little louder
+                let squeeze = (1.0 - 0.165 * (hz / 66.0).log2()).clamp(0.67, 1.0);
+                let wide = (1.0 - 0.1 * (hz / 66.0).log2()).clamp(0.8, 1.0);
+                let mut parts = Vec::new();
+                for k in 1..=24 {
+                    let f = hz * k as f32;
+                    if f > sr * 0.45 {
+                        break;
+                    }
+                    let x = k as f32 / squeeze;
+                    let xm = k as f32 / wide;
+                    let main = xm.powf(1.2) * (-(xm / 3.0).powi(2)).exp() / (wide * wide);
+                    let second = -0.24 / (1.0 + (f / 1500.0).powi(2)).powf(0.9) * (-((x - 11.0) / 1.2).powi(2) / 2.0).exp();
+                    // the three tone knobs lean on the low, middle and high partials
+                    let (l1, l2) = (1.0 / (1.0 + (f / 220.0).powi(2)).sqrt(), 1.0 / (1.0 + (f / 1400.0).powi(2)).sqrt());
+                    let tone = g[0] * l1 + g[1] * (l2 - l1) + g[2] * (1.0 - l2);
+                    let a = (main + second) * tone;
+                    if a.abs() < 1e-5 {
+                        continue;
+                    }
+                    let db_s = 9.0 * (f / 200.0).max(1.0).powf(1.1);
+                    parts.push([0.0, f / sr, a, 10f32.powf(-db_s / 20.0 / sr)]);
+                }
+                let _ = seed;
+                Voice::Pluck(Box::new(Pluck { parts, gain: vel * 0.0678, fall: (-1.0 / (0.0039 * sr)).exp(), held: true }))
             }
         }
     }
@@ -324,7 +322,7 @@ impl Voice {
             }
             Voice::Pluck(v) => {
                 v.held = false;
-                0.12
+                0.03
             }
             Voice::Keys(v) => v.release(),
             Voice::Bank(v) => v.left(),
@@ -499,23 +497,20 @@ impl Voice {
                 [o * 1.6; 2]
             }
             Voice::Pluck(v) => {
-                let n = v.line.len();
-                let a = v.line[v.pos];
-                let b = v.line[(v.pos + 1) % n];
-                // the fraction of a frame the loop is short by, and the wear of each trip
-                let y = a + (b - a) * v.frac;
-                let worn = (y * (1.0 - v.damp * 0.5) + v.last * v.damp * 0.5) * if v.held { v.keep } else { v.keep * 0.995 };
-                v.last = y;
-                v.line[v.pos] = worn;
-                v.pos = (v.pos + 1) % n;
                 let _ = dphase;
-                v.z[0] += v.f[0] * (y - v.z[0]);
-                v.z[1] += v.f[1] * (y - v.z[1]);
-                let lo = v.z[0];
-                let mid = v.z[1] - v.z[0];
-                let hi = y - v.z[1];
-                let o = (lo * v.g[0] * 1.6 + mid * v.g[1] + hi * v.g[2] * 0.6) * v.vel * 1.4;
-                [o; 2]
+                let mut o = 0.0;
+                for p in v.parts.iter_mut() {
+                    o += (p[0] * TAU).sin() * p[2];
+                    p[0] += p[1];
+                    if p[0] >= 1.0 {
+                        p[0] -= 1.0;
+                    }
+                    p[2] *= p[3];
+                }
+                if !v.held {
+                    v.gain *= v.fall;
+                }
+                [o * v.gain; 2]
             }
         }
     }
@@ -586,12 +581,12 @@ mod tests {
     fn plucked_bass_holds_its_pitch() {
         let g = Gen::new(Kind::Bass);
         let x = play(&g, 45, 44100);
-        // the wave repeats every 401 frames at 110 cycles a second
+        // two octaves under the key and a touch sharp: the wave repeats every 1596 frames
         let y = &x[4410..22050];
-        let score = |lag: usize| (0..y.len() - 500).map(|i| y[i] * y[i + lag]).sum::<f32>();
-        let best = (300..500).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap();
-        assert!((399..=403).contains(&best), "{best}");
+        let score = |lag: usize| (0..y.len() - 1800).map(|i| y[i] * y[i + lag]).sum::<f32>();
+        let best = (1400..1800).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap();
+        assert!((1593..=1599).contains(&best), "{best}");
         let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak > 0.1 && peak < 1.2, "{peak}");
+        assert!(peak > 0.02 && peak < 1.2, "{peak}");
     }
 }

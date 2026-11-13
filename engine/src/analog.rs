@@ -549,7 +549,7 @@ pub fn trio(p: &[f32]) -> Set {
         if shape == Shape::Pulse && width == 0.0 {
             width = (2.0 * v(b) - 1.0).abs().min(0.95);
         }
-        *o = Osc { shape, semis: ((v(b + 1) - 0.5) * 24.0).round() + (v(b + 2) - 0.5) * 2.0, level: v(b + 3).min(2.5) };
+        *o = Osc { shape, semis: ((v(b + 1) - 0.5) * 48.0).round() + (v(b + 2) - 0.5) * 2.0, level: v(b + 3).min(2.5) };
         let x = (v(b + 4) - 0.5) * 2.0;
         if x.abs() > bend.abs() {
             bend = x;
