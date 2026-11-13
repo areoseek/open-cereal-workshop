@@ -58,6 +58,77 @@ pub fn markers(wav: &[u8]) -> (Vec<usize>, u32) {
     (out, rate)
 }
 
+/// A named stretch of a wave file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Region {
+    pub start: usize,
+    /// One past the last frame.
+    pub end: usize,
+    pub name: String,
+}
+
+/// The regions a wave file holds: every marker starts one, which runs for its stored length or, when none
+/// is stored, up to the next marker or the end of the sound. `frames` is the length of the sound.
+pub fn regions(wav: &[u8], frames: usize) -> Vec<Region> {
+    if wav.len() < 12 || &wav[..4] != b"RIFF" {
+        return vec![];
+    }
+    let int = |at: usize| wav.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    // number, start, stored length, name
+    let mut points: Vec<(usize, usize, usize, String)> = vec![];
+    let mut notes: Vec<(usize, usize, Option<String>)> = vec![];
+    let mut at = 12;
+    while let (Some(id), Some(n)) = (wav.get(at..at + 4), int(at + 4)) {
+        let body = at + 8;
+        let end = (body + n).min(wav.len());
+        if id == b"cue " {
+            for k in 0..int(body).unwrap_or(0).min(4096) {
+                if let (Some(num), Some(frame)) = (int(body + 4 + k * 24), int(body + 4 + k * 24 + 20)) {
+                    points.push((num, frame, 0, String::new()));
+                }
+            }
+        } else if id == b"LIST" && wav.get(body..body + 4) == Some(b"adtl") {
+            let mut sub = body + 4;
+            while let (Some(sid), Some(m)) = (wav.get(sub..sub + 4), int(sub + 4)) {
+                if sub + 8 + m > end || m < 4 {
+                    break;
+                }
+                let num = int(sub + 8).unwrap_or(0);
+                if sid == b"labl" {
+                    let text = &wav[sub + 12..sub + 8 + m];
+                    let text = &text[..text.iter().position(|&c| c == 0).unwrap_or(text.len())];
+                    notes.push((num, 0, Some(String::from_utf8_lossy(text).into_owned())));
+                } else if sid == b"ltxt" {
+                    notes.push((num, int(sub + 12).unwrap_or(0), None));
+                }
+                sub += 8 + m + (m & 1);
+            }
+        }
+        at = body + n + (n & 1);
+    }
+    for (num, len, name) in notes {
+        if let Some(p) = points.iter_mut().find(|p| p.0 == num) {
+            match name {
+                Some(n) => p.3 = n,
+                None => p.2 = len,
+            }
+        }
+    }
+    points.sort_by_key(|p| p.1);
+    points.dedup_by_key(|p| p.1);
+    points.retain(|p| p.1 < frames);
+    let starts: Vec<usize> = points.iter().map(|p| p.1).collect();
+    points
+        .into_iter()
+        .enumerate()
+        .map(|(k, (_, start, len, name))| Region {
+            start,
+            end: if len > 0 { (start + len).min(frames) } else { starts.get(k + 1).copied().unwrap_or(frames) },
+            name: if name.is_empty() { format!("Region #{}", k + 1) } else { name },
+        })
+        .collect()
+}
+
 /// Read a slicing instrument's block and load its loop. The second kind keeps its cuts as markers inside
 /// the wave, which is either stored whole in the block or named by its path.
 pub fn open(ident: &str, state: &[u8], mut lib: Option<&mut crate::sample::Library>, project_dir: Option<&std::path::Path>) -> Option<(Slices, Option<std::sync::Arc<crate::sample::Sample>>)> {
@@ -164,6 +235,28 @@ impl Slices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_come_from_markers_names_and_lengths() {
+        let piece = |id: &[u8; 4], body: &[u8]| {
+            let mut v = id.to_vec();
+            v.extend((body.len() as u32).to_le_bytes());
+            v.extend(body);
+            if body.len() & 1 == 1 {
+                v.push(0);
+            }
+            v
+        };
+        let u = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let cue = [u(&[3]), u(&[1, 0, 0, 0, 0, 100]), u(&[2, 0, 0, 0, 0, 400]), u(&[3, 0, 0, 0, 0, 9000])].concat();
+        let adtl = [b"adtl".to_vec(), piece(b"labl", &[u(&[2]), b"Hit\0".to_vec()].concat()), piece(b"ltxt", &[u(&[1, 50, 0]), vec![0; 8]].concat())].concat();
+        let mut wav = b"RIFF\0\0\0\0WAVE".to_vec();
+        wav.extend(piece(b"cue ", &cue));
+        wav.extend(piece(b"LIST", &adtl));
+        let r = regions(&wav, 1000);
+        assert_eq!(r, [Region { start: 100, end: 150, name: "Region #1".into() }, Region { start: 400, end: 1000, name: "Hit".into() }]);
+        assert!(regions(b"nothing", 10).is_empty());
+    }
 
     #[test]
     fn moved_cuts_go_back_into_the_block() {

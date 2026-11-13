@@ -307,6 +307,43 @@ impl App {
                         }
                     }
                 });
+                if let Some(ch) = audio {
+                    if self.regions.as_ref().is_none_or(|r| r.0 != ch || r.1 != self.song.channels[ch].sample_path) {
+                        let c = &self.song.channels[ch];
+                        let frames = c.sample.as_ref().map_or(0, |s| s.frames.len());
+                        let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                        let found = self.lib.resolve(&c.sample_path, dir.as_deref()).and_then(|f| std::fs::read(f).ok()).map(|b| cereal_engine::slicer::regions(&b, frames)).unwrap_or_default();
+                        self.regions = Some((ch, c.sample_path.clone(), found));
+                    }
+                    let list = self.regions.as_ref().map(|r| r.2.clone()).unwrap_or_default();
+                    ui.add_enabled_ui(!list.is_empty(), |ui| {
+                        ui.menu_button("Region", |ui| {
+                            let Some(sm) = self.song.channels[ch].sample.clone() else { return };
+                            let per_tick = sm.rate as f64 * 60.0 / (self.song.tempo as f64 * self.song.ppq as f64);
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for r in &list {
+                                    if ui.button(&r.name).hint("Play only this part of the sound").clicked() {
+                                        if let Some(c) = self.song.clips.get_mut(i) {
+                                            c.offset = (r.start as f64 / per_tick).round() as u32;
+                                            c.len = (((r.end - r.start) as f64 / per_tick).round() as u32).max(1);
+                                            self.dirty = true;
+                                        }
+                                        close = true;
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Whole sound").clicked() {
+                                    if let Some(c) = self.song.clips.get_mut(i) {
+                                        c.offset = 0;
+                                        c.len = ((sm.frames.len() as f64 / per_tick).round() as u32).max(1);
+                                        self.dirty = true;
+                                    }
+                                    close = true;
+                                }
+                            });
+                        });
+                    });
+                }
                 match clip.src {
                     ClipSrc::Pattern(p) => {
                         if ui.button("Select source pattern").clicked() {

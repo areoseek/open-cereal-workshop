@@ -291,6 +291,8 @@ pub(crate) struct App {
     show_about: bool,
     /// What did not come across when the project was opened, shown once.
     problems: Vec<String>,
+    /// The regions found in one audio channel's file, kept while its clip menu is used.
+    regions: Option<(usize, String, Vec<cereal_engine::slicer::Region>)>,
     /// Note scripts the user said "not now" to since the program started.
     script_later: Vec<String>,
     render: Option<RenderOpts>,
@@ -477,6 +479,7 @@ impl App {
             prefs_win: Default::default(),
             show_about: false,
             problems: Vec::new(),
+            regions: None,
             script_later: Vec::new(),
             render: None,
             rec_held: Vec::new(),
