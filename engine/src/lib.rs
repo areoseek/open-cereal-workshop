@@ -65,6 +65,7 @@ pub mod preset;
 pub mod sample;
 pub mod save;
 pub mod score;
+pub mod sheet;
 pub mod song;
 pub mod stems;
 pub mod wav;

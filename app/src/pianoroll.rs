@@ -1269,6 +1269,10 @@ impl App {
                     ui.close_menu();
                     self.export_midi();
                 }
+                if ui.button("Export as score sheet...").clicked() {
+                    ui.close_menu();
+                    self.export_sheet();
+                }
             });
             // every entry presses its own key, so the menus and the keyboard can never drift apart
             const N: Modifiers = Modifiers::NONE;

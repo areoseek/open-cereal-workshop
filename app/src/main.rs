@@ -1766,6 +1766,30 @@ impl App {
         self.dirty = true;
     }
 
+    /// The selected channel's notes in the current pattern, written out on staves as a PDF file.
+    pub(crate) fn export_sheet(&mut self) {
+        let ci = self.sel_chan as u16;
+        let Some(p) = self.song.patterns.get(self.handle.transport.pattern()) else { return };
+        let step = (self.song.ppq / 4).max(1);
+        let notes: Vec<cereal_engine::sheet::SheetNote> =
+            p.notes.iter().filter(|n| n.chan == ci && !n.muted).map(|n| cereal_engine::sheet::SheetNote { pos: n.pos, len: if n.len == 0 { step } else { n.len }, key: n.key }).collect();
+        if notes.is_empty() {
+            self.status = "This piano roll has no notes to write out".into();
+            return;
+        }
+        let name = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
+        let title = if p.name.is_empty() { name.clone() } else { format!("{} - {}", p.name, name) };
+        // the second number of the project's signature counts steps in a beat: 4 is a quarter, 2 an eighth
+        let sig = (self.song.time_sig.0.max(1), (16 / self.song.time_sig.1.clamp(1, 16)).max(1));
+        let bar16 = (self.song.bar() / step).max(1);
+        let bytes = cereal_engine::sheet::sheet_pdf(&title, &notes, self.song.ppq, sig, bar16, self.song.tempo);
+        let Some(path) = rfd::FileDialog::new().add_filter("PDF file", &["pdf"]).set_file_name(format!("{name}.pdf")).save_file() else { return };
+        self.status = match std::fs::write(&path, bytes) {
+            Ok(()) => format!("Exported {}", path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        };
+    }
+
     pub(crate) fn export_midi(&mut self) {
         let default = self.path.as_ref().map(|p| p.with_extension("mid")).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "untitled.mid".into());
         let Some(path) = rfd::FileDialog::new().add_filter("MIDI file", &["mid"]).set_file_name(default).save_file() else { return };
