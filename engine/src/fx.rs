@@ -2386,8 +2386,10 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
         Kind::OldEq => {
             q[..28].copy_from_slice(&p[..28]);
             q[28..35].fill(0.0);
-            q[35] = 2000.0 * (p[28].max(1.0) / 128.0).log10();
-            q[36] = 0.0;
+            // measured: about 0.199 dB a step below the middle, 0.171 above
+            let d = p[28] - 128.0;
+            q[35] = d * if d < 0.0 { 19.875 } else { 17.125 };
+            q[36] = -1.0;
         }
         Kind::OldReverb => {
             let cut = |v: f32| if v >= 65536.0 { 221.0 } else { 5.0 + v / 65536.0 * 215.0 };
@@ -2588,6 +2590,19 @@ fn hb_chain(c: &[f32; 3], st: &mut [f32], x: f32) -> f32 {
 
 const HB_EVEN: [f32; 3] = [0.039_151_598, 0.302_646_85, 0.674_615_9];
 const HB_ODD: [f32; 3] = [0.147_377_11, 0.482_468_54, 0.883_005_03];
+
+/// One band of the classic equalizer, at the plain rate, by its own measured laws.
+fn old_eq_coeffs(kind: i32, x_hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5] {
+    let hz = (159.9 * 101f32.powf(x_hz.clamp(0.0, 1.0)) - 149.9).min(sr * 0.49);
+    let x = width.clamp(0.0, 1.0);
+    let a = 10f32.powf(gain_db / 40.0);
+    let w = TAU * hz / sr;
+    let q_pass = 0.1 + 18.9 * x;
+    let q_bell = if kind == 6 { 0.1 * 1000f32.powf(x) } else { q_pass };
+    let slope = 0.1 + 1.9 * x;
+    let q_shelf = 1.0 / ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).max(0.01).sqrt();
+    band_raw(kind, w.sin(), w.cos(), a, q_bell, q_pass, q_shelf)
+}
 
 fn band_raw(kind: i32, s: f32, c: f32, a: f32, q_bell: f32, q_res: f32, q_shelf: f32) -> [f32; 5] {
     let (b0, b1, b2, a0, a1, a2);
@@ -5130,6 +5145,7 @@ impl Unit {
                     self.lines = vec![vec![0.0; BANDS + 7 * 16]];
                 }
                 let high = p[36] >= 0.5;
+                let classic = p[36] < -0.5;
                 let rate = if high { sr * 2.0 } else { sr };
                 let mut bands = [([[0f32; 5]; 4], 0usize, 0usize); 7];
                 let mut nb = 0;
@@ -5139,11 +5155,15 @@ impl Unit {
                     if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain.abs() < 0.005) {
                         continue;
                     }
-                    let order = if matches!(kind, 1 | 3 | 5 | 6 | 7) { p[28 + b] as i32 } else { 0 };
+                    let order = if !classic && matches!(kind, 1 | 3 | 5 | 6 | 7) { p[28 + b] as i32 } else { 0 };
                     let parts = 1 + order.unsigned_abs().min(3) as usize;
                     let mut c = [[0f32; 5]; 4];
                     for (k, c) in c.iter_mut().enumerate().take(parts) {
-                        *c = eq_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, rate, order, k);
+                        *c = if classic {
+                            old_eq_coeffs(kind, p[7 + b] / 65536.0, gain, p[14 + b] / 65536.0, rate)
+                        } else {
+                            eq_coeffs(kind, knob_hz(p[7 + b] / 65536.0), gain, p[14 + b] / 65536.0, rate, order, k)
+                        };
                     }
                     bands[nb] = (c, BANDS + b * 16, parts);
                     nb += 1;
