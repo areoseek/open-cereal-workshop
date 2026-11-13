@@ -328,6 +328,10 @@ impl Plug {
             }
             plug.ask(SET_RATE, 0, 0, std::ptr::null_mut(), 44_100.0);
             plug.ask(SET_BLOCK, 0, MAX_FRAMES as isize, std::ptr::null_mut(), 0.0);
+            // some only put their settings in order once a program is picked
+            if (*fx).programs > 0 {
+                plug.ask(SET_PROGRAM, 0, 0, std::ptr::null_mut(), 0.0);
+            }
             let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let name = [plug.text(EFFECT_NAME, 0), plug.text(PRODUCT, 0), stem].into_iter().find(|n| !n.is_empty()).unwrap_or_default();
             let found = Found { path: path.to_path_buf(), id: ident((*fx).unique as u32), name, vendor: plug.text(VENDOR, 0), instrument: (*fx).flags & IS_SYNTH != 0 || category == 2 };
