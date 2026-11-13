@@ -77,8 +77,8 @@ fn placed() -> Vec<(usize, &'static str, Ctl, u8)> {
         (53, "Flip 2", Switch, 3),
         (49, "Oscillator 3", Knob, 3),
         (45, "Noise", Knob, 3),
-        (46, "Start of 2", Knob, 3),
-        (47, "Restart 2", Switch, 3),
+        (46, "Copy start", Knob, 4),
+        (47, "Restart copies", Switch, 4),
         (41, "Copies", Knob, 4),
         (43, "Spread", Knob, 4),
         (42, "Detune", Knob, 4),
@@ -464,12 +464,13 @@ pub fn set(p: &[f32]) -> Set {
         mix2: u(48),
         flip2: on(53),
         mix3: u(49),
-        noise: u(45),
+        // the knob only brings the hiss in over its upper half
+        noise: u(45).powi(4),
         start2: u(46),
         restart2: on(47),
         copies: 1 + (u(41) * 15.0).round() as usize,
         spread: u(43),
-        detune: u(42) * 50.0,
+        detune: u(42) * 10.0,
         start: u(52),
         cutoff: u(12),
         res: u(13),
@@ -478,7 +479,7 @@ pub fn set(p: &[f32]) -> Set {
         eg,
         lfo,
         amp: [0.001 + u(4).powi(2) * 5.0, 0.005 + u(5).powi(2) * 8.0, u(6), 0.005 + u(7).powi(2) * 5.0],
-        gain: u(0) / 0.75 * u(8) * 2.0 * 0.4,
+        gain: u(0) / 0.75 * u(8) * 2.0 * 0.167,
         pan: (u(1) - 0.5) * 2.0,
         mono: on(40).then(|| if on(11) { 0.005 + u(10).powi(2) * 2.0 } else { 0.0 }),
     }
@@ -530,6 +531,9 @@ pub struct Voice {
     pans: [[f32; 2]; MOST],
     seed: u32,
     filt: [[f32; 2]; 2],
+    /// The last frames out of the filter, for the soft top.
+    past: [[f32; 4]; 2],
+    begun: bool,
     /// Seconds since the note began.
     t: f32,
     lfo: [f32; 2],
@@ -569,6 +573,8 @@ impl Voice {
             pans: [[1.0; 2]; MOST],
             seed: 0,
             filt: [[0.0; 2]; 2],
+            past: [[0.0; 4]; 2],
+            begun: false,
             t: 0.0,
             lfo: [0.0; 2],
             env: 0.0,
@@ -588,9 +594,10 @@ impl Voice {
         for c in 0..n {
             let pos = if n > 1 { c as f32 / (n - 1) as f32 * 2.0 - 1.0 } else { 0.0 };
             v.tune[c] = 2f32.powf(set.detune * pos / 1200.0);
-            v.pans[c] = [(1.0 - pos * set.spread).min(1.0), (1.0 + pos * set.spread).min(1.0)];
-            let at = (c as f32 * set.start * 0.618).fract();
-            v.ph[c] = [at, (at + free2).fract(), at];
+            v.pans[c] = [(1.0 + pos * set.spread).min(1.0), (1.0 - pos * set.spread).min(1.0)];
+            // each further copy starts the set share of a cycle after the one before
+            let at = (c as f32 * (free2 + set.start * 0.618)).fract();
+            v.ph[c] = [at; 3];
         }
         for (e, l) in set.lfo.iter().enumerate() {
             v.lfo[e] = if l.restart { 0.0 } else { rnd(&mut seed) * 0.5 + 0.5 };
@@ -606,9 +613,9 @@ impl Voice {
     pub fn release(&mut self, set: &Set) -> f32 {
         if self.stage != 2 {
             self.stage = 2;
-            self.fall = self.env.max(0.001) / (set.amp[3] * self.sr);
+            self.fall = (-(EVERY as f32) / (set.amp[3] * 0.3 * self.sr)).exp();
         }
-        set.amp[3] + 0.02
+        set.amp[3] * 2.0 + 0.02
     }
 
     fn control(&mut self, set: &Set) {
@@ -616,14 +623,15 @@ impl Voice {
         // the level envelope
         match self.stage {
             0 => {
-                self.env += dt / set.amp[0];
+                // a quick curved rise that eases into the top
+                self.env += (1.02 - self.env) * (1.0 - (-dt / (set.amp[0] * 0.15)).exp());
                 if self.env >= 1.0 {
                     self.env = 1.0;
                     self.stage = 1;
                 }
             }
             1 => self.env += (set.amp[2] - self.env) * (1.0 - (-dt * 4.0 / set.amp[1]).exp()),
-            _ => self.env = (self.env - self.fall * EVERY as f32).max(0.0),
+            _ => self.env *= self.fall,
         }
         let (mut cutoff, mut res, mut amount, mut semis, mut level) = (set.cutoff, set.res, set.amount, 0.0f32, 1.0f32);
         for e in &set.eg {
@@ -690,6 +698,12 @@ impl Voice {
             let f = dphase * self.tune[c] * self.bend;
             let d = [f * set.ratio[0], f * set.ratio[1], f * set.ratio[2]];
             let ph = &mut self.ph[c];
+            if !self.begun {
+                // the rounding of the top takes two frames, which the oscillators start ahead by
+                for (p, d) in ph.iter_mut().zip(d) {
+                    *p = (*p + 1.25 * d + 0.0008).fract();
+                }
+            }
             ph[1] = (ph[1] + d[1]).fract();
             let mut o2 = w1.at(ph[1], d[1]);
             if set.flip2 {
@@ -728,6 +742,7 @@ impl Voice {
             out[0] += s * self.pans[c][0];
             out[1] += s * self.pans[c][1];
         }
+        self.begun = true;
         let norm = 1.0 / (self.n as f32).sqrt();
         let hiss = if set.noise > 0.0 { rnd(&mut self.seed) } else { 0.0 };
         self.level += self.level_step;
@@ -748,7 +763,11 @@ impl Voice {
                 1 => v1,
                 _ => x - self.k * v1 - v2,
             };
-            out[side] = y * self.level * if side == 0 { l } else { r };
+            // the top of the range is rounded off a little whatever the filter is set to
+            let h = &mut self.past[side];
+            let soft = 0.0462 * (y + h[3]) + 0.1964 * (h[0] + h[2]) + 0.5148 * h[1];
+            *h = [y, h[0], h[1], h[2]];
+            out[side] = soft * self.level * if side == 0 { l } else { r };
         }
         out
     }

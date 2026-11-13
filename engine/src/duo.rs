@@ -336,6 +336,7 @@ pub struct Voice {
     seed: u32,
     t: u32,
     z: [[f32; 4]; 2],
+    dc: [[f32; 2]; 2],
     g: f32,
     k: f32,
     a: f32,
@@ -525,8 +526,19 @@ impl Voice {
             out[0] += x * c.gl;
             out[1] += x * c.gr;
         }
-        let (g, k) = (self.g, self.k);
         let wide = set.stack > 1 && set.stack_pan > 0.0;
+        // the oscillators sit behind a gently peaked low cut a little under a third of the note's pitch, and
+        // come out upside down
+        let hg = (PI * (dphase * self.ra * 0.3265).min(0.2)).tan();
+        for (z, o) in self.dc.iter_mut().zip(out.iter_mut()).take(if wide { 2 } else { 1 }) {
+            let hk = 1.0 / 2.62;
+            let hp = (*o - (hk + hg) * z[0] - z[1]) / (1.0 + hg * (hg + hk));
+            let bp = hg * hp + z[0];
+            z[0] = hg * hp + bp;
+            z[1] = hg * bp + bp * hg + z[1];
+            *o = -hp * 1.013;
+        }
+        let (g, k) = (self.g, self.k);
         let mode = set.mode;
         let run = |z: &mut [f32; 4], x: f32| {
             let stage = |z: &mut [f32], x: f32, k: f32| {
