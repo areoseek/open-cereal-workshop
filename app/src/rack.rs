@@ -549,6 +549,33 @@ impl App {
                             self.state_ask = Some(crate::StateAsk::SaveChan(ci));
                             ui.close_menu();
                         }
+                        ui.menu_button("Burn MIDI to", |ui| {
+                            ui.label(RichText::new("The notes this channel really plays in the pattern, arpeggio steps and echoes written out").color(TEXT_DIM).small());
+                            let names: Vec<String> = self.song.channels.iter().map(|c| c.name.clone()).collect();
+                            for (to, name) in names.iter().enumerate() {
+                                let label = if to == ci { format!("{name} (this channel)") } else { name.clone() };
+                                if ui.button(label).clicked() {
+                                    let mut notes = cereal_engine::burn_notes(&self.song, pat, ci);
+                                    for n in &mut notes {
+                                        n.chan = to as u16;
+                                    }
+                                    let count = notes.len();
+                                    let p = &mut self.song.patterns[pat];
+                                    p.notes.retain(|n| n.chan != to as u16);
+                                    p.notes.extend(notes);
+                                    p.notes.sort_by_key(|n| n.pos);
+                                    if to == ci {
+                                        // they are notes now: the channel must not spell or echo them again
+                                        let f = &mut self.song.channels[ci].smp;
+                                        f.arp_dir = 0;
+                                        f.echo_feedback = 0.0;
+                                    }
+                                    self.status = format!("{count} notes written to {name}");
+                                    self.dirty = true;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                         ui.separator();
                         if ui.button("Clone").clicked() {
                             clone = Some(ci);

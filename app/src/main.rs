@@ -289,6 +289,8 @@ pub(crate) struct App {
     show_info: bool,
     /// The load monitor: its window, the rows shown (name, share of real time) and when they were last counted.
     show_load: bool,
+    show_touch: bool,
+    touch_held: Option<(u16, u8)>,
     speech_dlg: Option<cereal_engine::speech::Voice>,
     load_rows: Vec<(String, f32)>,
     load_at: Option<std::time::Instant>,
@@ -507,6 +509,8 @@ impl App {
             hist_pending: false,
             show_info: false,
             show_load: false,
+            show_touch: false,
+            touch_held: None,
             speech_dlg: None,
             load_rows: vec![],
             load_at: None,
@@ -2332,6 +2336,84 @@ impl App {
         }
     }
 
+    /// Keys and pads to play with the pointer or a finger: the keys play the selected channel, harder the
+    /// lower they are struck, and each pad plays one channel at its own pitch. Sliding moves from key to key.
+    fn touch_window(&mut self, ctx: &egui::Context) {
+        if !self.show_touch {
+            if let Some((chan, key)) = self.touch_held.take() {
+                self.handle.send(Cmd::NoteOff { chan, key });
+            }
+            return;
+        }
+        let mut open = true;
+        let mut want: Option<(u16, u8, f32)> = None;
+        egui::Window::new("Touch controllers").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            let down = ui.input(|i| i.pointer.primary_down());
+            let at = ui.input(|i| i.pointer.interact_pos());
+            // pads, one a channel
+            let names: Vec<(String, egui::Color32)> = self.song.channels.iter().take(32).map(|c| (c.name.clone(), egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]))).collect();
+            egui::Grid::new("touch_pads").spacing([4.0, 4.0]).show(ui, |ui| {
+                for (i, (name, color)) in names.iter().enumerate() {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(84.0, 44.0), egui::Sense::click_and_drag());
+                    let on = self.touch_held == Some((i as u16, 60));
+                    let fill = if on { ACCENT } else { color.gamma_multiply(0.55) };
+                    ui.painter().rect_filled(rect, 4.0, fill);
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, name.chars().take(12).collect::<String>(), egui::FontId::proportional(11.0), TEXT);
+                    if down && at.is_some_and(|p| rect.contains(p)) {
+                        let p = at.unwrap();
+                        want = Some((i as u16, 60, 0.4 + 0.8 * ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0)));
+                    }
+                    if i % 8 == 7 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            // four octaves of keys from C3
+            let (white_w, h) = (22.0, 110.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(white_w * 29.0, h), egui::Sense::click_and_drag());
+            let p = ui.painter_at(rect);
+            const WHITE: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+            let white_key = |i: usize| 36 + 12 * (i / 7) as u8 + WHITE[i % 7];
+            let white_rect = |i: usize| egui::Rect::from_min_size(rect.min + egui::vec2(i as f32 * white_w, 0.0), egui::vec2(white_w - 1.0, h));
+            // black keys sit over the gap after these white keys of an octave
+            let blacks: Vec<(u8, egui::Rect)> = (0..28).filter(|i| matches!(i % 7, 0 | 1 | 3 | 4 | 5)).map(|i| (white_key(i) + 1, egui::Rect::from_min_size(rect.min + egui::vec2((i + 1) as f32 * white_w - 7.0, 0.0), egui::vec2(14.0, h * 0.62)))).collect();
+            let chan = self.sel_chan as u16;
+            let mut hit: Option<(u8, egui::Rect)> = None;
+            if let Some(pos) = at.filter(|p| down && rect.contains(*p)) {
+                hit = blacks.iter().find(|b| b.1.contains(pos)).copied().or_else(|| (0..29).map(|i| (white_key(i), white_rect(i))).find(|w| w.1.contains(pos)));
+                if let Some((key, r)) = hit {
+                    want = Some((chan, key, 0.4 + 0.8 * ((pos.y - r.top()) / r.height()).clamp(0.0, 1.0)));
+                }
+            }
+            let held = self.touch_held.filter(|h| h.0 == chan).map(|h| h.1).or(hit.map(|h| h.0));
+            for i in 0..29 {
+                let key = white_key(i);
+                p.rect_filled(white_rect(i), 2.0, if held == Some(key) { ACCENT } else { egui::Color32::from_gray(225) });
+                if i % 7 == 0 {
+                    p.text(white_rect(i).center_bottom() - egui::vec2(0.0, 3.0), egui::Align2::CENTER_BOTTOM, format!("C{}", 3 + i / 7), egui::FontId::proportional(9.0), egui::Color32::from_gray(90));
+                }
+            }
+            for (key, r) in &blacks {
+                p.rect_filled(*r, 2.0, if held == Some(*key) { ACCENT } else { egui::Color32::from_gray(25) });
+            }
+        });
+        let now = want.map(|w| (w.0, w.1));
+        if now != self.touch_held {
+            if let Some((chan, key)) = self.touch_held.take() {
+                self.handle.send(Cmd::NoteOff { chan, key });
+            }
+            if let Some((chan, key, vel)) = want {
+                self.handle.send(Cmd::NoteOn { chan, key, vel });
+                self.touch_held = Some((chan, key));
+            }
+        }
+        if self.touch_held.is_some() {
+            ctx.request_repaint();
+        }
+        self.show_touch = open;
+    }
+
     fn load_window(&mut self, ctx: &egui::Context) {
         let tr = self.handle.transport.clone();
         if !self.show_load {
@@ -3157,6 +3239,7 @@ impl App {
                     ui.checkbox(&mut self.show_events, "Event editor");
                     ui.checkbox(&mut self.show_picker, "Plug-in picker     F8");
                     ui.checkbox(&mut self.show_load, "Plug-in load monitor");
+                    ui.checkbox(&mut self.show_touch, "Touch controllers");
                     ui.checkbox(&mut self.show_project, "Project picker    Ctrl+F8");
                     ui.separator();
                     ui.menu_button("Layout", |ui| {
@@ -3840,6 +3923,7 @@ impl App {
         self.render_window(ctx);
         self.load_window(ctx);
         self.speech_window(ctx);
+        self.touch_window(ctx);
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
         }

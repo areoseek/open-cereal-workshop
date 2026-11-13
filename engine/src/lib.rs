@@ -172,6 +172,37 @@ fn render_part(song: &Song, sample_rate: f32, song_mode: bool, pattern: usize, t
     render_job(song, &job).mix
 }
 
+/// The notes a channel really plays over one pattern, written out: each step of its arpeggio and each echo
+/// becomes a note of its own. Nothing is heard; the pattern is played through once without sound going anywhere.
+pub fn burn_notes(song: &Song, pattern: usize, chan: usize) -> Vec<song::Note> {
+    let mut played = song.clone();
+    for (i, c) in played.channels.iter_mut().enumerate() {
+        // the others stay silent: only this channel's notes matter
+        if i != chan && c.kind != flp::ChannelKind::Layer {
+            c.enabled = false;
+        }
+    }
+    for ins in &mut played.inserts {
+        ins.fx_on = false;
+    }
+    let (h, mut p) = new_player(played, 44_100.0);
+    p.set_offline(true);
+    p.burn = Some((chan as u16, vec![]));
+    h.transport.set_song_mode(false);
+    h.transport.set_pattern(pattern);
+    h.transport.set_looping(false);
+    h.transport.set_playing(true);
+    let mut buf = vec![0.0f32; 2048];
+    let mut frames = 0usize;
+    while h.transport.playing() && frames < 44_100 * 3600 {
+        p.render(&mut buf, 2);
+        frames += 1024;
+    }
+    let mut notes = p.burn.take().map(|b| b.1).unwrap_or_default();
+    notes.sort_by_key(|n| (n.pos, n.key));
+    notes
+}
+
 /// What to render: the song or one pattern, perhaps only a stretch of it (in ticks), with every mixer track kept apart if asked.
 #[derive(Clone, Debug, Default)]
 pub struct RenderJob {

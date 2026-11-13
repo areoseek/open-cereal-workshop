@@ -711,6 +711,8 @@ impl Handle {
             count_in: 0.0,
             born: 0,
             ov: Overrides::default(),
+            burn: None,
+            burn_tick: 0.0,
             tpf: 130.0 * 96.0 / 60.0 / sample_rate as f64,
             clicks: std::array::from_fn(|k| [click(sample_rate, k, true), click(sample_rate, k, false)]),
         }
@@ -1548,6 +1550,10 @@ pub struct Player {
     count_in: f64,
     born: u64,
     ov: Overrides,
+    /// When set, every note this channel really starts (arpeggio steps, echoes and all) is written down
+    /// with where it fell, in ticks from the start of the render.
+    pub burn: Option<(u16, Vec<Note>)>,
+    burn_tick: f64,
     /// Ticks per frame at the tempo of the block being played.
     tpf: f64,
     /// Metronome sounds: bar, beat.
@@ -1943,6 +1949,14 @@ impl Player {
     }
 
     fn note_on_one(&mut self, song: &Song, n: &Note, delay: u32, len_frames: Option<u64>, live: bool) {
+        if self.burn.as_ref().is_some_and(|b| b.0 == n.chan) {
+            let tpf = self.now_tpf(song);
+            let pos = (self.burn_tick + delay as f64 * tpf).round().max(0.0) as u32;
+            let len = len_frames.map_or(n.len, |f| ((f as f64 * tpf).round() as u32).max(1));
+            if let Some(b) = self.burn.as_mut() {
+                b.1.push(Note { pos, len, porta: false, ..n.clone() });
+            }
+        }
         let mark = self.born;
         // the note a portamento glides in from: the newest one still sounding on the channel
         let from = if n.porta {
@@ -4022,6 +4036,9 @@ impl Player {
             self.run_midi(&song, n);
             self.mix(&song, &mut out[done * channels..(done + n) * channels], channels);
             done += n;
+            if self.burn.is_some() {
+                self.burn_tick += n as f64 * self.now_tpf(&song);
+            }
         }
         if !self.offline {
             let tr = &self.transport;
@@ -4588,6 +4605,18 @@ mod tests {
         assert_eq!(onsets(&run(s.clone(), 40_000), 200).len(), 1);
         s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 72, ..Default::default() });
         assert_eq!(onsets(&run(s, 40_000), 200).len(), 4);
+    }
+
+    #[test]
+    fn an_arpeggio_is_written_out_as_notes() {
+        let mut s = click_song();
+        s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 60, ..Default::default() });
+        s.channels[0].smp.arp_dir = 1;
+        s.channels[0].smp.arp_chord = 1;
+        let got = crate::burn_notes(&s, 0, 0);
+        let step = s.step();
+        assert_eq!(got.iter().map(|n| n.pos).collect::<Vec<_>>(), (0..4).map(|i| i * step).collect::<Vec<_>>(), "{got:?}");
+        assert!(got[0].key == 60 && got[1].key > 60 && got.iter().all(|n| n.len >= 1 && n.len <= step));
     }
 
     #[test]
