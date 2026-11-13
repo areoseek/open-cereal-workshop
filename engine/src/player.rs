@@ -2099,7 +2099,9 @@ impl Player {
                         step,
                         level: 1.0,
                         attack: 1.0,
-                        release: ms(8.0),
+                        // (measured: with the envelope off, a note that ends fades over 10 ms along half a cosine)
+                        release: ms(10.0),
+                        ease: true,
                         remaining,
                         venv,
                         penv: f.pitch_env,
