@@ -58,8 +58,6 @@ pub struct Chan {
     pub zones: Option<Arc<crate::zones::Map>>,
     /// The live plug-in of a channel that plays one from another maker.
     pub ext: Option<crate::host::Hosted>,
-    /// A MIDI sender on the port of a bank player: the sounds its notes get there.
-    pub gm: Option<Arc<crate::gm::Link>>,
 }
 
 /// One envelope of a sampler channel. Times are seconds.
@@ -538,7 +536,7 @@ pub struct AutoPlan {
 
 impl Default for Chan {
     fn default() -> Self {
-        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, root_fine: 0.0, insert: 0, env_on: false, group: usize::MAX, zipped: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None, gm: None }
+        Self { name: "Sampler".into(), kind: ChannelKind::Sampler, plugin: String::new(), sample_path: String::new(), sample: None, color: [92, 101, 106], enabled: true, volume: 10000.0 / 12800.0, pan: 0.0, pitch_cents: 0.0, root_key: 60, root_fine: 0.0, insert: 0, env_on: false, group: usize::MAX, zipped: false, src: None, auto: None, children: vec![], smp: Sampler::default(), raw: None, gen: None, bay: None, slices: None, zones: None, ext: None }
     }
 }
 
@@ -1761,7 +1759,6 @@ impl Song {
                     slices,
                     zones: bank.or(zones),
                     ext: None,
-                    gm: None,
                 };
                 if ch.kind == ChannelKind::Plugin && ch.gen.is_none() && ch.plugin.eq_ignore_ascii_case(WRAPPER) {
                     ch.ext = crate::host::from_block(&c.state).map(crate::host::Hosted);
@@ -1958,22 +1955,10 @@ impl Song {
                 .filter(|c| !matches!(c.target, Target::Other { .. }))
                 .collect(),
         };
-        // bank players: the MIDI senders on their port sound through them
-        let players: Vec<(usize, crate::gm::Set)> = f
-            .inserts
-            .iter()
-            .enumerate()
-            .flat_map(|(i, ins)| ins.slots.iter().filter(|s| s.enabled && s.plugin.eq_ignore_ascii_case(crate::gm::IDENT)).filter_map(move |s| crate::gm::Set::read(&s.state).map(|set| (i, set))))
-            .collect();
-        if !players.is_empty() {
-            for ch in song.channels.iter_mut().filter(|c| c.plugin.eq_ignore_ascii_case(crate::midiout::IDENT)) {
-                let h = crate::midiout::Head::read(ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]));
-                let (insert, set) = players.iter().find(|p| p.1.port == h.port as u32).unwrap_or(&players[0]);
-                // a patch the sender picks itself goes over the player's; a sender that spreads its notes by
-                // colour reaches every MIDI channel
-                let of = |mc: u8| if h.patch >= 0 && !h.by_color { (h.patch as u32 & 127) | (set.patch[mc as usize & 15] & crate::gm::DRUMS) } else { set.patch[mc as usize & 15] };
-                let by = if h.by_color { (0..16u8).map(|mc| (mc, crate::gm::voice(of(mc)))).collect() } else { vec![(h.chan & 15, crate::gm::voice(of(h.chan)))] };
-                ch.gm = Some(Arc::new(crate::gm::Link { insert: (*insert).min(song.inserts.len().saturating_sub(1)), by }));
+        // bank players: have their sounds ready before the first note asks for them
+        for fx in song.inserts.iter().flat_map(|i| i.slots.iter()).filter_map(|s| s.fx.as_ref()).filter(|f| f.kind == crate::fx::Kind::Gm) {
+            for mc in 0..16 {
+                crate::gm::voice(crate::gm::patch_of(&fx.p, mc, -1));
             }
         }
         song.prepare();

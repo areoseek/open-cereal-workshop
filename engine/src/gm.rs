@@ -68,18 +68,43 @@ pub enum Voice {
     Add(Arc<crate::additive::Patch>),
 }
 
-/// A MIDI sender joined to a bank player: the mixer track the player sits on and the voice of each MIDI
-/// channel the sender can reach.
-#[derive(Debug, Clone)]
-pub struct Link {
-    pub insert: usize,
-    pub by: Vec<(u8, Voice)>,
+/// The patch word a MIDI channel plays from a bank player's settings (port, 16 patches, 16 drum switches);
+/// a patch the sender picks itself goes over the player's.
+pub fn patch_of(p: &[f32], chan: u8, own: i32) -> u32 {
+    let c = chan as usize & 15;
+    let drums = if p.get(17 + c).is_some_and(|d| *d >= 0.5) { DRUMS } else { 0 };
+    let num = if own >= 0 { own as u32 } else { p.get(1 + c).map_or(0, |v| v.round().clamp(0.0, 127.0) as u32) };
+    (num & 127) | drums
 }
 
-impl Link {
-    pub fn voice(&self, chan: u8) -> Option<&Voice> {
-        self.by.iter().find(|v| v.0 == chan).or(self.by.first()).map(|v| &v.1)
+/// The block's settings as the unit holds them: port, 16 patches, 16 drum switches.
+pub fn decode(b: &[u8]) -> Option<Vec<f32>> {
+    let s = Set::read(b)?;
+    let mut p = vec![s.port as f32];
+    p.extend(s.patch.iter().map(|w| (w & 127) as f32));
+    p.extend(s.patch.iter().map(|w| if w & DRUMS != 0 { 1.0 } else { 0.0 }));
+    Some(p)
+}
+
+/// The settings written into the block they came from, or into a fresh one.
+pub fn encode(p: &[f32], base: Option<&[u8]>) -> Vec<u8> {
+    let mut out = match base {
+        Some(b) if b.len() >= 97 => b.to_vec(),
+        _ => {
+            let mut v = vec![0u8; 97];
+            v[4] = 0x80;
+            v
+        }
+    };
+    out[8..12].copy_from_slice(&(p.first().map_or(0.0, |v| v.round().clamp(0.0, 255.0)) as u32).to_le_bytes());
+    for c in 0..16u8 {
+        let o = 33 + 4 * c as usize;
+        let was = u32::from_le_bytes(out[o..o + 4].try_into().unwrap());
+        // bits we do not read stay as they came
+        let now = (was & !(DRUMS | 127)) | patch_of(p, c, -1);
+        out[o..o + 4].copy_from_slice(&now.to_le_bytes());
     }
+    out
 }
 
 // ---- the public DLS layout ------------------------------------------------------------------------------
@@ -624,6 +649,13 @@ mod tests {
         let s = Set::read(&b).unwrap();
         assert_eq!((s.port, s.patch[1], s.patch[9]), (0, 48, DRUMS));
         assert!(Set::read(&b[..90]).is_none());
+        // the unit's settings go back into the same bytes, and a fresh block has the drums on channel 10
+        let p = decode(&b).unwrap();
+        assert_eq!((p[0], p[2], p[17 + 9], patch_of(&p, 1, -1), patch_of(&p, 9, 30)), (0.0, 48.0, 1.0, 48, DRUMS | 30));
+        assert_eq!(encode(&p, Some(&b)), b);
+        let fresh = crate::fx::Fx::new(crate::fx::Kind::Gm);
+        let block = fresh.encode(None);
+        assert_eq!((block.len(), Set::read(&block).unwrap().patch[9]), (97, DRUMS));
     }
 
     #[test]

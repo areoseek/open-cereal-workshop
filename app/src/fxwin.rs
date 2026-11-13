@@ -613,7 +613,10 @@ impl App {
             if f.kind == Kind::Patch {
                 changed |= bay_ui(ui, f);
             }
-            let mut shown: Vec<usize> = (0..d.params.len()).collect();
+            if f.kind == Kind::Gm {
+                changed |= bank_player_ui(ui, f);
+            }
+            let mut shown: Vec<usize> = if f.kind == Kind::Gm { vec![] } else { (0..d.params.len()).collect() };
             let mut cut = 0;
             if let Some((head, per, names)) = paged {
                 let id = egui::Id::new(("fxpage", ins, slot));
@@ -1523,6 +1526,52 @@ pub fn bay_ui(ui: &mut Ui, f: &mut fx::Fx) -> bool {
                     }
                 });
             });
+        }
+    });
+    changed
+}
+
+/// The bank player's page: the port it listens on and the instrument of each of the 16 MIDI channels.
+fn bank_player_ui(ui: &mut egui::Ui, f: &mut fx::Fx) -> bool {
+    use cereal_engine::gm;
+    if f.p.len() < 33 {
+        return false;
+    }
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Port").small());
+        let mut port = f.p[0] as i32;
+        if ui.add(egui::DragValue::new(&mut port).range(0..=255)).changed() {
+            f.p[0] = port as f32;
+            changed = true;
+        }
+        let from = if gm::has_bank() { "sounds from the General MIDI bank on this machine" } else { "no General MIDI bank found: stand-in voices play" };
+        ui.label(RichText::new(from).small().color(TEXT_DIM));
+    });
+    egui::Grid::new("bankplayer").num_columns(4).spacing([10.0, 3.0]).show(ui, |ui| {
+        for half in 0..8 {
+            for c in [half, half + 8] {
+                ui.label(RichText::new(format!("{}", c + 1)).small().color(TEXT_DIM));
+                let drums = f.p[17 + c] >= 0.5;
+                let now = (f.p[1 + c] as usize).min(127);
+                ui.horizontal(|ui| {
+                    let text = if drums { "Drum set".to_string() } else { format!("{:03} {}", now + 1, gm::NAMES[now]) };
+                    egui::ComboBox::from_id_salt(("bankpatch", c)).width(210.0).selected_text(RichText::new(text).small()).show_ui(ui, |ui| {
+                        if ui.selectable_label(drums, "Drum set").clicked() && !drums {
+                            f.p[17 + c] = 1.0;
+                            changed = true;
+                        }
+                        for (k, name) in gm::NAMES.iter().enumerate() {
+                            if ui.selectable_label(!drums && k == now, format!("{:03} {name}", k + 1)).clicked() {
+                                f.p[1 + c] = k as f32;
+                                f.p[17 + c] = 0.0;
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+            }
+            ui.end_row();
         }
     });
     changed

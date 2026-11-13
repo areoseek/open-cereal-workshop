@@ -59,6 +59,8 @@ pub enum Kind {
     Curve,
     /// Units that leave the sound alone: displays, notes, recorders and senders of control values.
     Thru,
+    /// The bank player: makes no change to the sound passing through; MIDI senders on its port sound here.
+    Gm,
     /// A board of controls that only sends their positions out.
     Surface,
     /// A plug-in from another maker, run through the host.
@@ -853,7 +855,7 @@ pub static DEFS: &[Def] = &[
     Def { kind: Kind::Thru, ident: "Fruity dB Meter", title: "Level Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Fruity Big Clock", title: "Big Clock", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Fruity Spectroman", title: "Spectrum View", size: 0, fixed: &[], params: &[] },
-    Def { kind: Kind::Thru, ident: "Fruity LSD", title: "Bank Player", size: 0, fixed: &[], params: &[] },
+    Def { kind: Kind::Gm, ident: "Fruity LSD", title: "Bank Player", size: 97, fixed: &[], params: &[p("Port", 8, 0, 255, 0), p("Channel 1 patch", 33, 0, 127, 0), p("Channel 2 patch", 37, 0, 127, 0), p("Channel 3 patch", 41, 0, 127, 0), p("Channel 4 patch", 45, 0, 127, 0), p("Channel 5 patch", 49, 0, 127, 0), p("Channel 6 patch", 53, 0, 127, 0), p("Channel 7 patch", 57, 0, 127, 0), p("Channel 8 patch", 61, 0, 127, 0), p("Channel 9 patch", 65, 0, 127, 0), p("Channel 10 patch", 69, 0, 127, 0), p("Channel 11 patch", 73, 0, 127, 0), p("Channel 12 patch", 77, 0, 127, 0), p("Channel 13 patch", 81, 0, 127, 0), p("Channel 14 patch", 85, 0, 127, 0), p("Channel 15 patch", 89, 0, 127, 0), p("Channel 16 patch", 93, 0, 127, 0), p("Channel 1 drums", 33, 0, 1, 0), p("Channel 2 drums", 37, 0, 1, 0), p("Channel 3 drums", 41, 0, 1, 0), p("Channel 4 drums", 45, 0, 1, 0), p("Channel 5 drums", 49, 0, 1, 0), p("Channel 6 drums", 53, 0, 1, 0), p("Channel 7 drums", 57, 0, 1, 0), p("Channel 8 drums", 61, 0, 1, 0), p("Channel 9 drums", 65, 0, 1, 0), p("Channel 10 drums", 69, 0, 1, 1), p("Channel 11 drums", 73, 0, 1, 0), p("Channel 12 drums", 77, 0, 1, 0), p("Channel 13 drums", 81, 0, 1, 0), p("Channel 14 drums", 85, 0, 1, 0), p("Channel 15 drums", 89, 0, 1, 0), p("Channel 16 drums", 93, 0, 1, 0)] },
     Def { kind: Kind::Thru, ident: "Tuner", title: "Pitch Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Razer Chroma", title: "Key Lights", size: 0, fixed: &[], params: &[] },
     Def {
@@ -2061,6 +2063,9 @@ impl Fx {
         if d.kind == Kind::Patch {
             return crate::fxpatch::decode(state).map(|p| Self { kind: d.kind, p: vec![], ir: None, sub: Some(std::sync::Arc::new(p)), raw: None, ext: None });
         }
+        if d.kind == Kind::Gm {
+            return crate::gm::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
+        }
         if d.kind == Kind::Rack {
             return crate::fxrack::decode(state).map(|p| Self { kind: d.kind, p, ir: None, sub: None, raw: None, ext: None });
         }
@@ -2192,6 +2197,9 @@ impl Fx {
         }
         if let (Kind::Patch, Some(sub)) = (self.kind, &self.sub) {
             return crate::fxpatch::encode(sub, base);
+        }
+        if self.kind == Kind::Gm {
+            return crate::gm::encode(&self.p, base);
         }
         if self.kind == Kind::Rack {
             return crate::fxrack::encode(&self.p, base);
@@ -3729,7 +3737,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::Plush | Kind::Thru | Kind::Hosted | Kind::Notes => {}
+            Kind::OldEq | Kind::OldReverb | Kind::Plush | Kind::Thru | Kind::Gm | Kind::Hosted | Kind::Notes => {}
             Kind::Conv => {
                 if let Some(st) = &mut self.conv {
                     // a normalized impulse lands this far under unit strength (measured on one render)

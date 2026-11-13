@@ -2055,15 +2055,17 @@ impl Player {
                 None => self.midi_wait.push((delay as u64 + (self.sr * 0.25) as u64, off)),
             }
             // a bank player on the sender's port sounds the note on its own mixer track
-            let Some(link) = ch.gm.clone() else { return };
+            let players = || song.inserts.iter().enumerate().flat_map(|(i, ins)| ins.slots.iter().filter(|s| s.enabled).filter_map(move |s| s.fx.as_ref().filter(|f| f.kind == crate::fx::Kind::Gm).map(|f| (i, f))));
+            let Some((to, unit)) = players().find(|u| u.1.p.first().is_some_and(|p| *p as u8 == h.port)).or_else(|| players().next()) else { return };
+            let voice = crate::gm::voice(crate::gm::patch_of(&unit.p, mc, h.patch));
             let sr = self.sr;
             let ms = |m: f32| 1.0 / (m * 0.001 * sr).max(1.0);
             let chan_vol = law::channel_gain(self.ov.chan_volume(song, n.chan as usize));
             let chan_pan = self.ov.chan_pan(song, n.chan as usize);
             let note_gain = law::velocity_gain(n.vel);
             let held = if live { len_frames } else { Some(len_frames.unwrap_or((sr * 0.12) as u64).max(1)) };
-            match link.voice(mc) {
-                Some(crate::gm::Voice::Map(map)) => {
+            match &voice {
+                crate::gm::Voice::Map(map) => {
                     let fade = ms(4.0);
                     for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.chan == n.chan && v.sample.is_some()) {
                         if map.cuts(n.key, v.key) {
@@ -2092,7 +2094,7 @@ impl Player {
                             remaining: if z.one_shot { None } else { held },
                             gl: gain * pl,
                             gr: gain * pr,
-                            insert: link.insert,
+                            insert: to,
                             delay,
                             chan: n.chan,
                             key: n.key,
@@ -2105,18 +2107,17 @@ impl Player {
                         });
                     }
                 }
-                Some(crate::gm::Voice::Add(patch)) => {
+                crate::gm::Voice::Add(patch) => {
                     let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + n.fine_cents / 1200.0);
                     let (pl, pr) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
                     let tone = crate::synth::Tone { add: Some(patch.clone()), ..Default::default() };
-                    let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: link.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
+                    let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: to, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
                     v.tone = Some(tone);
                     self.start(v);
                 }
-                None => {}
             }
             return;
         }
