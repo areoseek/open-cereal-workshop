@@ -589,6 +589,8 @@ pub struct Pattern {
     pub notes: Vec<Note>,
     /// Recorded control movements, kept sorted by position.
     pub events: Vec<PatEvent>,
+    /// Markers on the pattern's own time line, as the piano roll shows them.
+    pub markers: Vec<TimeMarker>,
 }
 
 /// One control movement inside a pattern, as the file holds it: which control of which destination, and
@@ -1796,6 +1798,7 @@ impl Song {
             out.name = p.name.clone();
             out.color = p.color.map(color);
             out.events = p.ctrl.iter().map(|&(tick, param, dest, raw)| PatEvent { tick, param, dest, raw }).collect();
+            out.markers = p.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect();
             out.events.sort_by_key(|e| e.tick);
             out.notes = p
                 .notes

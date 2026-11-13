@@ -305,10 +305,18 @@ pub(crate) struct App {
     /// Where each control being recorded was written last: (pattern, tick), keyed by its address.
     rec_ctl: std::collections::HashMap<(u16, u16), (usize, u32)>,
     audio_rec: Option<record::AudioRec>,
+    /// Loop recording: every pass of a looping song becomes a take of its own, the earlier ones muted.
+    rec_loop: bool,
+    rec_last_tick: f64,
     /// The sound card inputs, open while a mixer track listens to one; the flag stops retries after a failure.
     live_in: Option<record::LiveIn>,
     live_in_failed: bool,
     save_preset: Option<(String, bool)>,
+    /// A pick from a plug-in window's options menu: what, the unit, instrument or effect.
+    plug_ask: Option<(u8, String, bool)>,
+    plug_clip: Option<(String, bool, Vec<u8>)>,
+    /// The parameter list window: instrument or effect.
+    param_win: Option<bool>,
     pub(crate) state_ask: Option<StateAsk>,
     show_chanset: bool,
     show_events: bool,
@@ -379,6 +387,7 @@ const TYPING: [(Key, u8); 30] = [
 impl App {
     fn new(open: Option<PathBuf>) -> Self {
         let settings = setup::Settings::load();
+        let detached_bits = settings.detached;
         setup::load_trusted_scripts(&settings.content);
         record::set_input(&settings.audio_in);
         midi::set_prefs(midi::Prefs { off: settings.midi_off.clone(), out: settings.midi_out.clone(), sync: settings.midi_sync });
@@ -504,16 +513,21 @@ impl App {
             rec_score: true,
             rec_ctl: Default::default(),
             audio_rec: None,
+            rec_loop: false,
+            rec_last_tick: 0.0,
             live_in: None,
             live_in_failed: false,
             save_preset: None,
+            plug_ask: None,
+            plug_clip: None,
+            param_win: None,
             state_ask: None,
             show_chanset: false,
             show_events: false,
             events: events::State::default(),
             link_learn: None,
             multilink: false,
-            detached: [false; 4],
+            detached: std::array::from_fn(|k| detached_bits >> k & 1 == 1),
             multi_queue: vec![],
             multi_seen: vec![],
             value_clip: None,
@@ -718,16 +732,37 @@ impl App {
             }
         } else if !want {
             if let Some(r) = self.audio_rec.take() {
-                let tps = (if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo }) as f64 * self.song.ppq as f64 / 60.0;
-                let (at, cut) = r.placed(tr.song_mode(), OUT_LAG_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, tps);
-                match r.finish(&record::folder(self.path.as_deref()), cut) {
-                    Ok(path) => {
-                        self.add_audio_clip(&path, at, None);
-                        self.status = format!("Recorded {}", path.display());
-                    }
-                    Err(e) => self.status = e,
-                }
+                self.finish_take(r, false);
             }
+        } else if self.rec_loop && tr.song_mode() && tr.tick() + (self.song.ppq as f64) < self.rec_last_tick {
+            // the song went round: this pass is a take, kept silent while the next one is played
+            if let Some(r) = self.audio_rec.take() {
+                self.finish_take(r, true);
+            }
+            if let Ok(r) = record::AudioRec::start(tr.tick().max(0.0) as u32, tr.clone()) {
+                self.audio_rec = Some(r);
+            }
+        }
+        self.rec_last_tick = tr.tick();
+    }
+
+    fn finish_take(&mut self, r: record::AudioRec, muted: bool) {
+        let tr = self.handle.transport.clone();
+        let tps = (if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo }) as f64 * self.song.ppq as f64 / 60.0;
+        let (at, cut) = r.placed(tr.song_mode(), OUT_LAG_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, tps);
+        match r.finish(&record::folder(self.path.as_deref()), cut) {
+            Ok(path) => {
+                let before = self.song.channels.len();
+                self.add_audio_clip(&path, at, None);
+                if muted && self.song.channels.len() > before {
+                    let src = cereal_engine::song::ClipSrc::Audio(before);
+                    for c in self.song.clips.iter_mut().filter(|c| c.src == src) {
+                        c.muted = true;
+                    }
+                }
+                self.status = format!("Recorded {}", path.display());
+            }
+            Err(e) => self.status = e,
         }
     }
 
@@ -2002,6 +2037,41 @@ impl App {
         let label = at.and_then(|i| list[i].file_stem()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Presets".into());
         let mut pick = None;
         ui.horizontal(|ui| {
+            ui.menu_button("v", |ui| {
+                let mut ask = None;
+                if ui.button("Save preset as...").clicked() {
+                    self.save_preset = Some((ident.to_string(), generator));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Copy preset").clicked() {
+                    ask = Some(1);
+                }
+                let can = self.plug_clip.as_ref().is_some_and(|(i, g, _)| i.eq_ignore_ascii_case(ident) && *g == generator);
+                if ui.add_enabled(can, egui::Button::new("Paste preset")).clicked() {
+                    ask = Some(2);
+                }
+                ui.separator();
+                if ui.button("Randomize").clicked() {
+                    ask = Some(3);
+                }
+                if ui.button("Reset to defaults").clicked() {
+                    ask = Some(6);
+                }
+                ui.separator();
+                if ui.button("Browse parameters").clicked() {
+                    ask = Some(4);
+                }
+                if ui.button("Link all parameters...").clicked() {
+                    ask = Some(5);
+                }
+                if let Some(a) = ask {
+                    self.plug_ask = Some((a, ident.to_string(), generator));
+                    ui.close_menu();
+                }
+            })
+            .response
+            .hint("Plug-in options");
             if ui.small_button("Save").hint("Save these settings as a preset file").clicked() {
                 self.save_preset = Some((ident.to_string(), generator));
             }
@@ -2076,6 +2146,115 @@ impl App {
     }
 
     /// Write the settings of the open effect or the selected instrument to a preset file.
+    /// Parameter names and ranges of the selected instrument or the open effect, with the targets they answer to.
+    fn plug_params(&self, generator: bool) -> Vec<(&'static str, i32, i32, i32, cereal_engine::song::Target)> {
+        use cereal_engine::song::Target;
+        if generator {
+            let ci = self.sel_chan;
+            let Some(g) = self.song.channels.get(ci).and_then(|c| c.gen.as_ref()) else { return vec![] };
+            cereal_engine::synth::def(g.kind).params.iter().enumerate().filter(|(i, _)| *i < g.p.len()).map(|(i, p)| (p.name, p.min, p.max, p.def, Target::ChanParam(ci, i as u16))).collect()
+        } else {
+            let Some((ins, s)) = self.fx_open else { return vec![] };
+            let Some(f) = self.song.inserts.get(ins).and_then(|t| t.slots.iter().find(|x| x.index == s)).and_then(|x| x.fx.as_ref()) else { return vec![] };
+            cereal_engine::fx::def(f.kind).params.iter().enumerate().filter(|(i, _)| *i < f.p.len()).map(|(i, p)| (p.name, p.min, p.max, p.def, Target::SlotParam(ins, s, i as u16))).collect()
+        }
+    }
+
+    fn plug_values(&mut self, generator: bool) -> Option<&mut Vec<f32>> {
+        if generator {
+            self.song.channels.get_mut(self.sel_chan)?.gen.as_mut().map(|g| &mut g.p)
+        } else {
+            let (ins, s) = self.fx_open?;
+            self.song.inserts.get_mut(ins)?.slots.iter_mut().find(|x| x.index == s)?.fx.as_mut().map(|f| &mut f.p)
+        }
+    }
+
+    fn plug_option(&mut self, what: u8, ident: &str, generator: bool) {
+        let state = if generator {
+            self.song.channels.get(self.sel_chan).and_then(|c| c.gen.as_ref()).filter(|g| cereal_engine::synth::def(g.kind).ident.eq_ignore_ascii_case(ident)).map(|g| g.encode(None))
+        } else {
+            self.fx_open.and_then(|(i, s)| self.song.inserts.get(i)?.slots.iter().find(|x| x.index == s)?.fx.as_ref()).map(|f| f.encode(None))
+        };
+        match what {
+            1 => {
+                if let Some(state) = state {
+                    self.plug_clip = Some((ident.to_string(), generator, cereal_engine::preset::write(ident, &state, generator)));
+                    self.status = "Preset copied".into();
+                }
+            }
+            2 => {
+                let Some((_, _, bytes)) = self.plug_clip.clone() else { return };
+                let path = std::env::temp_dir().join(format!("ocw-paste-{}.fst", std::process::id()));
+                if std::fs::write(&path, bytes).is_ok() {
+                    let to = if generator { PresetTo::Chan(self.sel_chan) } else { self.fx_open.map(|(i, s)| PresetTo::Slot(i, s)).unwrap_or(PresetTo::Auto) };
+                    let was = self.preset_name.get(ident).cloned();
+                    let name = self.song.channels.get(self.sel_chan).map(|c| c.name.clone());
+                    self.load_preset(&path, to);
+                    let _ = std::fs::remove_file(&path);
+                    match was {
+                        Some(w) => self.preset_name.insert(ident.to_string(), w),
+                        None => self.preset_name.remove(ident),
+                    };
+                    if let (true, Some(n), Some(c)) = (generator, name, self.song.channels.get_mut(self.sel_chan)) {
+                        c.name = n;
+                    }
+                    self.status = "Preset pasted".into();
+                }
+            }
+            3 | 6 => {
+                let ps = self.plug_params(generator);
+                let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
+                if let Some(v) = self.plug_values(generator) {
+                    for (i, (_, lo, hi, def, _)) in ps.iter().enumerate() {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        let r = (seed >> 11) as f64 / (1u64 << 53) as f64;
+                        v[i] = if what == 6 { *def as f32 } else { (*lo as f64 + r * (*hi as f64 - *lo as f64)).round() as f32 };
+                    }
+                    self.dirty = true;
+                    self.status = if what == 6 { "Settings back to their defaults".into() } else { "Settings randomized".into() };
+                }
+            }
+            4 => self.param_win = Some(generator),
+            5 => {
+                self.multilink = true;
+                self.multi_seen.clear();
+                self.multi_queue = self.plug_params(generator).into_iter().map(|p| p.4).collect();
+                self.status = format!("Linking {} parameters: turn the knobs of the MIDI device one after another", self.multi_queue.len());
+            }
+            _ => {}
+        }
+    }
+
+    /// The list of every parameter of the unit, each one a slider that can be linked or automated.
+    fn param_window(&mut self, ctx: &egui::Context) {
+        let Some(generator) = self.param_win else { return };
+        let ps = self.plug_params(generator);
+        if ps.is_empty() {
+            self.param_win = None;
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Parameters").id(egui::Id::new("paramwin")).open(&mut open).default_pos([700.0, 180.0]).default_width(320.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+                for (i, (name, lo, hi, _, target)) in ps.iter().enumerate() {
+                    let Some(v) = self.plug_values(generator).and_then(|v| v.get_mut(i)) else { break };
+                    let r = ui.add(egui::Slider::new(v, *lo as f32..=*hi as f32).step_by(1.0).text(*name));
+                    widgets::control_menu(&r, *target);
+                    changed |= r.changed();
+                }
+            });
+        });
+        if changed {
+            self.dirty = true;
+        }
+        if !open {
+            self.param_win = None;
+        }
+    }
+
     fn save_preset_file(&mut self, ident: &str, generator: bool) {
         let state = if generator {
             self.song.channels.get(self.sel_chan).and_then(|c| c.gen.as_ref()).filter(|g| cereal_engine::synth::def(g.kind).ident == ident).map(|g| g.encode(None))
@@ -2567,10 +2746,30 @@ impl App {
                     self.handle.transport.set_pattern(p);
                     self.dirty = true;
                 }
-                Key::F5 if !repeat => self.show_playlist = !self.show_playlist,
-                Key::F6 if !repeat => self.show_rack = !self.show_rack,
-                Key::F7 if !repeat => self.show_piano = !self.show_piano,
-                Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
+                Key::F5 if !repeat => {
+                    self.show_playlist = !self.show_playlist;
+                    if self.show_playlist {
+                        self.focus = Win::Playlist;
+                    }
+                }
+                Key::F6 if !repeat => {
+                    self.show_rack = !self.show_rack;
+                    if self.show_rack {
+                        self.focus = Win::Rack;
+                    }
+                }
+                Key::F7 if !repeat => {
+                    self.show_piano = !self.show_piano;
+                    if self.show_piano {
+                        self.focus = Win::Piano;
+                    }
+                }
+                Key::F9 if !repeat => {
+                    self.show_mixer = !self.show_mixer;
+                    if self.show_mixer {
+                        self.focus = Win::Mixer;
+                    }
+                }
                 Key::F3 if !repeat => self.tool_menu = if self.tool_menu.is_some() { None } else { Some(egui::Pos2::ZERO) },
                 Key::F4 if !repeat => {
                     if modifiers.shift {
@@ -2909,6 +3108,7 @@ impl App {
                     }
                     ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");
                     ui.checkbox(&mut self.rec_blend, "Blend recorded notes               Ctrl+B");
+                    ui.checkbox(&mut self.rec_loop, "Loop recording");
                     let (mut w, mut st) = (self.handle.transport.waiting(), self.handle.transport.step_edit());
                     if ui.checkbox(&mut w, "Wait for input to start playing   Ctrl+I").changed() {
                         self.handle.transport.set_waiting(w);
@@ -3200,6 +3400,7 @@ impl App {
                         tr.set_metronome(met);
                     }
                     ui.checkbox(&mut self.rec_blend, "Blend recorded notes   Ctrl+B");
+                    ui.checkbox(&mut self.rec_loop, "Loop recording");
                     ui.checkbox(&mut self.rec_quantise, "Snap recorded notes to the grid");
                 });
                 if rec_btn.clicked() {
@@ -3505,6 +3706,15 @@ impl App {
         if let Some((ident, generator)) = self.save_preset.take() {
             self.save_preset_file(&ident, generator);
         }
+        let det = (0..4).fold(0u8, |a, k| a | (self.detached[k] as u8) << k);
+        if det != self.settings.detached {
+            self.settings.detached = det;
+            let _ = self.settings.save();
+        }
+        if let Some((what, ident, generator)) = self.plug_ask.take() {
+            self.plug_option(what, &ident, generator);
+        }
+        self.param_window(ctx);
         if let Some(ask) = self.state_ask.take() {
             self.state_file(ask);
         }

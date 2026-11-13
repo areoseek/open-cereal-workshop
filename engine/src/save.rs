@@ -1256,7 +1256,88 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
     }
 }
 
+/// A pattern's own time markers, written again when any of them changed. They live in the second pattern
+/// list, after the pattern's name and colour.
+fn patch_pattern_markers(ev: &mut Vec<Event>, number: u16, markers: &[crate::song::TimeMarker], unicode: bool, with_sig: bool) {
+    let first_chan = ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(0);
+    let stop = |id: u8| matches!(id, 64 | 65 | 99 | 233 | 236);
+    let mut sel = None;
+    let mut last_block_end = None;
+    let mut i = first_chan;
+    while i < ev.len() {
+        match (ev[i].id, &ev[i].value) {
+            (id::NEW_PATTERN, Value::Word(v)) => {
+                let mut j = i + 1;
+                while j < ev.len() && !stop(ev[j].id) {
+                    j += 1;
+                }
+                last_block_end = Some(j);
+                if *v == number {
+                    sel = Some((i, j));
+                }
+                i = j;
+                continue;
+            }
+            (id::NEW_ARRANGEMENT | id::INSERT_FLAGS | id::PLAYLIST, _) => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    let mut at = match sel {
+        Some((start, end)) => {
+            // the old markers go, with the extra events newer versions write between a marker's place and its name
+            let mut old = vec![];
+            let mut open = false;
+            for k in start + 1..end {
+                match ev[k].id {
+                    id::MARKER_POSITION => {
+                        open = true;
+                        old.push(k);
+                    }
+                    id::MARKER_NAME => {
+                        open = false;
+                        old.push(k);
+                    }
+                    _ if open => old.push(k),
+                    _ => {}
+                }
+            }
+            let at = old.first().copied().unwrap_or(end);
+            for &k in old.iter().rev() {
+                ev.remove(k);
+            }
+            at
+        }
+        None if markers.is_empty() => return,
+        None => {
+            let at = last_block_end.unwrap_or_else(|| {
+                let mut j = (first_chan + 1).min(ev.len());
+                while j < ev.len() && !ends_channel(ev[j].id) {
+                    j += 1;
+                }
+                j
+            });
+            ev.insert(at, Event::word(id::NEW_PATTERN, number));
+            at + 1
+        }
+    };
+    for m in markers {
+        let mut new = vec![Event::int(id::MARKER_POSITION, (m.kind as u32) << 24 | (m.pos & 0x00ff_ffff))];
+        if with_sig {
+            let (n, d) = if m.sig.0 == 0 || m.sig.1 == 0 { (4, 4) } else { m.sig };
+            new.push(Event::byte(id::MARKER_NUMERATOR, n));
+            new.push(Event::byte(id::MARKER_DENOMINATOR, d));
+        }
+        new.push(text_event(id::MARKER_NAME, &m.name, unicode));
+        for e in new {
+            ev.insert(at, e);
+            at += 1;
+        }
+    }
+}
+
 fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unicode: bool) {
+    let with_sig = flp.version_tuple() >= (20, 0, 0, 0);
     let n = song.patterns.len().max(base.patterns.len());
     for p in 0..n {
         let number = p as u16 + 1;
@@ -1489,6 +1570,9 @@ fn patch_patterns(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unic
                     ev.insert(at, Event::word(id::NEW_PATTERN, number));
                 }
             }
+        }
+        if now.markers != was.markers {
+            patch_pattern_markers(ev, number, &now.markers, unicode, with_sig);
         }
     }
 }
@@ -2656,6 +2740,26 @@ mod tests {
         assert_eq!(r2.groups[r2.group_of(0)], "Drums");
         assert_eq!(r2.groups[r2.group_of(3)], "Unsorted");
         assert!(r2.channels[2].zipped && !r2.channels[1].zipped);
+    }
+
+    #[test]
+    fn pattern_markers_are_saved_and_read_back() {
+        use crate::song::TimeMarker;
+        let bytes = to_bytes(&Song::new(), None).unwrap();
+        let (mut r, f) = reload(&bytes);
+        r.ensure_pattern(2);
+        r.patterns[0].markers = vec![TimeMarker { pos: 96, name: "Fill".into(), kind: 0, sig: (4, 4) }];
+        r.patterns[2].markers = vec![TimeMarker { pos: 0, name: "A".into(), kind: 0, sig: (4, 4) }, TimeMarker { pos: 384, name: "B".into(), kind: 0, sig: (4, 4) }];
+        let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
+        let (mut r2, _) = reload(&bytes2);
+        assert_eq!(r2.patterns[0].markers, r.patterns[0].markers);
+        assert_eq!(r2.patterns[2].markers, r.patterns[2].markers);
+        r2.patterns[2].markers.remove(0);
+        r2.patterns[0].markers.clear();
+        let (bytes3, _) = save(&mut r2, Some(&f2)).unwrap();
+        let (r3, _) = reload(&bytes3);
+        assert!(r3.patterns[0].markers.is_empty());
+        assert_eq!(r3.patterns[2].markers, r2.patterns[2].markers);
     }
 
     #[test]

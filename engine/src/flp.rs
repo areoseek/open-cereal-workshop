@@ -569,6 +569,8 @@ pub struct FlpPattern {
     pub notes: Vec<Note>,
     /// Control events: tick, which control (see `param`), destination, raw value.
     pub ctrl: Vec<(u32, u16, u16, i32)>,
+    /// The markers on the pattern's own time line.
+    pub markers: Vec<Marker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1017,6 +1019,24 @@ impl Flp {
                 (id::TRACK_NAME, Value::Data(d)) => {
                     if let Some(t) = flp.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
                         t.name = text(d);
+                    }
+                }
+                (id::MARKER_POSITION, Value::Int(v)) if in_pattern => {
+                    let p = patterns.entry(cur_pat).or_insert_with(|| FlpPattern { index: cur_pat, ..Default::default() });
+                    p.markers.push(Marker { position: *v & 0x00ff_ffff, name: String::new(), kind: (*v >> 24) as u8, sig: (0, 0) });
+                }
+                (id::MARKER_NUMERATOR | id::MARKER_DENOMINATOR, Value::Byte(v)) if in_pattern => {
+                    if let Some(m) = patterns.get_mut(&cur_pat).and_then(|p| p.markers.last_mut()) {
+                        if e.id == id::MARKER_NUMERATOR {
+                            m.sig.0 = *v;
+                        } else {
+                            m.sig.1 = *v;
+                        }
+                    }
+                }
+                (id::MARKER_NAME, Value::Data(d)) if in_pattern => {
+                    if let Some(m) = patterns.get_mut(&cur_pat).and_then(|p| p.markers.last_mut()) {
+                        m.name = text(d);
                     }
                 }
                 (id::MARKER_POSITION | id::MARKER_NAME | id::MARKER_NUMERATOR | id::MARKER_DENOMINATOR, _) if in_pattern => {}

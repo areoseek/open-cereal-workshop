@@ -297,6 +297,26 @@ impl App {
         }
     }
 
+    /// A time marker on the pattern's own time line: at the start of the picked stretch, else at the bar the
+    /// play position is in.
+    fn pr_add_marker(&mut self) {
+        let pat = self.pr_pat();
+        let bar = self.song.bar().max(1);
+        let tr = &self.handle.transport;
+        let pos = match self.piano.time_sel {
+            Some((a, _)) => a,
+            None if tr.playing() && !tr.song_mode() => (tr.tick().max(0.0) as u32 / bar) * bar,
+            None => 0,
+        };
+        let ms = &mut self.song.patterns[pat].markers;
+        if !ms.iter().any(|m| m.pos == pos && m.kind == 0) {
+            let name = format!("Marker #{}", ms.len() + 1);
+            ms.push(cereal_engine::song::TimeMarker { pos, name, kind: 0, sig: (4, 4) });
+            ms.sort_by_key(|m| m.pos);
+            self.dirty = true;
+        }
+    }
+
     fn pr_pat(&mut self) -> usize {
         let pat = self.handle.transport.pattern();
         self.song.ensure_pattern(pat);
@@ -1109,6 +1129,7 @@ impl App {
                 Key::G if !repeat => self.pr_group(false),
                 Key::B if !repeat => self.piano.rows = !self.piano.rows,
                 Key::N if !repeat => self.piano.wave = !self.piano.wave,
+                Key::T if !repeat => self.pr_add_marker(),
                 k => match HELPERS.iter().position(|h| h.1 == k) {
                     Some(i) => self.pr_helper(i),
                     None => return false,
@@ -1317,6 +1338,16 @@ impl App {
             ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
             ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
             ui.menu_button("Zoom", |ui| list(ui, &ZOOM, &mut press));
+            ui.menu_button("Time markers", |ui| {
+                const MARK: [Item; 1] = [("Add one                     Alt+T", A, Key::T)];
+                list(ui, &MARK, &mut press);
+                if ui.button(RichText::new("Delete all").monospace().size(11.0)).clicked() {
+                    let pat = self.pr_pat();
+                    self.song.patterns[pat].markers.retain(|m| m.kind != 0);
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+            });
             ui.menu_button("Target channel", |ui| {
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     for c in 0..self.song.channels.len() {
@@ -1677,6 +1708,40 @@ impl App {
                 p.text(Pos2::new(x + 3.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", b / bar + 1), FontId::proportional(10.5), TEXT_DIM);
             }
             b += bar;
+        }
+        // the pattern's own time markers: a flag on the ruler, a faint line down the grid
+        {
+            let pat = self.handle.transport.pattern();
+            let n = self.song.patterns.get(pat).map(|p| p.markers.len()).unwrap_or(0);
+            let mut gone = None;
+            for i in 0..n {
+                let m = &self.song.patterns[pat].markers[i];
+                let x = x_of(m.pos as f32);
+                if m.kind != 0 || x < grid.left() - 1.0 || x > grid.right() {
+                    continue;
+                }
+                let amber = Color32::from_rgb(230, 170, 70);
+                let g = p.layout_no_wrap(m.name.clone(), FontId::proportional(10.5), Color32::BLACK);
+                let tab = Rect::from_min_size(Pos2::new(x, ruler.top()), egui::vec2(g.size().x + 8.0, ruler.height() - 1.0));
+                p.rect_filled(tab, 2.0, amber);
+                p.galley(Pos2::new(x + 4.0, ruler.center().y - g.size().y / 2.0), g, Color32::BLACK);
+                p.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, amber.gamma_multiply(0.35)));
+                let r = ui.interact(tab, ui.id().with(("prmark", i)), Sense::click());
+                r.context_menu(|ui| {
+                    let m = &mut self.song.patterns[pat].markers[i];
+                    if ui.text_edit_singleline(&mut m.name).changed() {
+                        self.dirty = true;
+                    }
+                    if ui.button("Delete").clicked() {
+                        gone = Some(i);
+                        ui.close_menu();
+                    }
+                });
+            }
+            if let Some(i) = gone {
+                self.song.patterns[pat].markers.remove(i);
+                self.dirty = true;
+            }
         }
 
         // keyboard
