@@ -10,6 +10,9 @@ use std::sync::OnceLock;
 
 /// Frames between spectrum updates; the two neighbouring waves are cross-faded in between.
 const TICK: u32 = 128;
+/// The larger instrument's way out: seconds a let go note holds on, and seconds of its half cosine fall.
+const HOLD: f32 = 245.0 / 44100.0;
+const LEAVE: f32 = 420.0 / 44100.0;
 const MAX_M: usize = 2048;
 const MAX_UNISON: usize = 9;
 
@@ -147,6 +150,10 @@ pub struct Patch {
     pub p: Vec<f32>,
     /// Harmonic levels and phases (in cycles) of a custom timbre.
     pub custom: Option<(Vec<f32>, Vec<f32>)>,
+    /// The larger instrument's way in and out (measured on its factory test): every harmonic rises on its own,
+    /// closing on its level at this many time constants a cycle of its own pitch, and a let go note holds on
+    /// for a moment and then leaves on a half cosine. Zero for the plain rise and fall.
+    pub rise: f32,
 }
 
 impl Patch {
@@ -163,7 +170,7 @@ impl Patch {
                 custom = Some((amp, ph));
             }
         }
-        Self { p: p.to_vec(), custom }
+        Self { p: p.to_vec(), custom, rise: 0.0 }
     }
 
     fn v(&self, i: usize) -> f32 {
@@ -253,7 +260,7 @@ pub struct Voice {
     hphase: Vec<f32>,
     /// How far each harmonic has run ahead of its place, in cycles (harmonic detune and grit).
     drift: Vec<f32>,
-    last: [f32; 8],
+    last: [f32; 9],
     primed: bool,
     ph: [f32; MAX_UNISON],
     ratio: [f32; MAX_UNISON],
@@ -269,6 +276,9 @@ pub struct Voice {
     env_mul: f32,
     env_out: f32,
     held: bool,
+    /// Frames between two looks at the settings, and frames since the note was let go.
+    tick_len: u32,
+    gone: u32,
     lfo_ph: f32,
     lfo_hold: f32,
     lfo_prev: f32,
@@ -305,7 +315,7 @@ impl Voice {
             im: vec![0.0; m],
             hphase: Vec::new(),
             drift: Vec::new(),
-            last: [f32::NAN; 8],
+            last: [f32::NAN; 9],
             primed: false,
             ph: [0.0; MAX_UNISON],
             ratio: [1.0; MAX_UNISON],
@@ -319,6 +329,8 @@ impl Voice {
             env_mul: 1.0,
             env_out: 0.0,
             held: true,
+            tick_len: TICK,
+            gone: 0,
             lfo_ph: 0.0,
             lfo_hold: 0.0,
             lfo_prev: 0.0,
@@ -355,7 +367,7 @@ impl Voice {
         let speed = patch.v(ix::LFO_SPEED);
         let hz = (speed.abs() / 8000.0).powi(2) * 32.0 * speed.signum();
         let was = self.lfo_ph;
-        self.lfo_ph = (self.lfo_ph + hz * TICK as f32 / self.sr).rem_euclid(1.0);
+        self.lfo_ph = (self.lfo_ph + hz * self.tick_len as f32 / self.sr).rem_euclid(1.0);
         let x = self.lfo_ph;
         let raw = match shape {
             1 => 1.0 - 4.0 * ((x + 0.25).fract() - 0.5).abs(),
@@ -439,7 +451,19 @@ impl Voice {
         if moving && self.drift.len() < n {
             self.drift.resize(n, 0.0);
         }
-        let key = [n as f32, if open { 99.0 } else { cut }, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }];
+        // harmonics that rise on their own: looked at often while the fast ones come in, and each wave is the
+        // one for the end of its fade in
+        let first = !self.primed;
+        let rise = patch.rise;
+        let mut rise_t = 0.0;
+        if rise > 0.0 {
+            self.tick_len = if self.frames < 512 { 16 } else if self.frames < 2048 { 32 } else { TICK };
+            rise_t = if first { 0.0 } else { t + self.tick_len as f32 / self.sr };
+            if rise * f0 * rise_t >= 10.0 {
+                rise_t = -1.0;
+            }
+        }
+        let key = [n as f32, if open { 99.0 } else { cut }, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }, rise_t];
         if self.primed && key.iter().zip(&self.last).all(|(a, b)| (a - b).abs() < 1e-4) {
             self.blend = false;
             return;
@@ -508,6 +532,9 @@ impl Voice {
                 let d = (f / res_at).log2() / 0.18;
                 a *= low + res * 5.0 * (-d * d).exp();
             }
+            if rise_t >= 0.0 && rise > 0.0 {
+                a *= 1.0 - (-rise * kf * f0 * rise_t).exp();
+            }
             if ph_amt > 0.0 {
                 let pos = match scale {
                     1 => kf * f0 / 1000.0,
@@ -528,7 +555,7 @@ impl Voice {
                 if detune != 0.0 {
                     // the sixteenth harmonic moves by the knob's own cents, lower ones by less
                     let ratio = 2f32.powf(detune * kf.log2() / 4800.0) - 1.0;
-                    *d += (kf * dphase * ratio * TICK as f32).clamp(-0.45, 0.45);
+                    *d += (kf * dphase * ratio * self.tick_len as f32).clamp(-0.45, 0.45);
                 }
                 if grit != 0.0 {
                     // turned left, the shaking grows with the harmonic number
@@ -561,12 +588,19 @@ impl Voice {
             self.fade = 0.0;
         }
         self.primed = true;
+        if first && rise > 0.0 {
+            // the silent start fades straight into the first sounding wave
+            self.tick(patch, dphase);
+        }
     }
 
     /// Let the note go; returns the seconds it still sounds.
     pub fn release(&mut self, patch: &Patch) -> f32 {
-        let tau = patch.release_s();
         self.held = false;
+        if patch.rise > 0.0 {
+            return (HOLD + LEAVE) * 1.05 + 0.002;
+        }
+        let tau = patch.release_s();
         self.env_mul = (-1.0 / (tau * self.sr)).exp();
         tau * 9.2 + 0.05
     }
@@ -581,7 +615,7 @@ impl Voice {
             self.tick(patch, dphase * self.pitch_mul);
         }
         self.count += 1;
-        if self.count >= TICK {
+        if self.count >= self.tick_len {
             self.count = 0;
         }
         self.frames += 1;
@@ -604,13 +638,21 @@ impl Voice {
             self.ph[u] = if p >= 1.0 { p - 1.0 } else { p };
         }
         if self.blend {
-            self.fade = (self.fade + 1.0 / TICK as f32).min(1.0);
+            self.fade = (self.fade + 1.0 / self.tick_len as f32).min(1.0);
         }
         if self.held {
             let a = patch.attack_s() * self.sr;
             self.env = if a < 1.0 { 1.0 } else { (self.env + 1.0 / a).min(1.0) };
         } else {
             self.env *= self.env_mul;
+        }
+        if patch.rise > 0.0 {
+            let x = if self.held { 0.0 } else { ((self.gone as f32 / self.sr - HOLD) / LEAVE).clamp(0.0, 1.0) };
+            if !self.held {
+                self.gone += 1;
+            }
+            let g = self.level * 0.5304 * (0.5 + 0.5 * (x * std::f32::consts::PI).cos());
+            return [out[0] * g * (1.0 - self.trem.max(0.0)), out[1] * g * (1.0 + self.trem.min(0.0))];
         }
         let lag = if self.held { 0.00215 } else { 0.006 };
         self.env_out += (self.env - self.env_out) * (1.0 - (-1.0 / (lag * self.sr)).exp());

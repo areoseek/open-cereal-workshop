@@ -692,7 +692,7 @@ pub fn stand_in(name: &str) -> crate::additive::Patch {
     p[ix::CUTOFF] = cut;
     p[ix::KEY_TRACK] = 500.0;
     p[ix::UNI_ORDER] = uni;
-    crate::additive::Patch { p, custom: None }
+    crate::additive::Patch { p, custom: None, rise: 0.0 }
 }
 
 pub fn def(kind: Kind) -> &'static Def {
@@ -998,7 +998,7 @@ impl Gen {
         use crate::additive::ix;
         let v = |i: usize| self.p[i];
         let mut p: Vec<f32> = def(Kind::Additive).params.iter().map(|p| p.def as f32).collect();
-        p[ix::PHASE] = 1000.0 - v(1).abs();
+        p[ix::PHASE] = v(1).abs();
         p[ix::HZ_AMOUNT] = v(3).abs();
         p[ix::HZ_WIDTH] = v(4);
         p[ix::HZ_STRENGTH] = v(5);
@@ -1011,7 +1011,7 @@ impl Gen {
         p[ix::FILTER_ON] = 1.0;
         p[ix::F_AMOUNT] = 0.0;
         // a low setting is nearly always opened by a drawn envelope we cannot read yet, so it is kept from closing fully
-        p[ix::CUTOFF] = 2048.0 + cut * 0.75;
+        p[ix::CUTOFF] = if cut >= 4096.0 { cut + 321.0 } else { 2048.0 + cut * 0.75 };
         p[ix::KEY_TRACK] = v(12);
         p[ix::RESONANCE] = res;
         p[ix::PLUCK] = v(16);
@@ -1031,7 +1031,8 @@ impl Gen {
             custom = Some((amp, vec![0.0; 512]));
             p[ix::TIMBRE] = 11.0;
         }
-        crate::additive::Patch { p, custom }
+        p[ix::VOLUME] *= 0.943;
+        crate::additive::Patch { p, custom, rise: 0.5 }
     }
 
     /// Where the settings start in a block that opens with a name.
@@ -2255,7 +2256,7 @@ mod tests {
         let p = t.add.expect("played by the additive engine");
         assert_eq!(p.p[ix::UNI_ORDER], 5.0);
         assert_eq!(p.p[ix::UNI_PAN], 96.0);
-        assert_eq!(p.p[ix::CUTOFF], 5120.0);
+        assert_eq!(p.p[ix::CUTOFF], 4417.0);
         assert_eq!(p.p[ix::RESONANCE], 300.0);
         assert_eq!(p.p[ix::PLUCK], 600.0);
         let (amp, _) = p.custom.as_ref().expect("a half square has its own table");

@@ -63,7 +63,7 @@ pub fn patch(state: &[u8]) -> Option<Patch> {
         })
         .collect();
     let phase = (1..=HARMONICS).map(|k| hash(seed1 as u32 ^ 0x5bd1, k as u32)).collect();
-    Some(Patch { p, custom: Some((amp, phase)) })
+    Some(Patch { p, custom: Some((amp, phase)), rise: 0.0 })
 }
 
 #[cfg(test)]
