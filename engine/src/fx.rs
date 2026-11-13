@@ -2736,8 +2736,21 @@ fn bank_time(q: &[f32], layout: f32, cx: &Ctx) -> f32 {
 }
 
 /// Reverb line lengths in milliseconds at full room size.
-const REV_MS: [f32; 8] = [31.7, 37.1, 41.3, 47.9, 53.3, 61.7, 71.3, 83.9];
-const REV_AP_MS: [f32; 4] = [4.7, 3.6, 12.7, 9.3];
+/// Room sizes the reverb's line lengths were measured at, and for each the seven tap places and
+/// the length of both ring halves, in samples at 44100 Hz. Sizes between are interpolated.
+const REV2_SIZES: [f32; 5] = [1.0, 25.0, 50.0, 75.0, 100.0];
+const REV2_TAPS: [[[f32; 8]; 2]; 5] = [
+    [[81.0, 555.0, 912.0, 1395.0, 1879.0, 2297.0, 2872.0, 3077.0], [108.0, 518.0, 1112.0, 1422.0, 1895.0, 2397.0, 2890.0, 3057.0]],
+    [[204.0, 1388.0, 2280.0, 3490.0, 4701.0, 5747.0, 7185.0, 7696.0], [270.0, 1296.0, 2781.0, 3558.0, 4740.0, 5996.0, 7228.0, 7647.0]],
+    [[331.0, 2257.0, 3706.0, 5672.0, 7639.0, 9338.0, 11675.0, 12507.0], [439.0, 2106.0, 4520.0, 5782.0, 7702.0, 9743.0, 11746.0, 12427.0]],
+    [[460.0, 3126.0, 5133.0, 7856.0, 10579.0, 12932.0, 16168.0, 17317.0], [611.0, 2918.0, 6260.0, 8008.0, 10667.0, 13494.0, 16267.0, 17208.0]],
+    [[586.0, 3993.0, 6557.0, 10036.0, 13516.0, 16523.0, 20657.0, 22128.0], [778.0, 3726.0, 7997.0, 10230.0, 13628.0, 17240.0, 20783.0, 21988.0]],
+];
+const REV2_EARLY: [f32; 2] = [0.1758, 0.1668];
+/// The inner diffusers' lengths at size 50 and the powers the ring diffusers' gains take.
+const REV2_MID: [f32; 2] = [3310.2, 2243.5];
+const REV2_G5: f32 = 1.265;
+const REV2_G6: f32 = 2.46;
 
 /// Kind B curve of the fast distortion, measured from reference renders: one row per
 /// threshold step 1..10, natural log of the output at inputs 10^(-3 + i/16), i = 0..=48.
@@ -2856,9 +2869,10 @@ impl Unit {
                 }
             }
             Kind::Reverb => {
-                u.buf = vec![[0.0; 2]; (sr * 1.1) as usize + 8];
-                for ms in REV_MS.iter().chain(&REV_AP_MS) {
-                    u.lines.push(vec![0.0; (ms * 1.6 * sr / 1000.0) as usize + 8]);
+                let k = sr / 44100.0;
+                u.buf = vec![[0.0; 2]; (sr * 2.7) as usize + 8];
+                for n in [240.0f32, 320.0, 620.0, 840.0, 320.0, 320.0, 2010.0, 1490.0, 13600.0, 13700.0, 5900.0, 4000.0, 8700.0, 8400.0] {
+                    u.lines.push(vec![0.0; (n * k) as usize + 16]);
                     u.lpos.push(0);
                 }
             }
@@ -2933,7 +2947,7 @@ impl Unit {
             Kind::Relooper => (cx.sr * 4.0) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
             Kind::Patch => self.patch.as_ref().map_or(0, |st| st.tail(cx)),
-            Kind::Reverb => ((p[5] / 10.0 + p[2] / 1000.0 + 0.5) * cx.sr) as usize,
+            Kind::Reverb => ((p[5] / 10.0 * 1.5 * (p[7] / 100.0).clamp(1.0, 1.6) + p[2] / 384.0 + 0.5) * cx.sr) as usize,
             Kind::Enhancer | Kind::Shaper => (cx.sr * 0.6) as usize,
             Kind::Comp | Kind::MultiComp | Kind::Maxi | Kind::Limiter | Kind::Eq | Kind::Filter | Kind::FastLp | Kind::Overdrive | Kind::Loud => (cx.sr * 0.25) as usize,
             _ => 0,
@@ -5188,90 +5202,158 @@ impl Unit {
                 }
             }
             Kind::Reverb => {
+                // Measured structure: the mono sum goes through a low cut and a high cut once, then
+                // feeds one early tap a side and, after the predelay, four diffusers in series and a
+                // ring of two halves. Each half is a damping filter, one diffuser and a tapped line;
+                // its end feeds the other half through the decay gain and the bass shelf.
                 let n = self.buf.len();
-                let g_low = svf_g(p[0].max(19.0), sr);
-                let low_on = p[0] > 20.0;
-                let a_high = if p[1] >= 220.0 { 1.0 } else { 1.0 - (-TAU * p[1] * 100.0 / sr).exp() };
-                let pre = ((p[2] / 1000.0 * sr) as usize).min(n - 2);
-                let size = 0.25 + p[3] / 100.0 * 1.25;
-                let diff = p[4] / 100.0 * 0.62;
-                let decay = (p[5] / 10.0).max(0.1);
-                let a_damp = if p[6] >= 220.0 { 1.0 } else { 1.0 - (-TAU * p[6] * 100.0 / sr).exp() };
-                let side = 1.0 - p[9] / 64.0;
-                let (dry, early, wet) = (p[10] / 128.0, p[11] / 128.0, p[12] / 128.0);
-                let mut len = [0usize; 12];
-                let mut gain = [0f32; 8];
-                for i in 0..12 {
-                    let ms = if i < 8 { REV_MS[i] * size } else { REV_AP_MS[i - 8] };
-                    len[i] = ((ms * sr / 1000.0) as usize).clamp(1, self.lines[i].len() - 1);
-                    if i < 8 {
-                        gain[i] = 10f32.powf(-3.0 * (len[i] as f32 / sr) / decay);
+                let k = sr / 44100.0;
+                let pole = |hz: f32| {
+                    let c = 2.0 - (TAU * hz.min(0.49 * sr) / sr).cos();
+                    c - (c * c - 1.0).sqrt()
+                };
+                let lc_on = p[0] > 19.5;
+                let pl = pole(p[0].max(1.0));
+                let ph = if p[1] >= 220.5 { 0.0 } else { pole(p[1] * 100.0) };
+                let pd = if p[6] >= 220.5 { 0.0 } else { pole(p[6] * 100.0) };
+                let pre = if p[2] < 0.5 { 0 } else { ((((p[2] * 114.8453).floor() - 1.0).max(0.0) * k).round() as usize).min(n - 2) };
+                let size = p[3].clamp(1.0, 100.0);
+                let scale = (15.0 + size) / 65.0;
+                let t60 = (p[5] / 10.0).max(0.01);
+                let h = (-0.758_926_5 * scale / t60).exp();
+                let h_low = h.powf(100.0 / p[7].max(1.0));
+                let g = if p[4] < 0.5 { 0.0 } else { 0.5f32.powf((14.636 + size) / 64.64 * 50.0 / p[4]) };
+                let g5 = if p[4] < 0.5 { 0.0 } else { 0.5f32.powf(scale * 50.0 / p[4] * REV2_G5) };
+                let g6 = if p[4] < 0.5 { 0.0 } else { 0.5f32.powf(scale * 50.0 / p[4] * REV2_G6) };
+                // the bass shelf on the way from one half to the other: a first order shelf around
+                // the crossover whose low side takes the bass decay
+                let shelf = {
+                    let t = (std::f32::consts::PI * p[8].max(1.0).min(0.45 * sr) / sr).tan();
+                    let gl = h_low / h;
+                    let (b0, b1, a0, a1) = if gl >= 1.0 { (gl * t + 1.0, gl * t - 1.0, t + 1.0, t - 1.0) } else { (t + 1.0, t - 1.0, t / gl + 1.0, t / gl - 1.0) };
+                    [b0 / a0, b1 / a0, a1 / a0]
+                };
+                let lvl = |v: f32| if v <= 128.0 { (v.max(0.0) / 128.0).powf(1.5) } else { 1.0 + (v - 128.0) / 64.0 };
+                let dry = knob_amp(p[10] / 128.0);
+                let early = lvl(p[11]);
+                let wet = lvl(p[12]) * 0.4633;
+                let sp = (p[9] / 64.0).clamp(-1.0, 1.0);
+                let cross = sp.signum() * (5f32.powf(sp.abs()) - 1.0) / 8.0;
+                // lengths
+                let fl = |base: f32, cap: usize| (((base * scale).floor() * k).round() as usize).clamp(1, cap - 2);
+                let mut ap = [0usize; 8];
+                for (i, base) in [133.3f32, 176.96, 345.1, 472.2, 176.96, 176.96, 1131.8, 837.4].iter().enumerate() {
+                    ap[i] = fl(*base, self.lines[i].len());
+                }
+                let mid = [fl(REV2_MID[0], self.lines[10].len()), fl(REV2_MID[1], self.lines[11].len())];
+                let e_at = [
+                    (((16.05 * (size + 3.0)).round() * k).round() as usize).min(n - 2),
+                    (((12.19 * (size + 3.0)).round() * k).round() as usize).min(n - 2),
+                ];
+                let seg = if size < 25.0 { 0 } else if size < 50.0 { 1 } else if size < 75.0 { 2 } else { 3 };
+                let (s0, s1) = (REV2_SIZES[seg], REV2_SIZES[seg + 1]);
+                let fr = (size - s0) / (s1 - s0);
+                let mut at = [[0usize; 8]; 2];
+                for hf in 0..2 {
+                    let cap = self.lines[8 + hf].len();
+                    for i in 0..8 {
+                        let (a, b) = (REV2_TAPS[seg][hf][i], REV2_TAPS[seg + 1][hf][i]);
+                        at[hf][i] = ((a + (b - a) * fr).round() * k).round() as usize;
+                    }
+                    // the first three taps and the entry of the inner diffuser come off the first
+                    // line, taps four and five from inside the inner diffuser, the rest after it
+                    let p0 = at[hf][4].saturating_sub(mid[hf]).max(1);
+                    at[hf][3] = at[hf][3].saturating_sub(p0).min(mid[hf]);
+                    for i in 5..8 {
+                        at[hf][i] = (at[hf][i] - at[hf][4]).clamp(1, self.lines[12 + hf].len() - 2);
+                    }
+                    at[hf][4] = p0.min(cap - 2);
+                    for i in 0..3 {
+                        at[hf][i] = at[hf][i].clamp(1, cap - 2);
                     }
                 }
-                let taps = [0.0043f32, 0.0215, 0.0225, 0.0268, 0.0270, 0.0298, 0.0458, 0.0485];
-                let tap_g = [0.84f32, 0.50, 0.49, 0.38, 0.38, 0.35, 0.29, 0.27];
+                let w = [1.0, 0.6 + 0.4 * h, 0.25 + 0.75 * h, h, h * (0.7 + 0.3 * h), h * (0.5 + 0.5 * h), h * (0.2 + 0.8 * h)];
+                // signs of the seven taps of each half; even taps of the first half and odd taps of
+                // the second go left, the others right
+                const SG: [[f32; 7]; 2] = [[1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0], [1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0]];
+                fn diffuse(line: &mut [f32], lp: &mut usize, m: usize, g: f32, x: f32) -> f32 {
+                    let len = line.len();
+                    let d = line[(*lp + len - m) % len];
+                    let y = d - g * x;
+                    line[*lp] = x + g * y;
+                    *lp = (*lp + 1) % len;
+                    y
+                }
                 for f in io.iter_mut() {
                     let x = *f;
-                    // input: low cut, high cut, predelay
-                    let mut s = [x[0], x[1]];
-                    for ch in 0..2 {
-                        if low_on {
-                            let (_, _, hp) = svf(&mut z[ch * 2..], s[ch], g_low, 1.414);
-                            s[ch] = hp;
-                        }
-                        z[4 + ch] += a_high * (s[ch] - z[4 + ch]);
-                        s[ch] = z[4 + ch];
+                    let mut m = 0.5 * (x[0] + x[1]);
+                    if lc_on {
+                        let hp = 0.5 * (1.0 + pl) * (m - z[0]) + pl * z[1];
+                        z[0] = m;
+                        z[1] = hp;
+                        m = hp;
                     }
-                    self.buf[self.pos] = s;
-                    let d = self.buf[(self.pos + n - pre) % n];
-                    // early reflections straight off the predelay line
+                    z[2] = (1.0 - ph) * m + ph * z[2];
+                    m = z[2];
+                    self.buf[self.pos][0] = m;
                     let mut er = [0f32; 2];
-                    for (k, (&t, &g)) in taps.iter().zip(&tap_g).enumerate() {
-                        let o = ((t * size * sr) as usize + pre).min(n - 1);
-                        let v = self.buf[(self.pos + n - o) % n];
-                        er[k % 2] += v[k % 2] * g;
-                        er[(k + 1) % 2] += v[(k + 1) % 2] * g * 0.3;
-                    }
-                    self.pos = (self.pos + 1) % n;
-                    // diffusion: two all-pass sections a side
-                    let mut inp = [d[0], d[1]];
                     for ch in 0..2 {
-                        for k in 0..2 {
-                            let li = 8 + ch * 2 + k;
-                            let line = &mut self.lines[li];
-                            let lp = &mut self.lpos[li];
-                            let m = line.len();
-                            let old = line[(*lp + m - len[li]) % m];
-                            let v = inp[ch] + old * diff;
-                            line[*lp] = v;
-                            *lp = (*lp + 1) % m;
-                            inp[ch] = old - v * diff;
+                        let v = self.buf[(self.pos + n - e_at[ch]) % n][0];
+                        er[ch] = diffuse(&mut self.lines[4 + ch], &mut self.lpos[4 + ch], ap[4 + ch], g, v);
+                    }
+                    let mut v = self.buf[(self.pos + n - pre) % n][0];
+                    self.pos = (self.pos + 1) % n;
+                    for i in 0..4 {
+                        v = diffuse(&mut self.lines[i], &mut self.lpos[i], ap[i], g, v);
+                    }
+                    // the ends of both halves, through the decay and the bass shelf
+                    let mut fb = [0f32; 2];
+                    for hf in 0..2 {
+                        let line = &self.lines[12 + hf];
+                        let e = line[(self.lpos[12 + hf] + line.len() - at[hf][7]) % line.len()];
+                        let y = shelf[0] * e + shelf[1] * z[6 + hf] - shelf[2] * z[8 + hf];
+                        z[6 + hf] = e;
+                        z[8 + hf] = y;
+                        fb[hf] = h * h * y;
+                    }
+                    let mut tl = 0f32;
+                    let mut tr = 0f32;
+                    for hf in 0..2 {
+                        let inp = v + fb[1 - hf];
+                        z[4 + hf] = (1.0 - pd) * inp + pd * z[4 + hf];
+                        let a = diffuse(&mut self.lines[6 + hf], &mut self.lpos[6 + hf], ap[6 + hf], g5, z[4 + hf]);
+                        let mut tap = [0f32; 7];
+                        let lp = self.lpos[8 + hf];
+                        let line = &mut self.lines[8 + hf];
+                        let len = line.len();
+                        line[lp] = a;
+                        for i in 0..3 {
+                            tap[i] = line[(lp + len - at[hf][i]) % len];
+                        }
+                        let into = line[(lp + len - at[hf][4]) % len];
+                        self.lpos[8 + hf] = (lp + 1) % len;
+                        let out = diffuse(&mut self.lines[10 + hf], &mut self.lpos[10 + hf], mid[hf], g6, into);
+                        let lp = self.lpos[10 + hf];
+                        let line = &self.lines[10 + hf];
+                        let len = line.len();
+                        // the diffuser has just stepped: its newest entry is one behind
+                        tap[3] = line[(lp + len - 1 - at[hf][3]) % len];
+                        tap[4] = line[(lp + len - 1 - mid[hf]) % len];
+                        let lp = self.lpos[12 + hf];
+                        let line = &mut self.lines[12 + hf];
+                        let len = line.len();
+                        line[lp] = out;
+                        for i in 5..7 {
+                            tap[i] = line[(lp + len - at[hf][i]) % len];
+                        }
+                        self.lpos[12 + hf] = (lp + 1) % len;
+                        for i in 0..7 {
+                            let t = tap[i] * w[i] * SG[hf][i];
+                            if (i + hf) % 2 == 0 { tl += t } else { tr += t }
                         }
                     }
-                    // the tank: eight lines, each damped, mixed through a Householder reflection
-                    let mut outs = [0f32; 8];
-                    let mut sum = 0.0;
-                    for i in 0..8 {
-                        let m = self.lines[i].len();
-                        let o = self.lines[i][(self.lpos[i] + m - len[i]) % m];
-                        z[8 + i] += a_damp * (o - z[8 + i]);
-                        outs[i] = z[8 + i] * gain[i];
-                        sum += outs[i];
-                    }
-                    let sum = sum * 0.25;
-                    let mut w = [0f32; 2];
-                    for i in 0..8 {
-                        let v = outs[i] - sum + inp[i % 2] * 0.5;
-                        let lp = self.lpos[i];
-                        self.lines[i][lp] = v;
-                        self.lpos[i] = (lp + 1) % self.lines[i].len();
-                        w[i % 2] += outs[i];
-                    }
-                    let (wl, wr) = (w[0] * 0.5, w[1] * 0.5);
-                    let m = (wl + wr) * 0.5;
-                    let sd = (wl - wr) * 0.5 * side;
-                    f[0] = x[0] * dry + er[0] * early * 0.5 + (m + sd) * wet;
-                    f[1] = x[1] * dry + er[1] * early * 0.5 + (m - sd) * wet;
+                    f[0] = x[0] * dry + er[0] * early * REV2_EARLY[0] + (tl * (1.0 - cross) + tr * cross) * wet;
+                    f[1] = x[1] * dry + er[1] * early * REV2_EARLY[1] + (tr * (1.0 - cross) + tl * cross) * wet;
                 }
             }
             Kind::Limiter => {
