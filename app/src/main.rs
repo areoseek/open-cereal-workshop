@@ -315,6 +315,11 @@ pub(crate) struct App {
     events: events::State,
     /// The control waiting for a knob of the MIDI device to be moved, while its link window is open.
     link_learn: Option<cereal_engine::song::Target>,
+    /// Multilink to controllers: the controls turned since it was switched on, in order, each waiting for
+    /// the next knob of the MIDI device that has not been given one yet.
+    multilink: bool,
+    multi_queue: Vec<cereal_engine::song::Target>,
+    multi_seen: Vec<u8>,
     /// A control's place copied from its menu, 0 to 1.
     value_clip: Option<f32>,
     /// The control a value is being typed for, the text so far, and whether the box still wants the focus.
@@ -505,6 +510,9 @@ impl App {
             show_events: false,
             events: events::State::default(),
             link_learn: None,
+            multilink: false,
+            multi_queue: vec![],
+            multi_seen: vec![],
             value_clip: None,
             type_in: None,
             fx_open: None,
@@ -1436,6 +1444,19 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
+        if self.multilink {
+            for &(cc, _) in &moves {
+                if self.multi_seen.contains(&cc) || self.multi_queue.is_empty() {
+                    continue;
+                }
+                let t = self.multi_queue.remove(0);
+                self.multi_seen.push(cc);
+                self.song.midi_links.retain(|l| l.target != t);
+                self.song.midi_links.push(cereal_engine::song::MidiLink { ctrl: cc as u16, port: 0, target: t });
+                self.status = format!("Controller {cc} linked to {}", self.song.target_name(t));
+                self.dirty = true;
+            }
+        }
         for (cc, v) in moves {
             let hit: Vec<_> = self.song.midi_links.iter().filter(|l| l.ctrl == cc as u16 && !matches!(l.target, cereal_engine::song::Target::Other { .. })).map(|l| l.target).collect();
             for t in hit {
@@ -2201,6 +2222,13 @@ impl App {
         self.dirty = true;
     }
 
+    fn toggle_multilink(&mut self) {
+        self.multilink = !self.multilink;
+        self.multi_queue.clear();
+        self.multi_seen.clear();
+        self.status = if self.multilink { "Multilink on: turn the controls, then the knobs of the MIDI device in the same order".into() } else { "Multilink off".into() };
+    }
+
     /// The first empty pattern after the current one.
     fn next_empty_after(&mut self) {
         let from = self.handle.transport.pattern() + 1;
@@ -2436,6 +2464,7 @@ impl App {
                         self.status = format!("Wait for input to start playing: {}", if self.wait_input { "on" } else { "off" });
                     }
                     Key::T => self.typing_keys = !self.typing_keys,
+                    Key::J => self.toggle_multilink(),
                     Key::M if modifiers.shift => self.export_midi(),
                     Key::M => {
                         let tr = &self.handle.transport;
@@ -2846,6 +2875,18 @@ impl App {
                         self.handle.transport.set_countdown(c);
                     }
                     ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");
+                    ui.checkbox(&mut self.rec_blend, "Blend recorded notes               Ctrl+B");
+                    let (mut w, mut st) = (self.handle.transport.waiting(), self.handle.transport.step_edit());
+                    if ui.checkbox(&mut w, "Wait for input to start playing   Ctrl+I").changed() {
+                        self.handle.transport.set_waiting(w);
+                    }
+                    if ui.checkbox(&mut st, "Step editing                           Ctrl+E").changed() {
+                        self.handle.transport.set_step_edit(st);
+                    }
+                    let mut ml = self.multilink;
+                    if ui.checkbox(&mut ml, "Multilink to controllers           Ctrl+J").on_hover_text("Turn the controls you want, then move a knob of the MIDI device for each, in the same order").changed() {
+                        self.toggle_multilink();
+                    }
                     if ui.button("Stop all sound                          Ctrl+H").clicked() {
                         self.handle.send(Cmd::Panic);
                         ui.close_menu();
@@ -2978,6 +3019,12 @@ impl App {
                                 }
                             }
                             self.status = format!("{n} unused audio clips removed");
+                            ui.close_menu();
+                        }
+                        if ui.button("Unlock all playlist tracks from content").clicked() {
+                            let n = self.song.tracks.iter_mut().filter(|t| t.lock_content).map(|t| t.lock_content = false).count();
+                            self.dirty |= n > 0;
+                            self.status = format!("{n} tracks unlocked");
                             ui.close_menu();
                         }
                         if ui.button("Reset empty playlist tracks").hint("Tracks with no clip on them get their plain name and colour back").clicked() {
@@ -3543,6 +3590,13 @@ impl eframe::App for App {
         }
         self.midi.chan.store(self.sel_chan, std::sync::atomic::Ordering::Relaxed);
         let moved: Vec<cereal_engine::song::Target> = ctx.data_mut(|d| d.remove_temp(egui::Id::new("moved"))).unwrap_or_default();
+        if self.multilink {
+            for t in &moved {
+                if !self.multi_queue.contains(t) {
+                    self.multi_queue.push(*t);
+                }
+            }
+        }
         self.record_controls(moved);
         // what a control's right-click menu asked for last frame
         let ask_id = egui::Id::new("ctl_ask");
