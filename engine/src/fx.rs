@@ -3502,8 +3502,8 @@ impl Unit {
                 let g_hi = svf_g(split_hz(p[2]), sr);
                 let (steep_lo, steep_hi) = (p[1] >= 0.5, p[3] >= 0.5);
                 let mix = (p[5] / 1000.0).clamp(0.0, 1.0);
-                // the low cut knob rests at 20 Hz in the middle; -1 is off
-                let cut = if p[6] < 0.0 { None } else { Some(svf_g(20.0 * 4f32.powf((p[6] - 32768.0) / 32768.0), sr)) };
+                // the low cut knob's middle turns a 131 Hz tone the way a 51 Hz cut does (measured); -1 is off
+                let cut = if p[6] < 0.0 { None } else { Some(svf_g(51.0 * 4f32.powf((p[6] - 32768.0) / 32768.0), sr)) };
                 struct Band {
                     mode: i32,
                     pre: f32,
@@ -3520,8 +3520,9 @@ impl Unit {
                     let rel = 0.005 + ((q[9] / 10000.0).powi(2) + (q[7] / 10000.0).powi(2)) * 4.0;
                     Band {
                         mode: q[0] as i32,
-                        pre: q[1] / 1000.0,
-                        post: q[2] / 1000.0,
+                        // measured against a render: the two gain knobs are not straight lines
+                        pre: (q[1] / 1000.0).max(0.0).powf(1.5),
+                        post: (q[2] / 1000.0).max(0.0).powf(3.6),
                         width: 1.0 - (q[3] / 1000.0).clamp(-1.0, 1.0),
                         sat: (q[4] / 1000.0).clamp(-1.0, 1.0),
                         ceil: (q[5] / 1000.0).max(0.01),
@@ -3582,35 +3583,43 @@ impl Unit {
                     [s[0] * k.post, s[1] * k.post]
                 };
                 const Q: f32 = std::f32::consts::SQRT_2;
+                // a split whose two halves add back to the input's level at every pitch: steep is two stages
+                // each way, gentle is one stage with the top half turned over
+                let split = |z: &mut [f32], x: f32, g: f32, steep: bool| -> (f32, f32) {
+                    if steep {
+                        let (l, _, h) = svf(z, x, g, Q);
+                        (svf(&mut z[2..], l, g, Q).0, svf(&mut z[4..], h, g, Q).2)
+                    } else {
+                        let (l, _, h) = svf(z, x, g, 2.0);
+                        (l, -h)
+                    }
+                };
                 for f in io.iter_mut() {
                     let mut part = [[0f32; 2]; 3];
                     let mut dry = [0f32; 2];
                     for c in 0..2 {
                         let mut x = f[c];
                         if let Some(g) = cut {
-                            x = svf(&mut z[c * 10 + 8..], x, g, Q).2;
+                            x = svf(&mut z[c * 20 + 18..], x, g, Q).2;
                         }
                         dry[c] = x;
-                        let (mut low, _, _) = svf(&mut z[c * 10..], x, g_lo, Q);
-                        if steep_lo {
-                            low = svf(&mut z[c * 10 + 2..], low, g_lo, Q).0;
-                        }
-                        let (_, _, mut high) = svf(&mut z[c * 10 + 4..], x, g_hi, Q);
-                        if steep_hi {
-                            high = svf(&mut z[c * 10 + 6..], high, g_hi, Q).2;
-                        }
-                        part[0][c] = low;
+                        // the three bands stay in step with each other: the low band goes through the same turn
+                        // the upper split gives the other two
+                        let (low, rest) = split(&mut z[c * 20..], x, g_lo, steep_lo);
+                        let (mid, high) = split(&mut z[c * 20 + 6..], rest, g_hi, steep_hi);
+                        let (a, b) = split(&mut z[c * 20 + 12..], low, g_hi, steep_hi);
+                        part[0][c] = a + b;
+                        part[1][c] = mid;
                         part[2][c] = high;
-                        part[1][c] = x - low - high;
                     }
                     let mut sum = [0f32; 2];
                     for b in 0..3 {
-                        let y = run(b, part[b], &mut z[20 + b * 2..22 + b * 2]);
+                        let y = run(b, part[b], &mut z[40 + b * 2..42 + b * 2]);
                         sum[0] += y[0];
                         sum[1] += y[1];
                     }
                     let into = [dry[0] + (sum[0] - dry[0]) * mix, dry[1] + (sum[1] - dry[1]) * mix];
-                    *f = run(3, into, &mut z[26..28]);
+                    *f = run(3, into, &mut z[46..48]);
                 }
             }
             Kind::Pad => {
@@ -6183,7 +6192,7 @@ mod tests {
         loud.p[20 + 1] = 2000.0;
         let out = run(loud, sine, 32768);
         let peak = out[16384..].iter().fold(0f32, |m, f| m.max(f[0].abs()));
-        assert!(peak < 1.3 && peak > 0.7, "{peak}");
+        assert!(peak < 1.7 && peak > 0.7, "{peak}");
 
         // plush reverb: fresh block reads back, a click leaves a tail, dry off and wet off behave
         let fx = Fx::new(Kind::Plush);
