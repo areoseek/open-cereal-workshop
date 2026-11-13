@@ -310,6 +310,10 @@ pub(crate) struct App {
     events: events::State,
     /// The control waiting for a knob of the MIDI device to be moved, while its link window is open.
     link_learn: Option<cereal_engine::song::Target>,
+    /// A control's place copied from its menu, 0 to 1.
+    value_clip: Option<f32>,
+    /// The control a value is being typed for, the text so far, and whether the box still wants the focus.
+    type_in: Option<(cereal_engine::song::Target, String, bool)>,
     /// The effect slot whose editor is open: insert, slot.
     fx_open: Option<(usize, u16)>,
     /// The takes of the open wave recorders, by mixer track and slot.
@@ -493,6 +497,8 @@ impl App {
             show_events: false,
             events: events::State::default(),
             link_learn: None,
+            value_clip: None,
+            type_in: None,
             fx_open: None,
             wave_eds: Default::default(),
             preset_lists: Default::default(),
@@ -2768,17 +2774,7 @@ impl App {
                             ui.menu_button(label, |ui| {
                                 let Some(target) = tweaked[k] else { return };
                                 ui.label(RichText::new(self.song.target_name(target)).color(TEXT_DIM).small());
-                                let mut ask = None;
-                                if ui.button("Edit events").clicked() {
-                                    ask = Some(widgets::CtlAsk::Events);
-                                }
-                                if ui.button("Create automation clip").clicked() {
-                                    ask = Some(widgets::CtlAsk::AutoClip);
-                                }
-                                if ui.button("Link to controller...").clicked() {
-                                    ask = Some(widgets::CtlAsk::Link);
-                                }
-                                if let Some(a) = ask {
+                                if let Some(a) = widgets::control_items(ui) {
                                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));
                                     ui.close_menu();
                                 }
@@ -3423,6 +3419,53 @@ impl eframe::App for App {
                     self.show_events = true;
                 }
                 widgets::CtlAsk::Link => self.link_learn = Some(target),
+                widgets::CtlAsk::Init => {
+                    let pat = self.handle.transport.pattern();
+                    self.song.ensure_pattern(pat);
+                    let (param, dest) = self.song.event_address(target);
+                    if let Some(raw) = self.song.event_raw(target) {
+                        let ev = &mut self.song.patterns[pat].events;
+                        ev.retain(|e| (e.param, e.dest, e.tick) != (param, dest, 0));
+                        ev.insert(0, cereal_engine::song::PatEvent { tick: 0, param, dest, raw });
+                        self.dirty = true;
+                        self.status = format!("{} starts from here", self.song.target_name(target));
+                    }
+                }
+                widgets::CtlAsk::Copy => self.value_clip = Some(self.target_travel(target)),
+                widgets::CtlAsk::Paste => {
+                    if let Some(v) = self.value_clip {
+                        self.song.set_travel(target, v);
+                        self.dirty = true;
+                    }
+                }
+                widgets::CtlAsk::TypeIn => self.type_in = Some((target, String::new(), true)),
+            }
+        }
+        if let Some((target, mut text, first)) = self.type_in.take() {
+            let mut keep = true;
+            egui::Window::new("Type in value").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(RichText::new(self.song.target_name(target)).color(TEXT_DIM).small());
+                ui.horizontal(|ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(90.0).hint_text(format!("{:.1}", self.target_travel(target) * 100.0)));
+                    ui.label("%");
+                    if first {
+                        r.request_focus();
+                    }
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button("Accept").clicked() || enter {
+                        if let Ok(v) = text.trim().trim_end_matches('%').replace(',', ".").parse::<f32>() {
+                            self.song.set_travel(target, v / 100.0);
+                            self.dirty = true;
+                        }
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        keep = false;
+                    }
+                });
+            });
+            if keep {
+                self.type_in = Some((target, text, false));
             }
         }
         self.controllers_ui(ctx);

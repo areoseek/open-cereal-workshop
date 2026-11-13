@@ -89,7 +89,40 @@ pub fn knob(ui: &mut Ui, v: &mut f32, min: f32, max: f32, default: f32, d: f32) 
 pub enum CtlAsk {
     AutoClip,
     Events,
+    Init,
     Link,
+    Copy,
+    Paste,
+    TypeIn,
+}
+
+/// The lines of a control's menu; the pick, when one was clicked.
+pub fn control_items(ui: &mut Ui) -> Option<CtlAsk> {
+    let mut ask = None;
+    if ui.button("Edit events").clicked() || ui.button("Edit events in new window").clicked() {
+        ask = Some(CtlAsk::Events);
+    }
+    if ui.button("Init song with this position").hint("Write where the control stands now at the start of the pattern").clicked() {
+        ask = Some(CtlAsk::Init);
+    }
+    ui.separator();
+    if ui.button("Create automation clip").clicked() {
+        ask = Some(CtlAsk::AutoClip);
+    }
+    if ui.button("Link to controller...").clicked() {
+        ask = Some(CtlAsk::Link);
+    }
+    ui.separator();
+    if ui.button("Copy value").clicked() {
+        ask = Some(CtlAsk::Copy);
+    }
+    if ui.button("Paste value").clicked() {
+        ask = Some(CtlAsk::Paste);
+    }
+    if ui.button("Type in value...").clicked() {
+        ask = Some(CtlAsk::TypeIn);
+    }
+    ask
 }
 
 /// The control moved last and the one moved before it.
@@ -108,17 +141,7 @@ pub fn control_menu(resp: &Response, target: cereal_engine::song::Target) {
         });
     }
     resp.context_menu(|ui| {
-        let mut ask = None;
-        if ui.button("Create automation clip").clicked() {
-            ask = Some(CtlAsk::AutoClip);
-        }
-        if ui.button("Edit events").clicked() {
-            ask = Some(CtlAsk::Events);
-        }
-        if ui.button("Link to controller...").clicked() {
-            ask = Some(CtlAsk::Link);
-        }
-        if let Some(a) = ask {
+        if let Some(a) = control_items(ui) {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));
             ui.close_menu();
         }

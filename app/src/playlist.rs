@@ -570,7 +570,7 @@ impl App {
     }
 
     /// How far along its travel a control stands in the song, 0..=1.
-    fn target_travel(&self, t: Target) -> f32 {
+    pub(crate) fn target_travel(&self, t: Target) -> f32 {
         let s = &self.song;
         let v = match t {
             Target::ChanVolume(c) => s.channels.get(c).map(|c| c.volume),
