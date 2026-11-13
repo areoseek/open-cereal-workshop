@@ -1597,7 +1597,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn export_midi(&mut self) {
+    pub(crate) fn export_midi(&mut self) {
         let default = self.path.as_ref().map(|p| p.with_extension("mid")).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "untitled.mid".into());
         let Some(path) = rfd::FileDialog::new().add_filter("MIDI file", &["mid"]).set_file_name(default).save_file() else { return };
         let bytes = cereal_engine::midifile::export(&self.song, self.handle.transport.song_mode(), self.handle.transport.pattern());

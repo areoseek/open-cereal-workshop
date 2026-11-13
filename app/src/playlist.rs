@@ -421,6 +421,7 @@ impl App {
         }
         let mut close = false;
         let mut changed = false;
+        let mut act: Option<u8> = None;
         let area = egui::Area::new(egui::Id::new("pl_track_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(380.0);
@@ -431,7 +432,50 @@ impl App {
                     changed |= r.changed();
                     close |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Change color");
+                    changed |= ui.color_edit_button_srgb(&mut t.color).changed();
+                    if ui.button("Reset").clicked() {
+                        t.color = cereal_engine::song::Track::default().color;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Auto name").hint("Name the track after the first clip on it").clicked() {
+                        act = Some(0);
+                    }
+                    if ui.button("Auto color").hint("Take the colour of the first clip on it").clicked() {
+                        act = Some(1);
+                    }
+                });
+                ui.separator();
                 changed |= ui.checkbox(&mut t.enabled, "On").changed();
+                ui.horizontal(|ui| {
+                    if ui.button("Solo").clicked() {
+                        act = Some(2);
+                    }
+                    if ui.button("Select all clips").clicked() {
+                        act = Some(3);
+                    }
+                    if ui.button("Mute all clips").clicked() {
+                        act = Some(8);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Insert one").hint("An empty track here; the ones below move down").clicked() {
+                        act = Some(4);
+                    }
+                    if ui.button("Delete one").hint("Remove this track and its clips; the ones below move up").clicked() {
+                        act = Some(5);
+                    }
+                    if ui.button("Move up").clicked() {
+                        act = Some(6);
+                    }
+                    if ui.button("Move down").clicked() {
+                        act = Some(7);
+                    }
+                });
+                ui.separator();
                 if tr > 0 {
                     changed |= ui.checkbox(&mut t.grouped, "Group with above track").changed();
                 }
@@ -461,6 +505,75 @@ impl App {
                 changed |= row(ui, "Position sync", &PERF_SYNC, &mut t.perf.pos_sync);
             });
         });
+        if let Some(k) = act {
+            let n = self.song.tracks.len();
+            let first = self.song.clips.iter().filter(|c| c.track as usize == tr).min_by_key(|c| c.pos).map(|c| c.src);
+            match k {
+                0 => {
+                    if let Some(src) = first {
+                        self.song.tracks[tr].name = match src {
+                            ClipSrc::Pattern(p) => self.song.pattern_name(p),
+                            ClipSrc::Audio(c) | ClipSrc::Automation(c) => self.song.channels.get(c).map(|c| c.name.clone()).unwrap_or_default(),
+                        };
+                    }
+                }
+                1 => {
+                    let col = first.and_then(|src| match src {
+                        ClipSrc::Pattern(p) => self.song.patterns.get(p).and_then(|p| p.color),
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => self.song.channels.get(c).map(|c| c.color),
+                    });
+                    if let Some(col) = col {
+                        self.song.tracks[tr].color = col;
+                    }
+                }
+                2 => {
+                    // solo; a second press on the only track left on brings them all back
+                    let alone = self.song.tracks.iter().enumerate().all(|(i, t)| t.enabled == (i == tr));
+                    for (i, t) in self.song.tracks.iter_mut().enumerate() {
+                        t.enabled = alone || i == tr;
+                    }
+                }
+                3 => {
+                    self.playlist.sel = self.song.clips.iter().enumerate().filter(|(_, c)| c.track as usize == tr).map(|(i, _)| i).collect();
+                }
+                8 => {
+                    let all = self.song.clips.iter().filter(|c| c.track as usize == tr).all(|c| c.muted);
+                    for c in self.song.clips.iter_mut().filter(|c| c.track as usize == tr) {
+                        c.muted = !all;
+                    }
+                }
+                4 => {
+                    // the last track falls off the end only when it is empty
+                    if !self.song.clips.iter().any(|c| c.track as usize == n - 1) {
+                        self.song.tracks.pop();
+                        self.song.tracks.insert(tr, cereal_engine::song::Track::default());
+                        for c in self.song.clips.iter_mut().filter(|c| c.track as usize >= tr) {
+                            c.track += 1;
+                        }
+                    }
+                }
+                5 => {
+                    self.song.clips.retain(|c| c.track as usize != tr);
+                    for c in self.song.clips.iter_mut().filter(|c| c.track as usize > tr) {
+                        c.track -= 1;
+                    }
+                    self.song.tracks.remove(tr);
+                    self.song.tracks.push(cereal_engine::song::Track::default());
+                    self.playlist.sel.clear();
+                }
+                6 if tr > 0 => {
+                    self.song.swap_tracks(tr, tr - 1);
+                    self.playlist.track_menu = None;
+                }
+                7 if tr + 1 < n => {
+                    self.song.swap_tracks(tr, tr + 1);
+                    self.playlist.track_menu = None;
+                }
+                _ => {}
+            }
+            changed = true;
+            close |= k >= 2;
+        }
         self.dirty |= changed;
         let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
         if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1975,37 +2088,110 @@ impl App {
 
     fn playlist_header(&mut self, ui: &mut Ui, pat: usize) {
         ui.horizontal(|ui| {
-            ui.menu_button("Tools", |ui| {
-                let mut act: Option<fn(&mut App)> = None;
-                let items: [(&str, fn(&mut App)); 7] = [
-                    ("Select all                  Ctrl+A", |a| a.playlist.sel = (0..a.song.clips.len()).collect()),
-                    ("Deselect                    Ctrl+D", |a| a.playlist.sel.clear()),
-                    ("Delete                      Del", |a| a.pl_delete_selected()),
-                    ("Duplicate                   Ctrl+B", |a| a.pl_duplicate()),
-                    ("Paste                       Ctrl+V", |a| a.pl_paste()),
-                    ("Mute                        Alt+M", |a| a.pl_mute(true)),
-                    ("Unmute                      Shift+Alt+M", |a| a.pl_mute(false)),
-                ];
-                for (label, f) in items {
-                    if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
-                        act = Some(f);
+            // every entry presses its own key, so the menus and the keyboard can never drift apart
+            const N: Modifiers = Modifiers::NONE;
+            const C: Modifiers = Modifiers::COMMAND;
+            const A: Modifiers = Modifiers::ALT;
+            const S: Modifiers = Modifiers::SHIFT;
+            const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
+            const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
+            const CSA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: true };
+            type Item = (&'static str, Modifiers, Key);
+            const EDIT: [Item; 14] = [
+                ("Delete                      Del", N, Key::Delete),
+                ("Duplicate                   Ctrl+B", C, Key::B),
+                ("", N, Key::F35),
+                ("Shift left                  Shift+Left", S, Key::ArrowLeft),
+                ("Shift right                 Shift+Right", S, Key::ArrowRight),
+                ("Shift up                    Shift+Up", S, Key::ArrowUp),
+                ("Shift down                  Shift+Down", S, Key::ArrowDown),
+                ("", N, Key::F35),
+                ("Mute                        Alt+M", A, Key::M),
+                ("Unmute                      Shift+Alt+M", SA, Key::M),
+                ("Quick quantise              Shift+Q", S, Key::Q),
+                ("", N, Key::F35),
+                ("Insert space                Ctrl+Ins", C, Key::Insert),
+                ("Delete space                Ctrl+Del", C, Key::Delete),
+            ];
+            const TOOLS_M: [Item; 2] = [
+                ("Consolidate from track start  Ctrl+Alt+C", CA, Key::C),
+                ("Consolidate from song start   Shift+Ctrl+Alt+C", CSA, Key::C),
+            ];
+            const SELECT: [Item; 7] = [
+                ("Select all                  Ctrl+A", C, Key::A),
+                ("Deselect                    Ctrl+D", C, Key::D),
+                ("Invert selection            Shift+I", S, Key::I),
+                ("Select time around selection  Ctrl+Enter", C, Key::Enter),
+                ("Select previous             Ctrl+Left", C, Key::ArrowLeft),
+                ("Select next                 Ctrl+Right", C, Key::ArrowRight),
+                ("Select all of the same source  Shift+C", S, Key::C),
+            ];
+            const GROUP: [Item; 2] = [("Group                       Shift+G", S, Key::G), ("Ungroup                     Alt+G", A, Key::G)];
+            const ZOOM: [Item; 8] = [
+                ("Zoom in                     PgUp", N, Key::PageUp),
+                ("Zoom out                    PgDn", N, Key::PageDown),
+                ("Close                       Shift+1", S, Key::Num1),
+                ("Medium                      Shift+2", S, Key::Num2),
+                ("Far                         Shift+3", S, Key::Num3),
+                ("Show all                    Shift+4", S, Key::Num4),
+                ("Zoom on selection           Shift+5", S, Key::Num5),
+                ("Centre on the play position Shift+0", S, Key::Num0),
+            ];
+            const MARKERS: [Item; 3] = [
+                ("Add one                     Alt+T", A, Key::T),
+                ("Add time signature          Shift+Alt+T", SA, Key::T),
+                ("Jump to the previous        Alt+/", A, Key::Slash),
+            ];
+            let mut press: Option<(Modifiers, Key)> = None;
+            let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
+                for (label, m, k) in items {
+                    if label.is_empty() {
+                        ui.separator();
+                    } else if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
+                        *press = Some((*m, *k));
                         ui.close_menu();
                     }
                 }
-                if let Some(f) = act {
-                    f(self);
+            };
+            let f = |t: &str| RichText::new(t.to_string()).monospace().size(11.0);
+            ui.menu_button("Edit", |ui| {
+                for (label, cut) in [("Cut                         Ctrl+X", true), ("Copy                        Ctrl+C", false)] {
+                    if ui.button(f(label)).clicked() {
+                        self.pl_copy(ui.ctx(), cut);
+                        ui.close_menu();
+                    }
                 }
+                if ui.button(f("Paste                       Ctrl+V")).clicked() {
+                    self.pl_paste();
+                    ui.close_menu();
+                }
+                list(ui, &EDIT, &mut press);
+            });
+            ui.menu_button("Tools", |ui| {
+                list(ui, &TOOLS_M, &mut press);
                 ui.separator();
                 let mut on = self.song.performance;
-                if ui.checkbox(&mut on, RichText::new("Performance mode            Ctrl+P").monospace().size(11.0)).changed() {
+                if ui.checkbox(&mut on, f("Performance mode            Ctrl+P")).changed() {
                     self.toggle_performance();
                     ui.close_menu();
                 }
-                if ui.button(RichText::new("Prepare for performance mode").monospace().size(11.0)).clicked() {
+                if ui.button(f("Prepare for performance mode")).clicked() {
                     self.prepare_performance();
                     ui.close_menu();
                 }
             });
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut self.grid_win, f("Grid colours...             Ctrl+Alt+G"));
+                ui.checkbox(&mut self.playlist.picker, f("Picker panel                Alt+P"));
+                ui.checkbox(&mut self.playlist.stretch, f("Stretch mode                Shift+M"));
+            });
+            ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
+            ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
+            ui.menu_button("Zoom", |ui| list(ui, &ZOOM, &mut press));
+            ui.menu_button("Time markers", |ui| list(ui, &MARKERS, &mut press));
+            if let Some((m, k)) = press {
+                self.playlist_key(k, m, false);
+            }
             for (t, label, hint) in TOOLS {
                 if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.playlist.tool = t;

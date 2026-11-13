@@ -719,6 +719,25 @@ impl App {
         }
     }
 
+    /// Snap the starts and leave the ends where they are.
+    fn pr_quantise_starts(&mut self) {
+        let pat = self.pr_pat();
+        let g = self.pr_snap().max(1);
+        let t = self.pr_targets(pat);
+        let notes = &mut self.song.patterns[pat].notes;
+        for &i in &t {
+            let end = notes[i].pos + notes[i].len;
+            notes[i].pos = (notes[i].pos + g / 2) / g * g;
+            if notes[i].len > 0 {
+                notes[i].len = end.saturating_sub(notes[i].pos).max(1);
+            }
+        }
+        if !t.is_empty() {
+            self.pr_sort(pat);
+            self.dirty = true;
+        }
+    }
+
     /// Stretch every note to the start of the next one.
     fn pr_legato(&mut self) {
         let pat = self.pr_pat();
@@ -1114,6 +1133,7 @@ impl App {
                 Key::C => self.pr_select_colour(),
                 Key::R => self.pr_select_random(),
                 Key::D => self.pr_discard_lengths(),
+                Key::Q => self.pr_quantise_starts(),
                 Key::F => {
                     let at = LANES.iter().position(|l| l.0 == self.piano.lane).unwrap_or(0);
                     self.piano.lane = LANES[(at + LANES.len() - 1) % LANES.len()].0;
@@ -1184,46 +1204,130 @@ impl App {
                     ui.close_menu();
                     self.open_score_dialog();
                 }
+                if ui.button("Export as MIDI file...  Shift+Ctrl+M").clicked() {
+                    ui.close_menu();
+                    self.export_midi();
+                }
             });
-            ui.menu_button("Tools", |ui| {
-                let mut act: Option<fn(&mut App)> = None;
-                let items: [(&str, fn(&mut App)); 14] = [
-                    ("Select all                  Ctrl+A", |a| a.pr_select_all()),
-                    ("Deselect                    Ctrl+D", |a| a.piano.sel.clear()),
-                    ("Invert selection", |a| a.pr_invert_selection()),
-                    ("Delete                      Del", |a| a.pr_delete_selected()),
-                    ("Duplicate                   Ctrl+B", |a| a.pr_duplicate()),
-                    ("Paste                       Ctrl+V", |a| a.pr_paste()),
-                    ("Quick quantise              Ctrl+Q", |a| a.pr_quantise()),
-                    ("Quick legato                Ctrl+L", |a| a.pr_legato()),
-                    ("Quick chop                  Ctrl+U", |a| a.pr_chop()),
-                    ("Glue                        Ctrl+G", |a| a.pr_glue()),
-                    ("Transpose up                Shift+Up", |a| a.pr_transpose(1)),
-                    ("Transpose down              Shift+Down", |a| a.pr_transpose(-1)),
-                    ("Mute                        Alt+M", |a| a.pr_mute(true)),
-                    ("Unmute                      Shift+Alt+M", |a| a.pr_mute(false)),
-                ];
-                for (label, f) in items {
-                    if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
-                        act = Some(f);
+            // every entry presses its own key, so the menus and the keyboard can never drift apart
+            const N: Modifiers = Modifiers::NONE;
+            const C: Modifiers = Modifiers::COMMAND;
+            const A: Modifiers = Modifiers::ALT;
+            const S: Modifiers = Modifiers::SHIFT;
+            const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
+            type Item = (&'static str, Modifiers, Key);
+            const EDIT: [Item; 16] = [
+                ("Delete                      Del", N, Key::Delete),
+                ("Duplicate                   Ctrl+B", C, Key::B),
+                ("", N, Key::F35),
+                ("Shift left                  Shift+Left", S, Key::ArrowLeft),
+                ("Shift right                 Shift+Right", S, Key::ArrowRight),
+                ("Transpose up                Shift+Up", S, Key::ArrowUp),
+                ("Transpose down              Shift+Down", S, Key::ArrowDown),
+                ("Transpose one octave up     Ctrl+Up", C, Key::ArrowUp),
+                ("Transpose one octave down   Ctrl+Down", C, Key::ArrowDown),
+                ("", N, Key::F35),
+                ("Discard lengths             Shift+D", S, Key::D),
+                ("Change color                Alt+C", A, Key::C),
+                ("Mute                        Alt+M", A, Key::M),
+                ("Unmute                      Shift+Alt+M", SA, Key::M),
+                ("Insert space                Ctrl+Ins", C, Key::Insert),
+                ("Delete space                Ctrl+Del", C, Key::Delete),
+            ];
+            const QUICK: [Item; 5] = [
+                ("Quick legato                Ctrl+L", C, Key::L),
+                ("Quick quantise              Ctrl+Q", C, Key::Q),
+                ("Quick quantise start times  Shift+Q", S, Key::Q),
+                ("Quick chop                  Ctrl+U", C, Key::U),
+                ("Glue                        Ctrl+G", C, Key::G),
+            ];
+            const SELECT: [Item; 8] = [
+                ("Select all                  Ctrl+A", C, Key::A),
+                ("Deselect                    Ctrl+D", C, Key::D),
+                ("Invert selection            Shift+I", S, Key::I),
+                ("Select time around selection  Ctrl+Enter", C, Key::Enter),
+                ("Select previous             Ctrl+Left", C, Key::ArrowLeft),
+                ("Select next                 Ctrl+Right", C, Key::ArrowRight),
+                ("Select by colour            Shift+C", S, Key::C),
+                ("Select random               Shift+R", S, Key::R),
+            ];
+            const GROUP: [Item; 2] = [("Group                       Shift+G", S, Key::G), ("Ungroup                     Alt+G", A, Key::G)];
+            const ZOOM: [Item; 8] = [
+                ("Zoom in                     PgUp", N, Key::PageUp),
+                ("Zoom out                    PgDn", N, Key::PageDown),
+                ("One bar                     Shift+1", S, Key::Num1),
+                ("Four bars                   Shift+2", S, Key::Num2),
+                ("Sixteen bars                Shift+3", S, Key::Num3),
+                ("Show all                    Shift+4", S, Key::Num4),
+                ("Zoom on selection           Shift+5", S, Key::Num5),
+                ("Centre on the play position Shift+0", S, Key::Num0),
+            ];
+            let mut press: Option<(Modifiers, Key)> = None;
+            let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
+                for (label, m, k) in items {
+                    if label.is_empty() {
+                        ui.separator();
+                    } else if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
+                        *press = Some((*m, *k));
                         ui.close_menu();
                     }
                 }
-                ui.separator();
+            };
+            ui.menu_button("Edit", |ui| {
+                for (label, cut) in [("Cut                         Ctrl+X", true), ("Copy                        Ctrl+C", false)] {
+                    if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
+                        self.pr_copy(ui.ctx(), cut);
+                        ui.close_menu();
+                    }
+                }
+                if ui.button(RichText::new("Paste                       Ctrl+V").monospace().size(11.0)).clicked() {
+                    self.pr_paste();
+                    ui.close_menu();
+                }
+                list(ui, &EDIT, &mut press);
+            });
+            ui.menu_button("Tools", |ui| {
                 let mut helper = None;
-                for (i, (label, _)) in HELPERS.iter().enumerate() {
+                if ui.button(RichText::new(HELPERS[0].0).monospace().size(11.0)).clicked() {
+                    helper = Some(0);
+                    ui.close_menu();
+                }
+                ui.separator();
+                list(ui, &QUICK, &mut press);
+                ui.separator();
+                for (i, (label, _)) in HELPERS.iter().enumerate().skip(1) {
                     if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
                         helper = Some(i);
                         ui.close_menu();
                     }
                 }
-                if let Some(f) = act {
-                    f(self);
-                }
                 if let Some(i) = helper {
                     self.pr_helper(i);
                 }
             });
+            ui.menu_button("View", |ui| {
+                let f = |t: &str| RichText::new(t.to_string()).monospace().size(11.0);
+                ui.checkbox(&mut self.piano.ghosts, f("Ghost channels              Alt+V"));
+                ui.checkbox(&mut self.piano.rows, f("Row highlights              Alt+B"));
+                ui.checkbox(&mut self.piano.wave, f("Background waveform         Alt+N"));
+                ui.checkbox(&mut self.piano.names, f("Note names                  M"));
+            });
+            ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
+            ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
+            ui.menu_button("Zoom", |ui| list(ui, &ZOOM, &mut press));
+            ui.menu_button("Target channel", |ui| {
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for c in 0..self.song.channels.len() {
+                        if ui.selectable_label(c == self.sel_chan, self.song.channels[c].name.clone()).clicked() {
+                            self.sel_chan = c;
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+            if let Some((m, k)) = press {
+                self.piano_key(k, m, false);
+            }
             for (t, label, hint) in TOOLS {
                 if ui.selectable_label(self.piano.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.piano.tool = t;

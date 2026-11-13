@@ -426,6 +426,49 @@ impl App {
                         }
                     }
                 });
+                let n_ins = self.song.inserts.len();
+                ui.menu_button("Channel routing", |ui| {
+                    let last = n_ins.saturating_sub(2).max(1);
+                    if ui.button("Route selected channels to this track   Ctrl+L").clicked() {
+                        for c in self.rack_targets() {
+                            self.link_channel(c, i);
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Route selected channels starting from this track   Shift+Ctrl+L").clicked() {
+                        for (k, c) in self.rack_targets().into_iter().enumerate() {
+                            self.link_channel(c, (i + k).min(last));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Select linked channels   Alt+L").clicked() {
+                        if let Some(c) = self.song.channels.iter().position(|c| c.insert == i) {
+                            self.sel_chan = c;
+                        }
+                        ui.close_menu();
+                    }
+                });
+                if i > 1 && i + 1 < n_ins && ui.button("Move left   Alt+Left").clicked() {
+                    self.song.swap_inserts(i, i - 1);
+                    self.sel_insert = i - 1;
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                if i > 0 && i + 2 < n_ins && ui.button("Move right   Alt+Right").clicked() {
+                    self.song.swap_inserts(i, i + 1);
+                    self.sel_insert = i + 1;
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                if i > 0 && ui.button("Reset to default").hint("Name, colour, level, panning, stereo and equaliser back to how an empty track has them; the effects stay").clicked() {
+                    let d = cereal_engine::song::Insert::default();
+                    let ins = &mut self.song.inserts[i];
+                    ins.name.clear();
+                    ins.color = None;
+                    (ins.volume, ins.pan, ins.sep, ins.eq, ins.invert, ins.swap, ins.enabled) = (d.volume, d.pan, d.sep, d.eq, d.invert, d.swap, true);
+                    self.dirty = true;
+                    ui.close_menu();
+                }
                 let mut gap = self.song.inserts[i].separator;
                 if ui.checkbox(&mut gap, "Separator").clicked() {
                     self.song.inserts[i].separator = gap;
