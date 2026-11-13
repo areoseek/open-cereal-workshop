@@ -464,6 +464,9 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     if song.song_mode != base.song_mode {
         set_or_insert(ev, 0..head_end, Event::byte(id::LOOP_ACTIVE, song.song_mode as u8), after_version);
     }
+    if song.truncated != base.truncated {
+        set_or_insert(ev, 0..head_end, Event::byte(id::TRUNCATED, song.truncated as u8), after_version);
+    }
     if song.performance != base.performance {
         set_or_insert(ev, 0..head_end, Event::byte(id::PERFORMANCE, song.performance as u8), after_version);
     }

@@ -867,6 +867,8 @@ pub struct Song {
     pub time_sig: (u8, u8),
     /// The playlist's clips ahead of the start marker are played by hand.
     pub performance: bool,
+    /// Clips that start part-way into their pattern sound the notes already running at that point.
+    pub truncated: bool,
     /// Main pitch: every instrument is moved by this many cents.
     pub main_pitch: i16,
     /// The transport plays the whole song, not one pattern: stored with the project.
@@ -991,6 +993,7 @@ impl Song {
             tempo: 130.0,
             time_sig: (4, 4),
             performance: false,
+            truncated: true,
             main_pitch: 0,
             song_mode: false,
             swing: 0.0,
@@ -1911,6 +1914,7 @@ impl Song {
             tempo: if f.tempo > 0.0 { f.tempo } else { 130.0 },
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
             performance: f.performance,
+            truncated: f.truncated,
             main_pitch: f.main_pitch,
             song_mode: f.song_mode,
             swing: (f.shuffle as f32 / 128.0).min(1.0),

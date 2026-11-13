@@ -111,6 +111,7 @@ pub struct Transport {
     metronome: AtomicBool,
     recording: AtomicBool,
     countdown: AtomicBool,
+    late_notes: AtomicBool,
     click_kind: std::sync::atomic::AtomicU8,
     count_bars: std::sync::atomic::AtomicU8,
     /// Notes played by hand are written down one grid step at a time while the song stands still.
@@ -297,6 +298,7 @@ impl Transport {
             metronome: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             countdown: AtomicBool::new(false),
+            late_notes: AtomicBool::new(false),
             click_kind: std::sync::atomic::AtomicU8::new(0),
             count_bars: std::sync::atomic::AtomicU8::new(1),
             step_edit: AtomicBool::new(false),
@@ -358,6 +360,13 @@ impl Transport {
         self.recording.store(on, Relaxed);
     }
     /// Whether a bar of clicks is counted in before recording starts.
+    /// Whether notes already running where playing starts or jumps to are sounded.
+    pub fn late_notes(&self) -> bool {
+        self.late_notes.load(Relaxed)
+    }
+    pub fn set_late_notes(&self, on: bool) {
+        self.late_notes.store(on, Relaxed);
+    }
     pub fn countdown(&self) -> bool {
         self.countdown.load(Relaxed)
     }
@@ -705,6 +714,7 @@ impl Handle {
             pos: 0.0,
             was_playing: false,
             chase: false,
+            pickup: false,
             perf: Vec::new(),
             perf_out: Vec::new(),
             perf_rng: 0x9e37_79b9,
@@ -1542,6 +1552,8 @@ pub struct Player {
     was_playing: bool,
     /// Set after a start or a seek: clips already under the play head must be picked up mid-way.
     chase: bool,
+    /// Set after a start or a seek by hand (not a loop or marker jump): notes under the play head may be picked up.
+    pickup: bool,
     /// Performance mode: what each playlist track is playing by hand.
     perf: Vec<PerfTrack>,
     perf_out: Vec<PerfSeg>,
@@ -2839,7 +2851,8 @@ impl Player {
     /// start of the segment and `shift` maps pattern ticks onto song ticks. Notes are cut at `cut` (pattern
     /// ticks) when given.
     #[allow(clippy::too_many_arguments)]
-    fn fire_pattern(&mut self, song: &Song, pat: usize, a: f64, b: f64, shift: f64, t0: f64, tpf: f64, cut: Option<u32>) {
+    #[allow(clippy::too_many_arguments)]
+    fn fire_pattern(&mut self, song: &Song, pat: usize, a: f64, b: f64, shift: f64, t0: f64, tpf: f64, cut: Option<u32>, late: bool) {
         let Some(p) = song.patterns.get(pat) else { return };
         let first = a.ceil().max(0.0) as u32;
         // recorded control movements: each sets its control, which then holds
@@ -2854,6 +2867,20 @@ impl Player {
             }
         }
         let start = p.notes.partition_point(|n| n.pos < first);
+        if late && a < b {
+            // notes already running where playing picks up start here, from their beginning, for what is left of them
+            let delay = ((((a + shift) - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+            for n in &p.notes[..start] {
+                let end = match cut {
+                    Some(c) => (n.pos + n.len).min(c),
+                    None => n.pos + n.len,
+                };
+                if n.len == 0 || end as f64 <= a {
+                    continue;
+                }
+                self.note_on(song, n, delay, Some(((end as f64 - a) / tpf) as u64), false);
+            }
+        }
         for n in &p.notes[start..] {
             if n.pos as f64 >= b {
                 break;
@@ -2890,7 +2917,7 @@ impl Player {
         match src {
             ClipSrc::Pattern(p) => {
                 let shift = pos0 - offset;
-                self.fire_pattern(song, p, a.max(pos0) - shift, b.min(end) - shift, shift, t0, tpf, Some((len + offset) as u32));
+                self.fire_pattern(song, p, a.max(pos0) - shift, b.min(end) - shift, shift, t0, tpf, Some((len + offset) as u32), false);
             }
             ClipSrc::Audio(chi) => {
                 let starts_here = pos0 >= a;
@@ -3188,6 +3215,7 @@ impl Player {
         if sought >= 0 {
             self.pos = sought as f64;
             self.chase = true;
+            self.pickup = true;
             if playing {
                 self.silence(true);
             }
@@ -3212,6 +3240,7 @@ impl Player {
                 }
             }
             self.chase = true;
+            self.pickup = true;
             self.ov.clear();
             self.count_in = if tr.recording() && tr.countdown() { song.bar() as f64 * tr.count_bars() as f64 } else { 0.0 };
         }
@@ -3317,6 +3346,7 @@ impl Player {
         }
         let t1 = (t0 + n as f64 * tpf).min(loop_len);
         let chase = std::mem::take(&mut self.chase);
+        let pickup = std::mem::take(&mut self.pickup) && tr.late_notes();
 
         if song_mode {
             for ci in 0..song.clips.len() {
@@ -3337,7 +3367,10 @@ impl Player {
                         let shift = c.pos as f64 - c.offset as f64;
                         let a = t0.max(c.pos as f64) - shift;
                         let b = t1.min(end) - shift;
-                        self.fire_pattern(song, p, a, b, shift, t0, tpf, Some(c.len + c.offset));
+                        // a clip cut at its front, or playing picked up in the middle of one
+                        let begins = t0 <= c.pos as f64;
+                        let late = (begins && c.offset > 0 && song.truncated) || (!begins && pickup);
+                        self.fire_pattern(song, p, a, b, shift, t0, tpf, Some(c.len + c.offset), late);
                     }
                     ClipSrc::Audio(_) => self.play_clip(song, c.src, c.pos as f64, c.len as f64, c.offset as f64, t0, t1, t0, tpf, tempo, chase, 0),
                     ClipSrc::Automation(_) => {}
@@ -3347,7 +3380,7 @@ impl Player {
                 self.perform(song, t0, t1, tpf, tempo, tr.recording());
             }
         } else {
-            self.fire_pattern(song, pat, t0, t1, 0.0, t0, tpf, None);
+            self.fire_pattern(song, pat, t0, t1, 0.0, t0, tpf, None, pickup && t0 > 0.0);
         }
 
         if tr.metronome() {
@@ -5408,6 +5441,20 @@ mod tests {
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 0.9) < 1e-6);
         assert!(loud(&buf, 1.1, 1.8) > 0.1);
+    }
+
+    #[test]
+    fn a_clip_cut_at_its_front_sounds_the_note_it_cuts_into() {
+        let mut s = tone_song(4.0);
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].notes[0].len = 384;
+        s.clips.push(Clip { pos: 0, len: 192, track: 0, src: ClipSrc::Pattern(0), offset: 96, muted: false, group: 0 });
+        s.truncated = true;
+        let buf = crate::render_song(&s, 48_000.0, true, 0, 0.5);
+        assert!(loud(&buf, 0.0, 0.3) > 0.1, "the note starts with the clip");
+        s.truncated = false;
+        let buf = crate::render_song(&s, 48_000.0, true, 0, 0.5);
+        assert!(loud(&buf, 0.0, 1.4) < 1e-6);
     }
 
     #[test]

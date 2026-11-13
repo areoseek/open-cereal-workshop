@@ -27,6 +27,8 @@ pub mod id {
     pub const TIMESIG_NUM: u8 = 17;
     /// 1 when the playlist is in performance mode.
     pub const PERFORMANCE: u8 = 31;
+    /// 1 when clips that start part-way into a pattern still sound the notes they cut into.
+    pub const TRUNCATED: u8 = 30;
     pub const TIMESIG_BEAT: u8 = 18;
     pub const CHAN_ZIPPED: u8 = 15;
     /// The sample's loop goes back and forth.
@@ -718,6 +720,7 @@ pub struct Flp {
     pub tempo: f32,
     pub time_sig: (u8, u8),
     pub performance: bool,
+    pub truncated: bool,
     /// The channel rack's named groups, and the one on show (-1 for all).
     pub groups: Vec<String>,
     pub cur_group: i32,
@@ -921,6 +924,7 @@ impl Flp {
                 (id::TEMPO_WORD, Value::Word(v)) if flp.tempo == 0.0 => flp.tempo = *v as f32,
                 (id::TIMESIG_NUM, Value::Byte(v)) => flp.time_sig.0 = *v,
                 (id::PERFORMANCE, Value::Byte(v)) => flp.performance = *v != 0,
+                (id::TRUNCATED, Value::Byte(v)) => flp.truncated = *v != 0,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
                 (id::MAIN_PITCH, Value::Word(v)) => flp.main_pitch = *v as i16,
                 (id::LOOP_ACTIVE, Value::Byte(v)) => flp.song_mode = *v != 0,

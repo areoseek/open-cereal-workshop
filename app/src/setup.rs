@@ -70,8 +70,12 @@ pub struct Settings {
     /// The metronome's sound and the bars counted in before recording (0 = one).
     pub click_kind: u8,
     pub count_bars: u8,
+    /// How many steps back undo keeps; 0 = the usual hundred.
+    pub undo_levels: u32,
     /// How samples are read between their frames while playing (None = 4-point Hermite).
     pub resample: Option<u8>,
+    /// Sound the notes already running where playing starts; none = yes.
+    pub late_notes: Option<bool>,
     /// The plug-ins marked as favourites: 'g:' or 'f:' and the title.
     pub plugfav: Vec<String>,
     /// Tags given to browser files.
@@ -172,7 +176,9 @@ impl Settings {
                 Some(("star", v)) if !v.trim().is_empty() => s.starred.push(PathBuf::from(v.trim())),
                 Some(("click", v)) => s.click_kind = v.trim().parse().unwrap_or(0),
                 Some(("resample", v)) => s.resample = v.trim().parse().ok(),
+                Some(("late_notes", v)) => s.late_notes = Some(v.trim() == "1"),
                 Some(("count_bars", v)) => s.count_bars = v.trim().parse().unwrap_or(0),
+                Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
                 Some(("autosave", v)) => s.autosave = v.trim().parse().ok(),
                 Some(("plugfav", v)) if !v.trim().is_empty() => s.plugfav.push(v.trim().to_string()),
                 Some(("tag", v)) => {
@@ -261,8 +267,14 @@ impl Settings {
         if self.click_kind != 0 {
             out += &format!("click={}\n", self.click_kind);
         }
+        if let Some(l) = self.late_notes {
+            out += &format!("late_notes={}\n", l as u8);
+        }
         if let Some(r) = self.resample {
             out += &format!("resample={r}\n");
+        }
+        if self.undo_levels > 0 {
+            out += &format!("undo_levels={}\n", self.undo_levels);
         }
         if self.count_bars > 1 {
             out += &format!("count_bars={}\n", self.count_bars);

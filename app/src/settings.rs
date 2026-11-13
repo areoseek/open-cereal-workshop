@@ -216,6 +216,12 @@ impl App {
             });
             ui.end_row();
         });
+        let mut late = self.handle.transport.late_notes();
+        if ui.checkbox(&mut late, "Play truncated notes on transport").hint("Starting or jumping into the middle of a note sounds that note").changed() {
+            self.handle.transport.set_late_notes(late);
+            self.settings.late_notes = Some(late);
+            let _ = self.settings.save();
+        }
         ui.horizontal(|ui| {
             if ui.button("Rescan devices").clicked() {
                 self.prefs_win.outs = None;
@@ -243,6 +249,14 @@ impl App {
                     changed |= ui.selectable_value(&mut self.settings.scale, s, name(s)).changed();
                 }
             });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Maximum undo levels");
+            let mut n = if self.settings.undo_levels > 0 { self.settings.undo_levels } else { 100 };
+            if ui.add(egui::DragValue::new(&mut n).range(10..=1000)).changed() {
+                self.settings.undo_levels = n;
+                changed = true;
+            }
         });
         ui.checkbox(&mut self.typing_keys, "Typing keyboard to piano");
         ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");

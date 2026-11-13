@@ -438,6 +438,7 @@ impl App {
         handle.transport.set_click_kind(settings.click_kind);
         handle.transport.set_count_bars(settings.count_bars.max(1));
         cereal_engine::sample::set_quality(settings.resample.unwrap_or(1));
+        handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
         let mut app = Self {
             song: Song::new(),
             dirty: true,
@@ -3923,6 +3924,7 @@ impl App {
                 });
                 self.song.time_sig = (n, d);
             });
+            changed |= ui.checkbox(&mut self.song.truncated, "Play truncated notes in clips").changed();
             if changed {
                 self.dirty = true;
             }
@@ -4486,7 +4488,8 @@ impl eframe::App for App {
             self.hist_pending = false;
             self.history.truncate(self.hist_at + 1);
             self.history.push(self.song.clone());
-            if self.history.len() > HISTORY_MAX {
+            let keep = if self.settings.undo_levels > 0 { self.settings.undo_levels as usize } else { HISTORY_MAX };
+            while self.history.len() > keep + 1 {
                 self.history.remove(0);
             }
             self.hist_at = self.history.len() - 1;
