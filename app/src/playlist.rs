@@ -190,6 +190,12 @@ impl App {
     fn edit_clip_sample(&mut self, ch: usize) {
         let Some(sm) = self.song.channels[ch].raw.clone().or_else(|| self.song.channels[ch].sample.clone()) else { return };
         let ins = self.song.channels[ch].insert.min(self.song.inserts.len().saturating_sub(1));
+        let name = self.song.channels[ch].name.clone();
+        self.edit_sound_on(ins, &sm, &name);
+    }
+
+    /// Open a sound in the Wave Recorder of a mixer track, putting one in its first free slot if it has none.
+    pub(crate) fn edit_sound_on(&mut self, ins: usize, sm: &cereal_engine::sample::Sample, name: &str) {
         let have = self.song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.plugin.eq_ignore_ascii_case("Edison")).map(|s| s.index));
         let free = || (0..10u16).find(|n| !self.song.inserts[ins].slots.iter().any(|s| s.index == *n));
         match have.or_else(free) {
@@ -199,11 +205,10 @@ impl App {
                     self.dirty = true;
                     self.handle.publish(self.song.clone());
                 }
-                let name = self.song.channels[ch].name.clone();
-                self.wave_eds.entry((ins, slot)).or_default().take(&sm, &name);
+                self.wave_eds.entry((ins, slot)).or_default().take(sm, name);
                 self.fx_open = Some((ins, slot));
             }
-            None => self.status = "No free effect slot on the mixer track of this channel".into(),
+            None => self.status = "No free effect slot on this mixer track".into(),
         }
     }
 

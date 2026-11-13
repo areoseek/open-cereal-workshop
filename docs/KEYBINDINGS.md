@@ -145,6 +145,7 @@ keyboard off and outside the channel rack.
 | Alt+C | Give the notes the colour being drawn with | yes |
 | Alt+M / Shift+Alt+M | Mute / unmute | yes |
 | Alt+V | Ghost notes of the other channels | yes |
+| Double click on a ghost note | Switch to that note's channel (Editable ghosts) | yes |
 | Alt+E, Q, U, A, S, F, W, K, Y, R, X, O, L | Riff machine, quantise, chop, arpeggiate, strum, flam, claw, limit, flip, randomise, scale levels, LFO, articulate | yes |
 | Ctrl+M | Import a MIDI file or score | yes |
 | PgUp / PgDn | Zoom in / out | yes |

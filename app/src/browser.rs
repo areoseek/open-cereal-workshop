@@ -344,6 +344,17 @@ impl App {
                             self.actions.push(Action::LoadSample(path.clone(), Some(self.sel_chan)));
                             ui.close_menu();
                         }
+                        if ui.button("Open in audio editor").hint("In a Wave Recorder on the selected mixer track").clicked() {
+                            match self.lib.load_path(&path) {
+                                Ok(sm) => {
+                                    let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
+                                    let name = sm.name.clone();
+                                    self.edit_sound_on(ins, &sm, &name);
+                                }
+                                Err(e) => self.status = e,
+                            }
+                            ui.close_menu();
+                        }
                         if ui.button("Add to the playlist").hint("As an audio clip where the song stands").clicked() {
                             let at = if self.handle.transport.song_mode() { self.handle.transport.tick() as u32 } else { 0 };
                             self.add_audio_clip(&path, at, None);

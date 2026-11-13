@@ -181,6 +181,10 @@ pub struct State {
     pub(crate) time_sel: Option<(u32, u32)>,
     lane: Lane,
     ghosts: bool,
+    /// A double click on another channel's note turns the piano roll to that channel.
+    ghost_edit: bool,
+    /// Where the last click put a new note: position and key.
+    made: Option<(u32, u8)>,
     /// The key strip shows every note's name instead of a keyboard.
     names: bool,
     /// The light rows that show the white keys or the scale, and the channel's sample drawn behind the notes.
@@ -226,6 +230,8 @@ impl Default for State {
             time_sel: None,
             lane: Lane::Vel,
             ghosts: true,
+            ghost_edit: true,
+            made: None,
             names: false,
             rows: true,
             wave: false,
@@ -1333,6 +1339,7 @@ impl App {
             ui.menu_button("View", |ui| {
                 let f = |t: &str| RichText::new(t.to_string()).monospace().size(11.0);
                 ui.checkbox(&mut self.piano.ghosts, f("Ghost channels              Alt+V"));
+                ui.add_enabled(self.piano.ghosts, egui::Checkbox::new(&mut self.piano.ghost_edit, "Editable ghosts")).hint("A double click on another channel's note turns the piano roll to that channel");
                 ui.checkbox(&mut self.piano.rows, f("Row highlights              Alt+B"));
                 ui.checkbox(&mut self.piano.wave, f("Background waveform         Alt+N"));
                 ui.checkbox(&mut self.piano.names, f("Note names                  M"));
@@ -1818,7 +1825,25 @@ impl App {
                     self.piano.drag = Some(Drag::Lane);
                 } else if grid.contains(pp) {
                     let key = key_of(pp.y) as u8;
+                    let ghost_at = (double && self.piano.ghosts && self.piano.ghost_edit && !mods.command)
+                        .then(|| {
+                            let t = tick_of(pp.x).max(0.0) as u32;
+                            self.song.patterns[pat].notes.iter().find(|n| n.chan != chan && n.key == key && n.pos <= t && t < n.pos + note_len(n, step)).map(|n| n.chan as usize)
+                        })
+                        .flatten();
                     match tool {
+                        Tool::Draw | Tool::Paint if ghost_at.is_some() => {
+                            // the first click of the pair put a note down on the old channel: it goes again
+                            if let (Some((i, _)), Some((pos, k))) = (hit, self.piano.made.take()) {
+                                let notes = &mut self.song.patterns[pat].notes;
+                                if notes.get(i).is_some_and(|n| n.pos == pos && n.key == k) {
+                                    notes.remove(i);
+                                }
+                            }
+                            self.piano.sel.clear();
+                            self.sel_chan = ghost_at.unwrap_or(self.sel_chan);
+                            self.dirty = true;
+                        }
                         Tool::Draw | Tool::Paint if mods.command => self.piano.drag = Some(Drag::Rect { from: pp, add: mods.shift, what: RectUse::Select }),
                         Tool::Draw | Tool::Paint => match hit {
                             Some((i, _)) if double => self.piano.props = Some(i),
@@ -1867,6 +1892,7 @@ impl App {
                             None => {
                                 let pos = snap_floor(tick_of(pp.x));
                                 let n = Note { pos, len: self.piano.last_len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, slide: self.piano.slide, porta: self.piano.porta, color: self.piano.color, ..Default::default() };
+                                self.piano.made = Some((pos, key));
                                 let notes = &mut self.song.patterns[pat].notes;
                                 let mut orig = vec![];
                                 for add in STAMPS[self.piano.stamp.min(STAMPS.len() - 1)].1 {
