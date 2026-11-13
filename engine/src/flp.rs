@@ -721,6 +721,7 @@ pub struct Flp {
     pub time_sig: (u8, u8),
     pub performance: bool,
     pub truncated: bool,
+    pub pan_law: u8,
     /// The channel rack's named groups, and the one on show (-1 for all).
     pub groups: Vec<String>,
     pub cur_group: i32,
@@ -925,6 +926,7 @@ impl Flp {
                 (id::TIMESIG_NUM, Value::Byte(v)) => flp.time_sig.0 = *v,
                 (id::PERFORMANCE, Value::Byte(v)) => flp.performance = *v != 0,
                 (id::TRUNCATED, Value::Byte(v)) => flp.truncated = *v != 0,
+                (id::PAN_LAW, Value::Byte(v)) => flp.pan_law = *v,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
                 (id::MAIN_PITCH, Value::Word(v)) => flp.main_pitch = *v as i16,
                 (id::LOOP_ACTIVE, Value::Byte(v)) => flp.song_mode = *v != 0,

@@ -33,8 +33,21 @@ pub fn clip_gain(v: f32) -> f32 {
     channel_gain(v) / channel_gain(10000.0 / 12800.0)
 }
 
+/// The project's panning law: 0 circular, 2 triangular. One song plays at a time, so one switch serves.
+static TRIANGULAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_pan_law(law: u8) {
+    TRIANGULAR.store(law == 2, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Circular pan: centre is unity on both sides, hard left/right is +3 dB on one side and silence on the other.
+/// Triangular pan (the older law): the side turned to stays at unity and the other falls in a straight line;
+/// that reading of it is an estimate until measured.
 pub fn pan(p: f32) -> (f32, f32) {
+    if TRIANGULAR.load(std::sync::atomic::Ordering::Relaxed) {
+        let p = p.clamp(-1.0, 1.0);
+        return ((1.0 - p).min(1.0), (1.0 + p).min(1.0));
+    }
     let a = (p.clamp(-1.0, 1.0) + 1.0) * FRAC_PI_4;
     (a.cos() * std::f32::consts::SQRT_2, a.sin() * std::f32::consts::SQRT_2)
 }

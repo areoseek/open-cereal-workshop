@@ -3928,6 +3928,15 @@ impl App {
                 self.song.time_sig = (n, d);
             });
             changed |= ui.checkbox(&mut self.song.truncated, "Play truncated notes in clips").changed();
+            ui.horizontal(|ui| {
+                ui.label("Panning law");
+                let name = |l: u8| if l == 2 { "Triangular" } else { "Circular" };
+                egui::ComboBox::from_id_salt("panlaw").width(110.0).selected_text(name(self.song.pan_law)).show_ui(ui, |ui| {
+                    for l in [0u8, 2] {
+                        changed |= ui.selectable_value(&mut self.song.pan_law, l, name(l)).changed();
+                    }
+                });
+            });
             if changed {
                 self.dirty = true;
             }

@@ -3210,6 +3210,7 @@ impl Player {
     /// Start whatever begins in the next `n` frames; returns how many frames to render before calling again.
     fn advance(&mut self, song: &Song, n: usize) -> usize {
         let tr = self.transport.clone();
+        crate::law::set_pan_law(song.pan_law);
         let playing = tr.playing();
         let sought = tr.seek.swap(-1, Relaxed);
         if sought >= 0 {
