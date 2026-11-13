@@ -804,6 +804,7 @@ impl App {
                 c.root_key = key;
             }
         }
+        changed |= self.key_strip(ui, ci);
         if rebake {
             self.song.channels[ci].bake();
             changed = true;
@@ -811,6 +812,131 @@ impl App {
         if changed {
             self.dirty = true;
         }
+    }
+}
+
+/// Where key `k` sits on a keyboard whose white keys are `ww` wide: left edge, width, and whether it is black.
+fn key_place(k: u8, ww: f32) -> (f32, f32, bool) {
+    const WHITE: [u8; 12] = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
+    let (o, pc) = ((k / 12) as f32, (k % 12) as usize);
+    let black = matches!(pc, 1 | 3 | 6 | 8 | 10);
+    let x = (o * 7.0 + WHITE[pc] as f32) * ww;
+    if black {
+        (x + ww * 0.7, ww * 0.6, true)
+    } else {
+        (x, ww, false)
+    }
+}
+
+/// The key under a point on that keyboard, `fy` being how far down the keys it is (0 top, 1 bottom).
+fn key_under(x: f32, fy: f32, ww: f32) -> u8 {
+    if fy < 0.6 {
+        if let Some(k) = (0..132u8).find(|&k| {
+            let (kx, kw, black) = key_place(k, ww);
+            black && x >= kx && x < kx + kw
+        }) {
+            return k;
+        }
+    }
+    (0..132u8).rev().find(|&k| {
+        let (kx, _, black) = key_place(k, ww);
+        !black && x >= kx
+    }).unwrap_or(0)
+}
+
+impl App {
+    /// The preview keyboard under the channel settings: a click plays the key (harder lower down), a
+    /// right-click makes it the root note, and the bar above it holds the range of keys the channel answers to.
+    fn key_strip(&mut self, ui: &mut Ui, ci: usize) -> bool {
+        let mut changed = false;
+        ui.add_space(4.0);
+        let w = ui.available_width().clamp(200.0, 900.0);
+        let ww = w / 77.0;
+        let (bar_rect, bar) = ui.allocate_exact_size(Vec2::new(w, 9.0), Sense::click_and_drag());
+        let (keys_rect, keys) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click_and_drag());
+        let c = &mut self.song.channels[ci];
+        // the range bar
+        let id = ui.id().with(("keyrange", ci));
+        if let Some(pos) = bar.interact_pointer_pos().filter(|_| bar.dragged_by(egui::PointerButton::Primary) || bar.drag_started_by(egui::PointerButton::Primary)) {
+            let k = key_under(pos.x - bar_rect.left(), 1.0, ww);
+            let from: u8 = if bar.drag_started() { k } else { ui.data(|d| d.get_temp(id)).unwrap_or(k) };
+            ui.data_mut(|d| d.insert_temp(id, from));
+            let (a, b) = (from.min(k) as u32, from.max(k) as u32);
+            let b = if b >= 131 { 256 } else { b };
+            if (a, b) != (c.smp.key_lo, c.smp.key_hi) {
+                c.smp.key_lo = a;
+                c.smp.key_hi = b;
+                changed = true;
+            }
+        }
+        if bar.secondary_clicked() && (c.smp.key_lo, c.smp.key_hi) != (0, 256) {
+            c.smp.key_lo = 0;
+            c.smp.key_hi = 256;
+            changed = true;
+        }
+        bar.on_hover_text("Key range: drag across the keys this channel answers to. Right-click for all of them.");
+        let (lo, hi) = (c.smp.key_lo.min(131) as u8, c.smp.key_hi.min(131) as u8);
+        let root = c.root_key.min(131);
+        let held_id = ui.id().with(("keyheld", ci));
+        let held: Option<u8> = ui.data(|d| d.get_temp(held_id)).flatten();
+        let p = ui.painter();
+        p.rect_filled(bar_rect, 1.0, PANEL_DARK);
+        let edge = |k: u8, right: bool| {
+            let (x, kw, _) = key_place(k, ww);
+            bar_rect.left() + if right { x + kw } else { x }
+        };
+        let span = egui::Rect::from_min_max(Pos2::new(edge(lo, false), bar_rect.top() + 2.0), Pos2::new(edge(hi, true).min(bar_rect.right()), bar_rect.bottom() - 2.0));
+        p.rect_filled(span, 1.0, if (lo, hi) == (0, 131) { TEXT_DIM } else { ACCENT });
+        // the keys: white ones first, the black ones over them
+        for pass in [false, true] {
+            for k in 0..132u8 {
+                let (x, kw, black) = key_place(k, ww);
+                if black != pass {
+                    continue;
+                }
+                let h = if black { 18.0 } else { 30.0 };
+                let r = egui::Rect::from_min_size(Pos2::new(keys_rect.left() + x, keys_rect.top()), Vec2::new(kw, h));
+                let out = k < lo || k > hi;
+                let fill = match (held == Some(k), black, out) {
+                    (true, ..) => ACCENT,
+                    (_, true, _) => Color32::from_rgb(28, 32, 35),
+                    (_, false, true) => Color32::from_rgb(150, 156, 160),
+                    (_, false, false) => Color32::from_rgb(232, 236, 238),
+                };
+                p.rect_filled(r.shrink2(Vec2::new(0.4, 0.0)), 1.0, fill);
+                if k == root {
+                    p.rect_filled(egui::Rect::from_min_size(Pos2::new(r.left() + 0.5, r.bottom() - 6.0), Vec2::new((kw - 1.0).max(2.0), 5.0)), 1.0, ACCENT);
+                } else if !black && k % 12 == 0 && ww >= 4.5 {
+                    p.text(Pos2::new(r.left() + 1.0, r.bottom() - 1.0), egui::Align2::LEFT_BOTTOM, format!("{}", k / 12), egui::FontId::proportional(7.0), Color32::from_rgb(90, 96, 100));
+                }
+            }
+        }
+        // the key under the pointer, and how hard: full strength at the bottom of the keys
+        let now = ui.input(|i| i.pointer.latest_pos()).filter(|pos| keys_rect.contains(*pos)).map(|pos| {
+            let fy = (pos.y - keys_rect.top()) / keys_rect.height();
+            (key_under(pos.x - keys_rect.left(), fy, ww).min(131), (0.25 + 0.75 * fy).clamp(0.05, 1.0))
+        });
+        let down = keys.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+        let want = if down { now } else { None };
+        if want.map(|w| w.0) != held {
+            if let Some(k) = held {
+                self.handle.send(cereal_engine::player::Cmd::NoteOff { chan: ci as u16, key: k });
+            }
+            if let Some((k, vel)) = want {
+                self.handle.send(cereal_engine::player::Cmd::NoteOn { chan: ci as u16, key: k, vel });
+            }
+            ui.data_mut(|d| d.insert_temp(held_id, want.map(|w| w.0)));
+        }
+        if keys.secondary_clicked() {
+            if let Some((k, _)) = now {
+                if self.song.channels[ci].root_key != k {
+                    self.song.channels[ci].root_key = k;
+                    changed = true;
+                }
+            }
+        }
+        keys.on_hover_text("Click to hear a key, harder the lower you click. Right-click to make it the root note.");
+        changed
     }
 }
 
