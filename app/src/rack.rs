@@ -380,8 +380,30 @@ impl App {
                             self.show_piano = true;
                             ui.close_menu();
                         }
-                        if ui.button("Rename").clicked() {
+                        if ui.button("Graph editor").clicked() {
+                            self.sel_chan = ci;
+                            self.rack.graph = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Rename, color and icon...                F2").clicked() {
                             self.rack.rename = Some((ci, self.song.channels[ci].name.clone()));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Cut                                                  Ctrl+X").clicked() {
+                            self.sel_chan = ci;
+                            self.rack_copy(true);
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy                                               Ctrl+C").clicked() {
+                            self.sel_chan = ci;
+                            self.rack_copy(false);
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!self.rack.clip.is_empty(), egui::Button::new("Paste                                              Ctrl+V")).clicked() {
+                            self.sel_chan = ci;
+                            self.rack_paste();
                             ui.close_menu();
                         }
                         ui.separator();
@@ -397,6 +419,33 @@ impl App {
                         if ui.button("Clear steps").clicked() {
                             self.song.patterns[pat].notes.retain(|n| n.chan != ci as u16);
                             self.dirty = true;
+                            ui.close_menu();
+                        }
+                        for (name, right) in [("Rotate left                    Shift+Ctrl+Left", false), ("Rotate right                Shift+Ctrl+Right", true)] {
+                            if ui.button(name).clicked() {
+                                self.sel_chan = ci;
+                                self.rack_shift(right);
+                                ui.close_menu();
+                            }
+                        }
+                        if ui.button("Send to piano roll").hint("Turn the steps into notes one step long").clicked() {
+                            for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == ci as u16 && n.len == 0) {
+                                n.len = step;
+                            }
+                            self.dirty = true;
+                            self.sel_chan = ci;
+                            self.show_piano = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Assign to free mixer track               Ctrl+L").clicked() {
+                            match self.free_insert() {
+                                Some(i) => {
+                                    self.link_channel(ci, i);
+                                    self.sel_insert = i;
+                                }
+                                None => self.status = "No free mixer track".into(),
+                            }
                             ui.close_menu();
                         }
                         ui.separator();

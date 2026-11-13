@@ -152,7 +152,7 @@ impl App {
     }
 
     /// The first mixer track nothing plays into and nothing sits on.
-    fn free_insert(&self) -> Option<usize> {
+    pub(crate) fn free_insert(&self) -> Option<usize> {
         let n = self.song.inserts.len();
         // the last track is the one new channels may be heard through, so it is never handed out
         (1..n.saturating_sub(1)).find(|&i| self.song.channels.iter().all(|c| c.insert != i) && self.song.inserts[i].slots.is_empty() && self.song.inserts[i].name.is_empty())
@@ -186,7 +186,7 @@ impl App {
     }
 
     /// Turn the selected channel's notes of this pattern round the pattern by one step.
-    fn rack_shift(&mut self, right: bool) {
+    pub(crate) fn rack_shift(&mut self, right: bool) {
         let pat = self.handle.transport.pattern();
         self.song.ensure_pattern(pat);
         let chan = self.sel_chan as u16;
