@@ -97,9 +97,16 @@ fn out_lag(info: &cpal::OutputCallbackInfo) {
 /// How much of each block's time the sound engine used, in thousandths, smoothed.
 static CPU_LOAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Blocks that took longer to make than they last, or that the sound card reported as late, since the
+/// stream was opened: each one is a gap in what was heard.
+pub(crate) static UNDERRUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn cpu_load(took: std::time::Duration, frames: usize, rate: f32) {
     use std::sync::atomic::Ordering::Relaxed;
     let now = took.as_secs_f32() / (frames.max(1) as f32 / rate.max(1.0)) * 1000.0;
+    if now > 1000.0 {
+        UNDERRUNS.fetch_add(1, Relaxed);
+    }
     let was = CPU_LOAD.load(Relaxed) as f32;
     // quick to rise, slow to fall, like a meter
     let next = if now > was { now } else { was + (now - was) * 0.05 };
@@ -149,7 +156,11 @@ fn start_audio(prefs: &setup::Settings, make: impl FnOnce(f32) -> Player) -> Res
     OUT_RATE.store(rate as u32, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{} ({} Hz, {} ch)", device.name().unwrap_or_default(), rate as u32, channels);
     let mut player = make(rate);
-    let err = |e| eprintln!("audio stream error: {e}");
+    UNDERRUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let err = |e| {
+        UNDERRUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("audio stream error: {e}")
+    };
     let stream = match format {
         cpal::SampleFormat::F32 => device.build_output_stream(&config, move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 out_lag(info);

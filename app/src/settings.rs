@@ -280,6 +280,8 @@ impl App {
         });
         ui.separator();
         ui.label(RichText::new(format!("Status: {}", self.audio)).color(TEXT_DIM));
+        ui.label(RichText::new(format!("Underruns: {}", crate::UNDERRUNS.load(std::sync::atomic::Ordering::Relaxed))).color(TEXT_DIM))
+            .hint("Blocks of sound that were not ready in time since the device was opened. If this climbs, pick a longer buffer");
         if restart {
             let _ = self.settings.save();
             self.restart_audio();
