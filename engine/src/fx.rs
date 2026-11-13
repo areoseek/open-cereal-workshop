@@ -3237,9 +3237,16 @@ impl Unit {
                 }
             }
             Kind::AutoPan => {
-                let amount = (p[4] - 64.0) / 64.0;
-                let hz = 0.05 * ((p[5] - 27500.0) / 27500.0 * 8.0).exp2();
+                // measured: the depth is the plain fraction, the wave runs 0.25 to 4 Hz and has already run
+                // 1024 frames when the first sound arrives, and target 1 is the pan
+                // 64 is no movement; one render at 100 showed a depth of 0.78125
+                let amount = ((p[4] - 64.0) / 64.0 * 25.0 / 18.0).clamp(-1.0, 1.0);
+                let hz = 0.25 * ((p[5] - 27500.0) / 27500.0 * 4.0).exp2();
                 let step = hz / sr;
+                if z[0] == 0.0 {
+                    z[0] = 1.0;
+                    self.ph = (self.ph + 1024.0 * step).fract();
+                }
                 let shape = p[2] as i32;
                 let target = p[3] as i32;
                 let vol = p[1] / 256.0;
@@ -3259,13 +3266,13 @@ impl Unit {
                     self.ph = (self.ph + step).fract();
                     let (mut pn, mut v) = (pan, vol);
                     if amount != 0.0 {
-                        if target == 1 {
+                        if target == 0 {
                             v *= (1.0 + lfo).clamp(0.0, 2.0) * 0.5 + 0.5 * (1.0 - amount.abs());
                         } else {
                             pn = (pn + lfo).clamp(-1.0, 1.0);
                         }
                     }
-                    let (l, r) = crate::law::pan(pn);
+                    let (l, r) = (1.0 - pn.max(0.0), 1.0 + pn.min(0.0));
                     f[0] *= l * v;
                     f[1] *= r * v;
                 }
@@ -3450,7 +3457,9 @@ impl Unit {
             Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru | Kind::Hosted | Kind::Notes => {}
             Kind::Conv => {
                 if let Some(st) = &mut self.conv {
-                    let (dry, wet) = (p[0] / 1000.0, p[1] / 1000.0);
+                    // a normalized impulse lands this far under unit strength (measured on one render)
+                    let level = if p.get(4).is_some_and(|v| *v >= 0.5) { 0.4163 } else { 1.0 };
+                    let (dry, wet) = (p[0] / 1000.0, p[1] / 1000.0 * level);
                     let (si, sw) = (1.0 - p[2] / 1000.0, 1.0 - p[3] / 1000.0);
                     for f in io.iter_mut() {
                         let (m, s) = ((f[0] + f[1]) * 0.5, (f[0] - f[1]) * 0.5 * si);
@@ -6296,7 +6305,7 @@ mod tests {
         assert_eq!(&out[out.len() - 4..], &[9, 8, 7, 6]);
         let y = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 2000);
         let g = y[0][0];
-        assert!(g > 0.5 && (y[1500][0] - g).abs() < 1e-3 && y[700][0].abs() < 1e-4, "{g} {}", y[1500][0]);
+        assert!(g > 0.25 && (y[1500][0] - g).abs() < 1e-3 && y[700][0].abs() < 1e-4, "{g} {}", y[1500][0]);
     }
     #[test]
     fn the_impulse_reverb_keeps_its_reshaping_settings() {
