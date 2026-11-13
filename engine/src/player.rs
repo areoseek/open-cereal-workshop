@@ -2389,6 +2389,14 @@ impl Player {
                     // (measured: let go, it fades over 10 ms along half a cosine)
                     v.release = ms(if osc3 { 10.0 } else { 12.0 });
                     v.ease = osc3;
+                    if tone.fm.is_some() {
+                        // (measured: the operator instrument starts at once and, let go with its own envelopes
+                        // off, falls in a straight line over 390 frames at 44.1 kHz; everything it plays comes two
+                        // frames late)
+                        v.attack = 1.0;
+                        v.release = ms(8.84);
+                        v.delay += 2;
+                    }
                     if let Some(p) = &tone.add {
                         // this instrument brings its own rise and fall
                         v.attack = ms(p.attack_s() * 1000.0);

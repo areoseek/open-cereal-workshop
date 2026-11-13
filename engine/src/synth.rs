@@ -1455,7 +1455,7 @@ impl ToneState {
                 a * (1.0 + (o[2][c] - 1.0) * tone.mix3)
             } else {
                 a + (o[2][c] - a) * tone.mix3
-            } * 0.498_21; // measured level
+            } * 0.5; // measured level
         }
         out
     }

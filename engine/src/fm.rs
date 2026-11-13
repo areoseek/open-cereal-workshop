@@ -16,7 +16,7 @@ const TICK: u32 = 16;
 /// Phase swing, in cycles, of a full-scale modulator at 100 %.
 const DEPTH: f32 = 2.0;
 /// Level of one full-scale operator sent straight out.
-const LEVEL: f32 = 0.4;
+const LEVEL: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 pub const OP_TARGETS: [&str; 6] = ["Pan", "Volume", "Modulation", "Pitch", "Phase", "Damping"];
 pub const FILTER_TARGETS: [&str; 8] = ["Pan", "Volume", "Cutoff", "Resonance", "Low", "Band", "High", "Shaper mix"];
@@ -352,7 +352,8 @@ impl Art {
 
 #[derive(Debug, Clone, Default)]
 pub struct Op {
-    /// Frequency against the note (2 in the file is the note itself).
+    /// Frequency against the note. Measured against a render: the stored 20000, shown as 1, sounds an octave
+    /// above the note the other instruments play for the same key.
     pub ratio: f32,
     pub offset_hz: f32,
     pub phase: f32,
@@ -785,7 +786,7 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
         }
     }
     Op {
-        ratio: i(40).clamp(0, 640000) as f32 / 20000.0,
+        ratio: i(40).clamp(0, 640000) as f32 / 10000.0,
         offset_hz: i(44) as f32 / 100.0,
         phase: i(0).clamp(0, 256) as f32 / 256.0,
         vol: i(4).clamp(-256, 512) as f32 / 256.0,
@@ -802,7 +803,7 @@ impl Default for Patch {
     fn default() -> Self {
         let mut ops: [Op; 6] = Default::default();
         for o in ops.iter_mut() {
-            *o = Op { ratio: 1.0, vol: 1.0, pitch_cents: 1200.0, tables: vec![Arc::new(sine().to_vec())], caps: vec![1], ..Default::default() };
+            *o = Op { ratio: 2.0, vol: 1.0, pitch_cents: 1200.0, tables: vec![Arc::new(sine().to_vec())], caps: vec![1], ..Default::default() };
         }
         let mut arts = Vec::with_capacity(ARTS);
         for k in 0..ARTS {
@@ -1612,8 +1613,8 @@ pub(crate) mod tests {
         let p = Patch::parse(&packed_block()).expect("reads");
         assert_eq!(p.fm[0][1], 0.25);
         assert_eq!(p.feed[0][0], 1.0);
-        assert_eq!(p.ops[1].ratio, 2.0);
-        assert_eq!(p.ops[0].ratio, 1.0);
+        assert_eq!(p.ops[1].ratio, 4.0);
+        assert_eq!(p.ops[0].ratio, 2.0);
         assert_eq!(p.used(), [true, true, false, false, false, false]);
         assert!(p.arts[1].env.on() && !p.arts[7].env.on());
         assert_eq!(p.arts.len(), ARTS);
@@ -1652,7 +1653,7 @@ pub(crate) mod tests {
         assert!(gone < 1e-3, "silent after the release, got {gone}");
         assert!((p.tail_s(0.5) - 0.1).abs() < 1e-4);
 
-        // with the modulator taken away the held part is a plain tone at 220 Hz: next to nothing at 440 Hz
+        // with the modulator taken away the held part is a plain tone an octave over the key: next to nothing above
         let mut plain = p.clone();
         plain.fm[0][1] = 0.0;
         plain.feed[0][0] = 0.0;
@@ -1667,12 +1668,12 @@ pub(crate) mod tests {
             }
             (a * a + b * b).sqrt() / 4800.0
         };
-        assert!(part(&q, 220.0) > 0.05 && part(&q, 440.0) < part(&q, 220.0) * 0.01);
+        assert!(part(&q, 440.0) > 0.05 && part(&q, 880.0) < part(&q, 440.0) * 0.01);
         let mut direct = p.clone();
         direct.feed[0][0] = 0.0;
         direct.wire();
         let m = run(&direct, 57, 24000, 24000);
-        assert!(part(&m, 660.0) > part(&m, 220.0) * 0.05, "the modulator adds a partial at three times the note");
+        assert!(part(&m, 1320.0) > part(&m, 440.0) * 0.05, "the modulator adds a partial at three times the note");
     }
 
     #[test]
@@ -1816,7 +1817,7 @@ pub(crate) mod tests {
         let state = Patch::blank_state();
         let p = Patch::parse(&state).unwrap();
         assert_eq!(p.out[0], 1.0);
-        assert_eq!(p.ops[0].ratio, 1.0);
+        assert_eq!(p.ops[0].ratio, 2.0);
         assert_eq!(p.used(), [true, false, false, false, false, false]);
         // operator 2 into operator 1 at 25 %, and a point more in operator 1's volume envelope
         let mut env = p.arts[1].env.clone();

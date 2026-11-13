@@ -4,9 +4,10 @@
 use std::f32::consts::FRAC_PI_4;
 
 /// Channel volume knob: `v` is 0..=1 of the knob's travel (file value / 12800). 100 % is unity gain and the
-/// default 78 % sits a little over 5 dB down.
+/// default 78 % sits a little over 5 dB down. Measured against renders of two instruments at the default: the
+/// same curve the sampler's velocity follows.
 pub fn channel_gain(v: f32) -> f32 {
-    v.clamp(0.0, 1.0).powf(2.4)
+    (11f32.powf(v.clamp(0.0, 1.0)) - 1.0) / 10.0
 }
 
 /// Mixer fader: `v` is file value / 12800, so 1.0 is 0 dB and 1.25 the top of the fader (about +5.6 dB).
