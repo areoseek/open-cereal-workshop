@@ -66,6 +66,9 @@ impl App {
                 if ui.checkbox(&mut self.mixer_wave, "Wave meters     Alt+W").clicked() {
                     ui.close_menu();
                 }
+                if ui.checkbox(&mut self.detached[3], "Detached").hint("The window leaves the main one, to sit on another screen").clicked() {
+                    ui.close_menu();
+                }
                 if ui.checkbox(&mut self.settings.mixer_big, "Big meter").hint("A tall meter for the selected track at the left of the mixer").clicked() {
                     let _ = self.settings.save();
                     ui.close_menu();

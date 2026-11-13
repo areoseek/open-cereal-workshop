@@ -318,6 +318,8 @@ pub(crate) struct App {
     /// Multilink to controllers: the controls turned since it was switched on, in order, each waiting for
     /// the next knob of the MIDI device that has not been given one yet.
     multilink: bool,
+    /// The big windows that live in an operating system window of their own (playlist, rack, piano roll, mixer).
+    pub(crate) detached: [bool; 4],
     multi_queue: Vec<cereal_engine::song::Target>,
     multi_seen: Vec<u8>,
     /// A control's place copied from its menu, 0 to 1.
@@ -511,6 +513,7 @@ impl App {
             events: events::State::default(),
             link_learn: None,
             multilink: false,
+            detached: [false; 4],
             multi_queue: vec![],
             multi_seen: vec![],
             value_clip: None,
@@ -2222,6 +2225,36 @@ impl App {
         self.dirty = true;
     }
 
+    /// One of the big windows shown as a window of the operating system, so it can sit on another screen.
+    /// Closing it closes the window, as it does when it lives inside the main one.
+    fn detached_window(&mut self, ctx: &egui::Context, k: usize, title: &str, size: [f32; 2], open: &mut bool, win: Win, body: fn(&mut App, &mut egui::Ui)) {
+        if !*open {
+            return;
+        }
+        let id = egui::ViewportId::from_hash_of(("detached", k));
+        let builder = egui::ViewportBuilder::default().with_title(format!("{title} - Open Cereal Workshop")).with_inner_size(size).with_min_inner_size([240.0, 140.0]);
+        ctx.show_viewport_immediate(id, builder, |vctx, class| {
+            let frame = egui::Frame::NONE.fill(PANEL).inner_margin(6.0);
+            if class == egui::ViewportClass::Embedded {
+                // no second window to be had here: it stays inside after all
+                self.detached[k] = false;
+                return;
+            }
+            egui::CentralPanel::default().frame(frame).show(vctx, |ui| body(self, ui));
+            let (closed, focused, pressed) = vctx.input(|i| (i.viewport().close_requested(), i.viewport().focused == Some(true), i.pointer.any_pressed()));
+            if focused || pressed {
+                self.focus = win;
+            }
+            if focused && !self.setup.open {
+                // the keys pressed over there are ours as well
+                self.keys(vctx);
+            }
+            if closed {
+                *open = false;
+            }
+        });
+    }
+
     fn toggle_multilink(&mut self) {
         self.multilink = !self.multilink;
         self.multi_queue.clear();
@@ -3720,7 +3753,12 @@ impl eframe::App for App {
         let took = |r: &egui::Response| press.is_some_and(|p| r.rect.contains(p) && ctx.layer_id_at(p) == Some(r.layer_id));
         self.raise_window(ctx);
         let mut open = self.show_playlist;
-        let shown = if self.pl_max && open {
+        let shown = if self.detached[0] {
+            self.detached_window(ctx, 0, "Playlist", [wide, upper], &mut open, Win::Playlist, |a, ui| {
+                a.playlist_ui(ui);
+            });
+            None
+        } else if self.pl_max && open {
             // Enter lets the playlist fill the work area; its own window keeps its place for afterwards
             let size = [(screen.width() - left - 8.0).max(200.0), (screen.height() - top - 44.0).max(120.0)];
             egui::Window::new("Playlist").id(egui::Id::new("playlist_max")).open(&mut open).frame(frame).fixed_pos([left, top - 44.0]).fixed_size(size).show(ctx, |ui| {
@@ -3745,11 +3783,18 @@ impl eframe::App for App {
         self.show_playlist = open;
         let mut open = self.show_rack;
         let (pos, size) = self.win_place(1, [left, low_y], [rack_w, low_h]);
-        let shown = egui::Window::new("Channel rack").id(self.win_id("Channel rack")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
-            let inner = ui.max_rect().size();
-            self.rack_ui(ui);
-            inner
-        });
+        let shown = if self.detached[1] {
+            self.detached_window(ctx, 1, "Channel rack", [rack_w, low_h], &mut open, Win::Rack, |a, ui| {
+                a.rack_ui(ui);
+            });
+            None
+        } else {
+    egui::Window::new("Channel rack").id(self.win_id("Channel rack")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+                let inner = ui.max_rect().size();
+                self.rack_ui(ui);
+                inner
+                    })
+        };
         if let Some(r) = &shown {
             self.win_now[4..8].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(rack_w, |s| s.x), r.inner.map_or(low_h, |s| s.y)]);
         }
@@ -3759,11 +3804,18 @@ impl eframe::App for App {
         self.show_rack = open;
         let mut open = self.show_piano;
         let (pos, size) = self.win_place(2, [left + 24.0, top + 24.0], [wide - 24.0, upper + 60.0]);
-        let shown = egui::Window::new("Piano roll").id(self.win_id("Piano roll")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
-            let inner = ui.max_rect().size();
-            self.piano_ui(ui);
-            inner
-        });
+        let shown = if self.detached[2] {
+            self.detached_window(ctx, 2, "Piano roll", [wide, upper + 60.0], &mut open, Win::Piano, |a, ui| {
+                a.piano_ui(ui);
+            });
+            None
+        } else {
+    egui::Window::new("Piano roll").id(self.win_id("Piano roll")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+                let inner = ui.max_rect().size();
+                self.piano_ui(ui);
+                inner
+                    })
+        };
         if let Some(r) = &shown {
             self.win_now[8..12].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(wide, |s| s.x), r.inner.map_or(upper, |s| s.y)]);
         }
@@ -3773,11 +3825,18 @@ impl eframe::App for App {
         self.show_piano = open;
         let mut open = self.show_mixer;
         let (pos, size) = self.win_place(3, [left + rack_w + 28.0, low_y], [(screen.width() - left - rack_w - 44.0).max(400.0), low_h]);
-        let shown = egui::Window::new("Mixer").id(self.win_id("Mixer")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
-            let inner = ui.max_rect().size();
-            self.mixer_ui(ui);
-            inner
-        });
+        let shown = if self.detached[3] {
+            self.detached_window(ctx, 3, "Mixer", [900.0, low_h], &mut open, Win::Mixer, |a, ui| {
+                a.mixer_ui(ui);
+            });
+            None
+        } else {
+    egui::Window::new("Mixer").id(self.win_id("Mixer")).open(&mut open).frame(frame).default_pos(pos).default_size(size).show(ctx, |ui| {
+                let inner = ui.max_rect().size();
+                self.mixer_ui(ui);
+                inner
+                    })
+        };
         if let Some(r) = &shown {
             self.win_now[12..16].copy_from_slice(&[r.response.rect.left(), r.response.rect.top(), r.inner.map_or(400.0, |s| s.x), r.inner.map_or(low_h, |s| s.y)]);
         }

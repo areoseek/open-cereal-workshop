@@ -1311,6 +1311,8 @@ impl App {
                 ui.checkbox(&mut self.piano.rows, f("Row highlights              Alt+B"));
                 ui.checkbox(&mut self.piano.wave, f("Background waveform         Alt+N"));
                 ui.checkbox(&mut self.piano.names, f("Note names                  M"));
+                ui.separator();
+                ui.checkbox(&mut self.detached[2], f("Detached")).hint("The window leaves the main one, to sit on another screen");
             });
             ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
             ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));

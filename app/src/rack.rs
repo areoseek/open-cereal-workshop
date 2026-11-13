@@ -192,6 +192,7 @@ impl App {
                         }
                     });
                     ui.checkbox(&mut self.rack.hide_selectors, RichText::new("Hide the selectors          Alt+M").monospace().size(11.0));
+                    ui.checkbox(&mut self.detached[1], RichText::new("Detached").monospace().size(11.0)).hint("The window leaves the main one, to sit on another screen");
                 })
                 .response
                 .hint("Channel options");

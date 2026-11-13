@@ -2236,6 +2236,8 @@ impl App {
                 ui.checkbox(&mut self.grid_win, f("Grid colours...             Ctrl+Alt+G"));
                 ui.checkbox(&mut self.playlist.picker, f("Picker panel                Alt+P"));
                 ui.checkbox(&mut self.playlist.stretch, f("Stretch mode                Shift+M"));
+                ui.separator();
+                ui.checkbox(&mut self.detached[0], f("Detached")).hint("The window leaves the main one, to sit on another screen");
             });
             ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
             ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
