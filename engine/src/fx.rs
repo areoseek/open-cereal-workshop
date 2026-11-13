@@ -2792,7 +2792,12 @@ impl Unit {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
         match u.fx.kind {
-            Kind::Delay | Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
+            Kind::Delay => {
+                u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8];
+                u.lines = vec![vec![0.0; (sr * 0.5) as usize + 8]];
+                u.lpos = vec![0];
+            }
+            Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
             Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Spread => {
@@ -3230,17 +3235,21 @@ impl Unit {
                 let iv = knob_amp(p[1] / 128.0);
                 let dry = knob_amp(p[2] / 128.0);
                 let fb = (p[3] / 128.0).clamp(0.0, 1.0);
-                let off = (0.5 * sr * (1000f32.powf(p[5].abs() / 512.0) - 1.0) / 999.0).round() as usize;
-                let time = ((p[4] / 48.0 * cx.step).round() as usize).clamp(1, n - 2 - off.min(n / 2));
-                let ol = (time + if p[5] < 0.0 { off } else { 0 }).min(n - 1);
-                let or = (time + if p[5] > 0.0 { off } else { 0 }).min(n - 1);
+                let m = self.lines[0].len();
+                let off = ((0.5 * sr * (1001f32.powf(p[5].abs() / 512.0) - 1.0) / 1000.0).round() as usize).min(m - 1);
+                let time = ((p[4] / 48.0 * cx.step).round() as usize).clamp(1, n - 2);
+                let side = if p[5] < 0.0 { 0 } else { 1 };
                 let mode = p[6] as i32;
                 let a = ((21f32.powf((p[7] / 128.0).clamp(0.0, 1.0)) - 1.0) / 20.0).clamp(0.0, 1.0);
                 for f in io.iter_mut() {
-                    let x = [f[0] * il * iv, f[1] * ir * iv];
+                    let mut x = [f[0] * il * iv, f[1] * ir * iv];
+                    // the stereo offset holds one side's input back before it enters the line
+                    let lp = self.lpos[0];
+                    self.lines[0][lp] = x[side];
+                    x[side] = self.lines[0][(lp + m - off) % m];
+                    self.lpos[0] = (lp + 1) % m;
                     let back = self.buf[(self.pos + n - time) % n];
-                    let l = self.buf[(self.pos + n - ol) % n][0];
-                    let r = self.buf[(self.pos + n - or) % n][1];
+                    let [l, r] = back;
                     // ping pong: each side feeds the other
                     let into = if mode == 2 { [x[1] + back[1] * fb, x[0] + back[0] * fb] } else { [x[0] + back[0] * fb, x[1] + back[1] * fb] };
                     z[0] += a * (into[0] - z[0]);
