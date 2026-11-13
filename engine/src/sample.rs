@@ -138,6 +138,10 @@ impl Sample {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // a drum patch kept as text is turned into its wave here
+        if let Some(wave) = crate::dsfile::render(&bytes) {
+            return Ok(Self { name, ..Self::from_mono("", 44_100, &wave) });
+        }
         // a packed wave says how many frames it really holds; the packed stream rounds that up
         let mut true_len = None;
         let (bytes, ext) = match ogg_inside_wav(&bytes) {

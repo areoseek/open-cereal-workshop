@@ -48,6 +48,7 @@ pub mod convset;
 #[cfg(test)]
 mod probe;
 pub mod drumbank;
+pub mod dsfile;
 pub mod grain;
 pub mod dash;
 pub mod travel;
