@@ -580,7 +580,7 @@ impl App {
 
     /// The built-in effects a slot can take, by title.
     pub(crate) fn effect_defs() -> Vec<&'static cereal_engine::fx::Def> {
-        let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
+        let mut defs: Vec<&cereal_engine::fx::Def> = cereal_engine::fx::DEFS.iter().filter(|d| !d.ident.starts_with('(')).filter(|d| d.kind != cereal_engine::fx::Kind::Thru || ["Tuner", "Wave Candy", "Edison", "Fruity dB Meter", "Fruity Spectroman", "Fruity Big Clock"].contains(&d.ident)).collect();
         defs.sort_by_key(|d| d.title);
         defs
     }

@@ -48,6 +48,7 @@ pub enum Kind {
     OldEq,
     OldReverb,
     OldFlanger,
+    Stack,
     Plush,
     Pad,
     Tuner,
@@ -287,9 +288,18 @@ pub static DEFS: &[Def] = &[
         ],
     },
     Def {
-        kind: Kind::Flanger,
+        kind: Kind::Stack,
         ident: "Fruity Flangus",
         title: "Flanger",
+        size: 32,
+        fixed: &[],
+        params: &[p("Order", 0, 1, 16, 4), p("Depth", 4, 0, 1024, 512), p("Speed", 8, 0, 1024, 768), p("Delay", 12, 0, 1024, 8), p("Spread", 16, 0, 128, 128), p("Cross", 20, -128, 128, -32), p("Dry", 24, -128, 128, 96), p("Wet", 28, -128, 128, 96)],
+    },
+    // the processor the classic flanger runs on; no file names it
+    Def {
+        kind: Kind::Flanger,
+        ident: "(feedback flanger)",
+        title: "Feedback flanger",
         size: 32,
         fixed: &[],
         params: &[p("Delay", 0, 1, 1024, 4), p("Depth", 4, 0, 1024, 512), p("Rate", 8, 0, 1024, 768), p("Phase", 12, 0, 360, 8), p("Damp", 16, 0, 128, 128), p("Feedback", 20, -128, 128, -32), p("Dry", 24, -128, 128, 128), p("Wet", 28, -128, 128, 96)],
@@ -2858,7 +2868,7 @@ impl Unit {
                 u.lpos = vec![0];
             }
             Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
-            Kind::Flanger | Kind::Chorus => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            Kind::Flanger | Kind::Chorus | Kind::Stack => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Spread => {
                 for ms in [7.3f32, 11.9, 17.1] {
@@ -2974,7 +2984,7 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + 4096
             }
-            Kind::Flanger | Kind::Chorus | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
+            Kind::Flanger | Kind::Chorus | Kind::Stack | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
             Kind::EchoBank => {
                 // the longest ring among the banks that are switched on
                 let mut most = 0usize;
@@ -5713,6 +5723,54 @@ impl Unit {
                     *f = [f[0] * dry + out[0] * wet, f[1] * dry + out[1] * wet];
                 }
             }
+            Kind::Stack => {
+                // a stack of plain flangers per side, no feedback: each sweeps its own delay at its own pace.
+                // The ranges are read off one render at the plain settings (delays of 0.5 to 7 ms moving at a
+                // third of a cycle a second, each flanger about 0.3 loud); the laws of the knobs are not measured
+                let n = self.buf.len();
+                let order = (p[0].round() as usize).clamp(1, 16);
+                let span = p[1] / 1024.0 * 0.012 * sr;
+                let hz = 0.01 * 100f32.powf(p[2] / 1024.0);
+                let base = (p[3] / 1024.0 * 0.064 * sr).max(1.0);
+                let spread = (p[4] / 128.0).clamp(0.0, 1.0);
+                let cross = p[5] / 128.0;
+                let (dry, wet) = (p[6] / 192.0, p[7] / 128.0 * 0.78 / (order as f32).sqrt());
+                // three steady numbers between 0 and 1 for each flanger
+                let pick = |i: usize, k: u32| -> f32 {
+                    let mut h = (i as u32 + 1).wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+                    h ^= h >> 15;
+                    h = h.wrapping_mul(0x2C1B_3C6D);
+                    h ^= h >> 12;
+                    (h & 0xFFFF) as f32 / 65536.0
+                };
+                if z[63] == 0.0 {
+                    z[63] = 1.0;
+                    for i in 0..32 {
+                        z[i] = pick(i, 3);
+                    }
+                }
+                let top = n as f32 * 0.9;
+                for f in io.iter_mut() {
+                    self.buf[self.pos] = *f;
+                    let mut out = [0.0f32; 2];
+                    for c in 0..2 {
+                        for v in 0..order {
+                            let i = v * 2 + c;
+                            z[i] += hz * (1.0 + spread * (pick(i, 1) - 0.5)) / sr;
+                            if z[i] >= 1.0 {
+                                z[i] -= 1.0;
+                            }
+                            let d = (base + span * (1.0 - spread * 0.6 * pick(i, 2)) * (0.5 - 0.5 * (z[i] * TAU).cos())).min(top);
+                            let at = self.pos as f32 + n as f32 - d;
+                            let k = at as usize;
+                            let fr = at - k as f32;
+                            out[c] += self.buf[k % n][c] * (1.0 - fr) + self.buf[(k + 1) % n][c] * fr;
+                        }
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    *f = [f[0] * dry + (out[0] + out[1] * cross) * wet, f[1] * dry + (out[1] + out[0] * cross) * wet];
+                }
+            }
             Kind::Chorus => {
                 // three voices on one delay line, each swept by its own slow wave between the delay and the
                 // delay plus the depth; only one side of a gentle split feeds them
@@ -6011,7 +6069,7 @@ mod tests {
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
-            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
+            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Stack | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
