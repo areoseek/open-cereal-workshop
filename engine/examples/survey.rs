@@ -50,9 +50,9 @@ fn main() {
                         let st = f.channels.get(ci).map(|fc| fc.state.clone()).unwrap_or_default();
                         what = format!("wrapper: {}", inside(&st));
                     }
-                    if std::env::var_os("SURVEY_WHY").is_some() && !what.starts_with("wrapper") {
+                    if std::env::var_os("SURVEY_WHY").is_some() && (!what.starts_with("wrapper") || what.contains("old layout") || what == "wrapper: ") {
                         let st = f.channels.get(ci).map(|fc| fc.state.clone()).unwrap_or_default();
-                        let hex: String = st.iter().take(24).map(|b| format!("{b:02x}")).collect();
+                        let hex: String = st.iter().take(24).map(|b| format!("{b:02x}")).collect::<String>() + " " + &st.iter().take(400).map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect::<String>();
                         println!("    quiet: {} | {} | {} | {} bytes {} | sample {:?}", f.version, p.file_name().unwrap().to_string_lossy(), what, st.len(), hex, c.sample_path);
                     }
                     *quiet.entry(what).or_default() += 1;
@@ -81,6 +81,11 @@ fn inside(state: &[u8]) -> String {
             return String::from_utf8_lossy(data).trim_end_matches('\0').to_lowercase();
         }
         at += size;
+    }
+    if state.first() == Some(&4) {
+        if let Some(name) = state.get(20).and_then(|&n| state.get(21..21 + n as usize)) {
+            return String::from_utf8_lossy(name).to_lowercase();
+        }
     }
     format!("(old layout, head {})", state.first().copied().unwrap_or(0))
 }

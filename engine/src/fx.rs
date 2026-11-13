@@ -3007,7 +3007,8 @@ impl Unit {
                 let echoes = if fb < 0.01 { 1.0 } else { (0.001f32.ln() / fb.ln()).min(60.0) };
                 (time * (echoes + 1.0)) as usize
             }
-            Kind::Squeeze | Kind::Eq7 | Kind::DcBlock | Kind::Emph | Kind::Amp => (cx.sr * 0.25) as usize,
+            Kind::DcBlock => (cx.sr * 2.0) as usize,
+            Kind::Squeeze | Kind::Eq7 | Kind::Emph | Kind::Amp => (cx.sr * 0.25) as usize,
             Kind::StonePhaser => cx.sr as usize,
             Kind::Relooper => (cx.sr * 4.0) as usize,
             Kind::Pad => (cx.sr * 6.0) as usize,
@@ -4216,7 +4217,7 @@ impl Unit {
             }
             Kind::DcBlock => {
                 if p[0] >= 0.5 {
-                    let a = 1.0 - (-TAU * 5.0 / sr).exp();
+                    let a = 1.0 - (-TAU * 0.806 / sr).exp();
                     for f in io.iter_mut() {
                         for c in 0..2 {
                             z[c] += a * (f[c] - z[c]);
