@@ -2440,7 +2440,6 @@ fn successor(kind: Kind) -> Option<Kind> {
     match kind {
         Kind::OldEq => Some(Kind::Eq),
         Kind::OldReverb => Some(Kind::Reverb),
-        Kind::OldFlanger => Some(Kind::Flanger),
         Kind::Plush => Some(Kind::Reverb),
         _ => None,
     }
@@ -2473,17 +2472,6 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
             q[12] = p[9] / 165.0;
             q[13] = 0.0;
             q[14] = 0.0;
-        }
-        Kind::OldFlanger => {
-            let sign = |v: f32| if v >= 512.0 { -1.0 } else { 1.0 };
-            q[0] = 1.0 + p[0] / 1024.0 * 9.0;
-            q[1] = p[1] / 5000.0 * 1024.0;
-            q[2] = 1024.0 * ((p[2] / 1000.0).max(0.02) / 0.02).ln() / 250f32.ln();
-            q[3] = p[3];
-            q[4] = 128.0 * (1.0 - p[4] / 5000.0);
-            q[5] = p[6] * 1.28 * sign(p[7]);
-            q[6] = p[9] / 5000.0 * 128.0;
-            q[7] = p[10] / 5000.0 * 128.0 * sign(p[8]);
         }
         Kind::Plush => {
             // gains: 746 is unity, twenty units to the dB, the bottom of the travel is silence
@@ -2868,7 +2856,7 @@ impl Unit {
                 u.lpos = vec![0];
             }
             Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
-            Kind::Flanger | Kind::Chorus | Kind::Stack => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            Kind::Flanger | Kind::Chorus | Kind::Stack | Kind::OldFlanger => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Spread => {
                 for ms in [7.3f32, 11.9, 17.1] {
@@ -2984,7 +2972,7 @@ impl Unit {
                 let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                 (time * (n + 1.0)) as usize + 4096
             }
-            Kind::Flanger | Kind::Chorus | Kind::Stack | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
+            Kind::Flanger | Kind::Chorus | Kind::Stack | Kind::OldFlanger | Kind::Swarm | Kind::BucketChorus | Kind::BandSplit => (cx.sr * 0.5) as usize,
             Kind::EchoBank => {
                 // the longest ring among the banks that are switched on
                 let mut most = 0usize;
@@ -3514,7 +3502,7 @@ impl Unit {
                     *f = y;
                 }
             }
-            Kind::OldEq | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Thru | Kind::Hosted | Kind::Notes => {}
+            Kind::OldEq | Kind::OldReverb | Kind::Plush | Kind::Thru | Kind::Hosted | Kind::Notes => {}
             Kind::Conv => {
                 if let Some(st) = &mut self.conv {
                     // a normalized impulse lands this far under unit strength (measured on one render)
@@ -5732,6 +5720,46 @@ impl Unit {
                     *f = [f[0] * dry + out[0] * wet, f[1] * dry + out[1] * wet];
                 }
             }
+            Kind::OldFlanger => {
+                // one swept delay a side, each feeding back into itself, and the cross knob shares the two between
+                // the sides. Fitted to one render: the delay swings from one sample up over 2.3 ms at depth 0.4, a
+                // sine at 0.313 Hz for rate 0.4 that starts in the middle going up, the right side ahead by the
+                // phase knob; wet is the level of a side's own delay and cross the level of the other side's
+                let n = self.buf.len();
+                let base = 1.0 + p[0] / 1024.0 * 0.010 * sr;
+                let span = p[1] / 5000.0 * 255.0 * sr / 44100.0;
+                let inc = 1.958 * (p[2] / 5000.0).powi(2) / sr;
+                let lead = p[3] / 360.0;
+                let damp = 1.0 - (-TAU * (20000.0 * 0.02f32.powf(p[4] / 5000.0)).min(0.45 * sr) / sr).exp();
+                let shape = (p[5] / 1024.0).clamp(0.0, 1.0);
+                let g = (p[6] / 100.0).clamp(0.0, 0.98) * if p[7] >= 512.0 { -1.0 } else { 1.0 };
+                let turn = if p[8] >= 512.0 { -1.0 } else { 1.0 };
+                let (near, far) = (p[10] / 5000.0 * turn, p[11] / 5000.0 * turn);
+                let dry = p[9] / 5000.0;
+                let top = n as f32 - 4.0;
+                for f in io.iter_mut() {
+                    self.ph += inc;
+                    if self.ph >= 1.0 {
+                        self.ph -= 1.0;
+                    }
+                    let mut v = [0.0f32; 2];
+                    for c in 0..2 {
+                        let t = (self.ph + lead * c as f32).fract();
+                        let tri = 1.0 - 4.0 * ((t + 0.75).fract() - 0.5).abs();
+                        let l = 0.5 + 0.5 * ((t * TAU).sin() * (1.0 - shape) + tri * shape);
+                        let d = (base + span * l).min(top);
+                        let at = self.pos as f32 + n as f32 - d;
+                        let k = at as usize;
+                        let fr = at - k as f32;
+                        let y = self.buf[k % n][c] * (1.0 - fr) + self.buf[(k + 1) % n][c] * fr;
+                        z[c] += damp * (y - z[c]);
+                        v[c] = if p[4] > 0.0 { z[c] } else { y };
+                        self.buf[self.pos][c] = f[c] + g * v[c];
+                    }
+                    self.pos = (self.pos + 1) % n;
+                    *f = [f[0] * dry + v[0] * near + v[1] * far, f[1] * dry + v[1] * near + v[0] * far];
+                }
+            }
             Kind::Stack => {
                 // a stack of plain flangers per side, no feedback: each sweeps its own delay at its own pace.
                 // The ranges are read off one render at the plain settings (delays of 0.5 to 7 ms moving at a
@@ -6078,7 +6106,7 @@ mod tests {
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
-            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Stack | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::OldFlanger | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
+            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Stack | Kind::OldFlanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
