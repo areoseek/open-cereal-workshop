@@ -511,6 +511,17 @@ impl App {
                         ui.close_menu();
                     }
                 });
+                ui.horizontal(|ui| {
+                    if ui.button("Auto color group").hint("Every track of this group takes the colour of the group's first track").clicked() {
+                        act = Some(10);
+                    }
+                    if ui.button("Merge pattern clips").hint("The pattern clips on this track become one clip of a new pattern").clicked() {
+                        act = Some(12);
+                    }
+                    if ui.button("Consolidate this track").hint("Render the clips on this track into one audio clip").clicked() {
+                        act = Some(11);
+                    }
+                });
                 changed |= ui.checkbox(&mut t.lock_content, "Lock to content").on_hover_text("Drawing on this track puts down the clip that already lies on it").changed();
                 ui.separator();
                 ui.label(RichText::new("Performance settings").color(TEXT_DIM).small());
@@ -545,6 +556,20 @@ impl App {
                     let size = self.song.tracks[tr].size;
                     self.song.tracks.iter_mut().for_each(|t| t.size = size);
                 }
+                10 => {
+                    let head = (0..=tr).rev().find(|&i| !self.song.tracks[i].grouped).unwrap_or(0);
+                    let col = self.song.tracks[head].color;
+                    let mut i = head + 1;
+                    while i < n && self.song.tracks[i].grouped {
+                        self.song.tracks[i].color = col;
+                        i += 1;
+                    }
+                }
+                11 => {
+                    self.playlist.sel = self.song.clips.iter().enumerate().filter(|(_, c)| c.track as usize == tr).map(|(i, _)| i).collect();
+                    self.pl_consolidate(false);
+                }
+                12 => self.merge_pattern_clips(tr),
                 0 => {
                     if let Some(src) = first {
                         self.song.tracks[tr].name = match src {
@@ -615,6 +640,49 @@ impl App {
         if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.playlist.track_menu = None;
         }
+    }
+
+    /// The pattern clips of a track become one clip of a new pattern that holds what they played.
+    fn merge_pattern_clips(&mut self, tr: usize) {
+        let mine: Vec<usize> = self.song.clips.iter().enumerate().filter(|(_, c)| c.track as usize == tr && matches!(c.src, ClipSrc::Pattern(_))).map(|(i, _)| i).collect();
+        if mine.len() < 2 {
+            self.status = "This track needs two pattern clips or more to merge".into();
+            return;
+        }
+        let start = mine.iter().map(|&i| self.song.clips[i].pos).min().unwrap_or(0);
+        let end = mine.iter().map(|&i| self.song.clips[i].pos + self.song.clips[i].len).max().unwrap_or(start);
+        let mut pat = cereal_engine::song::Pattern { name: "Merged".into(), ..Default::default() };
+        for &i in &mine {
+            let c = &self.song.clips[i];
+            let ClipSrc::Pattern(pi) = c.src else { continue };
+            let Some(src) = self.song.patterns.get(pi) else { continue };
+            if c.muted {
+                continue;
+            }
+            let (from, to) = (c.offset, c.offset + c.len);
+            for nt in src.notes.iter().filter(|nt| nt.pos >= from && nt.pos < to) {
+                let mut nt = nt.clone();
+                // a note runs to the end of its clip at most
+                if nt.len > 0 {
+                    nt.len = nt.len.min(to - nt.pos).max(1);
+                }
+                nt.pos = nt.pos - from + c.pos - start;
+                pat.notes.push(nt);
+            }
+            for e in src.events.iter().filter(|e| e.tick >= from && e.tick < to) {
+                pat.events.push(cereal_engine::song::PatEvent { tick: e.tick - from + c.pos - start, ..*e });
+            }
+        }
+        pat.sort();
+        self.song.patterns.push(pat);
+        let pi = self.song.patterns.len() - 1;
+        let group = 0;
+        self.song.clips.retain(|c| !(c.track as usize == tr && matches!(c.src, ClipSrc::Pattern(_))));
+        self.song.clips.push(Clip { pos: start, len: end - start, track: tr as u16, src: ClipSrc::Pattern(pi), offset: 0, muted: false, group });
+        self.song.clips.sort_by_key(|c| c.pos);
+        self.playlist.sel.clear();
+        self.dirty = true;
+        self.status = format!("Merged {} clips into pattern {}", mine.len(), pi + 1);
     }
 
     /// The scene a place of the performance zone belongs to: from the marker at or before it to the next one.
