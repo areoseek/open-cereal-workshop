@@ -754,6 +754,8 @@ struct Overrides {
     slot: Vec<(Target, f32)>,
     /// Instrument settings being driven: channel, the setting's place in its table, and its 0..=1 value.
     gen: Vec<(usize, u16, f32)>,
+    /// Channels whose instrument settings have just moved: their sounding notes take the new settings.
+    gen_moved: Vec<usize>,
 }
 
 impl Overrides {
@@ -762,6 +764,7 @@ impl Overrides {
         self.any_chan = false;
         self.slot.clear();
         self.gen.clear();
+        self.gen_moved.clear();
         self.pitch.iter_mut().for_each(|c| *c = None);
         self.chan.iter_mut().for_each(|c| *c = (None, None));
         self.ins.iter_mut().for_each(|c| *c = (None, None));
@@ -824,10 +827,18 @@ impl Overrides {
                 Some(e) => e.1 = v,
                 None => self.slot.push((t, v)),
             },
-            Target::ChanParam(c, k) => match self.gen.iter_mut().find(|e| e.0 == c && e.1 == k) {
-                Some(e) => e.2 = v,
-                None => self.gen.push((c, k, v)),
-            },
+            Target::ChanParam(c, k) => {
+                let moved = match self.gen.iter_mut().find(|e| e.0 == c && e.1 == k) {
+                    Some(e) => std::mem::replace(&mut e.2, v) != v,
+                    None => {
+                        self.gen.push((c, k, v));
+                        true
+                    }
+                };
+                if moved && !self.gen_moved.contains(&c) {
+                    self.gen_moved.push(c);
+                }
+            }
             Target::Other { .. } => {}
         }
     }
@@ -3544,6 +3555,24 @@ impl Player {
                 (Some(b), _, _) => *slot = Some(ChanFx { unit: Some(fx::Unit::new(b.fx.clone(), self.sr)), tail: None, buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
             }
         }
+        // instrument settings a clip, an event or a cable has just moved reach the notes already sounding
+        for c in std::mem::take(&mut self.ov.gen_moved) {
+            let Some(g) = song.channels.get(c).and_then(|ch| ch.gen.as_ref()) else { continue };
+            // the plucked string's notes carry settings of their own
+            if g.kind == crate::synth::Kind::String || !self.voices.iter().any(|v| v.active && v.chan as usize == c && v.feed == 0 && v.tone.is_some()) {
+                continue;
+            }
+            let mut g = g.clone();
+            for e in self.ov.gen.iter().filter(|e| e.0 == c) {
+                g.set_travel(e.1 as usize, e.2);
+            }
+            let tone = g.tone();
+            for v in self.voices.iter_mut().filter(|v| v.active && v.chan as usize == c && v.feed == 0 && !v.preview) {
+                if v.tone.is_some() {
+                    v.tone = Some(tone.clone());
+                }
+            }
+        }
         let mut live = 0;
         let follow = self.ov.any_chan;
         let main = song.main_pitch as f32 / 1200.0;
@@ -5481,6 +5510,25 @@ mod tests {
         s.truncated = false;
         let buf = crate::render_song(&s, 48_000.0, true, 0, 0.5);
         assert!(loud(&buf, 0.0, 1.4) < 1e-6);
+    }
+
+    #[test]
+    fn an_instrument_setting_moved_by_an_event_reaches_the_sounding_note() {
+        let mut s = tone_song(1.0);
+        s.channels[0].sample = None;
+        s.channels[0].kind = ChannelKind::Plugin;
+        s.channels[0].gen = Some(crate::synth::Gen::new(crate::synth::Kind::Osc3));
+        s.patterns[0].toggle_step(0, 0);
+        s.patterns[0].notes[0].len = 384;
+        // one beat in, the first oscillator's pan goes hard to one side
+        let (param, dest) = s.event_address(crate::song::Target::ChanParam(0, 0));
+        s.patterns[0].events.push(crate::song::PatEvent { tick: 96, param, dest, raw: 64 });
+        let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
+        let side = |from: f32, to: f32, k: usize| buf[(from * 48_000.0) as usize * 2..(to * 48_000.0) as usize * 2].chunks(2).fold(0.0f32, |m, f| m.max(f[k].abs()));
+        let before = side(0.1, 0.4, 0) / side(0.1, 0.4, 1).max(1e-9);
+        let after = side(0.6, 0.9, 0) / side(0.6, 0.9, 1).max(1e-9);
+        assert!((before - 1.0).abs() < 0.2, "level at first: {before}");
+        assert!(!(0.5..2.0).contains(&after), "one side falls away under the held note: {after}");
     }
 
     #[test]

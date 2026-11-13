@@ -1469,6 +1469,44 @@ impl ToneState {
 mod tests {
     use super::*;
 
+    /// A setting moved while a note sounds: the note goes on with the new settings and stays sound.
+    #[test]
+    fn settings_can_move_under_a_sounding_note() {
+        let mut bad = vec![];
+        for d in DEFS {
+            let r = std::panic::catch_unwind(|| {
+                let mut g = Gen::new(d.kind);
+                let tone = g.tone();
+                let mut st = ToneState::start(&tone, 12345);
+                st.note(&tone, 44100.0, 60, 0.8, 261.6 / 44100.0);
+                for _ in 0..600 {
+                    st.frame(&tone, 261.6 / 44100.0);
+                }
+                let mut seed = 99u32;
+                for k in 0..d.params.len() {
+                    for round in 0..3 {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let v = match round {
+                            0 => 0.0,
+                            1 => 1.0,
+                            _ => (seed >> 8) as f32 / (1u32 << 24) as f32,
+                        };
+                        g.set_travel(k, v);
+                        let t = g.tone();
+                        for _ in 0..200 {
+                            let f = st.frame(&t, 261.6 / 44100.0);
+                            assert!(f[0].is_finite() && f[1].is_finite(), "setting {k} at {v}");
+                        }
+                    }
+                }
+            });
+            if r.is_err() {
+                bad.push(d.ident);
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
     #[test]
     fn block_round_trips() {
         let g = Gen::new(Kind::Osc3);
