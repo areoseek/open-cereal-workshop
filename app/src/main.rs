@@ -2662,7 +2662,7 @@ impl App {
         let mut n = 0;
         for i in (0..self.song.patterns.len()).rev() {
             let p = &self.song.patterns[i];
-            let placed = self.song.clips.iter().any(|c| c.src == cereal_engine::song::ClipSrc::Pattern(i));
+            let placed = self.song.all_clips().any(|c| c.src == cereal_engine::song::ClipSrc::Pattern(i));
             if i != cur && p.notes.is_empty() && p.events.is_empty() && p.name.is_empty() && !placed && self.song.patterns.len() > 1 {
                 self.song.remove_pattern(i);
                 if i < cur_now {
@@ -2722,7 +2722,7 @@ impl App {
     /// The first empty pattern after the current one.
     fn next_empty_after(&mut self) {
         let from = self.handle.transport.pattern() + 1;
-        let used: std::collections::HashSet<usize> = self.song.clips.iter().filter_map(|c| if let cereal_engine::song::ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
+        let used: std::collections::HashSet<usize> = self.song.all_clips().filter_map(|c| if let cereal_engine::song::ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
         let p = (from..self.song.patterns.len()).find(|i| self.song.patterns[*i].notes.is_empty() && self.song.patterns[*i].events.is_empty() && !used.contains(i)).unwrap_or(self.song.patterns.len().max(from));
         self.song.ensure_pattern(p);
         self.handle.transport.set_pattern(p);
@@ -3555,7 +3555,7 @@ impl App {
                         if ui.button("Purge unused audio clips").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
                             let mut n = 0;
                             for ci in (0..self.song.channels.len()).rev() {
-                                let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.clips.iter().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(ch) if ch == ci));
+                                let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.all_clips().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(ch) if ch == ci));
                                 if unused && self.song.channels.len() > 1 {
                                     self.delete_channel(ci);
                                     n += 1;

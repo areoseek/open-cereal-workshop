@@ -1857,6 +1857,47 @@ fn patch_tracks(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
 
 /// Where each effect slot of the insert opened at `open` sits: its index, its events, and whether an
 /// index event closes it (old files have none and keep the slot number in the plugin head).
+/// A project with more than one arrangement: each arrangement's stretch of the file is taken out, brought up
+/// to date on its own by the same three steps a lone playlist gets, and the stretches are put back in the
+/// song's order with the one on show named after them. Says false (nothing touched) for a lone playlist.
+fn patch_arrangements(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp, unicode: bool, with_sig: bool) -> bool {
+    if song.arrangements.len() < 2 && base.arrangements.len() < 2 && song.cur_arr == base.cur_arr {
+        return false;
+    }
+    let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::NEW_ARRANGEMENT).map(|(i, _)| i).collect();
+    let Some(&first) = starts.first() else { return false };
+    let Some(end) = ev.iter().skip(first).position(|e| e.id == id::CURRENT_ARRANGEMENT).map(|i| i + first) else { return false };
+    if starts.iter().any(|&i| i > end) {
+        return false;
+    }
+    let old: Vec<Vec<Event>> = starts.iter().enumerate().map(|(k, &i)| ev[i..starts.get(k + 1).copied().unwrap_or(end)].to_vec()).collect();
+    let (mut sv, mut bv) = (song.clone(), base.clone());
+    let mut made: Vec<Event> = vec![];
+    for (k, a) in song.arrangements.iter().enumerate() {
+        let from = a.src.filter(|j| *j < old.len() && *j < base.arrangements.len());
+        let mut sec = old[from.unwrap_or(0)].clone();
+        let (clips, tracks, markers) = song.arrangement(k);
+        (sv.clips, sv.tracks, sv.markers) = (clips.to_vec(), tracks.to_vec(), markers.to_vec());
+        let (clips, tracks, markers) = base.arrangement(from.unwrap_or(0));
+        (bv.clips, bv.tracks, bv.markers) = (clips.to_vec(), tracks.to_vec(), markers.to_vec());
+        patch_tracks(&mut sec, &sv, &bv, unicode);
+        patch_playlist(&mut sec, &sv, &bv, flp);
+        patch_markers(&mut sec, &sv, &bv, unicode, with_sig);
+        sec[0] = Event::word(id::NEW_ARRANGEMENT, k as u16);
+        if from.is_none_or(|j| base.arrangements[j].name != a.name) {
+            let name = text_event(id::ARRANGEMENT_NAME, &a.name, unicode);
+            match sec.iter().position(|e| e.id == id::ARRANGEMENT_NAME) {
+                Some(i) => sec[i] = name,
+                None => sec.insert(1, name),
+            }
+        }
+        made.extend(sec);
+    }
+    ev[end] = Event::word(id::CURRENT_ARRANGEMENT, song.cur_arr.min(song.arrangements.len().saturating_sub(1)) as u16);
+    ev.splice(first..end, made);
+    true
+}
+
 fn slot_spans(ev: &[Event], open: usize) -> Vec<(u16, std::ops::Range<usize>, bool)> {
     let mut out: Vec<(u16, std::ops::Range<usize>, bool)> = vec![];
     let (mut begin, mut plugin, mut hint) = (open + 1, false, None::<u16>);
@@ -2172,6 +2213,8 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     if song.channels.len() > 4000 {
         return Err("too many channels".into());
     }
+    // a file from before arrangements existed has no place for a second one: the project is then written afresh
+    let orig = orig.filter(|o| song.arrangements.len() < 2 || o.file.events.iter().any(|e| e.id == id::CURRENT_ARRANGEMENT));
     let (made, song_owned);
     let (song, orig) = match orig {
         Some(o) => (song, o),
@@ -2183,6 +2226,7 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
             for (i, c) in s.channels.iter_mut().enumerate() {
                 c.src = Some(i as u16);
             }
+            s.arrangements.iter_mut().enumerate().for_each(|(i, a)| a.src = (i == 0).then_some(0));
             song_owned = s;
             (&song_owned, &made)
         }
@@ -2202,9 +2246,11 @@ pub fn to_bytes(song: &Song, orig: Option<&Flp>) -> Result<Vec<u8>, String> {
     let word_insert = ev.iter().any(|e| e.id == id::CHAN_TARGET_INSERT_WORD);
 
     patch_mixer(&mut ev, song, &base, unicode, flp::mixer_base(ver));
-    patch_tracks(&mut ev, song, &base, unicode);
-    patch_playlist(&mut ev, song, &base, &flp);
-    patch_markers(&mut ev, song, &base, unicode, ver >= (20, 0, 0, 0));
+    if !patch_arrangements(&mut ev, song, &base, &flp, unicode, ver >= (20, 0, 0, 0)) {
+        patch_tracks(&mut ev, song, &base, unicode);
+        patch_playlist(&mut ev, song, &base, &flp);
+        patch_markers(&mut ev, song, &base, unicode, ver >= (20, 0, 0, 0));
+    }
     patch_patterns(&mut ev, song, &base, &flp, unicode);
     patch_channels(&mut ev, song, &base, unicode, word_insert);
     patch_groups(&mut ev, song, &base, unicode);
@@ -2232,6 +2278,7 @@ pub fn save(song: &mut Song, orig: Option<&Flp>) -> Result<(Vec<u8>, Flp), Strin
             s.src = Some((k as u16, s.index));
         }
     }
+    song.arrangements.iter_mut().enumerate().for_each(|(i, a)| a.src = Some(i));
     Ok((bytes, flp))
 }
 
@@ -2940,6 +2987,34 @@ mod tests {
             let bytes = std::fs::read(&p).unwrap();
             let (song, f) = reload(&bytes);
             assert_eq!(to_bytes(&song, Some(&f)).unwrap(), bytes, "untouched save differs: {}", p.display());
+
+            // every arrangement is kept: turning to another one, editing both and adding a third all come back
+            {
+                let key = |c: &[Clip]| {
+                    let mut v = c.iter().map(|c| (c.pos, c.track, c.len, c.offset)).collect::<Vec<_>>();
+                    v.sort();
+                    v
+                };
+                let mut s = song.clone();
+                let n = s.arrangements.len();
+                s.clips.retain(|c| c.pos >= s.ppq * 4);
+                s.add_arrangement("Third", true);
+                s.clips.truncate(3);
+                s.markers.push(crate::song::TimeMarker { pos: 96, name: "here".into(), kind: 0, sig: (4, 4) });
+                s.set_arrangement(0);
+                if n > 1 {
+                    s.clips.truncate(5);
+                }
+                let (back, _) = reload(&to_bytes(&s, Some(&f)).unwrap());
+                assert_eq!((back.arrangements.len(), back.cur_arr), (n + 1, 0), "arrangements: {}", p.display());
+                assert_eq!(back.arrangements[n].name, "Third");
+                for k in 0..=n {
+                    assert_eq!(key(back.arrangement(k).0), key(s.arrangement(k).0), "arrangement {k} clips: {}", p.display());
+                    assert_eq!(back.arrangement(k).1.len(), s.arrangement(k).1.len(), "arrangement {k} tracks: {}", p.display());
+                }
+                assert_eq!(back.arrangement(n).2.iter().filter(|m| m.name == "here").count(), 1, "marker: {}", p.display());
+                assert_eq!(back.arrangement(0).2.len(), s.arrangement(0).2.len(), "markers moved: {}", p.display());
+            }
 
             // a new timebase is written out and every time comes back on the new grid
             {

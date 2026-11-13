@@ -856,6 +856,18 @@ pub struct TimeMarker {
     pub sig: (u8, u8),
 }
 
+/// One of the project's playlists. The one on show lives in the song's own `clips`, `tracks` and `markers`;
+/// its entry here keeps only the name until another arrangement is turned to.
+#[derive(Debug, Clone, Default)]
+pub struct Arrangement {
+    pub name: String,
+    pub clips: Vec<Clip>,
+    pub tracks: Vec<Track>,
+    pub markers: Vec<TimeMarker>,
+    /// Which arrangement of the opened file this one is, counted in file order.
+    pub src: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Song {
     pub title: String,
@@ -888,6 +900,9 @@ pub struct Song {
     pub clips: Vec<Clip>,
     /// Kept sorted by position.
     pub markers: Vec<TimeMarker>,
+    /// Every playlist of the project, and which one is on show.
+    pub arrangements: Vec<Arrangement>,
+    pub cur_arr: usize,
     /// inserts[0] is the master.
     pub inserts: Vec<Insert>,
     /// Order in which the mixer processes inserts so every sender runs before what it feeds.
@@ -1011,6 +1026,8 @@ impl Song {
             mixer_base: 448,
             mix_order: vec![],
             auto_plan: vec![],
+            arrangements: vec![Arrangement { name: "Arrangement".into(), src: None, ..Default::default() }],
+            cur_arr: 0,
             ctl_links: vec![],
             midi_links: vec![],
             link_maps: vec![],
@@ -1087,6 +1104,64 @@ impl Song {
         }
         out
     }
+    /// Turn to another arrangement: the playlist on show is put away and the chosen one takes its place.
+    pub fn set_arrangement(&mut self, to: usize) {
+        if to == self.cur_arr || to >= self.arrangements.len() {
+            return;
+        }
+        let was = self.cur_arr.min(self.arrangements.len() - 1);
+        let a = &mut self.arrangements[was];
+        a.clips = std::mem::take(&mut self.clips);
+        a.tracks = std::mem::take(&mut self.tracks);
+        a.markers = std::mem::take(&mut self.markers);
+        let b = &mut self.arrangements[to];
+        self.clips = std::mem::take(&mut b.clips);
+        self.tracks = std::mem::take(&mut b.tracks);
+        self.markers = std::mem::take(&mut b.markers);
+        self.cur_arr = to;
+        self.prepare();
+    }
+
+    /// A new arrangement after the others: empty, or a copy of the one on show. It becomes the one on show.
+    pub fn add_arrangement(&mut self, name: &str, copy: bool) {
+        let a = Arrangement {
+            name: name.to_string(),
+            clips: if copy { self.clips.clone() } else { vec![] },
+            tracks: if copy { self.tracks.clone() } else { vec![Track::default(); self.tracks.len().max(DEFAULT_TRACKS)] },
+            markers: if copy { self.markers.clone() } else { vec![] },
+            src: None,
+        };
+        self.arrangements.push(a);
+        self.set_arrangement(self.arrangements.len() - 1);
+    }
+
+    /// Take an arrangement out of the project; the last one stays.
+    pub fn remove_arrangement(&mut self, i: usize) {
+        if self.arrangements.len() < 2 || i >= self.arrangements.len() {
+            return;
+        }
+        if i == self.cur_arr {
+            self.set_arrangement(if i == 0 { 1 } else { i - 1 });
+        }
+        self.arrangements.remove(i);
+        if self.cur_arr > i {
+            self.cur_arr -= 1;
+        }
+    }
+
+    /// The clips of every arrangement, the one on show first.
+    pub fn all_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.clips.iter().chain(self.arrangements.iter().flat_map(|a| a.clips.iter()))
+    }
+
+    /// The clips, tracks and markers of arrangement `i`, wherever they are kept just now.
+    pub fn arrangement(&self, i: usize) -> (&[Clip], &[Track], &[TimeMarker]) {
+        match self.arrangements.get(i) {
+            Some(a) if i != self.cur_arr => (&a.clips, &a.tracks, &a.markers),
+            _ => (&self.clips, &self.tracks, &self.markers),
+        }
+    }
+
     /// Change the timebase: every position and length in the project is counted afresh in ticks of the new
     /// resolution, so the song sounds as before on a finer or coarser grid.
     pub fn set_ppq(&mut self, ppq: u32) {
@@ -1105,13 +1180,13 @@ impl Song {
             p.events.iter_mut().for_each(|e| e.tick = m(e.tick));
             p.markers.iter_mut().for_each(|k| k.pos = m(k.pos));
         }
-        for c in &mut self.clips {
+        for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             let end = m(c.pos + c.len);
             c.pos = m(c.pos);
             c.len = end.saturating_sub(c.pos).max(1);
             c.offset = len(c.offset);
         }
-        self.markers.iter_mut().for_each(|k| k.pos = m(k.pos));
+        self.markers.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.markers.iter_mut())).for_each(|k| k.pos = m(k.pos));
         for ch in &mut self.channels {
             if let Some(a) = ch.auto.as_mut() {
                 Arc::make_mut(a).points.iter_mut().for_each(|p| p.tick = p.tick * new as f64 / old as f64);
@@ -1341,7 +1416,8 @@ impl Song {
             self.patterns.push(Pattern::default());
         }
         self.clips.retain(|c| c.src != ClipSrc::Pattern(pi));
-        for c in &mut self.clips {
+        self.arrangements.iter_mut().for_each(|a| a.clips.retain(|c| c.src != ClipSrc::Pattern(pi)));
+        for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             if let ClipSrc::Pattern(k) = &mut c.src {
                 if *k > pi {
                     *k -= 1;
@@ -1355,7 +1431,7 @@ impl Song {
         let to = if up { pi.checked_sub(1) } else { Some(pi + 1) };
         let Some(to) = to.filter(|t| pi < self.patterns.len() && *t < self.patterns.len()) else { return pi };
         self.patterns.swap(pi, to);
-        for c in &mut self.clips {
+        for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             if let ClipSrc::Pattern(k) = &mut c.src {
                 if *k == pi {
                     *k = to;
@@ -1415,7 +1491,7 @@ impl Song {
 
     /// The first pattern with nothing in it and nothing placed, adding one if there is none.
     pub fn next_empty_pattern(&mut self) -> usize {
-        let used: std::collections::HashSet<usize> = self.clips.iter().filter_map(|c| if let ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
+        let used: std::collections::HashSet<usize> = self.all_clips().filter_map(|c| if let ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
         match (0..self.patterns.len()).find(|i| self.patterns[*i].notes.is_empty() && !used.contains(i)) {
             Some(i) => i,
             None => {
@@ -1513,7 +1589,7 @@ impl Song {
             }
             p.sort();
         }
-        for c in &mut self.clips {
+        for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             match &mut c.src {
                 ClipSrc::Audio(k) | ClipSrc::Automation(k) => *k = f(*k),
                 _ => {}
@@ -1567,7 +1643,8 @@ impl Song {
             }
         }
         self.clips.retain(|c| !matches!(c.src, ClipSrc::Audio(k) | ClipSrc::Automation(k) if k == ci));
-        for c in &mut self.clips {
+        self.arrangements.iter_mut().for_each(|a| a.clips.retain(|c| !matches!(c.src, ClipSrc::Audio(k) | ClipSrc::Automation(k) if k == ci)));
+        for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             match &mut c.src {
                 ClipSrc::Audio(k) | ClipSrc::Automation(k) if *k > ci => *k -= 1,
                 _ => {}
@@ -1864,9 +1941,10 @@ impl Song {
             out.sort();
         }
 
+        let read_arr = |a: &flp::FlpArrangement| {
         let mut tracks = vec![Track::default(); DEFAULT_TRACKS];
         let mut clips = vec![];
-        if let Some(a) = f.arrangements.first() {
+        {
             if !a.tracks.is_empty() {
                 tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped, lock_content: t.content_locked }).collect();
             }
@@ -1889,6 +1967,24 @@ impl Song {
                 clips.push(Clip { pos: it.position, len: it.length, track: it.track, src, offset, muted: it.muted, group: it.group });
             }
         }
+        let mut markers: Vec<TimeMarker> = a.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect();
+        markers.sort_by_key(|m| m.pos);
+        Arrangement { name: a.name.trim_end_matches('\0').to_string(), clips, tracks, markers, src: None }
+        };
+        let mut arrangements: Vec<Arrangement> = f.arrangements.iter().map(read_arr).collect();
+        if arrangements.is_empty() {
+            arrangements.push(Arrangement { name: "Arrangement".into(), tracks: vec![Track::default(); DEFAULT_TRACKS], ..Default::default() });
+        }
+        arrangements.iter_mut().enumerate().for_each(|(i, a)| a.src = Some(i));
+        let want = f.file.events.iter().find_map(|e| match (e.id, &e.value) {
+            (flp::id::CURRENT_ARRANGEMENT, flp::Value::Word(v)) => Some(*v),
+            _ => None,
+        });
+        let cur_arr = want.and_then(|w| f.arrangements.iter().position(|a| a.index == w)).unwrap_or(0);
+        let (tracks, clips, markers) = {
+            let a = &mut arrangements[cur_arr];
+            (std::mem::take(&mut a.tracks), std::mem::take(&mut a.clips), std::mem::take(&mut a.markers))
+        };
 
         let inserts: Vec<Insert> = if f.inserts.is_empty() {
             Song::new().inserts
@@ -1962,14 +2058,12 @@ impl Song {
             groups: f.groups.clone(),
             cur_group: usize::try_from(f.cur_group).ok().filter(|g| *g < f.groups.len()),
             clips,
-            markers: {
-                let mut m: Vec<TimeMarker> = f.arrangements.first().map(|a| a.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect()).unwrap_or_default();
-                m.sort_by_key(|m| m.pos);
-                m
-            },
+            markers,
             inserts,
             mix_order: vec![],
             auto_plan: vec![],
+            arrangements,
+            cur_arr,
             mixer_base: base,
             midi_links: f
                 .file

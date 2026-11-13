@@ -2296,7 +2296,52 @@ impl App {
                 Some((ClipSrc::Audio(c), _, _)) | Some((ClipSrc::Automation(c), _, _)) => self.song.channels.get(c).map(|c| c.name.clone()).unwrap_or_default(),
                 None => self.song.pattern_name(pat),
             };
-            ui.label(RichText::new(format!("Arrangement  -  {brush}")).color(TEXT));
+            let cur = self.song.cur_arr.min(self.song.arrangements.len().saturating_sub(1));
+            let name = self.song.arrangements.get(cur).map(|a| a.name.clone()).unwrap_or_else(|| "Arrangement".into());
+            let mut turn = None;
+            ui.menu_button(RichText::new(name).color(TEXT), |ui| {
+                for (i, a) in self.song.arrangements.iter().enumerate() {
+                    if ui.radio(i == cur, a.name.as_str()).clicked() {
+                        turn = Some(i);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                let n = self.song.arrangements.len();
+                if ui.button("Add one").clicked() {
+                    self.song.add_arrangement(&format!("Arrangement {}", n + 1), false);
+                    turn = Some(usize::MAX);
+                    ui.close_menu();
+                }
+                if ui.button("Clone").clicked() {
+                    let name = format!("{} #2", self.song.arrangements[cur].name);
+                    self.song.add_arrangement(&name, true);
+                    turn = Some(usize::MAX);
+                    ui.close_menu();
+                }
+                if ui.add_enabled(n > 1, egui::Button::new("Delete")).clicked() {
+                    self.song.remove_arrangement(cur);
+                    turn = Some(usize::MAX);
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    if let Some(a) = self.song.arrangements.get_mut(cur) {
+                        if ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(160.0)).changed() {
+                            self.dirty = true;
+                        }
+                    }
+                });
+            })
+            .response
+            .hint("Arrangement: each one is a playlist of its own over the same patterns and channels");
+            if let Some(i) = turn {
+                self.song.set_arrangement(i);
+                self.playlist.sel.clear();
+                self.dirty = true;
+            }
+            ui.label(RichText::new(format!(">  {brush}")).color(TEXT));
         });
     }
 }
