@@ -1916,6 +1916,58 @@ impl App {
         }
     }
 
+    /// PATTERNS > Render as audio clip: the current pattern is played into a sound file that becomes an audio
+    /// clip channel. With `replace` every clip of the pattern on the playlist gives way to the sound.
+    pub(crate) fn render_pattern(&mut self, replace: bool) {
+        let pat = self.handle.transport.pattern();
+        self.song.ensure_pattern(pat);
+        let len = self.song.pattern_length(pat).max(1);
+        let mut part = self.song.clone();
+        part.clips = vec![Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0 }];
+        part.markers.clear();
+        part.prepare();
+        let rate = 44_100u32;
+        let buf = cereal_engine::render_song(&part, rate as f32, true, 0, 2.0);
+        let dir = crate::record::folder(self.path.as_deref());
+        let name = self.song.pattern_name(pat).replace(['/', '\\', ':'], "_");
+        let made = std::fs::create_dir_all(&dir).and_then(|_| {
+            let mut n = 1;
+            let path = loop {
+                let p = if n == 1 { dir.join(format!("{name}.wav")) } else { dir.join(format!("{name} {n}.wav")) };
+                if !p.exists() {
+                    break p;
+                }
+                n += 1;
+            };
+            let f = std::fs::File::create(&path)?;
+            crate::wav::write(std::io::BufWriter::new(f), &buf, rate, 2, 24)?;
+            Ok(path)
+        });
+        match made {
+            Ok(path) => {
+                let before = self.song.channels.len();
+                let clips_before = self.song.clips.len();
+                self.add_audio_clip(&path, 0, None);
+                if self.song.channels.len() > before {
+                    let ci = self.song.channels.len() - 1;
+                    // the sound is wanted as a channel; where it lies is decided here
+                    self.song.clips.truncate(clips_before);
+                    if replace {
+                        for c in self.song.clips.iter_mut().filter(|c| c.src == ClipSrc::Pattern(pat)) {
+                            c.src = ClipSrc::Audio(ci);
+                        }
+                        self.song.clips.sort_by_key(|c| c.pos);
+                        self.playlist.sel.clear();
+                    }
+                    self.playlist.brush = None;
+                    self.status = format!("Rendered into {}", path.display());
+                }
+                self.dirty = true;
+            }
+            Err(e) => self.status = format!("Render failed: {e}"),
+        }
+    }
+
     pub(crate) fn pl_tool_names() -> Vec<&'static str> {
         TOOLS.iter().map(|t| t.2).collect()
     }
@@ -1958,7 +2010,7 @@ impl App {
                 }
                 Key::Enter if !repeat => self.playlist.time_sel = self.pl_clip_span(),
                 Key::B => self.pl_duplicate(),
-                Key::Insert => self.pl_space(true),
+                Key::Insert if !m.shift => self.pl_space(true),
                 Key::Delete => self.pl_space(false),
                 Key::ArrowLeft => self.pl_select_beside(false),
                 Key::ArrowRight => self.pl_select_beside(true),

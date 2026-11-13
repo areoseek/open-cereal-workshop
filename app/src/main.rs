@@ -2201,6 +2201,28 @@ impl App {
         self.dirty = true;
     }
 
+    /// The first empty pattern after the current one.
+    fn next_empty_after(&mut self) {
+        let from = self.handle.transport.pattern() + 1;
+        let used: std::collections::HashSet<usize> = self.song.clips.iter().filter_map(|c| if let cereal_engine::song::ClipSrc::Pattern(p) = c.src { Some(p) } else { None }).collect();
+        let p = (from..self.song.patterns.len()).find(|i| self.song.patterns[*i].notes.is_empty() && self.song.patterns[*i].events.is_empty() && !used.contains(i)).unwrap_or(self.song.patterns.len().max(from));
+        self.song.ensure_pattern(p);
+        self.handle.transport.set_pattern(p);
+        self.dirty = true;
+    }
+
+    /// An empty pattern at the current place; the ones from here on move down one.
+    fn insert_pattern(&mut self) {
+        let p = self.handle.transport.pattern();
+        self.song.ensure_pattern(p);
+        self.song.patterns.push(Default::default());
+        let mut at = self.song.patterns.len() - 1;
+        while at > p {
+            at = self.song.move_pattern(at, true);
+        }
+        self.dirty = true;
+    }
+
     fn clone_pattern(&mut self) {
         let p = self.song.clone_pattern(self.handle.transport.pattern());
         self.handle.transport.set_pattern(p);
@@ -2384,7 +2406,9 @@ impl App {
                         }
                     }
                     Key::R => self.export(),
+                    Key::F4 if modifiers.shift => self.next_empty_after(),
                     Key::F4 => self.new_pattern(),
+                    Key::Insert if modifiers.shift => self.insert_pattern(),
                     Key::ArrowUp | Key::ArrowDown if modifiers.shift && !matches!(self.focus, Win::Piano | Win::Playlist) => {
                         let p = self.handle.transport.pattern();
                         self.song.ensure_pattern(p);
@@ -2487,7 +2511,11 @@ impl App {
                 Key::F9 if !repeat => self.show_mixer = !self.show_mixer,
                 Key::F3 if !repeat => self.tool_menu = if self.tool_menu.is_some() { None } else { Some(egui::Pos2::ZERO) },
                 Key::F4 if !repeat => {
-                    self.new_pattern();
+                    if modifiers.shift {
+                        self.next_empty_after();
+                    } else {
+                        self.new_pattern();
+                    }
                     self.start_rename_pattern();
                 }
                 Key::F2 if !repeat => self.start_rename_pattern(),
@@ -2668,6 +2696,14 @@ impl App {
                         self.new_pattern();
                         ui.close_menu();
                     }
+                    if ui.button("Find next empty                Shift+F4").clicked() {
+                        self.next_empty_after();
+                        ui.close_menu();
+                    }
+                    if ui.button("Insert one                        Shift+Ctrl+Ins").hint("An empty pattern here; this one and the ones after it move down").clicked() {
+                        self.insert_pattern();
+                        ui.close_menu();
+                    }
                     if ui.button("Clone                               Ctrl+Shift+C").clicked() {
                         self.clone_pattern();
                         ui.close_menu();
@@ -2700,6 +2736,14 @@ impl App {
                         let made = self.song.split_pattern(p);
                         self.status = if made.is_empty() { "Only one channel plays in this pattern".into() } else { format!("Split into {} patterns", made.len() + 1) };
                         self.dirty |= !made.is_empty();
+                        ui.close_menu();
+                    }
+                    if ui.button("Render as audio clip").hint("The pattern is played into a sound file that becomes an audio clip channel").clicked() {
+                        self.render_pattern(false);
+                        ui.close_menu();
+                    }
+                    if ui.button("Render and replace").hint("As above, and every clip of the pattern on the playlist becomes the sound").clicked() {
+                        self.render_pattern(true);
                         ui.close_menu();
                     }
                     ui.separator();

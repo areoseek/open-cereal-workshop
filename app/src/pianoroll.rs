@@ -1091,7 +1091,7 @@ impl App {
                 Key::G => self.pr_glue(),
                 Key::ArrowUp => self.pr_transpose(12),
                 Key::ArrowDown => self.pr_transpose(-12),
-                Key::Insert => self.pr_space(true),
+                Key::Insert if !m.shift => self.pr_space(true),
                 Key::Delete => self.pr_space(false),
                 Key::ArrowLeft => self.pr_select_beside(false),
                 Key::ArrowRight => self.pr_select_beside(true),
