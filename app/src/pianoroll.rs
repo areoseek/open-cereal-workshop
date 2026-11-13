@@ -1782,7 +1782,9 @@ impl App {
         // ---- interaction
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
         if let Some(pp) = over {
-            let tool = self.piano.tool;
+            // the right Shift and right Alt keys turn a click into a slice or a mute, whichever tool is picked
+            let ralt = egui_winit::key_side::right_alt();
+            let tool = if egui_winit::key_side::right_shift() { Tool::Slice } else if ralt { Tool::Mute } else { self.piano.tool };
             if pressed && self.piano.drag.is_none() {
                 if lane_head.contains(pp) {
                     let at = LANES.iter().position(|l| l.0 == which).unwrap_or(0);
@@ -1877,6 +1879,7 @@ impl App {
                 }
             } else if sec_pressed && self.piano.drag.is_none() && grid.contains(pp) {
                 match tool {
+                    Tool::Mute if ralt => self.pr_quantise(),
                     Tool::Zoom => {
                         let off = pp.x - grid.left();
                         let old = self.piano.zoom;

@@ -166,3 +166,10 @@ author published as open source (the mda plug-ins, MIT licence). The Rust code i
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
+
+## egui-winit (window toolkit glue, `vendor/egui-winit`)
+
+A copy of egui-winit 0.31.1 by Emil Ernerfeldt and the egui contributors (MIT OR Apache-2.0) is kept in
+`vendor/egui-winit` with one addition of ours, listed in `vendor/egui-winit/OCW-CHANGES.md`: it tells the number
+pad from the top row and the right Shift, Ctrl and Alt keys from the left ones. Its licence text is in
+`vendor/egui-winit/LICENSE-MIT`.

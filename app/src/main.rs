@@ -2808,6 +2808,7 @@ impl App {
     fn keys(&mut self, ctx: &egui::Context) {
         self.do_wheel_move();
         let typing_text = ctx.wants_keyboard_input();
+        let pad = egui_winit::key_side::take_pad();
         let events = ctx.input(|i| i.events.clone());
         for e in events {
             // the copy, cut and paste keys arrive as their own events, never as key presses
@@ -2860,6 +2861,29 @@ impl App {
             }
             if typing_text {
                 continue;
+            }
+            if modifiers.is_none() && pad.contains(&key) {
+                // the number pad picks patterns and steps through the bars, whichever window has the keys and
+                // whether or not the typing keyboard is on
+                let mut taken = true;
+                match key {
+                    Key::Slash => self.jump_bar(-1),
+                    Key::Num0 => self.jump_bar(1),
+                    Key::Plus => self.step_pattern(1),
+                    Key::Minus => self.step_pattern(-1),
+                    k if DIGITS[1..].contains(&k) => {
+                        if !repeat {
+                            let p = DIGITS.iter().position(|d| *d == k).unwrap_or(1) - 1;
+                            self.song.ensure_pattern(p);
+                            self.handle.transport.set_pattern(p);
+                            self.dirty = true;
+                        }
+                    }
+                    _ => taken = false,
+                }
+                if taken {
+                    continue;
+                }
             }
             if self.typing_keys && modifiers.is_none() && self.handle.transport.performing() {
                 // while a performance runs the typing keyboard plays the clips of the zone

@@ -7,10 +7,10 @@ still to do.
 Keys go to the window that was clicked last (or reached with Tab); the bindings under "Everywhere" work whichever
 window that is, unless that window has its own use for the key.
 
-**Number pad.** The window toolkit hands us the number pad's digits, plus, minus and slash as the same keys as
-the ones on the main block, so the two cannot be told apart yet. Where the original uses the number pad for one
-thing and the top row for another, the top-row meaning wins while the channel rack has the keys or the typing
-keyboard is on, and the number pad meaning applies otherwise.
+**Number pad.** Number pad keys are told apart from the top row (and the right Shift, Ctrl and Alt keys from
+the left ones) by a small addition of ours to the window toolkit, kept in `vendor/egui-winit`. On a keyboard
+without a number pad the top row does the number pad's job wherever it has no use of its own: with the typing
+keyboard off and outside the channel rack.
 
 ## Everywhere
 
@@ -35,7 +35,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Ctrl+Space | Play / pause | yes |
 | L | Pattern mode / song mode | yes |
 | R | Recording on / off | yes |
-| Number pad 0 | Jump forward a bar (hold to keep going) | part: with the typing keyboard off |
+| Number pad 0 | Jump forward a bar (hold to keep going) | yes |
 | Number pad / and * | Previous / next bar | yes |
 | Ctrl+B | Blend recorded notes with the ones already there, or replace them | yes |
 | Ctrl+E | Step editing: notes played while stopped are written one grid step at a time | yes |
@@ -50,7 +50,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 ### Patterns
 | Binding | Action | Done |
 |---|---|---|
-| Number pad 1 ... 9 | Select pattern 1 ... 9 | part: with the typing keyboard off |
+| Number pad 1 ... 9 | Select pattern 1 ... 9 | yes |
 | Number pad + / - | Next / previous pattern | yes |
 | F4 | Next empty pattern, and name it | yes |
 | Ctrl+F4 | Next empty pattern | yes |
@@ -166,7 +166,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Shift+Ctrl+V | Paste from the MIDI clipboard | yes (the clipboard holds the path of a MIDI file) |
 | Shift+M, Shift+N | Select groups of notes at random; chord stamp off (the Stamp menu on the toolbar picks a chord the draw tool lays down) | yes |
 | Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
-| Right Shift+click | Slice, and its variants | no |
+| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; quick quantise | yes (slice-and-delete with the right button is not done) |
 
 ## Playlist
 | Binding | Action | Done |
@@ -215,7 +215,7 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Shift+M | Stretch mode: dragging an audio clip's end fits the sound to the new length, pitch kept | yes |
 | Shift+wheel on a track name | Move the track up / down | yes |
 | Shift+Alt+wheel | Nudge the clip under the pointer by the snap value | yes |
-| Right Shift, right Alt clicks | Slice, mute and quantise by clicking | no |
+| Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; hear an audio clip | yes (slice-and-delete with the right button is not done) |
 
 ## Browser
 | Binding | Action | Done |
@@ -233,8 +233,8 @@ keyboard is on, and the number pad meaning applies otherwise.
 | Click a folder's row | Open or shut it | yes |
 | Star at the end of a row, right-click > Favorite | Mark as a favourite (Starred page) | yes |
 | Drag a plug-in from the plug-in page | Onto the rack: a new channel; onto a mixer track or slot: the effect goes there | yes |
-| Backspace / Shift+Backspace | Navigate back / forward | no |
-| Alt+click, Shift+click a sound | Play it whole / from the pointer | no |
+| Backspace / Shift+Backspace | Navigate back / forward | yes |
+| Alt+click, Shift+click a sound | Play it whole / from the pointer | part: every click plays the sound whole; there is no wave strip to start from |
 
 ## Wave Recorder (audio editor)
 
@@ -272,4 +272,3 @@ These work while the pointer is over the wave picture.
 | Ctrl+R / Ctrl+B / Ctrl+Q | Reverb / blur / equalise | yes |
 | Ctrl+L | Tune the loop | yes |
 | S | Frequencies in place of the wave | yes |
-| Alt+W | Claw | no |

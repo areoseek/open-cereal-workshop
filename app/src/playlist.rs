@@ -1131,7 +1131,9 @@ impl App {
                 }
             }
         }
-        let tool = self.playlist.tool;
+        // the right Shift and right Alt keys turn a click into a slice or a mute, whichever tool is picked
+        let ralt = egui_winit::key_side::right_alt();
+        let tool = if egui_winit::key_side::right_shift() { Tool::Slice } else if ralt { Tool::Mute } else { self.playlist.tool };
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
         // performance mode: presses in the zone play clips; nothing there is edited while the mode is on
         let mut over = over;
@@ -1286,6 +1288,14 @@ impl App {
                 }
             } else if sec_pressed && self.playlist.drag.is_none() && grid.contains(pp) {
                 match tool {
+                    Tool::Mute if ralt => {
+                        // right Alt and a right-click: hear the clip
+                        if let Some(ClipSrc::Audio(ch)) = hit.map(|h| self.song.clips[h.0].src) {
+                            if let Some(sm) = self.song.channels.get(ch).and_then(|c| c.sample.clone()) {
+                                self.handle.send(cereal_engine::Cmd::Preview(sm));
+                            }
+                        }
+                    }
                     Tool::Zoom => {
                         let off = pp.x - grid.left();
                         let old = self.playlist.zoom;

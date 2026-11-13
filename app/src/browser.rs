@@ -38,6 +38,8 @@ pub struct State {
     /// Where the browser has been, and which of those places is on show.
     hist: Vec<(Tab, Option<PathBuf>)>,
     hist_at: usize,
+    /// Backspace (-1) or Shift+Backspace (1) was pressed: step through the places visited.
+    key_go: i8,
 }
 
 /// A plug-in dragged out of the plug-in page.
@@ -359,6 +361,10 @@ impl App {
         if m.command || m.alt {
             return false;
         }
+        if key == egui::Key::Backspace {
+            self.browser.key_go = if m.shift { 1 } else { -1 };
+            return true;
+        }
         let key = match key {
             egui::Key::F2 if !self.browser.query.is_empty() => egui::Key::ArrowUp,
             egui::Key::F3 if !self.browser.query.is_empty() => egui::Key::ArrowDown,
@@ -416,7 +422,11 @@ impl App {
                     b.hist_at = b.hist.len() - 1;
                 }
             }
-            let mut go = None;
+            let mut go = match std::mem::take(&mut b.key_go) {
+                -1 if b.hist_at > 0 => Some(b.hist_at - 1),
+                1 if b.hist_at + 1 < b.hist.len() => Some(b.hist_at + 1),
+                _ => None,
+            };
             if ui.add_enabled(b.hist_at > 0, egui::Button::new("<").small()).hint("Back to where the browser was before").clicked() {
                 go = Some(b.hist_at - 1);
             }

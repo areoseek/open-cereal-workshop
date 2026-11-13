@@ -9,6 +9,7 @@ cereal-engine = { path = "../engine" }
 cpal = "0.15"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.31"
+egui-winit = { version = "0.31", default-features = false }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 lzma-rs = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
