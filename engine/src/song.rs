@@ -1865,7 +1865,7 @@ impl Song {
                                 AutoPt { tick, value: p.value as f32, tension: p.tension, mode: p.mode }
                             })
                             .collect();
-                        let targets = f.links.iter().filter(|l| l.kind == 0 && l.extra == 0 && l.source as usize == pos).map(target).collect();
+                        let targets = f.links.iter().filter(|l| l.from_clip() && l.source as usize == pos).map(target).collect();
                         Arc::new(Automation { points, targets })
                     }),
                     children: c.children.clone(),

@@ -765,6 +765,19 @@ pub struct FlpLink {
     pub dest: u16,
 }
 
+impl FlpLink {
+    /// The source is an automation clip channel. Versions 9 and 10 wrote the channel a second time in
+    /// the upper half of the spare field.
+    pub fn from_clip(&self) -> bool {
+        self.kind == 0 && (self.extra == 0 || self.extra == (self.source as u32) << 16)
+    }
+}
+
+/// The same test on the bytes of a link record.
+pub fn link_from_clip(d: &[u8]) -> bool {
+    d.len() >= 12 && u16at(d, 0) == 0 && (u32at(d, 4) == 0 || u32at(d, 4) == (u16at(d, 2) as u32) << 16)
+}
+
 /// Control numbers used by links and by the mixer parameter records.
 pub mod param {
     pub const CHAN_VOLUME: u16 = 0;
@@ -1582,6 +1595,22 @@ mod tests {
         d.extend_from_slice(&u32::MAX.to_le_bytes());
         d.extend_from_slice(&0x7fff_ffffu32.to_le_bytes());
         d
+    }
+
+    #[test]
+    fn links_of_versions_nine_and_ten_name_the_clip_twice() {
+        let rec = |extra: u32| {
+            let mut d = vec![0u8; 20];
+            d[2..4].copy_from_slice(&16u16.to_le_bytes());
+            d[4..8].copy_from_slice(&extra.to_le_bytes());
+            d[8..10].copy_from_slice(&param::INSERT_VOLUME.to_le_bytes());
+            d[10..12].copy_from_slice(&0x2000u16.to_le_bytes());
+            d
+        };
+        let bytes = file(1, 96, vec![version("9.0.0"), Event::data(id::LINK, rec(16 << 16)), Event::data(id::LINK, rec(0)), Event::data(id::LINK, rec(0x7961_6c50))]);
+        let flp = parse(&bytes).unwrap();
+        assert_eq!(flp.links.iter().map(|l| l.from_clip()).collect::<Vec<_>>(), [true, true, false]);
+        assert!(link_from_clip(&rec(16 << 16)) && link_from_clip(&rec(0)) && !link_from_clip(&rec(5 << 16)));
     }
 
     #[test]

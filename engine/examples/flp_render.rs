@@ -14,7 +14,7 @@ fn main() {
     }
     let pattern = args.iter().position(|a| a == "--pattern").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<usize>().ok());
     let mut lib = cereal_engine::Library::new();
-    let (song, _) = match cereal_engine::load_flp(Path::new(&args[0]), &mut lib) {
+    let (song, flp) = match cereal_engine::load_flp(Path::new(&args[0]), &mut lib) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -42,6 +42,10 @@ fn main() {
         (Some(p), None) => cereal_engine::render_song(&song, sr, false, p.saturating_sub(1), tail),
         // an empty playlist renders the pattern, as the original does
         (None, None) if song.clips.is_empty() => cereal_engine::render_song(&song, sr, false, 0, tail),
+        // saved in pattern mode with nothing to hear in the playlist: the pattern that was open
+        (None, None) if !song.song_mode && song.clips.iter().all(|c| matches!(c.src, cereal_engine::song::ClipSrc::Pattern(p) if song.patterns.get(p).is_none_or(|p| p.notes.is_empty()))) => {
+            cereal_engine::render_song(&song, sr, false, (flp.current_pattern as usize).saturating_sub(1), tail)
+        }
         (None, None) => cereal_engine::render_song(&song, sr, true, 0, tail),
         (p, Some(t)) => cereal_engine::render_track(&song, sr, p.is_none(), p.unwrap_or(1).saturating_sub(1), tail, t),
     };

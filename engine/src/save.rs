@@ -403,10 +403,16 @@ fn restructure_channels(file: &mut FlpFile, orig: &Flp, song: &Song, unicode: bo
     let known = |c: u16| (c as usize) < n_orig;
     out.retain_mut(|e| match (e.id, &mut e.value) {
         (id::LINK, Value::Data(d)) if d.len() >= 12 => {
-            if u16at(d, 0) == 0 && u32at(d, 4) == 0 {
+            if crate::flp::link_from_clip(d) {
                 let src = u16at(d, 2);
+                let twice = u32at(d, 4) != 0;
                 match remap.get(&src) {
-                    Some(&to) => put_u16(d, 2, to),
+                    Some(&to) => {
+                        put_u16(d, 2, to);
+                        if twice {
+                            put_u16(d, 6, to);
+                        }
+                    }
                     None if known(src) => return false,
                     None => {}
                 }
@@ -874,7 +880,7 @@ fn patch_auto(ev: &mut Vec<Event>, song: &Song, base: &Song) {
     }
     // the links of the clips whose targets changed are written afresh, ahead of the first channel
     ev.retain(|e| match (e.id, &e.value) {
-        (id::LINK, Value::Data(d)) if d.len() >= 12 => !(u16at(d, 0) == 0 && u32at(d, 4) == 0 && relink.contains(&(u16at(d, 2) as usize))),
+        (id::LINK, Value::Data(d)) if d.len() >= 12 => !(crate::flp::link_from_clip(d) && relink.contains(&(u16at(d, 2) as usize))),
         _ => true,
     });
     let at = ev.iter().position(|e| e.id == id::NEW_CHANNEL).unwrap_or(ev.len());

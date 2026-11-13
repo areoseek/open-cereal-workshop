@@ -3536,7 +3536,9 @@ impl Unit {
                 let band = (p[0] / 10000.0).clamp(0.0, 1.0);
                 let g_band = svf_g(400.0 * 5.5f32.powf(p[1] / 10000.0), sr);
                 let r = p[2] / 10000.0;
-                let amp = 1.5666 * (1.0 + 25.0 * r * r * r) * if p[3] >= 0.5 { 100.0 } else { 1.0 };
+                // The x100 switch multiplies what the pre amp adds, not the whole signal: a project in
+                // the wild keeps it on the master with the pre amp barely open (to confirm by a render).
+                let amp = 1.5666 * (1.0 + 25.0 * r * r * r * if p[3] >= 0.5 { 100.0 } else { 1.0 });
                 let pf = (p[4] / 10000.0).clamp(0.0, 1.0);
                 let f_post = 20000.0 * 0.02f32.powf(pf);
                 let a1 = 1.0 - (-TAU * f_post / sr).exp();
