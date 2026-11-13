@@ -1296,7 +1296,7 @@ pub struct Tone {
 /// Running state of one sounding note.
 #[derive(Debug, Clone, Default)]
 pub struct ToneState {
-    ph: [[f32; 2]; 3],
+    ph: [[f64; 2]; 3],
     seed: u32,
     hold: [f32; 3],
     add: Option<Box<crate::additive::Voice>>,
@@ -1351,7 +1351,7 @@ impl ToneState {
         for k in 0..3 {
             let r = if tone.random > 0.0 { s.rand() * 0.5 + 0.5 } else { 0.0 };
             let ph = (tone.osc[k].phase + r * tone.random).fract();
-            s.ph[k] = [ph, ph];
+            s.ph[k] = [ph as f64, ph as f64];
         }
         s
     }
@@ -1410,7 +1410,7 @@ impl ToneState {
             if osc.shape == 5 {
                 // noise, stepped at the oscillator's pitch so the note still has a colour
                 let p = &mut self.ph[k][0];
-                *p += (base * 64.0).min(1.0);
+                *p += (base * 64.0).min(1.0) as f64;
                 if *p >= 1.0 {
                     *p -= 1.0;
                     self.hold[k] = self.rand();
@@ -1423,13 +1423,16 @@ impl ToneState {
                     let p = &mut self.ph[k][c];
                     // each frame is the mean of three plain readings a third of a step apart (measured: the
                     // edges land on thirds of the full jump and nothing is rounded off)
+                    // (the place in the cycle is kept in double precision: the edges then fall on the same
+                    // frames as the reference for the whole note)
+                    let d = d as f64;
                     let third = d / 3.0;
-                    let at = |q: f32| if q >= 1.0 { q - 1.0 } else { q };
+                    let at = |q: f64| (if q >= 1.0 { q - 1.0 } else { q }) as f32;
                     o[k][c] = if osc.shape == 0 {
                         // the sine's three readings sit around the frame instead of after it
-                        (wave(0, *p, 0.0) + wave(0, *p + third, 0.0) + wave(0, *p - third, 0.0)) / 3.0
+                        (wave(0, *p as f32, 0.0) + wave(0, (*p + third) as f32, 0.0) + wave(0, (*p - third) as f32, 0.0)) / 3.0
                     } else {
-                        (wave(osc.shape, *p, 0.0) + wave(osc.shape, at(*p + third), 0.0) + wave(osc.shape, at(*p + 2.0 * third), 0.0)) / 3.0
+                        (wave(osc.shape, at(*p), 0.0) + wave(osc.shape, at(*p + third), 0.0) + wave(osc.shape, at(*p + 2.0 * third), 0.0)) / 3.0
                     };
                     *p += d;
                     if *p >= 1.0 {

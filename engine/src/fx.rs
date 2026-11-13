@@ -838,7 +838,7 @@ pub static DEFS: &[Def] = &[
         fixed: &[(0, 1)],
         params: &[p("63 Hz", 4, -1800, 1800, 0), p("250 Hz", 8, -1800, 1800, 0), p("500 Hz", 12, -1800, 1800, 0), p("1.5 kHz", 16, -1800, 1800, 0), p("3 kHz", 20, -1800, 1800, 0), p("5 kHz", 24, -1800, 1800, 0), p("8 kHz", 28, -1800, 1800, 0)],
     },
-    Def { kind: Kind::Mute, ident: "Fruity Mute 2", title: "Mute Switch", size: 8, fixed: &[], params: &[p("Mute", 0, 0, 1, 0), p("Channel", 4, 0, 2, 0)] },
+    Def { kind: Kind::Mute, ident: "Fruity Mute 2", title: "Mute Switch", size: 8, fixed: &[], params: &[p("On", 0, 0, 1, 1), p("Channel", 4, 0, 2, 0)] },
     Def { kind: Kind::Flip, ident: "Fruity Phase Inverter", title: "Polarity Flip", size: 4, fixed: &[], params: &[p("State", 0, 0, 2, 0)] },
     Def { kind: Kind::Thru, ident: "Fruity dB Meter", title: "Level Meter", size: 0, fixed: &[], params: &[] },
     Def { kind: Kind::Thru, ident: "Fruity Big Clock", title: "Big Clock", size: 0, fixed: &[], params: &[] },
@@ -1832,6 +1832,20 @@ pub fn sample_named_in(ident: &str, state: &[u8]) -> Option<String> {
         return None;
     }
     conv_parts(state).map(|x| x.0).filter(|s| !s.is_empty())
+}
+
+impl Fx {
+    /// How many frames late this unit's sound comes out; the mixer lines everything else up with it.
+    pub fn latency(&self, sr: f32) -> usize {
+        match self.kind {
+            Kind::Comp => 64,
+            Kind::Limiter => {
+                let t = 2.0 * (501f32.powf(self.p.get(3).copied().unwrap_or(0.0) / 10000.0) - 1.0) * 0.001 * sr;
+                (t.round().max(0.0) as usize).min(sr as usize)
+            }
+            _ => 0,
+        }
+    }
 }
 
 impl Fx {
@@ -3148,32 +3162,47 @@ impl Unit {
                 }
             }
             Kind::FastLp => {
-                let g = svf_g(knob_hz(p[0] / 1024.0), sr);
-                let k = 2.0 - (p[1] / 1024.0).clamp(0.0, 1.0) * 1.9;
+                // measured: two one-pole stages with feedback around them and no zeros (the response at one
+                // setting fits to five digits). The two knob laws are interim, drawn through that setting.
+                let fc = ((p[0] / 1024.0).clamp(0.0, 1.0).powf(2.3875) as f64).min(0.9999);
+                let q = ((p[1] / 1024.0).clamp(0.0, 1.0).powf(0.794) as f64).min(0.99);
+                let fb = q + q / (1.0 - fc);
                 let open = p[0] >= 1024.0 && p[1] <= 0.0;
                 for f in io.iter_mut() {
                     for ch in 0..2 {
-                        let (lp, _, _) = svf(&mut z[ch * 2..], f[ch], g, k);
+                        let (mut b0, mut b1) = (z[ch * 2] as f64, z[ch * 2 + 1] as f64);
+                        b0 += fc * (f[ch] as f64 - b0 + fb * (b0 - b1));
+                        b1 += fc * (b0 - b1);
+                        z[ch * 2] = b0 as f32;
+                        z[ch * 2 + 1] = b1 as f32;
                         if !open {
-                            f[ch] = lp;
+                            f[ch] = b1 as f32;
                         }
                     }
                 }
             }
             Kind::Filter => {
-                let g = svf_g(knob_hz(p[0] / 1024.0), sr);
-                let k = 2.0 - (p[1] / 1024.0).clamp(0.0, 1.0) * 1.9;
-                let (l, b, h) = (p[2] / 1024.0, p[3] / 1024.0, p[4] / 1024.0);
+                // measured: the plain two-integrator loop (low-pass updated first), damping 1 - 0.8 x resonance.
+                // The cutoff and level laws are interim, drawn through the one measured setting.
+                let fc = (p[0] / 1024.0).clamp(0.0, 1.0).powf(2.556);
+                let q = 1.0 - 0.8 * (p[1] / 1024.0).clamp(0.0, 1.0);
+                let lv = |v: f32| (v / 1024.0).clamp(0.0, 1.0).powf(2.37);
+                let (l, b, h) = (lv(p[2]), lv(p[3]), lv(p[4]));
                 let twice = p[5] >= 0.5;
                 // fully open low-pass is a plain wire
                 let open = p[0] >= 1024.0 && b == 0.0 && h == 0.0 && l == 1.0;
+                let run = |z: &mut [f32], x: f32| {
+                    z[0] += fc * z[1];
+                    let hp = x - z[0] - q * z[1];
+                    let bp = z[1];
+                    z[1] += fc * hp;
+                    z[0] * l + bp * b + hp * h
+                };
                 for f in io.iter_mut() {
                     for ch in 0..2 {
-                        let (lp, bp, hp) = svf(&mut z[ch * 4..], f[ch], g, k);
-                        let mut y = lp * l + bp * b * k + hp * h;
+                        let mut y = run(&mut z[ch * 4..], f[ch]);
                         if twice {
-                            let (lp, bp, hp) = svf(&mut z[ch * 4 + 2..], y, g, k);
-                            y = lp * l + bp * b * k + hp * h;
+                            y = run(&mut z[ch * 4 + 2..], y);
                         }
                         if !open {
                             f[ch] = y;
@@ -3399,7 +3428,8 @@ impl Unit {
             Kind::Shaper => {
                 let (rl, ll, rr, lr) = (p[0] / 12800.0, p[1] / 12800.0, p[2] / 12800.0, p[3] / 12800.0);
                 let n = self.buf.len();
-                let off = ((p[4].abs() / 4096.0) * 0.05 * sr).min(n as f32 - 2.0) as usize;
+                // full travel measured as 2352 frames at 44.1 kHz
+                let off = ((p[4].abs() / 4096.0) * 2352.0 / 44100.0 * sr).min(n as f32 - 2.0) as usize;
                 let left_late = p[4] < 0.0;
                 for f in io.iter_mut() {
                     let x = *f;
@@ -4152,7 +4182,8 @@ impl Unit {
                 }
             }
             Kind::Mute => {
-                if p[0] >= 0.5 {
+                // the switch reads 0 while it mutes
+                if p[0] < 0.5 {
                     let which = p[1] as i32;
                     for f in io.iter_mut() {
                         if which != 2 {
@@ -5002,7 +5033,9 @@ impl Unit {
                     fb: f32,
                     mode: i32,
                     pan_fb: (f32, f32),
-                    time: [usize; 2],
+                    time: usize,
+                    // how much later each side goes into the line
+                    lead: [usize; 2],
                     pan_out: (f32, f32),
                     next: f32,
                 }
@@ -5012,13 +5045,17 @@ impl Unit {
                     let q = &p[4 + b * 20..24 + b * 20];
                     let (modes, sw) = (q[18] as i32, q[19] as i32);
                     let t = bank_time(q, p[164], cx);
-                    let ofs = q[9] / 48.0 * cx.step;
-                    let frames = |d: f32| (d.max(1.0) as usize).min(len - 1);
+                    // the side offset is short: one setting measured at 116 frames for 136 units (interim, as a line)
+                    let ofs = q[9] * 0.8566 * sr / 44100.0;
+                    const AHEAD: usize = 1024;
+                    let frames = |d: f32| ((d + 0.5).max(1.0) as usize).min(len - AHEAD - 2);
+                    let lead = |d: f32| ((d.max(0.0) + 0.5) as usize).min(AHEAD - 1);
                     let (il, ir) = balance(q[0] / 128.0);
                     let (ol, or) = balance(q[13] / 128.0);
                     Bank {
                         on: (sw >> 8) & 1 != 0,
-                        pan_in: (il * q[1] / 128.0, ir * q[1] / 128.0),
+                        // interim: one measured setting (118 gives 0.8121) drawn as a power law
+                        pan_in: (il * (q[1] / 128.0).max(0.0).powf(2.5585), ir * (q[1] / 128.0).max(0.0).powf(2.5585)),
                         filt: (q[16] as i32, svf_g(hz(q[2]), sr), damp(q[3]), modes & 1 != 0),
                         echo_filt: (q[17] as i32, svf_g(hz(q[10]), sr), damp(q[11])),
                         shape: [(1 + (p[165 + b * 4] as usize).min(2), 0.1 + q[4].clamp(0.0, 200.0) / 200.0 * 1.9), (1 + (p[166 + b * 4] as usize).min(2), 0.1 + q[12].clamp(0.0, 200.0) / 200.0 * 1.9)],
@@ -5030,7 +5067,8 @@ impl Unit {
                         fb: (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995),
                         mode: (modes >> 8) & 0xff,
                         pan_fb: balance(q[7] / 128.0),
-                        time: [frames(t + (-ofs).max(0.0)), frames(t + ofs.max(0.0))],
+                        time: frames(t),
+                        lead: [lead(-ofs), lead(ofs)],
                         pan_out: (ol * q[14] / 128.0, or * q[14] / 128.0),
                         next: if b < 7 { q[15] / 128.0 } else { 0.0 },
                     }
@@ -5083,7 +5121,13 @@ impl Unit {
                             let env = (1.0 - (2.0 * ph - 1.0).abs()).powf(4f32.powf(k.grain.1));
                             s = [s[0] * env, s[1] * env];
                         }
-                        let e = [line[((pos + len - k.time[0]) % len) * 2], line[((pos + len - k.time[1]) % len) * 2 + 1]];
+                        // measured: one echo time for both sides; the side offset holds one side's input back
+                        // before the line, so with crossed feedback the echoes swap that lag from side to side
+                        let rd = (pos + len - k.time) % len;
+                        let e = [line[rd * 2].clamp(-16.0, 16.0), line[rd * 2 + 1].clamp(-16.0, 16.0)];
+                        let clear = (pos + 1024) % len;
+                        line[clear * 2] = 0.0;
+                        line[clear * 2 + 1] = 0.0;
                         let mut back = match k.mode {
                             0 => [0.0; 2],
                             2 | 3 => [e[1] * k.fb, e[0] * k.fb],
@@ -5094,8 +5138,10 @@ impl Unit {
                                 back[c] = run(&mut z[12 + c * 6..], k.echo_filt.0, k.echo_filt.1, k.echo_filt.2, k.shape[1], back[c]);
                             }
                         }
-                        line[pos * 2] = (s[0] + back[0] * k.pan_fb.0).clamp(-16.0, 16.0);
-                        line[pos * 2 + 1] = (s[1] + back[1] * k.pan_fb.1).clamp(-16.0, 16.0);
+                        line[((pos + k.lead[0]) % len) * 2] += s[0];
+                        line[((pos + k.lead[1]) % len) * 2 + 1] += s[1];
+                        line[pos * 2] += back[0] * k.pan_fb.0;
+                        line[pos * 2 + 1] += back[1] * k.pan_fb.1;
                         self.lpos[b] = (pos + 1) % len;
                         let mut o = e;
                         if (1..=7).contains(&k.filt.0) && k.filt.3 {

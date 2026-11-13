@@ -1270,6 +1270,8 @@ struct Comp {
     /// Per track: what those instruments gave, joined to the track behind its own hold.
     after: Vec<Vec<[f32; 2]>>,
     after_dirty: Vec<bool>,
+    /// How late the finished mix comes out, in frames.
+    total: usize,
     #[cfg(test)]
     fake: Vec<(usize, usize)>,
     #[cfg(test)]
@@ -1309,7 +1311,7 @@ impl Comp {
             }
             let ins = &song.inserts[i];
             #[allow(unused_mut)]
-            let mut own: usize = ins.slots.iter().filter(|s| s.enabled).filter_map(|s| s.fx.as_ref()?.ext.as_ref()).map(|h| h.0.latency() as usize).sum();
+            let mut own: usize = ins.slots.iter().filter(|s| s.enabled).filter_map(|s| s.fx.as_ref()).map(|f| f.ext.as_ref().map_or_else(|| f.latency(rate), |h| h.0.latency() as usize)).sum();
             #[cfg(test)]
             {
                 own += self.fake.iter().filter(|f| f.0 == i).map(|f| f.1).sum::<usize>();
@@ -1323,6 +1325,7 @@ impl Comp {
             }
         }
         self.on = any;
+        self.total = if any { out.first().copied().unwrap_or(0) } else { 0 };
         if !any {
             if !self.direct.is_empty() {
                 self.direct.clear();
@@ -3939,6 +3942,11 @@ impl Player {
     }
 
     /// True while anything is still sounding.
+    /// How many frames late the mix comes out, from units that look ahead.
+    pub fn lateness(&self) -> usize {
+        self.comp.total
+    }
+
     pub fn busy(&self) -> bool {
         self.voices.iter().any(|v| v.active)
     }

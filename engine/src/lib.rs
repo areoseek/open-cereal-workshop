@@ -213,16 +213,33 @@ pub fn render_job(song: &Song, job: &RenderJob) -> Rendered {
     }
     let main = out.len() / 2;
     let mut extra = 0;
-    while p.busy() && extra < max_tail {
+    // the tail runs until the voices have stopped and the effects have rung out
+    let mut ringing = true;
+    while (p.busy() || ringing) && extra < max_tail {
         let at = out.len();
-        out.resize(at + 2 * 1024, 0.0);
+        out.resize(at + 2 * 256, 0.0);
         p.render(&mut out[at..], 2);
-        extra += 1024;
+        ringing = out[at..].iter().any(|v| v.abs() >= 0.5 / 32768.0);
+        extra += 256;
     }
     for (was, i) in &hosted {
         i.set_offline(false);
         if let Some(r) = was {
             i.activate(*r);
+        }
+    }
+    // units that look ahead make the whole mix late by a known amount: that much comes off the front
+    let late = p.lateness().min(out.len() / 2);
+    if late > 0 {
+        let at = out.len();
+        out.resize(at + 2 * late, 0.0);
+        p.render(&mut out[at..], 2);
+        out.drain(..2 * late);
+        let cut = late.min(p.stem_buf.len());
+        p.stem_buf.drain(..cut);
+        for v in p.stems.iter_mut() {
+            let cut = late.min(v.len());
+            v.drain(..cut);
         }
     }
     let frames = out.len() / 2;
