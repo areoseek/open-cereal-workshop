@@ -2422,7 +2422,7 @@ impl Player {
                         v.attack = 1.0;
                         v.release = ms(5.0);
                     }
-                    if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2) {
+                    if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2 | crate::synth::Kind::Pocket) {
                         // these fade in by their own knob
                         v.attack = 1.0;
                     }

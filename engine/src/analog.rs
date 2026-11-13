@@ -18,6 +18,8 @@ pub enum Shape {
     Noise,
     /// A saw that stays level and then plunges to its jump (see `bent`).
     Bent,
+    /// A falling saw with strong low harmonics.
+    Warm,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -132,6 +134,11 @@ pub struct Set {
     pub follow: [f32; 2],
     /// Let go, the level stays for the first time and then falls in a straight line over the second (seconds).
     pub leave: Option<(f32, f32)>,
+    /// A gentle high cut at the very end (0 for none).
+    pub top_hz: f32,
+    /// The level envelope runs every frame: a straight rise, and a fall that aims a little under zero and stops
+    /// there. The low cut then runs once, behind the envelope.
+    pub snap: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,12 +188,16 @@ pub struct Voice {
     hp: f32,
     hp2: f32,
     hpc: f32,
+    topc: f32,
+    top: [f32; 2],
     ens: Option<Box<Ensemble>>,
     seed: u32,
     t: u32,
     // control values held between updates
     a: f32,
     a_to: f32,
+    lv: f32,
+    from: f32,
     g: f32,
     k: f32,
     bend: [f32; 2],
@@ -315,6 +326,11 @@ fn wave(shape: Shape, ph: f32, dt: f32, width: f32, seed: &mut u32) -> f32 {
     match shape {
         Shape::Bent => bent(ph, dt),
         Shape::Saw => 2.0 * ph - 1.0 - blep(ph, dt),
+        Shape::Warm => {
+            // a falling saw with a rounder copy of itself on top: the low harmonics come out about twice as strong
+            let (sn, cs) = (ph * TAU).sin_cos();
+            1.0 - 2.0 * ph + blep(ph, dt) + 0.987 * (0.74 * sn).atan2(1.0 - 0.74 * cs)
+        }
         Shape::Pulse => {
             let duty = 0.5 - 0.45 * width.clamp(0.0, 1.0);
             let mut y = if ph < duty { 1.0 } else { -1.0 };
@@ -354,6 +370,9 @@ impl Voice {
         if set.hpf_hz > 0.0 {
             v.hpc = 1.0 - (-TAU * set.hpf_hz / sr).exp();
         }
+        if set.top_hz > 0.0 {
+            v.topc = (PI_F * set.top_hz / sr).tan();
+        }
         if set.chorus != 0 {
             v.ens = Some(Box::new(Ensemble::new(set.chorus, sr)));
         }
@@ -364,6 +383,10 @@ impl Voice {
     pub fn release(&mut self, set: &Set) -> f32 {
         self.amp.stage = 2;
         self.fenv.stage = 2;
+        if set.snap {
+            self.from = self.amp.v;
+            return set.amp.r * 0.4 + 0.05;
+        }
         if let Some((stay, fall)) = set.leave {
             self.gone = Some((0, self.a));
             return stay + fall + 0.002;
@@ -373,7 +396,7 @@ impl Voice {
 
     fn control(&mut self, set: &Set) {
         let dt = EVERY as f32 / self.sr;
-        let a = self.amp.step(&set.amp, dt);
+        let a = if set.snap { self.amp.v } else { self.amp.step(&set.amp, dt) };
         let f = self.fenv.step(&set.fenv, dt);
         let mut cut_oct = f * set.env_oct + (self.key - 60.0) / 12.0 * set.track + set.vel_cut * (self.vel - 0.6) * 4.0;
         let mut level = 1.0;
@@ -403,7 +426,7 @@ impl Voice {
             self.lfo[k] = (before + l.hz * dt).fract();
             let ph = self.lfo[k];
             let x = match l.shape {
-                Shape::Saw | Shape::Bent => 1.0 - 2.0 * ph,
+                Shape::Saw | Shape::Bent | Shape::Warm => 1.0 - 2.0 * ph,
                 Shape::Pulse | Shape::Square => {
                     if ph < 0.5 {
                         1.0
@@ -437,7 +460,8 @@ impl Voice {
             }
         }
         self.a_to = a * level;
-        let hz = (set.cutoff_hz * 2f32.powf(cut_oct)).clamp(16.0, self.sr * 0.45);
+        self.lv = level;
+        let hz = (set.cutoff_hz * 2f32.powf(cut_oct)).clamp(16.0, self.sr * if set.top_hz > 0.0 { 0.495 } else { 0.45 });
         self.g = (std::f32::consts::PI * hz / self.sr).tan();
         self.k = 2.0 - 1.92 * set.res.clamp(0.0, 1.0);
     }
@@ -448,7 +472,17 @@ impl Voice {
         }
         self.t = self.t.wrapping_add(1);
         let follow = set.follow[(self.amp.stage == 2) as usize];
-        self.a += (self.a_to - self.a) * if follow > 0.0 { follow } else { 0.02 };
+        if set.snap {
+            if self.amp.stage == 2 {
+                let k = (-7.45 / (set.amp.r * self.sr)).exp();
+                self.amp.v = ((self.amp.v + 0.07 * self.from) * k - 0.07 * self.from).max(0.0);
+            } else {
+                self.amp.step(&set.amp, 1.0 / self.sr);
+            }
+            self.a = self.amp.v * self.lv;
+        } else {
+            self.a += (self.a_to - self.a) * if follow > 0.0 { follow } else { 0.02 };
+        }
         if let (Some((n, from)), Some((stay, fall))) = (self.gone.as_mut(), set.leave) {
             *n += 1;
             self.a = *from * (1.0 - (*n as f32 / self.sr - stay) / fall).clamp(0.0, 1.0);
@@ -519,7 +553,7 @@ impl Voice {
         };
         let mut y = y * self.a;
         if set.dc != 0.0 {
-            for z in [&mut self.hp, &mut self.hp2] {
+            for z in [&mut self.hp, &mut self.hp2].into_iter().take(if set.snap { 1 } else { 2 }) {
                 *z += (y - *z) * self.hpc;
                 y -= *z;
             }
@@ -532,7 +566,13 @@ impl Voice {
             self.tone += (y - self.tone) * c;
             y = self.tone;
         }
-        let y = y * set.gain * self.lvl;
+        let mut y = y * set.gain * self.lvl;
+        if self.topc > 0.0 {
+            let t = self.topc;
+            let o = (t * (y + self.top[0]) + (1.0 - t) * self.top[1]) / (1.0 + t);
+            self.top = [y, o];
+            y = o;
+        }
         match &mut self.ens {
             Some(e) => e.frame(y),
             None => [y, y],
@@ -776,29 +816,29 @@ pub fn pocket(p: &[f32]) -> Set {
         0 => {
             // a saw with a pulse under it; at either end of the modifier the pulse closes and the saw is alone
             width = (2.0 * m - 1.0).abs();
-            [o(Shape::Saw, 0.0, 1.0), o(Shape::Pulse, 0.0, (PI_F * m).sin()), none]
+            [o(Shape::Warm, 0.0, 1.0), o(Shape::Pulse, 0.0, (PI_F * m).sin()), none]
         }
-        1 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, apart, 1.0), none],
+        1 => [o(Shape::Warm, 0.0, 1.0), o(Shape::Warm, apart, 1.0), none],
         2 => {
             width = (2.0 * m - 1.0).abs();
             [o(Shape::Pulse, 0.0, 1.0), o(Shape::Pulse, 0.0, 1.0), none]
         }
-        3 => [o(Shape::Pulse, 0.0, 1.0), o(Shape::Saw, apart, 1.0), none],
+        3 => [o(Shape::Pulse, 0.0, 1.0), o(Shape::Warm, apart, 1.0), none],
         4 => [o(Shape::Pulse, 0.0, 1.0), o(Shape::Pulse, apart, 1.0), none],
         5 => {
             // a stack of saws: four here, pulled apart by the modifier
             dual = true;
-            [o(Shape::Saw, m * 0.35, 1.0), o(Shape::Saw, -m * 0.35, 1.0), o(Shape::Saw, m * 0.12, 0.7)]
+            [o(Shape::Warm, m * 0.35, 1.0), o(Shape::Warm, -m * 0.35, 1.0), o(Shape::Warm, m * 0.12, 0.7)]
         }
-        6 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Sine, 19.02, m), o(Shape::Sine, 28.0, m * 0.5)],
-        7 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 0.0, 1.0), none],
-        8 => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 12.0 + m * 0.3, 1.0), o(Shape::Saw, -12.0 - m * 0.3, 1.0)],
-        _ => [o(Shape::Saw, 0.0, 1.0), o(Shape::Saw, 7.0 + m * 0.3, 1.0), o(Shape::Saw, 12.0 - m * 0.3, 1.0)],
+        6 => [o(Shape::Warm, 0.0, 1.0), o(Shape::Sine, 19.02, m), o(Shape::Sine, 28.0, m * 0.5)],
+        7 => [o(Shape::Warm, 0.0, 1.0), o(Shape::Warm, 0.0, 1.0), none],
+        8 => [o(Shape::Warm, 0.0, 1.0), o(Shape::Warm, 12.0 + m * 0.3, 1.0), o(Shape::Warm, -12.0 - m * 0.3, 1.0)],
+        _ => [o(Shape::Warm, 0.0, 1.0), o(Shape::Warm, 7.0 + m * 0.3, 1.0), o(Shape::Warm, 12.0 - m * 0.3, 1.0)],
     };
     if osc[2].level == 0.0 && v(6) > 0.0 {
         osc[2] = Osc { shape: Shape::Noise, semis: 0.0, level: v(6) };
     }
-    let time = |i: usize| 0.002 + v(i) * v(i) * 5.0;
+    let time = |i: usize| 0.0005 * 10000f32.powf(v(i));
     let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2), r: time(i + 3) };
     Set {
         osc,
@@ -811,7 +851,11 @@ pub fn pocket(p: &[f32]) -> Set {
         res: v(8) * 0.9,
         env_oct: v(10) * 8.0,
         track: v(9),
-        gain: 0.4,
+        gain: 0.243,
+        hpf_hz: 35.0,
+        dc: 0.725,
+        snap: true,
+        top_hz: 9000.0,
         ..Default::default()
     }
 }
