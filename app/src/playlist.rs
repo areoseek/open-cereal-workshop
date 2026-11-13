@@ -196,20 +196,29 @@ impl App {
 
     /// Open a sound in the Wave Recorder of a mixer track, putting one in its first free slot if it has none.
     pub(crate) fn edit_sound_on(&mut self, ins: usize, sm: &cereal_engine::sample::Sample, name: &str) {
+        if let Some(slot) = self.audio_editor_on(ins) {
+            self.wave_eds.entry((ins, slot)).or_default().take(sm, name);
+        }
+    }
+
+    /// Show the audio editor of a mixer track, putting one in its first free slot when it has none. The slot.
+    pub(crate) fn audio_editor_on(&mut self, ins: usize) -> Option<u16> {
         let have = self.song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.plugin.eq_ignore_ascii_case("Edison")).map(|s| s.index));
         let free = || (0..10u16).find(|n| !self.song.inserts[ins].slots.iter().any(|s| s.index == *n));
-        match have.or_else(free) {
+        let slot = have.or_else(free);
+        match slot {
             Some(slot) => {
                 if have.is_none() {
                     self.set_effect(ins, slot, cereal_engine::fx::Kind::Thru, "Edison");
                     self.dirty = true;
                     self.handle.publish(self.song.clone());
                 }
-                self.wave_eds.entry((ins, slot)).or_default().take(sm, name);
+                self.wave_eds.entry((ins, slot)).or_default();
                 self.fx_open = Some((ins, slot));
             }
             None => self.status = "No free effect slot on this mixer track".into(),
         }
+        slot
     }
 
     fn clip_menu(&mut self, ctx: &egui::Context) {
@@ -728,10 +737,15 @@ impl App {
         let v = self.target_travel(t);
         let (pos, len) = span.unwrap_or((0, self.song.length().max(self.song.bar() * 4)));
         let pt = |tick: f64| cereal_engine::song::AutoPt { tick, value: v, tension: 0.0, mode: 0 };
+        self.add_auto_clip(t, pos, len, vec![pt(0.0), pt(len as f64)]);
+    }
+
+    /// A new automation clip with these points, on the first track with room for it.
+    pub(crate) fn add_auto_clip(&mut self, t: Target, pos: u32, len: u32, points: Vec<cereal_engine::song::AutoPt>) {
         let mut c = cereal_engine::song::Chan::default();
         c.name = self.song.target_name(t);
         c.kind = cereal_engine::flp::ChannelKind::AutomationClip;
-        c.auto = Some(std::sync::Arc::new(cereal_engine::song::Automation { points: vec![pt(0.0), pt(len as f64)], targets: vec![t] }));
+        c.auto = Some(std::sync::Arc::new(cereal_engine::song::Automation { points, targets: vec![t] }));
         self.song.channels.push(c);
         let ci = self.song.channels.len() - 1;
         let ntracks = self.song.tracks.len().max(1) as u16;

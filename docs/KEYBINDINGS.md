@@ -162,6 +162,9 @@ keyboard off and outside the channel rack.
 | Alt+B, Alt+N | Note helpers (the light rows), waveform helper (the channel sample behind the notes) | yes |
 | Alt+G / Shift+G | Ungroup / group the selected notes; a group is picked, moved and copied as one | yes |
 | Ctrl+I | Write the control's current value (with the event editor open: an event at the play position) | yes |
+| Alt+O (event editor) | LFO tool | yes |
+| Alt+X (event editor) | Scale levels tool | yes |
+| Ctrl+X / Ctrl+C / Ctrl+V / Del (event editor) | Cut, copy, paste, delete the shown control's events | yes |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Shift+Ctrl+V | Paste from the MIDI clipboard | yes (the clipboard holds the path of a MIDI file) |

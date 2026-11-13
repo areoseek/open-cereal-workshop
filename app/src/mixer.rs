@@ -411,6 +411,10 @@ impl App {
                     self.rename_insert = Some((i, self.song.inserts[i].name.clone()));
                     ui.close_menu();
                 }
+                if ui.button("Open audio editor").clicked() {
+                    self.audio_editor_on(i);
+                    ui.close_menu();
+                }
                 if i > 0 && ui.button("Solo   S").clicked() {
                     self.solo_insert(i, false);
                     ui.close_menu();
@@ -495,6 +499,33 @@ impl App {
                         if src != i && src != 0 && ui.button("Sidechain the selected track to this track").clicked() {
                             *route = Some((src, i, true));
                             self.route_side = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Create submix from the selected tracks").hint("The selected tracks play into the first empty track and nowhere else").clicked() {
+                            let mut from: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
+                            from.retain(|&k| k > 0 && k < n_ins);
+                            from.sort_unstable();
+                            let fed = |d: usize| self.song.inserts.iter().enumerate().any(|(k, x)| k != d && x.sends.contains(&d));
+                            let empty = |d: usize| {
+                                let x = &self.song.inserts[d];
+                                !from.contains(&d) && x.slots.is_empty() && x.name.is_empty() && self.song.channels.iter().all(|c| c.insert != d) && !fed(d)
+                            };
+                            let after = from.last().copied().unwrap_or(i);
+                            let last = n_ins.saturating_sub(1);
+                            match (after + 1..last).chain(1..after).find(|&d| empty(d)) {
+                                Some(d) => {
+                                    for &k in &from {
+                                        self.song.inserts[k].sends = vec![d];
+                                        self.song.inserts[k].levels.clear();
+                                    }
+                                    self.song.inserts[d].name = "Submix".into();
+                                    self.song.inserts[d].color = self.song.inserts[from[0]].color;
+                                    self.sel_insert = d;
+                                    self.mixer_sel.clear();
+                                    self.dirty = true;
+                                }
+                                None => self.status = "No empty mixer track for the submix".into(),
+                            }
                             ui.close_menu();
                         }
                         if ui.button("Reset routing (to the master only)").clicked() {

@@ -21,6 +21,69 @@ pub struct State {
     line: Option<(u32, i32)>,
     /// The last point a free-hand drag wrote, so fast strokes leave no holes.
     last: Option<(u32, i32)>,
+    /// The events last copied: tick and raw value.
+    copied: Vec<(u32, i32)>,
+    /// The LFO or scale tool while its box is open.
+    tool: Option<Tool>,
+}
+
+/// One of the two tools at work: what the pattern held before it, and its settings.
+pub struct Tool {
+    lfo: bool,
+    before: Vec<PatEvent>,
+    /// Sine, triangle, square.
+    shape: u8,
+    /// Value and range as 0..=1 of the travel, and the length of one cycle in beats: at the start and at the end.
+    start: [f32; 3],
+    end: [f32; 3],
+    end_on: bool,
+    phase: f32,
+    mul: f32,
+    offset: f32,
+    center: f32,
+}
+
+impl Tool {
+    fn new(lfo: bool, before: Vec<PatEvent>) -> Self {
+        Tool { lfo, before, shape: 0, start: [0.5, 0.5, 4.0], end: [0.5, 0.5, 4.0], end_on: false, phase: 0.0, mul: 1.0, offset: 0.0, center: 0.5 }
+    }
+
+    /// The pattern's events with the tool applied to one control.
+    fn apply(&self, param: u16, dest: u16, lo: i32, hi: i32, total: u32, snap: u32, ppq: u32) -> Vec<PatEvent> {
+        let span = (hi - lo).max(1) as f32;
+        let raw_of = |v: f32| lo + (v.clamp(0.0, 1.0) * span).round() as i32;
+        let mut out: Vec<PatEvent> = self.before.iter().filter(|e| (e.param, e.dest) != (param, dest)).copied().collect();
+        if self.lfo {
+            let mut turn = self.phase;
+            let mut t = 0;
+            while t < total {
+                let f = if self.end_on { t as f32 / total.max(1) as f32 } else { 0.0 };
+                let at = |k: usize| self.start[k] + (self.end[k] - self.start[k]) * f;
+                let x = turn.fract();
+                let wave = match self.shape {
+                    0 => (x * std::f32::consts::TAU).sin(),
+                    1 => 4.0 * ((x + 0.75).fract() - 0.5).abs() - 1.0,
+                    _ => {
+                        if x < 0.5 {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    }
+                };
+                out.push(PatEvent { tick: t, param, dest, raw: raw_of(at(0) + at(1) * 0.5 * wave) });
+                turn += snap as f32 / (at(2).max(0.01) * ppq.max(1) as f32);
+                t += snap;
+            }
+        } else {
+            for e in self.before.iter().filter(|e| (e.param, e.dest) == (param, dest)) {
+                let v = (e.raw - lo) as f32 / span;
+                out.push(PatEvent { raw: raw_of((v - self.center) * self.mul + self.center + self.offset), ..*e });
+            }
+        }
+        out.sort_by_key(|e| e.tick);
+        out
+    }
 }
 
 impl App {
@@ -84,6 +147,130 @@ impl App {
         self.dirty = true;
     }
 
+    /// Ctrl+C and Ctrl+X: the shown control's events of this pattern.
+    pub(crate) fn events_copy(&mut self, cut: bool) {
+        let pat = self.handle.transport.pattern();
+        let Some((param, dest)) = self.events.target else { return };
+        let Some(p) = self.song.patterns.get_mut(pat) else { return };
+        self.events.copied = p.events.iter().filter(|e| (e.param, e.dest) == (param, dest)).map(|e| (e.tick, e.raw)).collect();
+        if cut && !self.events.copied.is_empty() {
+            p.events.retain(|e| (e.param, e.dest) != (param, dest));
+            self.dirty = true;
+        }
+        self.status = format!("{} events {}", self.events.copied.len(), if cut { "cut" } else { "copied" });
+    }
+
+    /// Ctrl+V: the copied events onto the shown control, in place of what it had.
+    pub(crate) fn events_paste(&mut self) {
+        let pat = self.handle.transport.pattern();
+        let Some((param, dest)) = self.events.target else { return };
+        if self.events.copied.is_empty() {
+            return;
+        }
+        self.song.ensure_pattern(pat);
+        let range = self.song.event_range(self.song.event_target(param, dest));
+        let ev = &mut self.song.patterns[pat].events;
+        ev.retain(|e| (e.param, e.dest) != (param, dest));
+        for &(tick, raw) in &self.events.copied {
+            ev.push(PatEvent { tick, param, dest, raw: range.map(|(lo, hi)| raw.clamp(lo, hi)).unwrap_or(raw) });
+        }
+        ev.sort_by_key(|e| e.tick);
+        self.dirty = true;
+    }
+
+    /// The shown control's events as an automation clip: one held step per event, laid where the pattern first
+    /// plays in the song.
+    fn events_to_clip(&mut self, pat: usize, param: u16, dest: u16, lo: i32, hi: i32) {
+        let mine: Vec<PatEvent> = self.song.patterns[pat].events.iter().filter(|e| (e.param, e.dest) == (param, dest)).copied().collect();
+        if mine.is_empty() {
+            self.status = "No events to turn into a clip".into();
+            return;
+        }
+        let total = self.song.pattern_length(pat).max(self.song.bar().max(1));
+        let val = |raw: i32| ((raw - lo) as f32 / (hi - lo).max(1) as f32).clamp(0.0, 1.0);
+        let mut points = vec![];
+        if mine[0].tick > 0 {
+            points.push(cereal_engine::song::AutoPt { tick: 0.0, value: val(mine[0].raw), tension: 0.0, mode: 2 });
+        }
+        for e in &mine {
+            points.push(cereal_engine::song::AutoPt { tick: e.tick as f64, value: val(e.raw), tension: 0.0, mode: 2 });
+        }
+        if mine.last().is_some_and(|e| e.tick < total) {
+            points.push(cereal_engine::song::AutoPt { tick: total as f64, value: val(mine[mine.len() - 1].raw), tension: 0.0, mode: 2 });
+        }
+        let pos = self.song.clips.iter().filter(|c| c.src == cereal_engine::song::ClipSrc::Pattern(pat)).map(|c| c.pos).min().unwrap_or(0);
+        let target = self.song.event_target(param, dest);
+        self.add_auto_clip(target, pos, total, points);
+        self.song.patterns[pat].events.retain(|e| (e.param, e.dest) != (param, dest));
+        self.status = format!("Events of {} turned into an automation clip", self.song.target_name(target));
+    }
+
+    /// The LFO and scale boxes: what they show is written to the pattern as it is set, Accept keeps it and
+    /// Cancel puts the old events back.
+    #[allow(clippy::too_many_arguments)]
+    fn events_tool(&mut self, ctx: &egui::Context, open: Option<bool>, pat: usize, param: u16, dest: u16, lo: i32, hi: i32, total: u32) {
+        if let Some(lfo) = open {
+            if let Some(old) = self.events.tool.take() {
+                self.song.patterns[pat].events = old.before;
+            }
+            self.events.tool = Some(Tool::new(lfo, self.song.patterns[pat].events.clone()));
+        }
+        let Some(mut tool) = self.events.tool.take() else { return };
+        let (mut keep, mut drop) = (false, false);
+        egui::Window::new(if tool.lfo { "Event LFO" } else { "Scale event levels" }).collapsible(false).resizable(false).show(ctx, |ui| {
+            if tool.lfo {
+                ui.horizontal(|ui| {
+                    ui.label("Shape");
+                    for (k, name) in ["Sine", "Triangle", "Square"].iter().enumerate() {
+                        ui.selectable_value(&mut tool.shape, k as u8, *name);
+                    }
+                });
+                egui::Grid::new("ev_lfo").show(ui, |ui| {
+                    ui.label("");
+                    ui.label("Start");
+                    ui.checkbox(&mut tool.end_on, "End");
+                    ui.end_row();
+                    for (k, name, top) in [(0, "Value", 1.0), (1, "Range", 1.0), (2, "Speed (beats)", 64.0)] {
+                        ui.label(name);
+                        let lowest = if k == 2 { 0.0625 } else { 0.0 };
+                        ui.add(egui::Slider::new(&mut tool.start[k], lowest..=top).logarithmic(k == 2));
+                        ui.add_enabled(tool.end_on, egui::Slider::new(&mut tool.end[k], lowest..=top).logarithmic(k == 2));
+                        ui.end_row();
+                    }
+                    ui.label("Phase");
+                    ui.add(egui::Slider::new(&mut tool.phase, 0.0..=1.0));
+                    ui.end_row();
+                });
+            } else {
+                egui::Grid::new("ev_scale").show(ui, |ui| {
+                    ui.label("Multiply");
+                    ui.add(egui::Slider::new(&mut tool.mul, -2.0..=2.0));
+                    ui.end_row();
+                    ui.label("Offset");
+                    ui.add(egui::Slider::new(&mut tool.offset, -1.0..=1.0));
+                    ui.end_row();
+                    ui.label("Center");
+                    ui.add(egui::Slider::new(&mut tool.center, 0.0..=1.0));
+                    ui.end_row();
+                });
+            }
+            ui.horizontal(|ui| {
+                keep = ui.button("Accept").clicked();
+                drop = ui.button("Cancel").clicked();
+            });
+        });
+        if drop || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.song.patterns[pat].events = tool.before;
+            return;
+        }
+        let snap = (self.song.step() / 4).max(1);
+        self.song.patterns[pat].events = tool.apply(param, dest, lo, hi, total, snap, self.song.ppq);
+        self.dirty = true;
+        if !keep {
+            self.events.tool = Some(tool);
+        }
+    }
+
     pub(crate) fn events_ui(&mut self, ui: &mut Ui) {
         let pat = self.handle.transport.pattern();
         self.song.ensure_pattern(pat);
@@ -94,14 +281,47 @@ impl App {
         let Some((param, dest)) = self.events.target else { return };
         let target = self.song.event_target(param, dest);
         let range = self.song.event_range(target);
+        // what the file's values run between: the control's own travel when we know it, else what is there
+        let (lo, hi) = range.unwrap_or_else(|| {
+            let vals = self.song.patterns[pat].events.iter().filter(|e| (e.param, e.dest) == (param, dest)).map(|e| e.raw);
+            let (a, b) = (vals.clone().min().unwrap_or(0), vals.max().unwrap_or(1));
+            (a.min(0), b.max(a + 1))
+        });
+        let focused = self.focus == crate::Win::Events && !ui.ctx().wants_keyboard_input();
+        let (key_lfo, key_scale, key_del) = ui.input(|i| {
+            (focused && i.modifiers.alt && i.key_pressed(egui::Key::O), focused && i.modifiers.alt && i.key_pressed(egui::Key::X), focused && i.key_pressed(egui::Key::Delete))
+        });
+        let mut open_tool = if key_lfo { Some(true) } else if key_scale { Some(false) } else { None };
+        if key_del {
+            self.song.patterns[pat].events.retain(|e| (e.param, e.dest) != (param, dest));
+            self.dirty = true;
+        }
 
         ui.horizontal(|ui| {
             ui.menu_button("Edit", |ui| {
+                if ui.button("Cut   Ctrl+X").clicked() {
+                    self.events_copy(true);
+                    ui.close_menu();
+                }
+                if ui.button("Copy   Ctrl+C").clicked() {
+                    self.events_copy(false);
+                    ui.close_menu();
+                }
+                if ui.add_enabled(!self.events.copied.is_empty(), egui::Button::new("Paste   Ctrl+V")).clicked() {
+                    self.events_paste();
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Insert current control value   Ctrl+I").clicked() {
                     self.events_insert_now();
                     ui.close_menu();
                 }
-                if ui.button("Delete all events of this control").clicked() {
+                if ui.button("Turn into automation clip").clicked() {
+                    self.events_to_clip(pat, param, dest, lo, hi);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Delete all events of this control   Del").clicked() {
                     self.song.patterns[pat].events.retain(|e| (e.param, e.dest) != (param, dest));
                     self.dirty = true;
                     ui.close_menu();
@@ -109,6 +329,16 @@ impl App {
                 if ui.button("Delete every event in the pattern").clicked() {
                     self.song.patterns[pat].events.clear();
                     self.dirty = true;
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("Tools", |ui| {
+                if ui.button("LFO...   Alt+O").clicked() {
+                    open_tool = Some(true);
+                    ui.close_menu();
+                }
+                if ui.button("Scale levels...   Alt+X").clicked() {
+                    open_tool = Some(false);
                     ui.close_menu();
                 }
             });
@@ -125,14 +355,9 @@ impl App {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(Vec2::new(300.0, 140.0)), Sense::click_and_drag());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, PANEL_DARK);
-        // what the file's values run between: the control's own travel when we know it, else what is there
-        let (lo, hi) = range.unwrap_or_else(|| {
-            let vals = self.song.patterns[pat].events.iter().filter(|e| (e.param, e.dest) == (param, dest)).map(|e| e.raw);
-            let (a, b) = (vals.clone().min().unwrap_or(0), vals.max().unwrap_or(1));
-            (a.min(0), b.max(a + 1))
-        });
         let bar = self.song.bar().max(1);
         let total = self.song.pattern_length(pat).max(bar);
+        self.events_tool(ui.ctx(), open_tool, pat, param, dest, lo, hi, total);
         let px = rect.width() / total as f32;
         let x_of = |t: u32| rect.left() + t as f32 * px;
         let y_of = |v: i32| rect.bottom() - 2.0 - (v - lo) as f32 / (hi - lo).max(1) as f32 * (rect.height() - 4.0);

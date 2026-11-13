@@ -2844,6 +2844,8 @@ impl App {
                         self.pr_copy(ctx, cut);
                     } else if self.focus == Win::Playlist && self.show_playlist {
                         self.pl_copy(ctx, cut);
+                    } else if self.focus == Win::Events && self.show_events {
+                        self.events_copy(cut);
                     }
                     continue;
                 }
@@ -2856,6 +2858,8 @@ impl App {
                         self.pr_paste();
                     } else if self.focus == Win::Playlist && self.show_playlist {
                         self.pl_paste();
+                    } else if self.focus == Win::Events && self.show_events {
+                        self.events_paste();
                     }
                     continue;
                 }
