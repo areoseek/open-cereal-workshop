@@ -5213,7 +5213,7 @@ impl Unit {
             }
             Kind::MultiComp => {
                 // stored cutoffs run on a logarithmic knob scale
-                let hz = |v: f32| 20.0 * 1000f32.powf((v / 20000.0).clamp(0.0, 1.0));
+                let hz = |v: f32| 34.7 * 740f32.powf((v / 20000.0).clamp(0.0, 1.0));
                 let g_lo = svf_g(hz(p[20]), sr);
                 let g_hi = svf_g(hz(p[3]), sr);
                 // per band: state, threshold dB, slope, knee dB, attack, release, gain
@@ -5224,29 +5224,31 @@ impl Unit {
                     let x = 1.0 - (1.0 - (p[o + 1] / 65536.0).clamp(0.0, 1.0)).powf(1.5);
                     (
                         p[[2usize, 10, 19][b]] as i32,
-                        -73.0 * (p[o] / 65536.0).clamp(0.0, 1.0),
-                        x,
+                        -73.0 * (p[o] / 65536.0).clamp(0.0, 1.0) - 5.0,
+                        x * 0.8125,
                         (p[o + 2] / 65536.0).clamp(0.0, 1.0) * 24.0,
-                        (-1.0 / ((p[o + 3] / 10.0).max(0.05) * 0.001 * sr)).exp(),
-                        (-1.0 / ((p[o + 4] / 10.0).max(1.0) * 0.001 * sr)).exp(),
+                        (-1.0 / ((p[o + 3] / 10.0).max(0.05) * 0.0000095 * sr)).exp(),
+                        (-1.0 / ((p[o + 4] / 10.0).max(1.0) * 0.00055 * sr)).exp(),
                         (p[o + 5] / 32768.0).powi(2),
                     )
                 };
                 let bands = [band(0), band(1), band(2)];
                 let main = p[0] / 32768.0;
                 let limit = p[1] >= 0.5;
-                const Q: f32 = std::f32::consts::SQRT_2;
+                // each split is a four-stage flat-topped pair (measured from the turn each harmonic takes)
+                let split = |z: &mut [f32], x: f32, g: f32| -> (f32, f32) {
+                    let (l, _, h) = svf(z, x, g, 1.847_759);
+                    (svf(&mut z[2..], l, g, 0.765_367).0, svf(&mut z[4..], h, g, 0.765_367).2)
+                };
                 for f in io.iter_mut() {
                     let mut part = [[0f32; 2]; 3];
                     for c in 0..2 {
                         let x = f[c];
-                        let (l1, _, _) = svf(&mut z[c * 8..], x, g_lo, Q);
-                        let (low, _, _) = svf(&mut z[c * 8 + 2..], l1, g_lo, Q);
-                        let (_, _, h1) = svf(&mut z[c * 8 + 4..], x, g_hi, Q);
-                        let (_, _, high) = svf(&mut z[c * 8 + 6..], h1, g_hi, Q);
+                        let (low, rest) = split(&mut z[c * 18..], x, g_lo);
+                        let (mid, high) = split(&mut z[c * 18 + 6..], rest, g_hi);
                         part[0][c] = high;
                         part[2][c] = low;
-                        part[1][c] = x - low - high;
+                        part[1][c] = mid;
                     }
                     let mut out = [0f32; 2];
                     for (b, &(state, thr, slope, knee, att, rel, gain)) in bands.iter().enumerate() {
@@ -5269,7 +5271,7 @@ impl Unit {
                         } else {
                             0.0
                         };
-                        let e = &mut z[32 + b];
+                        let e = &mut z[40 + b];
                         let k = if want < *e { att } else { rel };
                         *e = want + (*e - want) * k;
                         let g = db(*e) * gain;
