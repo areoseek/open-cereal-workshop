@@ -2166,7 +2166,7 @@ impl Player {
                         follow: z.track,
                         venv: z.env.unwrap_or_default(),
                         fon: z.filter.is_some(),
-                        fcut: z.filter.map_or(1.0, |f| f.0),
+                        fcut: z.filter.map_or(1.0, |f| f.0 + z.cut_links[0] * n.vel + z.cut_links[1] * (n.key as f32 - 60.0) / 120.0),
                         fres: z.filter.map_or(0.0, |f| f.1),
                         penv: z.penv.unwrap_or_default(),
                         cenv: z.cenv.unwrap_or_default(),

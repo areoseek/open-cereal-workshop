@@ -21,6 +21,8 @@ pub struct Zone {
     pub path: String,
     pub sample: Option<Arc<Sample>>,
     pub gain: f32,
+    /// how far velocity and key (around middle C) move the filter knob
+    pub cut_links: [f32; 2],
     pub pan: f32,
     pub tune_cents: f32,
     /// Whether the note's velocity scales the level.
@@ -53,7 +55,7 @@ pub struct Zone {
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2] }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, cut_links: [0.0; 2], pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2] }
     }
 }
 
@@ -457,15 +459,17 @@ fn programs(state: &[u8]) -> Option<Map> {
             let looped = (int(20) != 0 && int(28) > int(24)).then(|| (int(24), int(28)));
             let all = |n: u32| inner.iter().filter(move |p| p.0 == n).map(|p| p.1);
             let knobs = |b: &[u8], from: usize| -> Vec<f32> { b.get(from..).unwrap_or(&[]).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()).clamp(0.0, 1.0)).collect() };
-            let secs = |k: f32| 10.0 * k * k * k;
+            // measured on the factory test: times go with the fourth power of the knob and the lines are squared
+            let secs = |k: f32| 10.0 * k * k * k * k;
             let adsr = |b: &[u8], amount: f32| {
                 let k = knobs(b, 0);
-                (k.len() >= 4).then(|| crate::song::Env { on: true, attack: secs(k[0]), decay: secs(k[1]), sustain: k[2], release: secs(k[3]).max(0.005), amount, tension: [0.0, -1.0, -1.0], ..Default::default() })
+                (k.len() >= 4).then(|| crate::song::Env { on: true, attack: secs(k[0]), decay: secs(k[1]), sustain: k[2], release: secs(k[3]).max(0.005), amount, tension: [0.0, -1.0 / 3.0, -1.0 / 3.0], ..Default::default() })
             };
             let env = find(509).and_then(|b| adsr(b, 0.0));
             // links: velocity (2) to level (2), the free envelopes (9, 10) to pitch (1) or the first cutoff (7)
             let mut vel_scale = all(516).next().is_none();
             let (mut penv, mut cenv) = (None, None);
+            let mut cut_links = [0.0f32; 2];
             let free: Vec<&[u8]> = all(514).collect();
             for l in all(516) {
                 if l.len() < 8 {
@@ -478,6 +482,8 @@ fn programs(state: &[u8]) -> Option<Map> {
                 }
                 match (src, dst) {
                     (2, 2) => vel_scale = amount > 0.0,
+                    (2, 7) => cut_links[0] = amount,
+                    (1, 7) => cut_links[1] = amount,
                     (9 | 10, 1) => penv = free.get(src as usize - 9).and_then(|b| adsr(b, amount * 1200.0)),
                     (9 | 10, 7) => cenv = free.get(src as usize - 9).and_then(|b| adsr(b, amount)),
                     _ => {}
@@ -515,6 +521,9 @@ fn programs(state: &[u8]) -> Option<Map> {
                 release: env.map_or(0.25, |e| e.release),
                 env,
                 vel_scale,
+                // the zone's level knob, squared: half way measured 11.5 dB down on the factory test
+                gain: find(504).map(|b| knobs(b, 0)).and_then(|k| k.first().copied()).map_or(1.0, |k| k * k * 1.0614),
+                cut_links,
                 penv,
                 cenv,
                 filter,
@@ -779,7 +788,7 @@ pub(crate) mod tests {
         assert!(z.path.ends_with("tone.wav"));
         assert!(m.hit(72, 100).next().is_none());
         let e = z.env.unwrap();
-        assert!((e.sustain - 0.8).abs() < 1e-6 && (e.release - 1.25).abs() < 1e-4 && e.attack == 0.0);
+        assert!((e.sustain - 0.8).abs() < 1e-6 && (e.release - 0.625).abs() < 1e-4 && e.attack == 0.0);
         assert_eq!(z.filter, Some((0.4, 0.5)));
         assert!(z.vel_scale && z.penv.is_none());
         let c = z.cenv.unwrap();

@@ -316,6 +316,7 @@ impl Bank {
                 let filter = (hz < 19_000.0 || moved).then(|| (((hz / 20.0).ln() / 1000f32.ln()).clamp(0.0, 1.0), ((q - 0.707) / 10.0).clamp(0.0, 1.0)));
                 out.push(Zone {
                     name: h.name.clone(),
+                    cut_links: [0.0; 2],
                     key_lo: key.0,
                     key_hi: key.1.min(127),
                     vel_lo: vel.0,
