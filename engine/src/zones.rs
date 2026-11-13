@@ -175,13 +175,17 @@ fn pads(state: &[u8]) -> Option<Map> {
                 root: set[3],
                 track: false,
                 path,
-                gain: (set[0] as f32 / 128.0).clamp(0.0, 1.0) * (l[0] as f32 / 127.0).clamp(0.0, 1.0),
-                pan: ((set[1] + l[1]) as f32 / 64.0).clamp(-1.0, 1.0),
+                // measured: a layer's level knob follows the fader curve around its resting 99
+                gain: (set[0] as f32 / 128.0).clamp(0.0, 1.0) * 0.74 * (l[0].clamp(0, 127) as f32 / 99.0).powf(2.83),
+                // measured: the pan knobs reach half way to a side at their ends
+                pan: ((set[1] + l[1]) as f32 / 128.0).clamp(-1.0, 1.0),
                 // the tune knob's reach is an estimate: an octave either way at its ends
                 tune_cents: l[5] as f32 * 12.0 + pitch,
                 vel_scale: opt & 1 != 0,
                 pick: if opt & 2 != 0 { 1 } else { 0 },
                 one_shot: true,
+                // a pad starts at once, with no fade in
+                attack: 0.0,
                 cut: set[5],
                 cut_by: set[6],
                 out: set[4].clamp(0, 125) as usize,
