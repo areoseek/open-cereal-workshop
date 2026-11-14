@@ -62,6 +62,15 @@ const PEAK_Q: [f32; 9] = [137.9, 20.0, 9.7, 5.8, 2.267, 0.91, 0.382, 0.178, 0.08
 /// steepness of the shelves:
 const SHELF_SLOPE: [f32; 9] = [1.0, 0.829, 0.678, 0.546, 0.43, 0.331, 0.244, 0.167, 0.101];
 
+/// Width in Hz of the first low-pass with its second switch on, over the resonance knob.
+fn flat_width(r: f32) -> f32 {
+    const W: [f32; 5] = [8370.0, 5000.0, 2753.0, 1170.0, 270.0];
+    let x = r.clamp(0.0, 1.0) * 4.0;
+    let i = (x as usize).min(3);
+    let f = x - i as f32;
+    (W[i].ln() * (1.0 - f) + W[i + 1].ln() * f).exp()
+}
+
 fn table(t: &[f32; 9], r: f32) -> f32 {
     let x = r.clamp(0.0, 1.0) * 8.0;
     let i = (x as usize).min(7);
@@ -530,6 +539,10 @@ pub struct Filt {
     pub db: f32,
     pub drive: f32,
     pub ws: Vec<f32>,
+    /// the quality switch
+    pub hq: bool,
+    /// the switch for the other way of ringing (a phaser gets five more steps from it)
+    pub flat: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1294,6 +1307,8 @@ impl Patch {
                 drive: i(16).clamp(0, 128) as f32 / 128.0,
                 ws_bipolar: bip,
                 ws: (0..=256).map(|j| ws.map(j as f32 / 256.0)).collect(),
+                hq: !first && h[40] != 0,
+                flat: !first && h[41] != 0,
             };
             for a in 0..8 {
                 let g = match a {
@@ -1338,7 +1353,6 @@ impl Patch {
         self.any_moving = self.arts.iter().any(|a| a.moving());
     }
 
-    /// Seconds the sound needs after the key is let go `t` seconds into the note.
     /// How many times over a note at this pitch must be worked out so that what its operators do to each
     /// other stays clean: 1 when nothing reaches past the top of the range, else 2 or 4.
     pub fn oversampling(&self, dphase: f32, sr: f32) -> u32 {
@@ -1352,14 +1366,13 @@ impl Patch {
             bend = bend.max(self.fm[r].iter().map(|x| x.abs()).sum::<f32>());
             ring |= self.rm[r].iter().any(|&x| x != 0.0);
         }
-        let least = 1;
         if bend == 0.0 && !ring {
-            return least;
+            return 1;
         }
         // a full knob spreads partials to some forty times the bending operator's pitch
         let top = fastest * (2.0 + 20.0 * bend);
         if top < 0.5 {
-            least
+            1
         } else if top < 1.5 {
             2
         } else {
@@ -1367,6 +1380,8 @@ impl Patch {
         }
     }
 
+    /// Seconds the sound needs after the key is let go `t` seconds into the note: until every volume
+    /// envelope that is on has ended (measured: one on a filter nothing feeds still holds the note open).
     pub fn tail_s(&self, t: f32, beat: f32) -> f32 {
         let mut tail = 0.0f32;
         // every volume envelope that is switched on counts, even one on a part nothing goes through (measured:
@@ -1406,7 +1421,7 @@ struct Sub {
     fs: [[[f32; 2]; 6]; 3],
     plan: [[[f32; 6]; 6]; 3],
     stages: [u8; 3],
-    ap: [[f32; 10]; 3],
+    ap: [[f32; 20]; 3],
     /// what takes each filter up to twice the rate and back
     twice: [Twice; 3],
     fb: [f32; 3],
@@ -1603,7 +1618,7 @@ impl Voice {
                 fs: [[[0.0; 2]; 6]; 3],
                 plan: [[[0.0; 6]; 6]; 3],
                 stages: [0; 3],
-                ap: [[0.0; 10]; 3],
+                ap: [[0.0; 20]; 3],
                 twice: [Twice::new(); 3],
                 fb: [0.0; 3],
                 fg: [0.1; 3],
@@ -1689,7 +1704,16 @@ impl Voice {
                     4 | 5 | 7 => {
                         // band kinds keep their overall width whatever the slope: each stage of a band-pass
                         // is made wider, each stage of a notch narrower
-                        let w = table(&WIDTH, r);
+                        // (the second switch gives the band-pass and the first notch a narrower law that
+                        // widens with the corner)
+                        let w = if f.flat && f.kind != 7 {
+                            // (below a quarter of the knob it runs down to the same needle as without the switch)
+                            let law = |r: f32| 0.041 * (4.43 * r + 0.96 * (c - 0.5)).exp();
+                            let kf = if r >= 0.25 { law(r) } else { (0.0072f32.ln() * (1.0 - r * 4.0) + law(0.25).ln() * r * 4.0).exp() };
+                            2.0 * (kf * 0.5).asinh() / std::f32::consts::LN_2
+                        } else {
+                            table(&WIDTH, r)
+                        };
                         let steps = f.slope.max(1) as f32;
                         let kk = width(if f.kind == 5 { w / n.max(1) as f32 } else if f.kind == 4 { w * steps } else { w });
                         let m = match f.kind {
@@ -1705,7 +1729,12 @@ impl Voice {
                         }
                     }
                     6 => {
-                        let kk = table(&DAMP_WIDE, r).powf(1.0 / n.max(1) as f32);
+                        let wide = if f.flat {
+                            9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp()
+                        } else {
+                            table(&DAMP_WIDE, r)
+                        };
+                        let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -kk, -1.0]));
                     }
                     8..=10 => {
@@ -1713,7 +1742,9 @@ impl Voice {
                         count = n.min(1);
                         let a = 10f32.powf(f.db / 40.0);
                         plan[0] = if f.kind == 9 {
-                            let kk = 1.0 / (table(&PEAK_Q, r) * a);
+                            // (sharper with the second switch on)
+                            let q = if f.flat { (99.5 * (-5.64 * r).exp()).min(137.9) } else { table(&PEAK_Q, r) };
+                            let kk = 1.0 / (q * a);
                             stage(s.fg[k], kk, [1.0, kk * (a * a - 1.0), 0.0])
                         } else {
                             let kk = ((a + 1.0 / a) * (1.0 / table(&SHELF_SLOPE, r) - 1.0) + 2.0).max(0.01).sqrt();
@@ -1772,8 +1803,15 @@ impl Voice {
                         let lv = [f.levels[0] * s.val[b + 4], f.levels[1] * s.val[b + 5], f.levels[2] * s.val[b + 6]];
                         for (st, slot) in plan.iter_mut().enumerate().take(count) {
                             let cs = if spread && st > 0 { 1.0 - far[st % 3] * (1.0 - c) } else { c };
+                            // with the second switch on, the resonance knob follows another law: the first
+                            // kind keeps a set width in Hz, the others ring harder the higher the corner sits
+                            let turned = (r * (0.70 + 0.59 * cs)).max(0.0);
+                            let own = if st == ringer { r } else { 0.0 };
                             let kk = match kind {
+                                0 if f.flat => flat_width(own) / (cutoff_hz(cs) * (1.07 - 0.07 * own)),
                                 0 => if st == ringer { 1.0 - 0.79 * r } else { 1.0 },
+                                3 if f.flat => (9.94 * (-4.33 * turned.powf(1.45)).exp()).powf(1.0 / n.max(1) as f32),
+                                _ if f.flat => (-2.43 * turned.powf(2.44)).exp().powf(1.0 / n.max(1) as f32),
                                 3 => table(&DAMP_WIDE, r).powf(1.0 / n.max(1) as f32),
                                 _ if spread => table(&DAMP, r).powf(1.0 / n as f32),
                                 _ => table(&DAMP, r).powf(1.0 / n.max(1) as f32),
@@ -1784,6 +1822,8 @@ impl Voice {
                                 _ => [0.0, 0.0, 1.0],
                             };
                             let g = match kind {
+                                // (its corner sits a little higher the less it rings)
+                                0 if f.flat => g_at(cutoff_hz(cs) * (1.07 - 0.07 * own)),
                                 0 => g_at(cutoff_hz(cs)),
                                 // the wide one's step is not bent for the sample rate, and stops at four tenths of it
                                 3 => PI * wide_hz(cs).min(sr * 0.6) / sr,
@@ -1976,7 +2016,8 @@ impl Voice {
                     // without a sample of delay (the row is a straight line: gain times input plus memory)
                     let g = s.fg[k];
                     let a = (g - 1.0) / (g + 1.0);
-                    let n = (f.slope.clamp(1, 5) as usize) * 2;
+                    // (the second switch adds five to the order)
+                    let n = (f.slope.clamp(1, 5) as usize + if f.flat { 5 } else { 0 }) * 2;
                     let (mut gain, mut held) = (1.0f32, 0.0f32);
                     for z in s.ap[k].iter().take(n) {
                         held = a * held + *z;
@@ -2088,7 +2129,7 @@ impl Voice {
                 if !x.is_finite() {
                     x = 0.0;
                     s.fs[k] = [[0.0; 2]; 6];
-                    s.ap[k] = [0.0; 10];
+                    s.ap[k] = [0.0; 20];
                     s.twice[k] = Twice::new();
                     s.fb[k] = 0.0;
                 }

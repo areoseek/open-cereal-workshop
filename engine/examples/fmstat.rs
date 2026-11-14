@@ -2,6 +2,8 @@
 use std::collections::BTreeMap;
 fn main() {
     let root = std::env::args().nth(1).expect("folder");
+    // (FIELD picks another setting of the filter than its first level to count by)
+    let field: usize = std::env::var("FIELD").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
     let mut lib = cereal_engine::Library::new();
     let mut seen: BTreeMap<(i32, i32, i32), usize> = BTreeMap::new();
     let mut wave: BTreeMap<&str, usize> = BTreeMap::new();
@@ -23,8 +25,8 @@ fn main() {
                 let mut raw = Vec::new();
                 cereal_engine::fm::Patch::edited(&g.raw, |d| raw = d.to_vec());
                 for k in 0..3 {
-                    if (pt.out[6 + k] != 0.0 || pt.filts[k].next != 0.0) && raw.len() >= pt.filt_at[k] + 20 {
-                        let a = pt.filt_at[k] + 16;
+                    if (pt.out[6 + k] != 0.0 || pt.filts[k].next != 0.0) && raw.len() >= pt.filt_at[k] + field + 4 {
+                        let a = pt.filt_at[k] + field;
                         let lv = i32::from_le_bytes([raw[a], raw[a + 1], raw[a + 2], raw[a + 3]]);
                         *seen.entry((pt.filts[k].slope, pt.filts[k].kind, lv)).or_default() += 1;
                     }
