@@ -339,36 +339,132 @@ pub const STRETCH_MODES: [(&str, i8); 11] = [
 ];
 
 /// The gate knob at its right end: notes keep their length.
-pub const GATE_OFF: f32 = 1.99;
+pub const GATE_OFF: f32 = 7.99;
 
 /// Chords the arpeggiator can spell from each note, after "the held notes" and "the note alone".
-pub const ARP_CHORDS: [(&str, &[u8]); 16] = [
+pub const ARP_CHORDS: [(&str, &[u8]); 88] = [
     ("Major", &[0, 4, 7]),
-    ("Minor", &[0, 3, 7]),
-    ("Sus 4", &[0, 5, 7]),
-    ("Sus 2", &[0, 2, 7]),
-    ("Major 7", &[0, 4, 7, 11]),
-    ("Minor 7", &[0, 3, 7, 10]),
-    ("Seventh", &[0, 4, 7, 10]),
-    ("Major 6", &[0, 4, 7, 9]),
-    ("Minor 6", &[0, 3, 7, 9]),
-    ("Ninth", &[0, 4, 7, 10, 14]),
-    ("Major 9", &[0, 4, 7, 11, 14]),
-    ("Minor 9", &[0, 3, 7, 10, 14]),
-    ("Diminished", &[0, 3, 6]),
-    ("Augmented", &[0, 4, 8]),
-    ("Fifth", &[0, 7]),
-    ("Octave", &[0, 12]),
+    ("sus2", &[0, 2, 7]),
+    ("sus4", &[0, 5, 7]),
+    ("Majb5", &[0, 4, 6]),
+    ("minor", &[0, 3, 7]),
+    ("mb5", &[0, 3, 6]),
+    ("aug", &[0, 4, 8]),
+    ("augsus4", &[0, 5, 8]),
+    ("tri", &[0, 3, 6, 9]),
+    ("6", &[0, 4, 7, 9]),
+    ("6sus4", &[0, 5, 7, 9]),
+    ("6add9", &[0, 4, 7, 9, 14]),
+    ("m6", &[0, 3, 7, 9]),
+    ("m6add9", &[0, 3, 7, 9, 14]),
+    ("7", &[0, 4, 7, 10]),
+    ("7sus4", &[0, 5, 7, 10]),
+    ("7#5", &[0, 4, 8, 10]),
+    ("7b5", &[0, 4, 6, 10]),
+    ("7#9", &[0, 4, 7, 10, 15]),
+    ("7b9", &[0, 4, 7, 10, 13]),
+    ("7#5#9", &[0, 4, 8, 10, 15]),
+    ("7#5b9", &[0, 4, 8, 10, 13]),
+    ("7b5b9", &[0, 4, 6, 10, 13]),
+    ("7add11", &[0, 4, 7, 10, 17]),
+    ("7add13", &[0, 4, 7, 10, 21]),
+    ("7#11", &[0, 4, 7, 10, 18]),
+    ("Maj7", &[0, 4, 7, 11]),
+    ("Maj7b5", &[0, 4, 6, 11]),
+    ("Maj7#5", &[0, 4, 8, 11]),
+    ("Maj7#11", &[0, 4, 7, 11, 18]),
+    ("Maj7add13", &[0, 4, 7, 11, 21]),
+    ("m7", &[0, 3, 7, 10]),
+    ("m7b5", &[0, 3, 6, 10]),
+    ("m7b9", &[0, 3, 7, 10, 13]),
+    ("m7add11", &[0, 3, 7, 10, 17]),
+    ("m7add13", &[0, 3, 7, 10, 21]),
+    ("m-Maj7", &[0, 3, 7, 11]),
+    ("m-Maj7add11", &[0, 3, 7, 11, 17]),
+    ("m-Maj7add13", &[0, 3, 7, 11, 21]),
+    ("9", &[0, 4, 7, 10, 14]),
+    ("9sus4", &[0, 5, 7, 10, 14]),
+    ("add9", &[0, 4, 7, 14]),
+    ("9#5", &[0, 4, 8, 10, 14]),
+    ("9b5", &[0, 4, 6, 10, 14]),
+    ("9#11", &[0, 4, 7, 10, 14, 18]),
+    ("9b13", &[0, 4, 7, 10, 14, 20]),
+    ("Maj9", &[0, 4, 7, 11, 14]),
+    ("Maj9sus4", &[0, 5, 7, 11, 14]),
+    ("Maj9#5", &[0, 4, 8, 11, 14]),
+    ("Maj9#11", &[0, 4, 7, 11, 14, 18]),
+    ("m9", &[0, 3, 7, 10, 14]),
+    ("madd9", &[0, 3, 7, 14]),
+    ("m9b5", &[0, 3, 6, 10, 14]),
+    ("m9-Maj7", &[0, 3, 7, 11, 14]),
+    ("11", &[0, 4, 7, 10, 14, 17]),
+    ("11b9", &[0, 4, 7, 10, 13, 17]),
+    ("Maj11", &[0, 4, 7, 11, 14, 17]),
+    ("m11", &[0, 3, 7, 10, 14, 17]),
+    ("m-Maj11", &[0, 3, 7, 11, 14, 17]),
+    ("13", &[0, 4, 7, 10, 14, 21]),
+    ("13#9", &[0, 4, 7, 10, 15, 21]),
+    ("13b9", &[0, 4, 7, 10, 13, 21]),
+    ("13b5b9", &[0, 4, 6, 10, 13, 21]),
+    ("Maj13", &[0, 4, 7, 11, 14, 21]),
+    ("m13", &[0, 3, 7, 10, 14, 21]),
+    ("m-Maj13", &[0, 3, 7, 11, 14, 21]),
+    ("Major", &[0, 2, 4, 5, 7, 9, 11]),
+    ("Major pentatonic", &[0, 2, 4, 7, 9]),
+    ("Major bebop", &[0, 2, 4, 5, 7, 8, 9, 11]),
+    ("Minor Harmonic", &[0, 2, 3, 5, 7, 8, 11]),
+    ("Minor Melodic", &[0, 2, 3, 5, 7, 9, 11]),
+    ("Minor pentatonic", &[0, 3, 5, 7, 10]),
+    ("Minor Natural (Aeolian)", &[0, 2, 3, 5, 7, 8, 10]),
+    ("Minor Neapolitan", &[0, 1, 3, 5, 7, 8, 11]),
+    ("Minor Hungarian", &[0, 2, 3, 6, 7, 8, 11]),
+    ("Whole tone", &[0, 2, 4, 6, 8, 10]),
+    ("Diminished", &[0, 2, 3, 5, 6, 8, 9, 11]),
+    ("Dominant bebop", &[0, 2, 4, 5, 7, 9, 10, 11]),
+    ("Jap in sen", &[0, 1, 5, 7, 10]),
+    ("Blues", &[0, 3, 5, 6, 7, 10]),
+    ("Arabic", &[0, 1, 4, 5, 7, 8, 11]),
+    ("Enigmatic", &[0, 1, 4, 6, 8, 10, 11]),
+    ("Neapolitan", &[0, 1, 3, 5, 7, 9, 11]),
+    ("Dorian", &[0, 2, 3, 5, 7, 9, 10]),
+    ("Phrygian", &[0, 1, 3, 5, 7, 8, 10]),
+    ("Lydian", &[0, 2, 4, 6, 7, 9, 11]),
+    ("Mixolydian", &[0, 2, 4, 5, 7, 9, 10]),
+    ("Locrian", &[0, 1, 3, 5, 6, 8, 10]),
 ];
 
-/// Arpeggiator and gate times: the stored knob value against steps (1024 = one step, squared).
+/// Where the set chord list is ruled off when shown: after these many entries. Scales start at the last one.
+pub const ARP_CHORD_BREAKS: [usize; 6] = [9, 14, 39, 54, 59, 66];
+
+/// The arpeggiator's time knob fully right: the first note is held and nothing follows.
+pub const ARP_HOLD: f32 = 8.0;
+
+/// The arpeggiator's time knob against steps between notes, before it is cut down to whole ticks: fitted to
+/// renders of the reference at eleven settings from a 24th of a step to four steps (1024 = one step).
+pub fn arp_knob_steps(raw: i32) -> f32 {
+    if raw >= 1447 {
+        return ARP_HOLD;
+    }
+    knob_steps(raw).max(1.0 / 24.0)
+}
+
+pub fn arp_steps_knob(steps: f32) -> i32 {
+    if steps >= ARP_HOLD {
+        return 1447;
+    }
+    steps_knob(steps)
+}
+
+/// The time knobs of a channel (arpeggiator time, gate, shift): the stored value against steps, before the
+/// player cuts it down to whole ticks. 1024 is one step; the curve is the one the arpeggiator fit gave, and
+/// renders with the gate and shift knobs fall on it too.
 pub fn knob_steps(raw: i32) -> f32 {
-    let x = raw.clamp(0, 1448) as f32 / 1024.0;
-    x * x
+    let x = raw.clamp(0, 1446) as f32 / 1024.0;
+    24.2 / 27.7 * (28f32.powf(x) - 0.3) / 24.0
 }
 
 pub fn steps_knob(steps: f32) -> i32 {
-    ((steps.max(0.0).sqrt() * 1024.0).round() as i32).clamp(0, 1447)
+    (((steps.max(0.0) * 24.0 * 27.7 / 24.2 + 0.3).ln() / 28f32.ln() * 1024.0).round() as i32).clamp(0, 1446)
 }
 
 impl Default for Sampler {
@@ -423,11 +519,11 @@ impl Default for Sampler {
             arp_dir: 0,
             arp_range: 1,
             arp_chord: -1,
-            arp_steps: 1.0,
+            arp_steps: arp_knob_steps(1024),
             arp_gate: 1.0,
             arp_slide: false,
             arp_repeat: 1,
-            gate_steps: 2.0,
+            gate_steps: 8.0,
             shift: 0.0,
             full_porta: true,
             add_to_key: false,
@@ -506,11 +602,11 @@ impl Sampler {
             arp_dir: c.arp[0].clamp(0, 5) as u8,
             arp_range: c.arp[1].clamp(1, 10) as u8,
             arp_chord: c.arp[2].clamp(-2, ARP_CHORDS.len() as i32) as i16,
-            arp_steps: knob_steps(c.arp[3]),
+            arp_steps: arp_knob_steps(c.arp[3]),
             arp_gate: (c.arp[4] as f32 / 48.0).clamp(0.0, 1.0),
             arp_slide: c.arp_slide,
             arp_repeat: c.arp[5].clamp(1, 16) as u8,
-            gate_steps: if c.gate >= 1447 { 2.0 } else { knob_steps(c.gate as i32) },
+            gate_steps: if c.gate >= 1447 { 8.0 } else { knob_steps(c.gate as i32) },
             shift: (c.time_shift as f32 / 1024.0).clamp(0.0, 1.0),
             full_porta: c.full_porta,
             add_to_key: c.add_to_key,

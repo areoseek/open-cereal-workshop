@@ -707,6 +707,7 @@ impl Handle {
             board_sent: Vec::new(),
             arps: Vec::new(),
             arp_note: false,
+            arp_glide: false,
             scripts: Vec::new(),
             script_emit: None,
             script_serial: 0,
@@ -973,6 +974,8 @@ struct Voice {
     /// Source frames per output frame at the note's own pitch, and where a glide is taking it.
     step: f64,
     step_to: f64,
+    /// A change of pitch waiting for its frame: frames to go and the new step.
+    jump: Option<(u32, f64)>,
     glide: f64,
     /// `step` with the pitch envelope applied.
     step_now: f64,
@@ -1041,6 +1044,8 @@ struct Voice {
     /// Frames sounded, and frames since the note was let go.
     t: u32,
     rel_t: u32,
+    /// Not 0 on a note whose release is shorter than a tick: the most its envelope may fall in one tick.
+    rel_fall: f32,
     rel_from: f32,
     ctl: u32,
     venv: Env,
@@ -1117,7 +1122,16 @@ impl Voice {
             }
         }
         if self.venv.on {
-            let mut target = if self.releasing {
+            let mut target = if self.releasing && self.rel_fall > 0.0 {
+                // (measured) each tick it heads for nothing in a straight line, falling no more than the limit; the
+                // value is the one wanted when this stretch ends
+                let tick = self.ltick.max(1.0);
+                let at = |t: f32| {
+                    let v = self.rel_from - (t / tick).floor() * self.rel_fall;
+                    if v <= 0.0 { -1.0 } else { v - v.min(self.rel_fall) * (t / tick).fract() }
+                };
+                if at(self.rel_t as f32) < 0.0 { -1.0 } else { at((self.rel_t + CTL) as f32).max(0.0) }
+            } else if self.releasing {
                 self.venv.released(self.rel_from, self.rel_t as f32 / self.sr).unwrap_or(-1.0)
             } else {
                 self.venv.held(t)
@@ -1333,6 +1347,16 @@ impl Voice {
             if self.delay > 0 {
                 self.delay -= 1;
                 continue;
+            }
+            if let Some((left, to)) = self.jump {
+                if left == 0 {
+                    self.jump = None;
+                    self.step = to;
+                    self.step_to = to;
+                    self.ctl = 0;
+                } else {
+                    self.jump = Some((left - 1, to));
+                }
             }
             if let Some(r) = self.remaining.as_mut() {
                 if *r == 0 {
@@ -1743,6 +1767,9 @@ pub struct Player {
     arps: Vec<ArpRun>,
     /// Set while the arpeggiator starts a note: its end is kept, so a sample is cut there even with no envelope.
     arp_note: bool,
+    /// Set while an arpeggiator step with its slide switch on is started: a sample voice still sounding is retuned
+    /// on the spot instead of a new one starting.
+    arp_glide: bool,
     /// Note scripts at work.
     scripts: Vec<ScriptRun>,
     /// Set while a script's own note is being started: the instrument it is for, the first note unit after the script, the voice's tag.
@@ -1814,6 +1841,8 @@ pub struct Player {
 const GAIN_SLEW: f32 = 112.9;
 
 struct VoiceMods {
+    /// The volume envelope's release as set, before the slowest-fall rule stretches it.
+    rel0: f32,
     env: [Env; 4],
     lfos: [crate::song::Lfo; 5],
     lper: [f32; 5],
@@ -1904,8 +1933,9 @@ impl Player {
         }
         let t0 = if self.was_playing && tpf > 0.0 { (self.pos / tpf / self.sr as f64) as f32 + delay as f32 / self.sr } else { 0.0 };
         let mut venv = fit(Env { on: ch.env_on, ..f.vol_env });
+        let rel0 = venv.release;
         venv.release = venv.release.max(1.0 / GAIN_SLEW);
-        VoiceMods { env: [venv, fit(f.cut_env), fit(f.res_env), fit(f.pitch_env)], lfos, lper, on: lfos.iter().any(|l| l.amount != 0.0), t0, tick: if tpf > 0.0 { (1.0 / tpf) as f32 } else { 256.0 } }
+        VoiceMods { rel0, env: [venv, fit(f.cut_env), fit(f.res_env), fit(f.pitch_env)], lfos, lper, on: lfos.iter().any(|l| l.amount != 0.0), t0, tick: if tpf > 0.0 { (1.0 / tpf) as f32 } else { 256.0 } }
     }
 
     /// Start one note as the channel's time settings shape it: shifted late, cut at the gate, or handed to the
@@ -1930,10 +1960,16 @@ impl Player {
             return;
         }
         let step = song.step() as f64 / self.now_tpf(song);
-        let delay = if live { delay } else { delay + (f.shift as f64 * step) as u32 };
-        let mut len_frames = len_frames;
+        // (measured) shift and gate are whole ticks, cut down from their knobs' curve; a shifted note starts late
+        // and still ends where it was written to
+        let tick = step / song.step().max(1) as f64;
+        let ticks = |steps: f32| (steps as f64 * song.step() as f64).floor().max(0.0);
+        let late = if live || f.shift <= 0.0 { 0 } else { (ticks(crate::song::knob_steps((f.shift * 1024.0).round() as i32)) * tick).round() as u32 };
+        let delay = delay + late;
+        // (measured) and gives up one more tick at its end
+        let mut len_frames = len_frames.map(|l| if late > 0 { l.saturating_sub(late as u64 + tick.round() as u64).max(1) } else { l });
         if !live && f.gate_steps < crate::song::GATE_OFF && !(n.porta && f.full_porta) && !n.slide {
-            let g = ((f.gate_steps as f64 * step) as u64).max(1);
+            let g = ((ticks(f.gate_steps).max(1.0) * tick).round() as u64).max(1);
             len_frames = Some(len_frames.map_or(g, |l| l.min(g)));
         }
         if f.arp_dir != 0 && !n.slide && !n.muted && ch.enabled && !matches!(ch.kind, ChannelKind::Layer | ChannelKind::AutomationClip | ChannelKind::AudioClip) {
@@ -2129,7 +2165,10 @@ impl Player {
                 r.held.clear();
                 continue;
             }
-            let period = (f.arp_steps as f64 * step).max(self.sr as f64 * 0.004);
+            // (measured) the time between steps is cut down to whole ticks, never less than one
+            let tick = step / song.step().max(1) as f64;
+            let period = (f.arp_steps as f64 * song.step() as f64).floor().max(1.0) * tick;
+            let hold_first = f.arp_steps >= crate::song::ARP_HOLD;
             while r.wait.round() < n as f64 {
                 // (measured) steps fall on the nearest frame
                 let t = r.wait.round() as i64;
@@ -2144,6 +2183,11 @@ impl Player {
                         }
                         None => break,
                     }
+                }
+                if hold_first && r.i > 0 {
+                    // (measured) with the time knob fully right the first note stays and nothing follows it
+                    r.wait += period;
+                    continue;
                 }
                 keys.clear();
                 if r.own {
@@ -2197,6 +2241,9 @@ impl Player {
                 let Some(tpl) = r.held.iter().filter(|h| on(h)).last().map(|h| h.note.clone()) else { break };
                 let note = Note { key: seq[at as usize], porta: tpl.porta || (f.arp_slide && r.i > 0), slide: false, ..tpl };
                 let mut hold = ((period * f.arp_gate.clamp(0.02, 1.0) as f64).round() as u64).max(1);
+                if hold_first {
+                    hold = r.held.iter().filter(|h| on(h)).filter_map(|h| h.to).max().map_or(u64::MAX / 4, |e| (e - t).max(1) as u64);
+                }
                 if r.own {
                     // (measured) with a set chord the last step stops one tick short of the note's end
                     if let Some(end) = r.held.iter().filter(|h| on(h)).filter_map(|h| h.to).max() {
@@ -2205,8 +2252,10 @@ impl Player {
                 }
                 // (measured) each step is cut where its gate ends, over the sampler's usual 10 ms, envelope or not
                 self.arp_note = true;
+                self.arp_glide = f.arp_slide && r.i > 0;
                 self.note_on_plain(song, &note, t.max(0) as u32, Some(hold), false);
                 self.arp_note = false;
+                self.arp_glide = false;
                 r.i = r.i.wrapping_add(1);
                 r.wait += period;
             }
@@ -2231,8 +2280,14 @@ impl Player {
         let f = &ch.smp;
         let mut n = n.clone();
         if !n.slide {
-            for (t, at) in [(&f.track_vel, n.vel * 100.0), (&f.track_key, n.key as f32)] {
-                let off = (at - t[0]) / 64.0;
+            // (measured) the hit strength counts by the loudness it and the middle stand for, twice their
+            // difference; the key counts an octave as the whole way, and its middle is kept mirrored about 60
+            let loud = |v: f32| (11f32.powf(v / 128.0) - 1.0) / 10.0;
+            let offs = [
+                (&f.track_vel, 2.0 * (loud(n.vel * 100.0) - loud(f.track_vel[0]))),
+                (&f.track_key, (n.key as f32 + f.track_key[0] - 120.0) / 12.0),
+            ];
+            for (t, off) in offs {
                 n.pan = (n.pan + t[1] * off).clamp(-1.0, 1.0);
                 n.mod_x = (n.mod_x + t[2] * off).clamp(-1.0, 1.0);
                 n.mod_y = (n.mod_y + t[3] * off).clamp(-1.0, 1.0);
@@ -2244,23 +2299,48 @@ impl Player {
         }
         let gap = f.echo_steps as f64 * song.step() as f64 / self.now_tpf(song);
         for k in 0..=echoes {
-            let mut pan = n.pan + f.echo_pan * k as f32;
+            // ping pong: the pan turns round at each side
+            let side = |pan: f32| {
+                if f.echo_ping {
+                    let x = (pan + 1.0).rem_euclid(4.0);
+                    if x > 2.0 { 3.0 - x } else { x - 1.0 }
+                } else {
+                    pan.clamp(-1.0, 1.0)
+                }
+            };
+            // (measured) echoes start on the nearest frame
+            let at = delay + (k as f64 * gap).round() as u32;
             if f.echo_fat {
-                // fat mode: the echoes sit on alternate sides
-                pan = n.pan + if k == 0 { 0.0 } else if k % 2 == 1 { f.echo_pan } else { -f.echo_pan };
-            } else if f.echo_ping {
-                // ping pong: the pan turns round at each side
-                let x = (pan + 1.0).rem_euclid(4.0);
-                pan = if x > 2.0 { 3.0 - x } else { x - 1.0 };
+                // (measured) fat mode: every echo is as loud as the others, twice the feedback over three for
+                // each echo and two more, and is a pair of voices that the pan and pitch steps pull apart to
+                // opposite sides; the note itself takes what is left of one and a half
+                let each = 2.0 * f.echo_feedback / (3.0 * echoes as f32 + 2.0);
+                if k == 0 {
+                    let e = Note { vel: law::scale_velocity(n.vel, 1.5 - echoes as f32 * each), ..n.clone() };
+                    self.note_on_one(song, &e, at, len_frames, live);
+                    continue;
+                }
+                for sign in [1.0f32, -1.0] {
+                    let e = Note {
+                        vel: law::scale_velocity(n.vel, each / 2.0),
+                        pan: side(n.pan + sign * f.echo_pan * k as f32),
+                        fine_cents: n.fine_cents + sign * f.echo_cents * k as f32,
+                        porta: false,
+                        ..n.clone()
+                    };
+                    self.note_on_one(song, &e, at, len_frames, live);
+                }
+                continue;
             }
             let e = Note {
-                vel: n.vel * f.echo_feedback.powi(k as i32).sqrt(),
-                pan: pan.clamp(-1.0, 1.0),
+                // (measured) each echo is the one before it times the feedback, as plain level
+                vel: law::scale_velocity(n.vel, f.echo_feedback.powi(k as i32)),
+                pan: side(n.pan + f.echo_pan * k as f32),
                 fine_cents: n.fine_cents + f.echo_cents * k as f32,
                 porta: n.porta && k == 0,
                 ..n.clone()
             };
-            self.note_on_one(song, &e, delay + (k as f64 * gap) as u32, len_frames, live);
+            self.note_on_one(song, &e, at, len_frames, live);
         }
     }
 
@@ -2504,10 +2584,15 @@ impl Player {
                 for v in self.voices.iter_mut().filter(|v| v.active && !v.preview && !v.releasing && v.sample.is_some()) {
                     let same = v.chan == n.chan;
                     let cut = f.cut != 0 && song.channels.get(v.chan as usize).map(|c| c.smp.cut_by == f.cut).unwrap_or(false);
-                    if same && f.mono && f.porta && !glided && v.delay == 0 {
+                    if same && ((f.mono && f.porta) || self.arp_glide) && !glided && v.delay == 0 {
                         // portamento: the sounding voice slides to the new note instead of starting again
                         v.step_to = step;
                         v.glide = 1.0 - (-(CTL as f64) / (f.slide.max(0.001) as f64 * sr as f64 / 3.0)).exp();
+                        if self.arp_glide {
+                            // (measured) a sliding arpeggio step lands on its pitch at once
+                            v.step_to = v.step;
+                            v.jump = Some((delay, step));
+                        }
                         v.key = n.key;
                         v.remaining = remaining.map(|r| r + delay as u64);
                         glided = true;
@@ -2529,6 +2614,7 @@ impl Player {
                     let note_pan = n.pan.clamp(-1.0, 1.0);
                     let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
+                    let rel_level = gain * pl.max(pr) / (law::channel_gain(10000.0 / 12800.0) * std::f32::consts::FRAC_1_SQRT_2);
                     self.start(Voice {
                         pos: f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64,
                         sample: Some(smp.clone()),
@@ -2542,7 +2628,10 @@ impl Player {
                         ease: true,
                         fade: f.declick.min(5) + 1,
                         remaining,
-                        venv: mods.env[0],
+                        // (measured) a released note falls to nothing over one tick, but neither side faster than
+                        // `GAIN_SLEW`, which is counted in levels of a plain note: quiet notes are gone sooner
+                        venv: Env { release: mods.rel0.max(mods.tick / self.sr).max(rel_level / GAIN_SLEW), ..mods.env[0] },
+                        rel_fall: if mods.rel0 <= mods.tick / self.sr { GAIN_SLEW * mods.tick / self.sr / rel_level.max(1e-6) } else { 0.0 },
                         penv: mods.env[3],
                         cenv: mods.env[1],
                         renv: mods.env[2],
@@ -5081,10 +5170,10 @@ mod tests {
         }
         // half the time: twice the notes; a quarter step late: all of them moved
         s.channels[0].smp.arp_steps = 0.5;
-        s.channels[0].smp.shift = 0.25;
+        s.channels[0].smp.shift = 0.5;
         let got = onsets(&run(s.clone(), 40_000), 200);
         assert_eq!(got.len(), 8, "{got:?}");
-        assert!(got[0].abs_diff(1500) <= 2 && got[1].abs_diff(4500) <= 2, "{got:?}");
+        assert!(got[0].abs_diff(1000) <= 2 && got[1].abs_diff(4000) <= 2, "{got:?}");
         // the gate cuts the held note to one step, leaving two notes
         s.channels[0].smp.shift = 0.0;
         s.channels[0].smp.gate_steps = 1.0;

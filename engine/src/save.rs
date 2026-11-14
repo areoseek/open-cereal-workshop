@@ -1133,7 +1133,7 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
     if q(now.shift, 1024.0) != q(was.shift, 1024.0) {
         put(ev, start, &mut end, Event::word(id::CHAN_TIME_SHIFT, q(now.shift, 1024.0) as u16));
     }
-    let arp = |f: &Sampler| (f.arp_dir, f.arp_range, f.arp_chord, crate::song::steps_knob(f.arp_steps), q(f.arp_gate, 48.0), f.arp_slide, f.arp_repeat, if f.gate_steps >= crate::song::GATE_OFF { 1447 } else { crate::song::steps_knob(f.gate_steps) }, f.full_porta);
+    let arp = |f: &Sampler| (f.arp_dir, f.arp_range, f.arp_chord, crate::song::arp_steps_knob(f.arp_steps), q(f.arp_gate, 48.0), f.arp_slide, f.arp_repeat, if f.gate_steps >= crate::song::GATE_OFF { 1447 } else { crate::song::steps_knob(f.gate_steps) }, f.full_porta);
     if arp(now) != arp(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
             if let Value::Data(d) = &mut ev[i].value {

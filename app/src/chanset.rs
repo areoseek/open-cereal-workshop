@@ -914,10 +914,20 @@ impl App {
                     ui.vertical(|ui| {
                         ui.label("Time");
                         ui.horizontal(|ui| {
-                            changed |= cap_knob(ui, "GATE", &mut f.gate_steps, 0.0, 2.0, 2.0, |v: f32| {
-                                if v >= cereal_engine::song::GATE_OFF { "Gate off".into() } else { format!("Gate {}:{:02}", v as u32, (v.fract() * 24.0) as u32) }
-                            });
-                            changed |= cap_knob(ui, "SHIFT", &mut f.shift, 0.0, 1.0, 0.0, |v: f32| format!("Shift 0:{:02}", (v * 24.0) as u32));
+                            let time = |name: &'static str| move |v: f32| {
+                                let s = cereal_engine::song::knob_steps(v as i32);
+                                if v >= 1447.0 { format!("{name} off") } else { format!("{name} {}:{:02}", s as u32, (s.fract() * 24.0) as u32) }
+                            };
+                            let mut raw = if f.gate_steps >= cereal_engine::song::GATE_OFF { 1447.0 } else { cereal_engine::song::steps_knob(f.gate_steps) as f32 };
+                            if cap_knob(ui, "GATE", &mut raw, 0.0, 1447.0, 1447.0, time("Gate")) {
+                                f.gate_steps = if raw >= 1446.5 { 8.0 } else { cereal_engine::song::knob_steps(raw.round() as i32) };
+                                changed = true;
+                            }
+                            let mut raw = f.shift * 1024.0;
+                            if cap_knob(ui, "SHIFT", &mut raw, 0.0, 1024.0, 0.0, time("Shift")) {
+                                f.shift = (raw / 1024.0).clamp(0.0, 1.0);
+                                changed = true;
+                            }
                             changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
                         });
                         changed |= switch(ui, &mut f.full_porta, "Full porta", "Portamento notes ignore the gate and play their whole length");
@@ -983,7 +993,14 @@ impl App {
                             ui.label("Arpeggiator");
                         });
                         ui.horizontal(|ui| {
-                            changed |= cap_knob(ui, "TIME", &mut f.arp_steps, 0.01, 2.0, 1.0, |v: f32| format!("Time {}:{:02}", v as u32, (v.fract() * 24.0) as u32));
+                            let mut raw = cereal_engine::song::arp_steps_knob(f.arp_steps) as f32;
+                            if cap_knob(ui, "TIME", &mut raw, 0.0, 1447.0, 1024.0, |v: f32| {
+                                let s = cereal_engine::song::arp_knob_steps(v as i32);
+                                if s >= cereal_engine::song::ARP_HOLD { "Time: hold".to_string() } else { format!("Time {}:{:02}", s as u32, (s.fract() * 24.0) as u32) }
+                            }) {
+                                f.arp_steps = cereal_engine::song::arp_knob_steps(raw.round() as i32);
+                                changed = true;
+                            }
                             changed |= cap_knob(ui, "GATE", &mut f.arp_gate, 0.0, 1.0, 1.0, |v: f32| format!("Gate {:.0} %", v * 100.0));
                             let (mut range, mut repeat) = (f.arp_range as u32, f.arp_repeat as u32);
                             ui.label("Range");
@@ -1004,8 +1021,21 @@ impl App {
                                 n => chords[(n as usize - 1).min(chords.len() - 1)].0.to_string(),
                             };
                             egui::ComboBox::from_id_salt(("arp chord", ci)).selected_text(face(f.arp_chord)).show_ui(ui, |ui| {
-                                for c in [-2i16, -1, 0].into_iter().chain(1..=chords.len() as i16) {
+                                let breaks = &cereal_engine::song::ARP_CHORD_BREAKS;
+                                ui.weak("Automatic");
+                                for c in [-2i16, -1, 0] {
                                     changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
+                                }
+                                ui.separator();
+                                ui.weak("Chords");
+                                for c in 1..=chords.len() as i16 {
+                                    changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
+                                    if breaks.contains(&(c as usize)) {
+                                        ui.separator();
+                                        if c as usize == breaks[breaks.len() - 1] {
+                                            ui.weak("Scales");
+                                        }
+                                    }
                                 }
                             });
                         });

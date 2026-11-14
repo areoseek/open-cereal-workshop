@@ -28,6 +28,11 @@ pub fn sampler_velocity(v: f32) -> f32 {
     (11f32.powf(v) - 1.0) / 10.0 * std::f32::consts::FRAC_1_SQRT_2
 }
 
+/// The velocity that plays `gain` times as loud as velocity `v` on the curve above.
+pub fn scale_velocity(v: f32, gain: f32) -> f32 {
+    (1.0 + gain.max(0.0) * (11f32.powf(v.clamp(0.0, 1.28)) - 1.0)).log(11.0)
+}
+
 /// The levels adjustment volume of a channel (`v` is file value / 12800, 1.0 leaves the level alone): the
 /// channel volume curve carried on past its top. Measured at 0.5 (0.2317 times).
 pub fn adjust_gain(v: f32) -> f32 {
