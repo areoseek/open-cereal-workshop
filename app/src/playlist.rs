@@ -1649,6 +1649,19 @@ impl App {
                     self.add_audio_clip(&path, snap(tick_of(pp.x)), Some(track_of(pp.y) as u16));
                 }
             }
+            // dropped on a track's name: the clip goes to the start of the track, which can lock itself to it
+            if let Some(pp) = pointer.filter(|pp| heads.contains(*pp)) {
+                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if !["fst", "fsc", "mid", "flp", "gmsynth", "tbio", "mrp", "dwp"].contains(&ext.as_str()) {
+                    let tr = track_of(pp.y);
+                    self.add_audio_clip(&path, 0, Some(tr as u16));
+                    if self.settings.pl_opts & plo::HEAD_LOCK != 0 {
+                        if let Some(t) = self.song.tracks.get_mut(tr) {
+                            t.lock_content = true;
+                        }
+                    }
+                }
+            }
         }
         // the right Shift and right Alt keys turn a click into a slice or a mute, whichever tool is picked
         let ralt = egui_winit::key_side::right_alt();

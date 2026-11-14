@@ -258,6 +258,15 @@ impl App {
                                 false
                             }
                         };
+                        if filled && resp.hovered() {
+                            // the wheel carries the unit a slot up or down
+                            let roll = ui.input(|i| if i.modifiers.any() { 0.0 } else { i.raw_scroll_delta.y });
+                            if roll > 0.0 && slot > 0 {
+                                act = Some(SlotAct::Move(slot, slot - 1));
+                            } else if roll < 0.0 && slot < 9 {
+                                act = Some(SlotAct::Move(slot, slot + 1));
+                            }
+                        }
                         if filled && resp.clicked() {
                             act = Some(if over_dot { SlotAct::Toggle(slot) } else { SlotAct::Open(slot) });
                         }
