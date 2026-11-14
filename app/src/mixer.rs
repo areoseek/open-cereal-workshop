@@ -42,6 +42,8 @@ pub(crate) mod mxo {
     pub const AUTO_COLOR: u64 = 1 << 20;
     /// The panel of the selected track (its slots and settings) is put away.
     pub const HIDE_PANEL: u64 = 1 << 21;
+    /// Separation, polarity and swap on every strip.
+    pub const EXTRA: u64 = 1 << 22;
     pub const DEFAULT: u64 = AUTO_CLIP | LAT_COMP | AUTO_NAME | GROUP_TAKES | PDC_AUTOM | CABLES | COMPACT_LIST | (1 << COLOR_SHIFT) | LINES | EXT_LEVELS | MASTER_LAT | THREADED;
 }
 
@@ -93,6 +95,10 @@ impl App {
             let shown = self.settings.mixer_opts & mxo::HIDE_PANEL == 0;
             if ui.selectable_label(shown, "FX panel").hint("Shows or hides the selected track's slots and settings (Ctrl+Enter)").clicked() {
                 self.settings.mixer_opts ^= mxo::HIDE_PANEL;
+                let _ = self.settings.save();
+            }
+            if ui.selectable_label(self.settings.mixer_opts & mxo::EXTRA != 0, "Stereo").hint("Stereo separation, polarity and left/right swap on every track").clicked() {
+                self.settings.mixer_opts ^= mxo::EXTRA;
                 let _ = self.settings.save();
             }
             if ui.button("+").hint("An empty track after the selected one").clicked() && self.sel_insert < self.last_regular() {
@@ -547,6 +553,7 @@ impl App {
         let o = self.settings.mixer_opts;
         // the alt views always carry the names under the faders
         let names_top = o & mxo::NAMES_TOP != 0 && !matches!(self.settings.mixer_view, 4 | 7);
+        let extra = o & mxo::EXTRA != 0;
         let alt = o & mxo::ALT_HL != 0;
         // how much of the track's own colour its strip takes
         let tint = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
@@ -570,6 +577,22 @@ impl App {
                 control_menu(&r, cereal_engine::song::Target::InsertPan(i));
                 if r.changed() {
                     self.dirty = true;
+                }
+                if extra {
+                    let r = knob(ui, &mut ins.sep, -1.0, 1.0, 0.0, [16.0, 13.0, 20.0][view]).hint(format!("Stereo separation {:+.0} %", -ins.sep * 100.0));
+                    if r.changed() {
+                        self.dirty = true;
+                    }
+                    for (k, (label, hint)) in [("\u{D8}", "Reverse polarity"), ("LR", "Swap left and right")].into_iter().enumerate() {
+                        let on = if k == 0 { ins.invert } else { ins.swap };
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new((sw - 8.0).min(26.0), 11.0), Sense::click());
+                        ui.painter().rect_filled(rect, 2.0, if on { ACCENT } else { PANEL_DARK });
+                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(8.5), if on { Color32::BLACK } else { TEXT_DIM });
+                        if resp.hint(hint).clicked() {
+                            if k == 0 { ins.invert = !on } else { ins.swap = !on }
+                            self.dirty = true;
+                        }
+                    }
                 }
                 {
                 // the highest level seen since the last click on it

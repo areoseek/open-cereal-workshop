@@ -859,6 +859,11 @@ impl App {
         self.dirty |= !t.is_empty();
     }
 
+    /// Put tick `a` at the left edge, zoom untouched.
+    pub(crate) fn pr_scroll_to(&mut self, a: u32) {
+        self.piano.scroll_x = a as f32 * self.piano.zoom * 96.0 / self.song.ppq as f32;
+    }
+
     /// Show the stretch from tick `a` to tick `b` across the whole width.
     fn pr_show(&mut self, a: u32, b: u32) {
         let ppq = self.song.ppq as f32;

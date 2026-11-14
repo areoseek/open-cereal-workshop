@@ -1382,7 +1382,7 @@ impl App {
                 gp.with_clip_rect(r.intersect(grid)).text(Pos2::new(lx + 3.0, title.center().y), Align2::LEFT_CENTER, &name, font.clone(), Color32::from_gray(245));
             }
             // a picture of what is inside
-            let body = Rect::from_min_max(Pos2::new(r.left(), title.bottom()), r.max);
+            let body = Rect::from_min_max(Pos2::new(r.left(), if opts & plo::TITLE_CONTENT != 0 { r.top() + 1.0 } else { title.bottom() }), r.max);
             if body.height() > 6.0 && r.width() > 6.0 {
                 match c.src {
                     ClipSrc::Pattern(pi) => {
@@ -2285,6 +2285,9 @@ impl App {
                     }
                     self.show_piano = true;
                     self.focus = Win::Piano;
+                    if self.settings.pl_opts & plo::SCROLL_TO_POS != 0 {
+                        self.pr_scroll_to(c.offset);
+                    }
                 } else {
                     self.show_rack = true;
                     self.focus = Win::Rack;
