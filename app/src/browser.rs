@@ -177,6 +177,20 @@ impl State {
 }
 
 impl App {
+    /// The browser comes up on the tab of what this project is made of.
+    pub(crate) fn browser_show_project(&mut self) {
+        self.show_browser = true;
+        self.focus = crate::Win::Browser;
+        self.browser.tab = Tab::Project;
+    }
+
+    /// The browser comes up on the tab of plug-ins.
+    pub(crate) fn browser_show_plugins(&mut self) {
+        self.show_browser = true;
+        self.focus = crate::Win::Browser;
+        self.browser.tab = Tab::Plugins;
+    }
+
     fn browser_dir(&mut self, ui: &mut Ui, dir: &Path, depth: usize) {
         let entries = self.browser.list(dir).clone();
         for (path, is_dir) in entries {

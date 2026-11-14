@@ -15,6 +15,7 @@ mod record;
 mod settings;
 mod setup;
 mod help;
+mod menus;
 mod stems;
 mod unpack;
 mod waveed;
@@ -305,6 +306,9 @@ pub(crate) struct App {
     /// The load monitor: its window, the rows shown (name, share of real time) and when they were last counted.
     show_load: bool,
     show_touch: bool,
+    show_tapper: bool,
+    /// Cut, copy and paste picked from the EDIT menu, handed to the window in use on the next frame.
+    menu_events: Vec<egui::Event>,
     show_script_out: bool,
     script_out: String,
     /// Inputs tied to one channel whatever is selected: the device name ("" = the typing keyboard), the channel.
@@ -538,6 +542,8 @@ impl App {
             show_info: false,
             show_load: false,
             show_touch: false,
+            show_tapper: false,
+            menu_events: Vec::new(),
             show_script_out: false,
             script_out: String::new(),
             recv: Vec::new(),
@@ -2999,27 +3005,23 @@ impl App {
                     Key::N => self.save_new_version(),
                     Key::O => self.leave(Leave::OpenDialog),
                     Key::S => self.save(modifiers.shift),
-                    Key::R if modifiers.shift => {
-                        self.export();
-                        if let Some(r) = self.render.as_mut() {
-                            r.lossy = 1;
-                        }
+                    Key::R if modifiers.shift => self.export_as(1),
+                    Key::R => self.export_as(0),
+                    Key::F4 => self.next_empty_after(),
+                    Key::F5 => self.show_tapper = !self.show_tapper,
+                    Key::F12 => self.close_unfocused(),
+                    Key::Delete if modifiers.shift => self.delete_pattern(),
+                    Key::P if modifiers.shift => self.browser_show_project(),
+                    Key::F => {
+                        self.show_browser = true;
+                        self.focus = Win::Browser;
+                        self.browser_key(Key::F, egui::Modifiers::COMMAND);
                     }
-                    Key::R => self.export(),
-                    Key::F4 if modifiers.shift => self.next_empty_after(),
-                    Key::F4 => self.new_pattern(),
                     Key::Insert if modifiers.shift => self.insert_pattern(),
                     Key::ArrowUp | Key::ArrowDown if modifiers.shift && !matches!(self.focus, Win::Piano | Win::Playlist) => {
-                        let p = self.handle.transport.pattern();
-                        self.song.ensure_pattern(p);
-                        let to = self.song.move_pattern(p, key == Key::ArrowUp);
-                        self.handle.transport.set_pattern(to);
-                        self.dirty = true;
+                        self.move_pattern(key == Key::ArrowUp);
                     }
-                    Key::H if modifiers.shift => {
-                        self.layout = None;
-                        ctx.memory_mut(|m| m.reset_areas());
-                    }
+                    Key::H if modifiers.shift => self.realign(ctx),
                     Key::B => {
                         self.rec_blend = !self.rec_blend;
                         self.status = format!("Blend recorded notes: {}", if self.rec_blend { "on" } else { "off" });
@@ -3063,6 +3065,10 @@ impl App {
             if modifiers.alt {
                 if key == Key::F8 && !repeat {
                     self.show_browser = !self.show_browser;
+                } else if key == Key::F7 && !repeat {
+                    self.show_touch = !self.show_touch;
+                } else if key == Key::F12 && !repeat {
+                    self.close_plugin_windows();
                 } else if key == Key::Slash {
                     self.jump_marker(false);
                 } else if key == Key::T && !repeat && !modifiers.shift && !modifiers.command && self.focus != Win::Piano {
@@ -3103,6 +3109,7 @@ impl App {
                         self.help_open();
                     }
                 }
+                Key::F8 if !repeat && modifiers.shift => self.browser_show_plugins(),
                 Key::F8 if !repeat => self.show_picker = !self.show_picker,
                 Key::Slash => self.jump_bar(-1),
                 Key::Num0 if !self.typing_keys => self.jump_bar(1),
@@ -3139,9 +3146,9 @@ impl App {
                 Key::F3 if !repeat => self.tool_menu = if self.tool_menu.is_some() { None } else { Some(egui::Pos2::ZERO) },
                 Key::F4 if !repeat => {
                     if modifiers.shift {
-                        self.next_empty_after();
-                    } else {
                         self.new_pattern();
+                    } else {
+                        self.next_empty_after();
                     }
                     self.start_rename_pattern();
                 }
@@ -3176,548 +3183,7 @@ impl App {
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.menu_button("FILE", |ui| {
-                    if ui.button("New").clicked() {
-                        self.leave(Leave::New);
-                        ui.close_menu();
-                    }
-                    ui.menu_button("New from template", |ui| {
-                        if self.templates.is_none() {
-                            let mut found = Vec::new();
-                            for root in &self.lib.factory_roots {
-                                let mut todo = vec![(root.join("Data/Templates"), 0)];
-                                while let Some((dir, depth)) = todo.pop() {
-                                    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                                        let p = e.path();
-                                        if p.is_dir() && depth < 4 {
-                                            todo.push((p, depth + 1));
-                                        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("flp")) {
-                                            let kind = p.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                                            found.push((format!("{kind} / {}", p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), p));
-                                        }
-                                    }
-                                }
-                            }
-                            found.sort();
-                            self.templates = Some(found);
-                        }
-                        let list = self.templates.clone().unwrap_or_default();
-                        if list.is_empty() {
-                            ui.label(RichText::new("Templates come with the sounds and presets from your own copy (OPTIONS menu).").color(TEXT_DIM));
-                        }
-                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                            for (name, path) in list {
-                                if ui.button(name).clicked() {
-                                    ui.close_menu();
-                                    self.leave(Leave::Template(path));
-                                }
-                            }
-                        });
-                    });
-                    if ui.button("Open...               Ctrl+O").clicked() {
-                        ui.close_menu();
-                        self.leave(Leave::OpenDialog);
-                    }
-                    if ui.button("Save                   Ctrl+S").clicked() {
-                        ui.close_menu();
-                        self.save(false);
-                    }
-                    if ui.button("Save as...           Ctrl+Shift+S").clicked() {
-                        ui.close_menu();
-                        self.save(true);
-                    }
-                    if ui.button("Save new version      Ctrl+N").clicked() {
-                        ui.close_menu();
-                        self.save_new_version();
-                    }
-                    ui.menu_button("Recent projects", |ui| {
-                        if self.settings.recent.is_empty() {
-                            ui.label(RichText::new("None yet").color(TEXT_DIM));
-                        }
-                        for (k, p) in self.settings.recent.clone().into_iter().enumerate() {
-                            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.button(format!("{name}     Alt+{}", (k + 1) % 10)).hint(p.display().to_string()).clicked() {
-                                self.actions.push(Action::Open(p));
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if ui.button("Export audio...   Ctrl+R").clicked() {
-                        ui.close_menu();
-                        self.export();
-                    }
-                    if ui.add_enabled(self.path.is_some(), egui::Button::new("Revert to last saved")).clicked() {
-                        ui.close_menu();
-                        if let Some(p) = self.path.clone() {
-                            self.open(&p);
-                        }
-                    }
-                    let last = Self::last_backup();
-                    if ui.add_enabled(last.is_some(), egui::Button::new("Revert to last backup")).hint("Open the newest copy in the backup folder: unsaved work put there on a timer, or a project as it was before it was saved over").clicked() {
-                        ui.close_menu();
-                        if let Some(p) = last {
-                            self.open(&p);
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Export MIDI file...     Ctrl+Shift+M").clicked() {
-                        ui.close_menu();
-                        self.export_midi();
-                    }
-                    if ui.button("Import MIDI file...").clicked() {
-                        ui.close_menu();
-                        self.import_midi_dialog();
-                    }
-                    if ui.button("Export zipped loop package...").clicked() {
-                        ui.close_menu();
-                        self.export_package();
-                    }
-                    if ui.button("Export project bones...").clicked() {
-                        ui.close_menu();
-                        self.export_bones();
-                    }
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("EDIT", |ui| {
-                    let can_undo = self.hist_at > 0;
-                    let can_redo = self.hist_at + 1 < self.history.len();
-                    if ui.add_enabled(can_undo || can_redo, egui::Button::new("Undo / redo last edit     Ctrl+Z")).clicked() {
-                        self.undo_toggle();
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(can_undo, egui::Button::new("Undo step by step         Ctrl+Alt+Z")).clicked() {
-                        self.undo();
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).clicked() {
-                        self.redo();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new(format!("History: step {} of {}", self.hist_at + 1, self.history.len().max(1))).color(TEXT_DIM).small());
-                });
-                ui.menu_button("ADD", |ui| {
-                    if ui.button("Sampler channel").clicked() {
-                        self.song.channels.push(Chan::default());
-                        self.sel_chan = self.song.channels.len() - 1;
-                        self.dirty = true;
-                        ui.close_menu();
-                    }
-                    ui.menu_button("Instrument", |ui| self.instrument_menu(ui));
-                    ui.separator();
-                    if ui.button("Pattern                F4").clicked() {
-                        self.new_pattern();
-                        ui.close_menu();
-                    }
-                    if ui.button("Time marker         Alt+T").clicked() {
-                        self.add_marker();
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("PATTERNS", |ui| {
-                    if ui.button("Find first empty               F4").clicked() {
-                        self.new_pattern();
-                        ui.close_menu();
-                    }
-                    if ui.button("Find next empty                Shift+F4").clicked() {
-                        self.next_empty_after();
-                        ui.close_menu();
-                    }
-                    if ui.button("Insert one                        Shift+Ctrl+Ins").hint("An empty pattern here; this one and the ones after it move down").clicked() {
-                        self.insert_pattern();
-                        ui.close_menu();
-                    }
-                    if ui.button("Clone                               Ctrl+Shift+C").clicked() {
-                        self.clone_pattern();
-                        ui.close_menu();
-                    }
-                    if ui.button("Rename and colour...      F2").clicked() {
-                        self.start_rename_pattern();
-                        ui.close_menu();
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.delete_pattern();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Open in piano roll              F7").clicked() {
-                        self.show_piano = true;
-                        ui.close_menu();
-                    }
-                    for (label, up) in [("Move up                           Shift+Ctrl+Up", true), ("Move down                      Shift+Ctrl+Down", false)] {
-                        if ui.button(label).clicked() {
-                            let p = self.handle.transport.pattern();
-                            self.song.ensure_pattern(p);
-                            let to = self.song.move_pattern(p, up);
-                            self.handle.transport.set_pattern(to);
-                            self.dirty = true;
-                            ui.close_menu();
-                        }
-                    }
-                    if ui.button("Split by channel").hint("Every channel playing in this pattern gets a pattern of its own").clicked() {
-                        let p = self.handle.transport.pattern();
-                        let made = self.song.split_pattern(p);
-                        self.status = if made.is_empty() { "Only one channel plays in this pattern".into() } else { format!("Split into {} patterns", made.len() + 1) };
-                        self.dirty |= !made.is_empty();
-                        ui.close_menu();
-                    }
-                    if ui.button("Render as audio clip").hint("The pattern is played into a sound file that becomes an audio clip channel").clicked() {
-                        self.render_pattern(false);
-                        ui.close_menu();
-                    }
-                    if ui.button("Render and replace").hint("As above, and every clip of the pattern on the playlist becomes the sound").clicked() {
-                        self.render_pattern(true);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Next                                 +").clicked() {
-                        self.step_pattern(1);
-                        ui.close_menu();
-                    }
-                    if ui.button("Previous                           -").clicked() {
-                        self.step_pattern(-1);
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("VIEW", |ui| {
-                    ui.checkbox(&mut self.show_playlist, "Playlist            F5");
-                    ui.checkbox(&mut self.show_rack, "Channel rack     F6");
-                    ui.checkbox(&mut self.show_piano, "Piano roll          F7");
-                    ui.checkbox(&mut self.show_mixer, "Mixer                 F9");
-                    ui.checkbox(&mut self.show_browser, "Browser            Alt+F8");
-                    ui.checkbox(&mut self.show_info, "Project info       F11");
-                    ui.checkbox(&mut self.show_events, "Event editor");
-                    ui.checkbox(&mut self.show_picker, "Plug-in picker     F8");
-                    ui.checkbox(&mut self.show_load, "Plug-in load monitor");
-                    ui.checkbox(&mut self.show_touch, "Touch controllers");
-                    ui.checkbox(&mut self.show_script_out, "Script output");
-                    ui.checkbox(&mut self.show_project, "Project picker    Ctrl+F8");
-                    ui.separator();
-                    ui.menu_button("Layout", |ui| {
-                        if ui.button("Arrange windows: default     Ctrl+Shift+H").clicked() {
-                            self.layout = None;
-                            ui.ctx().memory_mut(|m| m.reset_areas());
-                            ui.close_menu();
-                        }
-                        let mut gone = None;
-                        for k in 0..self.settings.layouts.len() {
-                            ui.horizontal(|ui| {
-                                if ui.button(format!("Arrange windows: {}", self.settings.layouts[k].0)).clicked() {
-                                    self.apply_layout(k);
-                                    ui.close_menu();
-                                }
-                                if ui.small_button("x").hint("Forget this layout").clicked() {
-                                    gone = Some(k);
-                                }
-                            });
-                        }
-                        if let Some(k) = gone {
-                            self.settings.layouts.remove(k);
-                            let _ = self.settings.save();
-                        }
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.layout_name).desired_width(120.0).hint_text("Name"));
-                            if ui.add_enabled(!self.layout_name.trim().is_empty(), egui::Button::new("Save this layout")).hint("Remember where the windows are and which are open, under this name").clicked() {
-                                let name = std::mem::take(&mut self.layout_name);
-                                self.save_layout(&name);
-                                ui.close_menu();
-                            }
-                        });
-                        ui.separator();
-                        if ui.button("Close all windows     F12").clicked() {
-                            self.close_all();
-                            ui.close_menu();
-                        }
-                        if ui.button("Show the main windows").hint("Playlist, channel rack, mixer and browser").clicked() {
-                            (self.show_playlist, self.show_rack, self.show_mixer, self.show_browser) = (true, true, true, true);
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Background", |ui| {
-                        if ui.button("Choose a picture...").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("Picture", &["png", "jpg", "jpeg", "bmp"]).pick_file() {
-                                self.settings.backdrop = Some(p);
-                                let _ = self.settings.save();
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.add_enabled(self.settings.backdrop.is_some(), egui::Button::new("No picture")).clicked() {
-                            self.settings.backdrop = None;
-                            let _ = self.settings.save();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Toolbars", |ui| {
-                        self.toolbar_menu(ui);
-                    });
-                    ui.separator();
-                    if ui.button("Close all windows     F12").clicked() {
-                        self.close_all();
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("OPTIONS", |ui| {
-                    ui.checkbox(&mut self.typing_keys, "Typing keyboard to piano     Ctrl+T");
-                    let mut m = self.handle.transport.metronome();
-                    if ui.checkbox(&mut m, "Metronome                              Ctrl+M").changed() {
-                        self.handle.transport.set_metronome(m);
-                    }
-                    let mut c = self.handle.transport.countdown();
-                    if ui.checkbox(&mut c, "Countdown before recording   Ctrl+P").changed() {
-                        self.handle.transport.set_countdown(c);
-                    }
-                    ui.checkbox(&mut self.rec_quantise, "Input quantise (snap recorded notes)");
-                    ui.checkbox(&mut self.rec_blend, "Blend recorded notes               Ctrl+B");
-                    ui.checkbox(&mut self.rec_loop, "Loop recording");
-                    let (mut w, mut st) = (self.handle.transport.waiting(), self.handle.transport.step_edit());
-                    if ui.checkbox(&mut w, "Wait for input to start playing   Ctrl+I").changed() {
-                        self.handle.transport.set_waiting(w);
-                    }
-                    if ui.checkbox(&mut st, "Step editing                           Ctrl+E").changed() {
-                        self.handle.transport.set_step_edit(st);
-                    }
-                    let mut ml = self.multilink;
-                    if ui.checkbox(&mut ml, "Multilink to controllers           Ctrl+J").on_hover_text("Turn the controls you want, then move a knob of the MIDI device for each, in the same order").changed() {
-                        self.toggle_multilink();
-                    }
-                    if ui.button("Stop all sound                          Ctrl+H").clicked() {
-                        self.handle.send(Cmd::Panic);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    for (label, page) in [("MIDI settings                          F10", settings::Page::Midi), ("Audio settings", settings::Page::Audio), ("General settings", settings::Page::General), ("File settings", settings::Page::File)] {
-                        if ui.button(label).clicked() {
-                            self.prefs_win.open = true;
-                            self.prefs_win.page = page;
-                            ui.close_menu();
-                        }
-                    }
-                    if ui.button("Project general settings         F11").clicked() {
-                        self.show_info = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Sounds and presets from your own copy...").clicked() {
-                        self.setup = Default::default();
-                        self.setup.open = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new(&self.audio).color(TEXT_DIM));
-                });
-                ui.menu_button("TOOLS", |ui| {
-                    if ui.button("Find in the browser              Ctrl+F").clicked() {
-                        self.show_browser = true;
-                        self.focus = Win::Browser;
-                        self.browser_key(egui::Key::F, egui::Modifiers::COMMAND);
-                        ui.close_menu();
-                    }
-                    if ui.button("Project picker                       Ctrl+F8").clicked() {
-                        self.show_project = true;
-                        ui.close_menu();
-                    }
-                    let tweaked: widgets::Tweaked = ui.ctx().data(|d| d.get_temp(egui::Id::new("tweaked"))).unwrap_or_default();
-                    for (k, label) in ["Last tweaked", "Before last tweaked"].into_iter().enumerate() {
-                        ui.add_enabled_ui(tweaked[k].is_some(), |ui| {
-                            ui.menu_button(label, |ui| {
-                                let Some(target) = tweaked[k] else { return };
-                                ui.label(RichText::new(self.song.target_name(target)).color(TEXT_DIM).small());
-                                if let Some(a) = widgets::control_items(ui) {
-                                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((target, a))));
-                                    ui.close_menu();
-                                }
-                            });
-                        });
-                    }
-                    if ui.button("Text to speech").hint("Type words and have them spoken into a new channel").clicked() {
-                        self.speech_dlg.get_or_insert_with(Default::default);
-                        ui.close_menu();
-                    }
-                    ui.menu_button("One-click audio recording", |ui| {
-                        if ui.button("Into the audio editor").hint("A Wave Recorder on the selected mixer track starts taking down what arrives there").clicked() {
-                            let ins = self.sel_insert.min(self.song.inserts.len().saturating_sub(1));
-                            let have = self.song.inserts.get(ins).and_then(|i| i.slots.iter().find(|s| s.plugin.eq_ignore_ascii_case("Edison")).map(|s| s.index));
-                            let free = || (0..10u16).find(|n| !self.song.inserts[ins].slots.iter().any(|s| s.index == *n));
-                            match have.or_else(free) {
-                                Some(slot) => {
-                                    if have.is_none() {
-                                        self.set_effect(ins, slot, cereal_engine::fx::Kind::Thru, "Edison");
-                                        self.dirty = true;
-                                        self.handle.publish(self.song.clone());
-                                    }
-                                    self.fx_open = Some((ins, slot));
-                                    self.handle.transport.record_slot(Some((ins, slot)));
-                                    self.status = "Recording into the Wave Recorder".into();
-                                }
-                                None => self.status = "No free effect slot on the selected mixer track".into(),
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.button("Into the playlist as an audio clip").hint("The song starts and the input device is recorded onto the playlist until you stop").clicked() {
-                            self.rec_audio = true;
-                            self.handle.transport.set_recording(true);
-                            if !self.handle.transport.playing() {
-                                self.play();
-                            }
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Audio logger", |ui| {
-                        if ui.button("Dump audio log to the playlist").hint("What came out of the program in the last two minutes becomes an audio clip").clicked() {
-                            self.dump_audio_log();
-                            ui.close_menu();
-                        }
-                        if ui.button("Clear log").clicked() {
-                            self.handle.transport.clear_audio_log();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Score logger", |ui| {
-                        if ui.button("Dump score log to selected pattern").hint("Every key played by hand is remembered, recording or not; this writes the last minutes of it into the pattern on show").clicked() {
-                            let n = self.dump_score_log();
-                            self.status = if n == 0 { "Nothing was played in that time".into() } else { format!("{n} played notes written to the pattern") };
-                            ui.close_menu();
-                        }
-                        ui.menu_button("Time", |ui| {
-                            for m in [2u32, 5, 10, 20, 30] {
-                                if ui.radio(self.score_minutes == m, format!("{m} minutes")).clicked() {
-                                    self.score_minutes = m;
-                                    ui.close_menu();
-                                }
-                            }
-                        });
-                        if ui.button("Clear log").clicked() {
-                            self.handle.transport.clear_score_log();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Macros", |ui| {
-                        if ui.button("Prepare for performance mode").clicked() {
-                            self.prepare_performance();
-                            ui.close_menu();
-                        }
-                        if ui.button("Select unused channels").hint("Channels with no notes in any pattern and no clip on the playlist").clicked() {
-                            let n = self.select_unused_channels();
-                            self.status = format!("{n} unused channels selected");
-                            ui.close_menu();
-                        }
-                        if ui.button("Delete empty patterns").hint("Patterns with no notes or events that lie nowhere on the playlist; named ones are kept").clicked() {
-                            let n = self.purge_patterns();
-                            self.status = format!("{n} empty patterns removed");
-                            ui.close_menu();
-                        }
-                        if ui.button("Purge unused audio clips").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
-                            let mut n = 0;
-                            for ci in (0..self.song.channels.len()).rev() {
-                                let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.all_clips().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(ch) if ch == ci));
-                                if unused && self.song.channels.len() > 1 {
-                                    self.delete_channel(ci);
-                                    n += 1;
-                                }
-                            }
-                            self.status = format!("{n} unused audio clips removed");
-                            ui.close_menu();
-                        }
-                        if ui.button("Unlock all playlist tracks from content").clicked() {
-                            let n = self.song.tracks.iter_mut().filter(|t| t.lock_content).map(|t| t.lock_content = false).count();
-                            self.dirty |= n > 0;
-                            self.status = format!("{n} tracks unlocked");
-                            ui.close_menu();
-                        }
-                        if ui.button("Reset empty playlist tracks").hint("Tracks with no clip on them get their plain name and colour back").clicked() {
-                            let mut n = 0;
-                            let plain = cereal_engine::song::Track::default();
-                            for (t, tr) in self.song.tracks.iter_mut().enumerate() {
-                                let used = self.song.clips.iter().any(|c| c.track as usize == t);
-                                if !used && (tr.name != plain.name || tr.color != plain.color) {
-                                    tr.name = plain.name.clone();
-                                    tr.color = plain.color;
-                                    n += 1;
-                                }
-                            }
-                            self.dirty |= n > 0;
-                            self.status = format!("{n} empty tracks reset");
-                            ui.close_menu();
-                        }
-                        if ui.button("Prepare for MIDI export").hint("Every sampler and instrument channel becomes a MIDI Sender on its own MIDI channel; the sounds themselves are given up").clicked() {
-                            let n = self.song.prepare_midi_export();
-                            if n > 0 {
-                                self.dirty = true;
-                            }
-                            self.status = format!("{n} channels turned into MIDI Senders");
-                            ui.close_menu();
-                        }
-                        for (keep, label) in [(true, "Switch all audio clips to stretch"), (false, "Switch all audio clips to resample")] {
-                            if ui.button(label).hint(if keep { "Every audio clip keeps its pitch when its length is changed" } else { "Every audio clip changes pitch with its speed" }).clicked() {
-                                let mut n = 0;
-                                for ch in self.song.channels.iter_mut().filter(|c| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
-                                    if ch.smp.keep_pitch != keep {
-                                        ch.smp.keep_pitch = keep;
-                                        n += 1;
-                                    }
-                                }
-                                self.dirty |= n > 0;
-                                self.status = format!("{n} audio clips switched");
-                                ui.close_menu();
-                            }
-                        }
-                        for (on, label) in [(true, "Lock all playlist tracks to content"), (false, "Unlock all playlist tracks from content")] {
-                            if ui.button(label).clicked() {
-                                let mut n = 0;
-                                for (t, tr) in self.song.tracks.iter_mut().enumerate() {
-                                    let used = !on || self.song.clips.iter().any(|c| c.track as usize == t);
-                                    if used && tr.lock_content != on {
-                                        tr.lock_content = on;
-                                        n += 1;
-                                    }
-                                }
-                                self.dirty |= n > 0;
-                                self.status = format!("{n} tracks {}", if on { "locked to their content" } else { "unlocked" });
-                                ui.close_menu();
-                            }
-                        }
-                        if ui.button("Remove all Wave Recorder instances").hint("Takes every Wave Recorder out of the mixer's effect slots").clicked() {
-                            let mut n = 0;
-                            for ins in self.song.inserts.iter_mut() {
-                                let before = ins.slots.len();
-                                ins.slots.retain(|s| !s.plugin.eq_ignore_ascii_case("Edison"));
-                                n += before - ins.slots.len();
-                            }
-                            if n > 0 {
-                                self.fx_open = None;
-                                self.dirty = true;
-                            }
-                            self.status = format!("{n} Wave Recorders removed");
-                            ui.close_menu();
-                        }
-                        if ui.button("Close all plugin windows").clicked() {
-                            self.fx_open = None;
-                            self.show_chanset = false;
-                            for inst in self.song.hosted() {
-                                inst.hide_window();
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.button("Stop all sound                Ctrl+H").clicked() {
-                            self.handle.send(Cmd::Panic);
-                            ui.close_menu();
-                        }
-                    });
-                });
-                ui.menu_button("HELP", |ui| {
-                    if ui.button("Keys and mouse      F1").clicked() {
-                        self.help_open();
-                        ui.close_menu();
-                    }
-                    if ui.button("About").clicked() {
-                        self.show_about = true;
-                        ui.close_menu();
-                    }
-                });
+                self.main_menus(ui, ctx);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // the hint bar: what the pointer rests on, or else the last thing that happened
                     let hint = widgets::take_hint();
@@ -3731,7 +3197,10 @@ impl App {
             ui.add_space(2.0);
             // on a narrow screen the window buttons and the monitor take a second row
             let order = self.settings.toolbar_order();
-            let bg = ui.interact(ui.max_rect(), ui.id().with("toolbar_bg"), egui::Sense::click());
+            // only the rows below the menu bar: over the whole panel it would take the menu titles' clicks
+            let mut below = ui.max_rect();
+            below.min.y = ui.cursor().top();
+            let bg = ui.interact(below, ui.id().with("toolbar_bg"), egui::Sense::click());
             bg.context_menu(|ui| self.toolbar_menu(ui));
             ui.horizontal_wrapped(|ui| {
                 let mut act = None;
@@ -3863,18 +3332,7 @@ impl App {
                 let mut set_tempo = None;
                 tempo_box.context_menu(|ui| {
                     if ui.button("Tap").hint("Click in time, four times or more").clicked() {
-                        let now = std::time::Instant::now();
-                        if self.taps.last().is_some_and(|t| now.duration_since(*t).as_secs_f32() > 2.5) {
-                            self.taps.clear();
-                        }
-                        self.taps.push(now);
-                        if self.taps.len() > 8 {
-                            self.taps.remove(0);
-                        }
-                        if self.taps.len() >= 4 {
-                            let span = now.duration_since(self.taps[0]).as_secs_f32();
-                            set_tempo = Some((60.0 * (self.taps.len() - 1) as f32 / span.max(0.01)).round());
-                        }
+                        self.tap_tempo();
                     }
                     ui.separator();
                     for (label, t) in [("Half", self.song.tempo / 2.0), ("Double", self.song.tempo * 2.0)] {
@@ -4210,6 +3668,7 @@ impl App {
         });
         self.show_about = open;
         self.help_window(ctx);
+        self.menu_windows(ctx);
         self.script_ask(ctx);
     }
 
@@ -4285,6 +3744,7 @@ impl eframe::App for App {
             s.feed(raw);
             ctx.request_repaint();
         }
+        raw.events.append(&mut self.menu_events);
         self.take_wheel(raw);
         self.wheel_over = None;
     }

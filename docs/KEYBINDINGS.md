@@ -52,8 +52,12 @@ keyboard off and outside the channel rack.
 |---|---|---|
 | Number pad 1 ... 9 | Select pattern 1 ... 9 | yes |
 | Number pad + / - | Next / previous pattern | yes |
+| Shift+F4 | First empty pattern, and name it | yes |
 | F4 | Next empty pattern, and name it | yes |
-| Ctrl+F4 | Next empty pattern | yes |
+| Ctrl+F4 | Next empty pattern, no naming | yes |
+| Shift+Ctrl+Ins | Insert an empty pattern here | yes |
+| Shift+Ctrl+Del | Delete the pattern | yes |
+| Shift+Ctrl+P | Show the pattern in the browser's project tab | yes |
 | Shift+Ctrl+Up / Down | Move the current pattern up / down the list (outside the piano roll and playlist) | yes |
 | F2 | Rename the pattern | yes |
 | Ctrl+Shift+C | Clone the pattern | yes |
@@ -67,6 +71,14 @@ keyboard off and outside the channel rack.
 | F10 | Settings | yes |
 | F11 | Project information | yes |
 | F12 | Close all windows | yes |
+| Alt+F12 | Close all plug-in windows | yes |
+| Ctrl+F12 | Close every window but the one in use | yes |
+| Shift+Ctrl+H | Put the windows back in their places | yes |
+| Ctrl+F8 | Project picker | yes |
+| Shift+F8 | Browser on its plug-in tab | yes |
+| Ctrl+F5 | Tempo tapper | yes |
+| Alt+F7 | Touch controller | yes |
+| Ctrl+F | Find in the browser, from any window | yes |
 | F1 | Help: the bindings of the window in use, with a find box | yes |
 | Tab / Shift+Tab | On to the next / previous open window | yes |
 | Esc | Close the window that has the keys | yes |

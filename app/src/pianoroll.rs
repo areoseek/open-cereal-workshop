@@ -840,7 +840,7 @@ impl App {
     }
 
     /// Open one of the helper tools on the selected notes (all of the channel's when nothing is selected).
-    fn pr_helper(&mut self, which: usize) {
+    pub(crate) fn pr_helper(&mut self, which: usize) {
         let pat = self.pr_pat();
         let (ppq, step, snap) = (self.song.ppq, self.song.step(), self.pr_snap().max(1));
         let grid = if snap <= 1 { step } else { snap };
