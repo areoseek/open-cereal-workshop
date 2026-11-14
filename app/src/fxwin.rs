@@ -613,6 +613,17 @@ impl App {
             if f.kind == Kind::Patch {
                 changed |= bay_ui(ui, f);
             }
+            if f.kind == Kind::Maxi {
+                ui.horizontal(|ui| {
+                    for (k, name) in ["Oversample", "Linear phase"].iter().enumerate() {
+                        let mut on = f.maxi_switch(k);
+                        if ui.checkbox(&mut on, *name).changed() {
+                            f.set_maxi_switch(k, on);
+                            changed = true;
+                        }
+                    }
+                });
+            }
             if f.kind == Kind::Gm {
                 changed |= bank_player_ui(ui, f);
             }

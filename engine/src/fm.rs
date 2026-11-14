@@ -152,17 +152,11 @@ fn look(t: &[f32], ph: f32) -> f32 {
     t[i] + (t[i + 1] - t[i]) * f
 }
 
-/// Bend a 0..=1 ramp. Positive tension moves fast first and settles (nearly every decay in the presets at hand
-/// is drawn with positive tension, which only makes sense this way round); negative starts slowly.
+/// Bend a 0..=1 ramp the way a drawn line's piece is bent. Positive tension moves fast first and settles,
+/// negative starts slowly. Measured through a level stage whose line had one bent piece: the piece is a stretch
+/// of an exponential covering twenty doublings at full tension.
 pub(crate) fn bend(t: f32, tension: f32) -> f32 {
-    let k = (tension.clamp(-1.0, 1.0).abs() * 3.0).exp2();
-    if tension.abs() < 1e-4 {
-        t
-    } else if tension > 0.0 {
-        1.0 - (1.0 - t).powf(k)
-    } else {
-        t.powf(k)
-    }
+    swell(t, tension)
 }
 
 /// The bend of a drawn line's piece in this instrument, measured on rendered notes: the piece is a stretch of

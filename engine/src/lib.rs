@@ -9,6 +9,7 @@ pub mod fxbank;
 pub mod fxpatch;
 pub mod fxrack;
 pub mod fxmulti;
+pub mod fxmaxi;
 pub mod fxsplit;
 pub mod noteshape;
 pub mod pyrt;

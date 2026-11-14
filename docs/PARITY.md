@@ -122,7 +122,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Low Lifter (built as Low Harmonics: band split, overtone curve, gains, mix; which stored value is which knob is partly guessed, diffusion missing)
 - [~] Luxeverb (built as Plush Reverb, approximate)
 - [~] LuxeVerb (built as Plush Reverb on the Room Reverb tank; the pitched loop round the tank, the hold, the follower that moves the tail with the playing and the bell on the tail all run, at scales of our own; side input for the follower not run)
-- [~] Maximus (built as Band Maximiser; drawn lines read and edited in the line editor, look-ahead and second state not run)
+- [x] Maximus (built as Band Maximiser; measured against renders: both splits, low cut, twice-rate path, look-ahead stages, drawn lines, both shapers, separation, mix, delay; the second state is kept but not run, no meters)
 - [~] Multiband Delay (built as Band Delay, approximate)
 - [x] Newtime (Time Editor: pins at the hits or by hand, drag or snap to a beat grid, each stretch re-timed at its own pitch)
 - [x] Newtone (Pitch Editor: notes found in the sound, drag to move, snap to keys, variation, transition, notes to the piano roll)
@@ -130,7 +130,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Pitcher (built as Voice Tuner; automatic correction, with the formant switch the voice keeps its colour and the gender knob moves it; note-driven modes and harmony voices not run)
 - [~] Pitch Shifter (built as Grain Shifter; a formant setting other than zero moves the colour apart from the pitch, cycle by cycle)
 - [~] Razer Chroma (opens, block kept; no keyboard lights)
-- [~] Soundgoodizer (built, approximate)
+- [x] Soundgoodizer (built as Loudener: the Band Maximiser at the four settings read from the user's own install, the amount as its band mix, measured against renders in all four modes)
 - [~] Spreader (built, approximate)
 - [~] Transient Processor (built, approximate)
 - [~] Transmitter (built as Attack Splitter: all 47 stored numbers read and saved back; a burst detector with sensitivity, three modes, hold and release opens a gate that divides the sound into attacks and the rest, which add up to the input again; each part has its level, tilt, switch and one of saturation, bounce, diffusion or echo (free or tempo time) with its own mix; side linking and 5 ms look-ahead; the gate is offered to linked controls. Which number is which was worked out from the presets, the times, gains and the look-ahead's place are estimates; side-chain input and separate outputs for the parts are not run, no moving display, latency is not reported)
@@ -202,8 +202,9 @@ close, not identical:
   modulation positions), Chorus wave selectors, Limiter time laws, Reverb character, Compressor knee types.
 - Harmonic Stack: which stored field is which control was inferred from value ranges and the public manual; every
   time, depth and frequency scale, the built-in timbre list and the menu orders are estimates to be measured.
-  Band Maximiser: the drawn line is read as linear level with its middle as full level; attack, release and
-  sustain time laws, the low cut scale, both saturation shapes and the separation direction are estimates.
+  Band Maximiser: positive separation follows a fitted curve (within 0.001); the reach of the linear-phase
+  splits is pinned only to within one percent of the corner's period; two stored switch bytes that no project
+  or preset at hand ever sets (one silences the unit's work, one drops the linear-phase delay) are not run.
   Three Band Compressor: band order, cutoff scale, threshold, ratio and knee scales are estimates.
   Bucket Chorus: which stored fields are high pass, gain and noise, the time and speed scales.
   Grain Shifter: meaning of density and colour, grain sizes.

@@ -1856,6 +1856,29 @@ fn maxi_lines(state: &[u8]) -> Option<usize> {
     None
 }
 
+/// The maximiser's switches we act on, as places among its switch bytes: twice the rate, linear-phase split.
+const MAXI_SWITCHES: [usize; 2] = [12, 21];
+
+/// How far along a drawn line's last point is.
+fn line_span(state: &[u8], head: usize) -> Option<f32> {
+    let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let size = match int(head + 4)? {
+        0 => 12,
+        1 => 16,
+        _ => 24,
+    };
+    let n = int(head + 8)? as usize;
+    let mut x = 0f32;
+    for k in 0..n.min(4096) {
+        let b = state.get(head + 12 + k * size..head + 12 + (k + 1) * size)?;
+        let dx = if size == 24 { f64::from_le_bytes(b[0..8].try_into().unwrap()) as f32 } else { f32::from_le_bytes([b[0], b[1], b[2], b[3]]) };
+        if dx.is_finite() {
+            x += dx.max(0.0);
+        }
+    }
+    Some(x.max(1e-6))
+}
+
 /// Where a maximiser setting sits in a block of the given version: the oldest layout has no low cut.
 fn maxi_off(version: u32, off: usize) -> Option<usize> {
     match (version, off) {
@@ -1877,7 +1900,7 @@ fn maxi_fresh() -> Vec<u8> {
         }
     }
     v.extend_from_slice(&50i32.to_le_bytes());
-    v.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    v.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     for _ in 0..8 {
         for x in [3i32, 3, 3] {
             v.extend_from_slice(&x.to_le_bytes());
@@ -1982,6 +2005,11 @@ impl Fx {
     pub fn latency(&self, sr: f32) -> usize {
         match self.kind {
             Kind::Comp => 64,
+            Kind::Maxi => crate::fxmaxi::latency(&self.p, sr),
+            Kind::Loud => match loud_settings() {
+                Some(set) => crate::fxmaxi::latency(&set[(self.p[0] as usize).min(3)], sr),
+                None => 0,
+            },
             Kind::Limiter => {
                 let t = 2.0 * (501f32.powf(self.p.get(3).copied().unwrap_or(0.0) / 10000.0) - 1.0) * 0.001 * sr;
                 (t.round().max(0.0) as usize).min(sr as usize)
@@ -2129,9 +2157,25 @@ impl Fx {
                     None => -1.0,
                 })
                 .collect();
-            let mut at = maxi_lines(state)?;
-            for _ in 0..4 {
-                at = drawn_table(state, at, &mut p)?;
+            // the lines come band by band, each band's two states together; the first state is the one in use
+            let first = maxi_lines(state)?;
+            let mut at = first;
+            let mut spans = [1f32; 4];
+            let mut spare = vec![];
+            for k in 0..8 {
+                if k % 2 == 0 {
+                    spans[k / 2] = line_span(state, at).unwrap_or(1.0);
+                    at = drawn_table(state, at, &mut p)?;
+                } else {
+                    spare.clear();
+                    at = drawn_table(state, at, &mut spare)?;
+                }
+            }
+            p.extend_from_slice(&spans);
+            // the switches sit between the settings and the lines; older blocks stop short of some
+            let flags = 4 + (if version == 2 { 58 } else { 59 }) * 8 + 4 + 8;
+            for i in MAXI_SWITCHES {
+                p.push(if flags + i < first && state[flags + i] != 0 { 1.0 } else { 0.0 });
             }
             return Some(Self { kind: d.kind, p, ir: None, sub: None, raw: Some(std::sync::Arc::new(state.to_vec())), ext: None });
         }
@@ -2461,13 +2505,35 @@ impl Fx {
                 let int = |o: usize| block.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
                 let mut heads = vec![];
                 let mut at = maxi_lines(block);
-                while let (Some(a), true) = (at, heads.len() < 4) {
-                    heads.push(a);
+                let mut k = 0;
+                while let (Some(a), true) = (at, k < 8) {
+                    if k % 2 == 0 {
+                        heads.push(a);
+                    }
+                    k += 1;
                     at = (|| Some(a + 12 + int(a + 8)? as usize * [12, 16, 24, 24][int(a + 4)?.clamp(0, 3) as usize] + 20))();
                 }
                 heads
             }
             _ => vec![],
+        }
+    }
+    /// The band maximiser's switches: 0 runs it at twice the rate, 1 makes its split linear-phase.
+    pub fn maxi_switch(&self, k: usize) -> bool {
+        self.kind == Kind::Maxi && self.p.get(crate::fxmaxi::OVERSAMPLE + k).is_some_and(|v| *v >= 0.5)
+    }
+    pub fn set_maxi_switch(&mut self, k: usize, on: bool) {
+        if self.kind != Kind::Maxi || k >= MAXI_SWITCHES.len() || self.p.len() < crate::fxmaxi::LEN {
+            return;
+        }
+        self.p[crate::fxmaxi::OVERSAMPLE + k] = if on { 1.0 } else { 0.0 };
+        // kept in the block as well, where the block is new enough to have the place
+        if let Some(raw) = &mut self.raw {
+            let version = raw.get(0..4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            let at = 4 + (if version == 2 { 58 } else { 59 }) * 8 + 4 + 8 + MAXI_SWITCHES[k];
+            if maxi_lines(raw).is_some_and(|first| at < first) {
+                std::sync::Arc::make_mut(raw)[at] = on as u8;
+            }
         }
     }
     /// How many drawn lines this unit has that can be edited.
@@ -2561,7 +2627,11 @@ fn loud_settings() -> Option<std::sync::Arc<[Vec<f32>; 4]>> {
                 let mut ok = true;
                 for (i, name) in ["a.fst", "b.fst", "c.fst", "d.fst"].iter().enumerate() {
                     match crate::preset::read(&dir.join(name)).ok().and_then(|pre| Fx::decode(&pre.ident, &pre.state)) {
-                        Some(fx) if fx.kind == Kind::Maxi => all[i] = fx.p,
+                        Some(fx) if fx.kind == Kind::Maxi && fx.p.len() == crate::fxmaxi::LEN => {
+                            all[i] = fx.p;
+                            // this unit leaves the low band unturned
+                            all[i].push(1.0);
+                        }
                         _ => ok = false,
                     }
                 }
@@ -2662,6 +2732,7 @@ pub struct Unit {
     voc: Option<Box<crate::fxvoc::State>>,
     multi: Option<Box<crate::fxmulti::State>>,
     split: Option<Box<crate::fxsplit::State>>,
+    maxi: Option<Box<crate::fxmaxi::State>>,
     oldvoc: Option<Box<crate::fxvoc::classic::State>>,
     /// What a send tap took off the signal in the last block, for the player to add to the target track.
     pub tap: Vec<[f32; 2]>,
@@ -3059,7 +3130,7 @@ impl Unit {
         if fx.kind == Kind::Loud && loud_settings().is_some() {
             inner = Some(Box::new(Unit::new(Fx::new(Kind::Maxi), sr)));
         }
-        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None };
+        let mut u = Self { fx, inner, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, maxi: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None };
         if let Some(sub) = &u.fx.sub {
             u.patch = Some(Box::new(crate::fxpatch::State::new(sub, sr)));
         }
@@ -3092,6 +3163,7 @@ impl Unit {
             Kind::Voc => u.voc = Some(Box::default()),
             Kind::Multi => u.multi = Some(Box::default()),
             Kind::Split => u.split = Some(Box::default()),
+            Kind::Maxi => u.maxi = Some(Box::default()),
             Kind::OldVoc => u.oldvoc = Some(Box::default()),
             Kind::Rack => {
                 let mut st = crate::fxrack::State::default();
@@ -3169,7 +3241,7 @@ impl Unit {
         if let Some(u) = &self.inner {
             let mut q = u.fx.clone();
             translate(self.fx.kind, &self.fx.p, &mut q.p, cx);
-            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None }.tail(cx);
+            return Unit { fx: q, inner: None, z: [0.0; 64], buf: vec![], pos: 0, ph: 0.0, lines: vec![], lpos: vec![], out: [0.0; 3], song_at: (0.0, 130.0), form: None, clock: 0.0, dice: 0x2545_f491_4f6c_dd1d, bank: None, conv: None, rack: None, voc: None, multi: None, split: None, maxi: None, oldvoc: None, tap: Vec::new(), tap_all: false, side: Vec::new(), side_on: false, patch: None, psola: None }.tail(cx);
         }
         let p = &self.fx.p;
         if let Some(c) = &self.conv {
@@ -3916,131 +3988,8 @@ impl Unit {
                 }
             }
             Kind::Maxi => {
-                if p.len() < 59 + 4 * CURVE_N {
-                    return;
-                }
-                let g_lo = svf_g(split_hz(p[0]), sr);
-                let g_hi = svf_g(split_hz(p[2]), sr);
-                let (steep_lo, steep_hi) = (p[1] >= 0.5, p[3] >= 0.5);
-                let mix = (p[5] / 1000.0).clamp(0.0, 1.0);
-                // the low cut knob's middle turns a 131 Hz tone the way a 51 Hz cut does (measured); -1 is off
-                let cut = if p[6] < 0.0 { None } else { Some(svf_g(51.0 * 4f32.powf((p[6] - 32768.0) / 32768.0), sr)) };
-                struct Band {
-                    mode: i32,
-                    pre: f32,
-                    post: f32,
-                    width: f32,
-                    sat: f32,
-                    ceil: f32,
-                    att: f32,
-                    rel: f32,
-                    rms: Option<f32>,
-                }
-                let band = |b: usize| {
-                    let q = &p[7 + b * 13..20 + b * 13];
-                    let rel = 0.005 + ((q[9] / 10000.0).powi(2) + (q[7] / 10000.0).powi(2)) * 4.0;
-                    Band {
-                        mode: q[0] as i32,
-                        // measured against a render: the two gain knobs are not straight lines
-                        pre: (q[1] / 1000.0).max(0.0).powf(1.5),
-                        post: (q[2] / 1000.0).max(0.0).powf(3.6),
-                        width: 1.0 - (q[3] / 1000.0).clamp(-1.0, 1.0),
-                        sat: (q[4] / 1000.0).clamp(-1.0, 1.0),
-                        ceil: (q[5] / 1000.0).max(0.01),
-                        att: (-1.0 / ((0.0002 + (q[6] / 10000.0).powi(2) * 0.25) * sr)).exp(),
-                        rel: (-1.0 / (rel * sr)).exp(),
-                        rms: (q[12] >= 0.5).then(|| (-1.0 / ((0.001 + (q[11] / 10000.0).powi(2) * 4.0) * sr)).exp()),
-                    }
-                };
-                let bands = [band(0), band(1), band(2), band(3)];
-                let top = (CURVE_N - 1) as f32;
-                // one band: gain in, level follower, the drawn line as an in/out map (its middle is full level),
-                // saturation, width, gain out
-                let run = |b: usize, s: [f32; 2], z: &mut [f32]| -> [f32; 2] {
-                    let k = &bands[b];
-                    match k.mode {
-                        2 => return [0.0; 2],
-                        3 => return s,
-                        _ => {}
-                    }
-                    let mut s = [s[0] * k.pre, s[1] * k.pre];
-                    if k.mode == 0 {
-                        let peak = s[0].abs().max(s[1].abs());
-                        let lv = match k.rms {
-                            Some(c) => {
-                                let sq = (s[0] * s[0] + s[1] * s[1]) * 0.5;
-                                z[1] = sq + (z[1] - sq) * c;
-                                // a sine at full level reads as full level
-                                (z[1] * 2.0).sqrt()
-                            }
-                            None => peak,
-                        };
-                        let c = if lv > z[0] { k.att } else { k.rel };
-                        z[0] = lv + (z[0] - lv) * c;
-                        let table = &p[59 + b * CURVE_N..59 + (b + 1) * CURVE_N];
-                        let at = (z[0] * 0.5).clamp(1.0 / 512.0, 1.0);
-                        let x = at * top;
-                        let i = (x as usize).min(CURVE_N - 2);
-                        let out = table[i] + (table[i + 1] - table[i]) * (x - i as f32);
-                        let g = (out / at).min(64.0);
-                        s = [s[0] * g, s[1] * g];
-                    }
-                    if k.sat != 0.0 {
-                        let thr = k.ceil * (1.0 - k.sat.abs());
-                        let room = (k.ceil - thr).max(1e-6);
-                        for v in s.iter_mut() {
-                            let a = v.abs();
-                            if a > thr {
-                                let t = (a - thr) / room;
-                                let bent = if k.sat < 0.0 { t.tanh() } else { 1.0 - (-t).exp() };
-                                *v = v.signum() * (thr + room * bent);
-                            }
-                        }
-                    }
-                    if k.width != 1.0 {
-                        let (m, d) = ((s[0] + s[1]) * 0.5, (s[0] - s[1]) * 0.5 * k.width);
-                        s = [m + d, m - d];
-                    }
-                    [s[0] * k.post, s[1] * k.post]
-                };
-                const Q: f32 = std::f32::consts::SQRT_2;
-                // a split whose two halves add back to the input's level at every pitch: steep is two stages
-                // each way, gentle is one stage with the top half turned over
-                let split = |z: &mut [f32], x: f32, g: f32, steep: bool| -> (f32, f32) {
-                    if steep {
-                        let (l, _, h) = svf(z, x, g, Q);
-                        (svf(&mut z[2..], l, g, Q).0, svf(&mut z[4..], h, g, Q).2)
-                    } else {
-                        let (l, _, h) = svf(z, x, g, 2.0);
-                        (l, -h)
-                    }
-                };
-                for f in io.iter_mut() {
-                    let mut part = [[0f32; 2]; 3];
-                    let mut dry = [0f32; 2];
-                    for c in 0..2 {
-                        let mut x = f[c];
-                        if let Some(g) = cut {
-                            x = svf(&mut z[c * 20 + 18..], x, g, Q).2;
-                        }
-                        dry[c] = x;
-                        // the three bands stay in step with each other: the low band goes through the same turn
-                        // the upper split gives the other two
-                        let (low, rest) = split(&mut z[c * 20..], x, g_lo, steep_lo);
-                        let (mid, high) = split(&mut z[c * 20 + 6..], rest, g_hi, steep_hi);
-                        let (a, b) = split(&mut z[c * 20 + 12..], low, g_hi, steep_hi);
-                        part[0][c] = a + b;
-                        part[1][c] = mid;
-                        part[2][c] = high;
-                    }
-                    let mut sum = [0f32; 2];
-                    for b in 0..3 {
-                        // the band mix blends each band with its own untouched half, so the blend stays in step
-                        let y = run(b, part[b], &mut z[40 + b * 2..42 + b * 2]);
-                        sum[0] += part[b][0] + (y[0] - part[b][0]) * mix;
-                        sum[1] += part[b][1] + (y[1] - part[b][1]) * mix;
-                    }
-                    *f = run(3, sum, &mut z[46..48]);
+                if let Some(st) = &mut self.maxi {
+                    crate::fxmaxi::process(p, st, io, cx);
                 }
             }
             Kind::Pad => {
