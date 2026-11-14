@@ -1388,6 +1388,10 @@ impl App {
             }
         });
         ui.menu_button("Snap", |ui| {
+            if ui.radio(self.playlist.snap == crate::pianoroll::SNAP_MAIN, "Main").clicked() {
+                self.playlist.snap = crate::pianoroll::SNAP_MAIN;
+                ui.close_menu();
+            }
             for (i, name) in Self::pl_snap_names().into_iter().enumerate() {
                 if ui.radio(self.playlist.snap == i, name).clicked() {
                     self.playlist.snap = i;

@@ -113,6 +113,14 @@ pub const NOTE_COLORS: [Color32; 16] = [
 
 /// Snap choices: name, then the grid as (unit, divisor) where unit 0 = follow the lines, 1 = none, 2 = step,
 /// 3 = beat, 4 = bar.
+/// A window's snap set to this follows the main snap of the toolbar.
+pub const SNAP_MAIN: usize = usize::MAX;
+
+/// The name a snap choice shows.
+pub fn snap_label(i: usize) -> &'static str {
+    if i == SNAP_MAIN { "Main" } else { SNAPS[i.min(SNAPS.len() - 1)].0 }
+}
+
 pub const SNAPS: [(&str, u8, u32); 13] = [
     ("Line", 0, 1),
     ("(none)", 1, 1),
@@ -227,7 +235,7 @@ impl Default for State {
             drag: None,
             sounding: None,
             tool: Tool::Draw,
-            snap: 0,
+            snap: SNAP_MAIN,
             time_sel: None,
             lane: Lane::Vel,
             ghosts: true,
@@ -336,7 +344,8 @@ impl App {
 
     /// The snap grid in ticks.
     pub(crate) fn pr_snap(&self) -> u32 {
-        let (_, unit, div) = SNAPS[self.piano.snap.min(SNAPS.len() - 1)];
+        let pick = if self.piano.snap == SNAP_MAIN { self.main_snap } else { self.piano.snap };
+        let (_, unit, div) = SNAPS[pick.min(SNAPS.len() - 1)];
         let base = match unit {
             0 => self.piano.grid_line,
             1 => 1,
@@ -1459,6 +1468,10 @@ impl App {
             }
         });
         ui.menu_button("Snap", |ui| {
+            if ui.radio(self.piano.snap == SNAP_MAIN, "Main").clicked() {
+                self.piano.snap = SNAP_MAIN;
+                ui.close_menu();
+            }
             for (i, (label, _, _)) in SNAPS.iter().enumerate() {
                 if ui.radio(self.piano.snap == i, *label).clicked() {
                     self.piano.snap = i;
@@ -1571,7 +1584,8 @@ impl App {
                 }
             }
             ui.separator();
-            egui::ComboBox::from_id_salt("pr_snap").width(74.0).selected_text(SNAPS[self.piano.snap].0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("pr_snap").width(74.0).selected_text(snap_label(self.piano.snap)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.piano.snap, SNAP_MAIN, "Main");
                 for (i, (label, _, _)) in SNAPS.iter().enumerate() {
                     ui.selectable_value(&mut self.piano.snap, i, *label);
                 }
@@ -1714,6 +1728,13 @@ impl App {
             }
         }
         let px = self.piano.zoom * 96.0 / ppq; // pixels per tick
+        if self.auto_scroll && self.handle.transport.playing() && !self.handle.transport.song_mode() {
+            // auto scrolling: the view turns the page when the play position leaves it
+            let x = self.handle.transport.tick() as f32 * px;
+            if x < self.piano.scroll_x || x > self.piano.scroll_x + grid.width() {
+                self.piano.scroll_x = x;
+            }
+        }
         self.piano.scroll_x = self.piano.scroll_x.max(0.0);
         self.piano.scroll_y = self.piano.scroll_y.clamp(0.0, (132.0 * KEY_H - grid.height()).max(0.0));
         let (sx, sy) = (self.piano.scroll_x, self.piano.scroll_y);

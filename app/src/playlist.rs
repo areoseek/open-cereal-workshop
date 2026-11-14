@@ -8,7 +8,7 @@ use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense,
 use cereal_engine::song::{Clip, ClipSrc, Target, PERF_MOTION, PERF_PRESS, PERF_SYNC};
 use cereal_engine::{Cmd, PerfSeg};
 
-use crate::pianoroll::SNAPS;
+use crate::pianoroll::{snap_label, SNAPS, SNAP_MAIN};
 use crate::widgets::*;
 use crate::{App, Win};
 
@@ -112,7 +112,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, size_drag: None, drag: None, tool: Tool::Draw, snap: 0, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, size_drag: None, drag: None, tool: Tool::Draw, snap: SNAP_MAIN, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
     }
 }
 
@@ -1027,6 +1027,13 @@ impl App {
             }
         }
         let px = self.playlist.zoom * 96.0 / ppq;
+        if self.auto_scroll && self.handle.transport.playing() && self.handle.transport.song_mode() {
+            // auto scrolling: the view turns the page when the play position leaves it
+            let x = self.handle.transport.tick() as f32 * px;
+            if x < self.playlist.scroll_x || x > self.playlist.scroll_x + grid.width() {
+                self.playlist.scroll_x = x;
+            }
+        }
         self.playlist.scroll_x = self.playlist.scroll_x.max(0.0);
         self.playlist.scroll_y = self.playlist.scroll_y.clamp(0.0, (all_h - grid.height()).max(0.0));
         let (sx, sy) = (self.playlist.scroll_x, self.playlist.scroll_y);
@@ -1748,7 +1755,8 @@ impl App {
     }
 
     fn pl_snap(&self) -> u32 {
-        let (_, unit, div) = SNAPS[self.playlist.snap.min(SNAPS.len() - 1)];
+        let pick = if self.playlist.snap == SNAP_MAIN { self.main_snap } else { self.playlist.snap };
+        let (_, unit, div) = SNAPS[pick.min(SNAPS.len() - 1)];
         let base = match unit {
             0 => self.playlist.grid_line,
             1 => 1,
@@ -2452,7 +2460,8 @@ impl App {
                 self.playlist.stretch = !self.playlist.stretch;
             }
             ui.separator();
-            egui::ComboBox::from_id_salt("pl_snap").width(74.0).selected_text(SNAPS[self.playlist.snap].0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("pl_snap").width(74.0).selected_text(snap_label(self.playlist.snap)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.playlist.snap, SNAP_MAIN, "Main");
                 for (i, (label, _, _)) in SNAPS.iter().enumerate() {
                     ui.selectable_value(&mut self.playlist.snap, i, *label);
                 }

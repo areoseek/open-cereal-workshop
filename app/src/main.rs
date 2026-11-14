@@ -228,6 +228,10 @@ pub(crate) struct App {
     score_minutes: u32,
     scope_buf: Vec<f32>,
     typing_keys: bool,
+    /// The toolbar's snap, followed by every window whose own snap says Main.
+    pub(crate) main_snap: usize,
+    /// The playlist and the piano roll follow the play position.
+    pub(crate) auto_scroll: bool,
     /// Snap hand-played notes to the piano roll's grid as they are recorded.
     rec_quantise: bool,
     /// The window key commands go to.
@@ -487,6 +491,8 @@ impl App {
             score_minutes: 2,
             scope_buf: Vec::new(),
             typing_keys: true,
+            main_snap: 0,
+            auto_scroll: true,
             rec_quantise: false,
             focus: Win::None,
             raise: None,
@@ -3182,51 +3188,38 @@ impl App {
 
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
+            let order = self.settings.toolbar_order();
+            // first row: the menus, then transport, time, recording switches and the monitor
             egui::menu::bar(ui, |ui| {
                 self.main_menus(ui, ctx);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // the hint bar: what the pointer rests on, or else the last thing that happened
-                    let hint = widgets::take_hint();
-                    if hint.is_empty() {
-                        ui.label(RichText::new(&self.status).color(TEXT_DIM).small());
-                    } else {
-                        ui.label(RichText::new(hint).color(TEXT).small());
-                    }
+                ui.separator();
+                let style = ctx.style();
+                ui.scope(|ui| {
+                    ui.set_style(style);
+                    self.tb_row(ui, &order, false);
                 });
+                let rest = ui.available_rect_before_wrap();
+                if rest.width() > 4.0 {
+                    ui.allocate_rect(rest, egui::Sense::click()).context_menu(|ui| self.toolbar_menu(ui));
+                }
             });
             ui.add_space(2.0);
-            // on a narrow screen the window buttons and the monitor take a second row
-            let order = self.settings.toolbar_order();
-            // only the rows below the menu bar: over the whole panel it would take the menu titles' clicks
+            // only the row below the menu bar: over the whole panel it would take the menu titles' clicks
             let mut below = ui.max_rect();
             below.min.y = ui.cursor().top();
             let bg = ui.interact(below, ui.id().with("toolbar_bg"), egui::Sense::click());
             bg.context_menu(|ui| self.toolbar_menu(ui));
-            ui.horizontal_wrapped(|ui| {
-                let mut act = None;
-                for (i, &k) in order.iter().enumerate() {
-                    let hidden = self.settings.toolbar_hidden & (1 << k) != 0;
-                    if self.bar_edit {
-                        if ui.small_button("<").hint("Move this panel to the left").clicked() {
-                            act = Some((i, 0));
-                        }
-                        if ui.small_button(if hidden { "show" } else { "hide" }).hint(setup::TOOLBAR_PANELS[k as usize]).clicked() {
-                            act = Some((i, 2));
-                        }
-                        if ui.small_button(">").hint("Move this panel to the right").clicked() {
-                            act = Some((i, 1));
-                        }
-                        if hidden {
-                            ui.label(RichText::new(setup::TOOLBAR_PANELS[k as usize]).color(TEXT_DIM).small());
-                            ui.separator();
-                            continue;
-                        }
-                    } else if hidden {
-                        continue;
-                    }
-                    self.tb_panel(ui, k);
-                    ui.separator();
-                }
+            // second row: the hint panel, the window buttons, the main snap and the pattern picker
+            ui.horizontal(|ui| {
+                // the hint panel: what the pointer rests on, or else the last thing that happened
+                let hint = widgets::take_hint();
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 26.0), egui::Sense::hover());
+                let paint = ui.painter_at(rect);
+                paint.rect_filled(rect, 2.0, egui::Color32::from_rgb(22, 26, 30));
+                let (text, color) = if hint.is_empty() { (self.status.as_str(), TEXT_DIM) } else { (hint.as_str(), TEXT) };
+                paint.text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), color);
+                ui.separator();
+                self.tb_row(ui, &order, true);
                 if self.bar_edit {
                     if ui.button("Done").hint("Leave the toolbar as it is now").clicked() {
                         self.bar_edit = false;
@@ -3237,20 +3230,60 @@ impl App {
                         let _ = self.settings.save();
                     }
                 }
-                if let Some((i, what)) = act {
-                    let mut o = order.clone();
-                    match what {
-                        0 if i > 0 => o.swap(i, i - 1),
-                        1 if i + 1 < o.len() => o.swap(i, i + 1),
-                        2 => self.settings.toolbar_hidden ^= 1 << o[i],
-                        _ => {}
-                    }
-                    self.settings.toolbar = o;
-                    let _ = self.settings.save();
-                }
             });
             ui.add_space(2.0);
         });
+    }
+
+    /// The panels of one toolbar row, in the stored order.
+    fn tb_row(&mut self, ui: &mut egui::Ui, order: &[u8], second: bool) {
+        let mut act = None;
+        for (i, &k) in order.iter().enumerate() {
+            if setup::TOOLBAR_ROW2.contains(&k) != second {
+                continue;
+            }
+            let hidden = self.settings.toolbar_hidden & (1 << k) != 0;
+            if self.bar_edit {
+                if ui.small_button("<").hint("Move this panel to the left").clicked() {
+                    act = Some((i, 0));
+                }
+                if ui.small_button(if hidden { "show" } else { "hide" }).hint(setup::TOOLBAR_PANELS[k as usize]).clicked() {
+                    act = Some((i, 2));
+                }
+                if ui.small_button(">").hint("Move this panel to the right").clicked() {
+                    act = Some((i, 1));
+                }
+                if hidden {
+                    ui.label(RichText::new(setup::TOOLBAR_PANELS[k as usize]).color(TEXT_DIM).small());
+                    ui.separator();
+                    continue;
+                }
+            } else if hidden {
+                continue;
+            }
+            self.tb_panel(ui, k);
+            ui.separator();
+        }
+        if let Some((i, what)) = act {
+            let mut o = order.to_vec();
+            // a move trades places with the nearest panel of the same row
+            let same = |j: usize| setup::TOOLBAR_ROW2.contains(&o[j]) == second;
+            match what {
+                0 => {
+                    if let Some(j) = (0..i).rev().find(|&j| same(j)) {
+                        o.swap(i, j);
+                    }
+                }
+                1 => {
+                    if let Some(j) = (i + 1..o.len()).find(|&j| same(j)) {
+                        o.swap(i, j);
+                    }
+                }
+                _ => self.settings.toolbar_hidden ^= 1 << o[i],
+            }
+            self.settings.toolbar = o;
+            let _ = self.settings.save();
+        }
     }
 
     /// The toolbar's own menu: which panels show, and the switch that lets them be moved.
@@ -3317,9 +3350,6 @@ impl App {
                 if rec_btn.clicked() {
                     tr.set_recording(!rec);
                 }
-                if ui.toggle_value(&mut self.rec_audio, "MIC").hint("Also record sound from the input device, as an audio clip on the playlist").changed() && !self.rec_audio {
-                    self.record_audio();
-                }
             }
             1 => {
                 let live = tr.tempo();
@@ -3378,6 +3408,23 @@ impl App {
                 }
             }
             3 => {
+                ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T)");
+                let mut count = tr.countdown();
+                let r = ui.toggle_value(&mut count, "3 2 1").hint("Count in before recording (Ctrl+P); right-click picks how many bars");
+                if r.changed() {
+                    tr.set_countdown(count);
+                }
+                r.context_menu(|ui| {
+                    for n in [1u8, 2, 4] {
+                        if ui.radio(tr.count_bars() == n, if n == 1 { "1 bar".to_string() } else { format!("{n} bars") }).clicked() {
+                            tr.set_count_bars(n);
+                            self.settings.count_bars = n;
+                            let _ = self.settings.save();
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.toggle_value(&mut self.rec_loop, "Loop").hint("Loop record: each pass of the loop is kept while recording");
                 let mut met = tr.metronome();
                 let r = ui.toggle_value(&mut met, "Metro").hint("Metronome (Ctrl+M); right-click picks its sound");
                 if r.changed() {
@@ -3397,27 +3444,11 @@ impl App {
                 if ui.toggle_value(&mut wait, "Wait").hint("Wait for input before the song starts (Ctrl+I)").changed() {
                     tr.set_waiting(wait);
                 }
-                let mut count = tr.countdown();
-                let r = ui.toggle_value(&mut count, "3 2 1").hint("Count in before recording (Ctrl+P); right-click picks how many bars");
-                if r.changed() {
-                    tr.set_countdown(count);
-                }
-                r.context_menu(|ui| {
-                    for n in [1u8, 2, 4] {
-                        if ui.radio(tr.count_bars() == n, if n == 1 { "1 bar".to_string() } else { format!("{n} bars") }).clicked() {
-                            tr.set_count_bars(n);
-                            self.settings.count_bars = n;
-                            let _ = self.settings.save();
-                            ui.close_menu();
-                        }
-                    }
-                });
                 ui.toggle_value(&mut self.rec_blend, "Blend").hint("Recorded notes are added to the ones already there (Ctrl+B)");
                 let mut step_edit = tr.step_edit();
                 if ui.toggle_value(&mut step_edit, "Step").hint("Step editing: played notes are written one grid step after another (Ctrl+E)").changed() {
                     tr.set_step_edit(step_edit);
                 }
-                ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T)");
             }
             4 => {
                 let tick = tr.tick() as u32;
@@ -3458,16 +3489,20 @@ impl App {
             }
             6 => {
                 let buttons: &mut [(&mut bool, &str, &str)] = &mut [
-                    (&mut self.show_playlist, "Playlist", "F5"),
-                    (&mut self.show_piano, "Piano roll", "F7"),
-                    (&mut self.show_rack, "Channel rack", "F6"),
-                    (&mut self.show_mixer, "Mixer", "F9"),
-                    (&mut self.show_browser, "Browser", "Alt+F8"),
+                    (&mut self.show_browser, "Browser", "Browser (Alt+F8)"),
+                    (&mut self.show_rack, "Channel rack", "Channel rack (F6)"),
+                    (&mut self.show_piano, "Piano roll", "Piano roll (F7)"),
+                    (&mut self.show_playlist, "Playlist", "Playlist (F5)"),
+                    (&mut self.show_mixer, "Mixer", "Mixer (F9)"),
                 ];
                 for (flag, label, tip) in buttons.iter_mut() {
                     if ui.selectable_label(**flag, *label).hint(*tip).clicked() {
                         **flag = !**flag;
                     }
+                }
+                ui.toggle_value(&mut self.auto_scroll, "Scroll").hint("Auto scrolling: the playlist and the piano roll follow the play position");
+                if ui.toggle_value(&mut self.rec_audio, "Mic").hint("One-click audio recording").changed() && !self.rec_audio {
+                    self.record_audio();
                 }
             }
             7 => {
@@ -3509,6 +3544,15 @@ impl App {
                     }
                     ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
                     ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
+            }
+            8 => {
+                ui.label(RichText::new("Snap").color(TEXT_DIM));
+                let r = egui::ComboBox::from_id_salt("main_snap").width(74.0).selected_text(pianoroll::SNAPS[self.main_snap.min(pianoroll::SNAPS.len() - 1)].0).show_ui(ui, |ui| {
+                    for (i, (label, _, _)) in pianoroll::SNAPS.iter().enumerate() {
+                        ui.selectable_value(&mut self.main_snap, i, *label);
+                    }
+                });
+                r.response.hint("Main snap: windows whose own snap is set to Main follow it");
             }
             _ => {}
         }

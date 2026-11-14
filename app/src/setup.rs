@@ -32,7 +32,11 @@ struct Job {
 }
 
 /// The panels of the toolbar row, by number.
-pub const TOOLBAR_PANELS: [&str; 8] = ["Transport", "Tempo", "Pattern picker", "Recording switches", "Time", "Main volume and pitch", "Window buttons", "Output monitor"];
+pub const TOOLBAR_PANELS: [&str; 9] = ["Transport", "Tempo", "Pattern picker", "Recording switches", "Time", "Main volume and pitch", "Window buttons", "Output monitor", "Snap"];
+/// The usual order: the first row beside the menus, then the second row after the hint panel.
+pub const TOOLBAR_USUAL: [u8; 9] = [0, 1, 4, 3, 7, 5, 6, 8, 2];
+/// Panels of the second row.
+pub const TOOLBAR_ROW2: [u8; 3] = [6, 8, 2];
 
 #[derive(Default)]
 pub struct Settings {
@@ -224,7 +228,7 @@ impl Settings {
     /// Every toolbar panel once, in the order asked for; ones the stored list leaves out follow in their usual order.
     pub fn toolbar_order(&self) -> Vec<u8> {
         let mut o: Vec<u8> = vec![];
-        for k in self.toolbar.iter().copied().chain(0..TOOLBAR_PANELS.len() as u8) {
+        for k in self.toolbar.iter().copied().chain(TOOLBAR_USUAL) {
             if (k as usize) < TOOLBAR_PANELS.len() && !o.contains(&k) {
                 o.push(k);
             }
