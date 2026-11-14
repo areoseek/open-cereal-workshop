@@ -1029,13 +1029,15 @@ pub static DEFS: &[Def] = &[
         size: 4143,
         fixed: &[],
         params: &[
-            p("Shift", 4100, 0, 256, 128),
+            p("Mix", 4100, -128, 128, 128),
             p("Morph", 4104, 0, 7000, 0),
             p("Smooth", 4108, 0, 256, 170),
             p("Volume", 4112, 0, 256, 128),
-            p("Add", 4116, 0, 1, 0),
+            p("Double rate", 4116, 0, 1, 0),
             p("Band width", 4120, 0, 300, 150),
-            p("Send only", 4128, 0, 1, 0),
+            // these two are single bytes
+            p("Add", 4137, 0, 1, 0),
+            p("Send only", 4136, 0, 1, 0),
         ],
     },
     // the offsets here only number the settings: the block is packed and read by its own module
@@ -1631,7 +1633,11 @@ fn warp_lines(state: &[u8]) -> Option<Vec<usize>> {
 
 /// Bands and curves of the morphing equaliser, and where its curve values sit behind the listed settings.
 const MEQ_BANDS: usize = 31;
-const MEQ_HEAD: usize = 7;
+const MEQ_HEAD: usize = 8;
+/// Filter memory: eight values a band, the two rate changers of each side, and the last input of each side.
+const MEQ_STATE: usize = MEQ_BANDS * 8 + 48 + 2;
+/// The steep half-band pair used when the whole unit runs at twice the rate (fitted to renders).
+const MEQ_HALF: [f32; 6] = [0.039_151_598, 0.147_377_114, 0.302_646_848, 0.482_468_543, 0.674_615_919, 0.883_005_026];
 
 fn meq_fresh() -> Vec<u8> {
     let mut v = Vec::with_capacity(4143);
@@ -2112,6 +2118,7 @@ impl Fx {
             Kind::Plush => 165,
             Kind::Conv => 22,
             Kind::Limiter => 76,
+            Kind::MorphEq => 4132,
             _ => need,
         };
         if state.len() < least {
@@ -2166,6 +2173,9 @@ impl Fx {
             curve_table(state, &mut p)?;
         }
         if d.kind == Kind::MorphEq {
+            for (i, o) in [(6, 4137), (7, 4136)] {
+                p[i] = state.get(o).map_or(0.0, |&b| (b != 0) as u8 as f32);
+            }
             meq_tables(state, &mut p)?;
         }
         if d.kind == Kind::Warp {
@@ -2304,6 +2314,12 @@ impl Fx {
         let version = if self.kind == Kind::Maxi && out.len() >= 4 { u32::from_le_bytes([out[0], out[1], out[2], out[3]]) } else { 0 };
         for (p, v) in d.params.iter().zip(&self.p) {
             let Some(off) = (if self.kind == Kind::Maxi { maxi_off(version, p.off) } else { Some(p.off) }) else { continue };
+            if self.kind == Kind::MorphEq && off >= 4136 {
+                if off < out.len() {
+                    out[off] = (*v >= 0.5) as u8;
+                }
+                continue;
+            }
             if off + 4 <= out.len() {
                 if floats(self.kind, p.off) {
                     // leave a stored value alone unless the setting moved off it
@@ -2313,6 +2329,23 @@ impl Fx {
                     }
                 } else {
                     out[off..off + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
+                }
+            }
+        }
+        if self.kind == Kind::MorphEq && self.p.len() >= MEQ_HEAD + 9 * MEQ_BANDS * 2 {
+            // the curves go back where they came from; a value that did not move keeps its stored bytes
+            for bank in 0..9 {
+                for band in 0..MEQ_BANDS {
+                    for k in 0..2 {
+                        let o = 4 + (186 + bank * 93 + band * 3 + k) * 4;
+                        let v = self.p[MEQ_HEAD + bank * 62 + band * 2 + k];
+                        if o + 4 <= out.len() {
+                            let old = f32::from_le_bytes([out[o], out[o + 1], out[o + 2], out[o + 3]]);
+                            if !(old.is_finite() && old.clamp(0.0, 2.0) == v) {
+                                out[o..o + 4].copy_from_slice(&v.to_le_bytes());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3270,7 +3303,7 @@ impl Unit {
                 u.lpos.push(12345);
             }
             Kind::MorphEq => {
-                u.lines.push(vec![0.0; MEQ_BANDS * 8]);
+                u.lines.push(vec![0.0; MEQ_STATE]);
                 u.lines.push(vec![-1.0; MEQ_BANDS * 2]);
             }
             Kind::Tuner => {
@@ -5149,69 +5182,121 @@ impl Unit {
                 }
             }
             Kind::MorphEq => {
-                if p.len() < MEQ_HEAD + 9 * MEQ_BANDS * 2 || self.lines.len() < 2 {
+                if p.len() < MEQ_HEAD + 9 * MEQ_BANDS * 2 || self.lines.len() < 2 || self.lines[0].len() < MEQ_STATE {
                     return;
                 }
-                // the sound is cut into bands a third of an octave apart, each a plain band-pass, all summed the
-                // same way up; what the bands up to 8 kHz leave over goes through at the level of the top bands
-                const CUT: usize = 27;
-                let kq = 0.5965 * (p[5] / 150.0).clamp(0.2, 2.0);
+                let out = knob_gain(p[3] / 128.0);
+                if p[7] >= 0.5 {
+                    // only the send gets the bands; the sound itself goes through as it is
+                    for f in io.iter_mut() {
+                        *f = [f[0] * out, f[1] * out];
+                    }
+                    return;
+                }
+                // 31 band-passes a third of an octave apart, all summed the same way up (measured against
+                // renders): the band width sets how wide each is, and their level is scaled so a flat curve
+                // adds up to about the sound that went in
+                let bw = (p[5] / 300.0).clamp(0.0, 1.0);
                 let pos = (p[1] / 1000.0).clamp(0.0, 7.0);
                 let (ba, t) = ((pos as usize).min(7), pos.fract());
                 let bb = (ba + 1).min(7);
-                let shift = (p[0] - 128.0) / 128.0 * 15.0;
-                let at = |bank: usize, x: f32, k: usize| -> f32 {
-                    let x = x.clamp(0.0, (MEQ_BANDS - 1) as f32);
-                    let (i, fr) = (x as usize, x.fract());
-                    let j = (i + 1).min(MEQ_BANDS - 1);
-                    p[MEQ_HEAD + bank * 62 + i * 2 + k] * (1.0 - fr) + p[MEQ_HEAD + bank * 62 + j * 2 + k] * fr
-                };
-                // evenly spaced band-passes of this width add up to this much
-                let flat = (0.1471 / kq).min(1.0);
-                let out = p[3] / 128.0;
+                let mix = p[0] / 128.0;
+                let at = |bank: usize, i: usize, k: usize| -> f32 { p[MEQ_HEAD + bank * 62 + i * 2 + k] };
+                let law = |v: f32| (3f32.powf(v) - 1.0) * 0.5;
+                let twice = p[4] >= 0.5;
+                let add = p[6] >= 0.5;
+                let base = if add { 1.0 } else { 0.0 };
                 let mut g = [0.0f32; MEQ_BANDS];
+                let mut kq = [1.0f32; MEQ_BANDS];
+                let mut sc = [0.0f32; MEQ_BANDS];
+                let mut fast = [false; MEQ_BANDS];
                 let mut want = [[0.0f32; 2]; MEQ_BANDS];
                 for i in 0..MEQ_BANDS {
-                    g[i] = svf_g(20.0 * 2f32.powf(i as f32 / 3.0), sr);
-                    let x = i as f32 - shift;
-                    let vol = (at(ba, x, 0) * (1.0 - t) + at(bb, x, 0) * t) * at(8, i as f32, 0);
-                    let pan = (at(ba, x, 1) * (1.0 - t) + at(bb, x, 1) * t + at(8, i as f32, 1) - 1.0).clamp(0.0, 2.0);
-                    let lv = vol.max(0.0).powf(2.2) * out;
+                    let hz = 20.0 * 2f32.powf(i as f32 / 3.0);
+                    // the top bands run at twice the rate so they keep their shape near the top
+                    fast[i] = !twice && hz > sr * 0.25;
+                    let w = TAU * hz / if twice || fast[i] { sr * 2.0 } else { sr };
+                    // (at no width at all the original's output sticks at full scale; ours is silent instead)
+                    if bw > 0.0 && w < PI * 0.98 {
+                        g[i] = (w * 0.5).tan();
+                        kq[i] = 2.0 * (std::f32::consts::LN_2 * 0.5 * bw * w / w.sin()).sinh();
+                        sc[i] = 0.236 / bw * kq[i];
+                    }
+                    // the mix knob scales how far the curve sits from flat, and can turn it over
+                    let v = 1.0 + (at(ba, i, 0) * (1.0 - t) + at(bb, i, 0) * t - 1.0) * mix;
+                    let pan = (1.0 + (at(ba, i, 1) * (1.0 - t) + at(bb, i, 1) * t - 1.0) * mix + at(8, i, 1) - 1.0).clamp(0.0, 2.0);
+                    let lv = law(v) * law(at(8, i, 0));
                     want[i] = [lv * (2.0 - pan).min(1.0), lv * pan.min(1.0)];
-                }
-                // the left-over's level sits in the first band above the cut
-                for c in 0..2 {
-                    want[CUT][c] = 0.5 * (want[CUT][c] + want[CUT + 1][c]);
                 }
                 let (st, rest) = self.lines.split_at_mut(1);
                 let (st, cur) = (&mut st[0], &mut rest[0]);
+                let smooth = p[2].clamp(0.0, 256.0);
+                let tau = 0.4427 * smooth / (950.0 - smooth);
                 if cur[0] == -1.0 && cur[1] == -1.0 {
-                    // it starts out flat and moves to its settings
-                    cur.fill(out);
-                }
-                let glide = 1.0 - (-1.0 / ((0.002 + p[2] / 170.0 * 0.048) * sr)).exp();
-                let add = p[4] >= 0.5;
-                for f in io.iter_mut() {
-                    let mut acc = [0.0f32; 2];
-                    for c in 0..2 {
-                        let mut all = 0.0f32;
-                        for i in 0..CUT {
-                            let k = i * 8 + c * 4;
-                            let (_, b, _) = svf(&mut st[k..k + 2], f[c], g[i], kq);
-                            let b = b * kq * flat;
-                            let lv = &mut cur[i * 2 + c];
-                            *lv += glide * (want[i][c] - *lv);
-                            acc[c] += b * *lv;
-                            all += b;
-                        }
-                        let lv = &mut cur[CUT * 2 + c];
-                        *lv += glide * (want[CUT][c] - *lv);
-                        acc[c] += (f[c] - all) * *lv;
-                        if add {
-                            acc[c] += f[c];
+                    // it starts out flat and has been moving to its settings for a moment already
+                    let left = if tau > 0.0 { (-0.06 / tau).exp() } else { 0.0 };
+                    for i in 0..MEQ_BANDS {
+                        for c in 0..2 {
+                            cur[i * 2 + c] = want[i][c] + (1.0 - want[i][c]) * left;
                         }
                     }
-                    *f = acc;
+                }
+                let glide = if tau > 0.0 { 1.0 - (-1.0 / (tau * sr)).exp() } else { 1.0 };
+                fn pass(z: &mut [f32], x: f32, a: f32) -> f32 {
+                    let y = a * (x - z[1]) + z[0];
+                    z[0] = x;
+                    z[1] = y;
+                    y
+                }
+                // one of the two all-pass chains of the half-band pair
+                fn chain(z: &mut [f32], x: f32, odd: usize) -> f32 {
+                    let mut v = x;
+                    for j in (odd..6).step_by(2) {
+                        v = pass(&mut z[j * 2..j * 2 + 2], v, MEQ_HALF[j]);
+                    }
+                    v
+                }
+                const UP: usize = MEQ_BANDS * 8;
+                const DOWN: usize = UP + 24;
+                const LAST: usize = DOWN + 24;
+                for f in io.iter_mut() {
+                    for c in 0..2 {
+                        let x = f[c];
+                        for i in 0..MEQ_BANDS {
+                            let lv = &mut cur[i * 2 + c];
+                            *lv += glide * (want[i][c] - *lv);
+                        }
+                        let acc = if twice {
+                            let up = &mut st[UP + c * 12..UP + c * 12 + 12];
+                            let pair = [chain(up, x, 0), chain(up, x, 1)];
+                            let mut y = [0.0f32; 2];
+                            for h in 0..2 {
+                                let mut a = pair[h] * base;
+                                for i in 0..MEQ_BANDS {
+                                    let k = i * 8 + c * 4;
+                                    let (_, b, _) = svf(&mut st[k..k + 2], pair[h], g[i], kq[i]);
+                                    a += b * sc[i] * (cur[i * 2 + c] - base);
+                                }
+                                y[h] = a;
+                            }
+                            let down = &mut st[DOWN + c * 12..DOWN + c * 12 + 12];
+                            0.5 * (chain(down, y[1], 0) + chain(down, y[0], 1))
+                        } else {
+                            let mid = 0.5 * (st[LAST + c] + x);
+                            st[LAST + c] = x;
+                            let mut a = x * base;
+                            for i in 0..MEQ_BANDS {
+                                let k = i * 8 + c * 4;
+                                if fast[i] {
+                                    svf(&mut st[k..k + 2], mid, g[i], kq[i]);
+                                }
+                                let (_, b, _) = svf(&mut st[k..k + 2], x, g[i], kq[i]);
+                                a += b * sc[i] * (cur[i * 2 + c] - base);
+                            }
+                            a
+                        };
+                        f[c] = acc * out;
+                    }
                 }
             }
             Kind::Bank => {
@@ -6862,6 +6947,31 @@ mod tests {
         // (the bands are wide, so the ones left below still pass a little of it)
         let (left, whole) = (rms(&run(cut, sine, 32768)[16384..]), rms(&run(fx, sine, 32768)[16384..]));
         assert!(left < whole * 0.4, "{left} of {whole}");
+    }
+
+    #[test]
+    fn morph_equaliser_adds_to_the_sound_and_keeps_its_switch_bytes() {
+        // in add mode a flat curve changes nothing, at either rate
+        for twice in [0.0, 1.0] {
+            let mut fx = Fx::new(Kind::MorphEq);
+            fx.p[6] = 1.0;
+            fx.p[4] = twice;
+            let tone = |i: usize| {
+                let v = (i as f32 * 3000.0 * TAU / 44100.0).sin() * 0.5;
+                [v, v]
+            };
+            let level = rms(&run(fx, tone, 16384)[8192..]);
+            assert!((level / 0.3535 - 1.0).abs() < 0.01, "{twice}: {level}");
+        }
+        // the two switches are single bytes; the byte after them stays as it was
+        let mut fx = Fx::new(Kind::MorphEq);
+        fx.p[6] = 1.0;
+        fx.p[MEQ_HEAD + 5 * 2] = 1.5;
+        let block = fx.encode(None);
+        assert_eq!(block.len(), 4143);
+        assert_eq!(&block[4136..4140], &[0, 1, 0, 1]);
+        let back = Fx::decode("EQUO", &block).unwrap();
+        assert_eq!(back.p, fx.p);
     }
 
     #[test]
