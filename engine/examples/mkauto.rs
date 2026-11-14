@@ -16,7 +16,7 @@ fn main() {
     song.channels.push(c);
     let ci = song.channels.len() - 1;
     song.song_mode = true;
-    song.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Audio(ci), offset: 0, muted: false, group: 0 });
+    song.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Audio(ci), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
     let target = match a[4].as_str() {
         "chanpan" => Target::ChanPan(ci),
         "insvol" => Target::InsertVolume(0),
@@ -35,7 +35,7 @@ fn main() {
     let lo_hi = (0.5f32, 0.78125f32);
     let ac = song.channels.len();
     song.channels.push(Chan { name: "Automation".into(), auto: Some(std::sync::Arc::new(Automation { points, targets: vec![target] })), volume: lo_hi.1, pan: lo_hi.0 * 2.0 - 1.0, ..Chan::automation() });
-    song.clips.push(Clip { pos: 0, len: end.max(1), track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
+    song.clips.push(Clip { pos: 0, len: end.max(1), track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
     song.prepare();
     std::fs::write(&a[2], cereal_engine::save::to_bytes(&song, None).expect("save")).expect("write");
 }

@@ -361,6 +361,8 @@ pub(crate) struct App {
     /// Loop recording: every pass of a looping song becomes a take of its own, the earlier ones muted.
     rec_loop: bool,
     rec_last_tick: f64,
+    /// The clip group the takes of one looped recording share.
+    rec_group: u16,
     /// The sound card inputs, open while a mixer track listens to one; the flag stops retries after a failure.
     live_in: Option<record::LiveIn>,
     live_in_failed: bool,
@@ -601,6 +603,7 @@ impl App {
             audio_rec: None,
             rec_loop: false,
             rec_last_tick: 0.0,
+            rec_group: 0,
             live_in: None,
             live_in_failed: false,
             save_preset: None,
@@ -838,20 +841,59 @@ impl App {
     fn finish_take(&mut self, r: record::AudioRec, muted: bool) {
         let tr = self.handle.transport.clone();
         let tps = (if tr.tempo() > 0.0 { tr.tempo() } else { self.song.tempo }) as f64 * self.song.ppq as f64 / 60.0;
-        let (at, cut) = r.placed(tr.song_mode(), OUT_LAG_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, tps);
-        match r.finish(&record::folder(self.path.as_deref()), cut) {
+        use crate::mixer::mxo;
+        let o = self.settings.mixer_opts;
+        let (at, cut) = r.placed(tr.song_mode(), OUT_LAG_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, tps, o & mxo::LAT_COMP != 0);
+        let bits = [16u16, 24, 32][((o >> mxo::FORMAT_SHIFT) & 3).min(2) as usize];
+        match r.finish(&record::folder(self.path.as_deref()), cut, bits) {
             Ok(path) => {
                 let before = self.song.channels.len();
-                self.add_audio_clip(&path, at, None);
-                if muted && self.song.channels.len() > before {
+                if o & mxo::AUTO_CLIP != 0 {
+                    self.add_audio_clip(&path, at, None);
+                }
+                if self.song.channels.len() > before {
                     let src = cereal_engine::song::ClipSrc::Audio(before);
+                    // the mixer track the sound came in on gives the take its name
+                    let from = self.mixer_armed.iter().copied().next().or_else(|| self.song.inserts.iter().position(|x| x.audio_in >= 0)).filter(|i| *i < self.song.inserts.len() && *i > 0);
+                    // takes of one looped recording belong together, so they move and mute as one
+                    let grouped = (muted || self.rec_group != 0) && o & mxo::GROUP_TAKES != 0;
+                    if grouped && self.rec_group == 0 {
+                        self.rec_group = self.song.clips.iter().map(|c| c.group).max().unwrap_or(0) + 1;
+                    }
+                    let mut track = None;
                     for c in self.song.clips.iter_mut().filter(|c| c.src == src) {
-                        c.muted = true;
+                        c.muted = muted;
+                        if grouped {
+                            c.group = self.rec_group;
+                        }
+                        track = Some(c.track as usize);
+                    }
+                    if let (Some(t), Some(i)) = (track, from) {
+                        if o & mxo::AUTO_NAME != 0 {
+                            let name = self.song.insert_name(i);
+                            if let Some(tk) = self.song.tracks.get_mut(t) {
+                                if tk.name.is_empty() {
+                                    tk.name = name.clone();
+                                }
+                            }
+                            self.song.channels[before].name = name;
+                        }
+                    }
+                }
+                if !muted {
+                    self.rec_group = 0;
+                    if o & mxo::AUTO_UNARM != 0 {
+                        self.mixer_armed.clear();
                     }
                 }
                 self.status = format!("Recorded {}", path.display());
             }
-            Err(e) => self.status = e,
+            Err(e) => {
+                if !muted {
+                    self.rec_group = 0;
+                }
+                self.status = e
+            }
         }
     }
 
@@ -892,7 +934,7 @@ impl App {
                         None => {
                             let used: std::collections::BTreeSet<u16> = self.song.clips.iter().map(|c| c.track).collect();
                             let track = (0..self.song.tracks.len() as u16).find(|t| !used.contains(t)).unwrap_or(0);
-                            self.song.clips.push(Clip { pos: 0, len: end, track, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0 });
+                            self.song.clips.push(Clip { pos: 0, len: end, track, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
                         }
                     }
                 }
@@ -1847,7 +1889,7 @@ impl App {
         let free = |song: &Song, t: u16| !song.clips.iter().any(|c| c.track == t && c.pos < pos + len && pos < c.pos + c.len);
         let ntracks = self.song.tracks.len().max(1) as u16;
         let track = track.filter(|&t| free(&self.song, t)).or_else(|| (track.unwrap_or(0)..ntracks).chain(0..ntracks).find(|&t| free(&self.song, t))).unwrap_or(0);
-        self.song.clips.push(cereal_engine::song::Clip { pos, len, track, src: cereal_engine::song::ClipSrc::Audio(ci), offset: 0, muted: false, group: 0 });
+        self.song.clips.push(cereal_engine::song::Clip { pos, len, track, src: cereal_engine::song::ClipSrc::Audio(ci), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         self.song.clips.sort_by_key(|c| c.pos);
         self.dirty = true;
     }

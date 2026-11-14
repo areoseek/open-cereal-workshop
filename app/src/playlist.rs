@@ -61,8 +61,28 @@ enum Drag {
     AutoPt { chan: usize, idx: usize, clip: usize, left: f32, top: f32, bottom: f32, offset: u32 },
     /// The bend of the line arriving at a point.
     AutoBend { chan: usize, idx: usize, y0: f32, t0: f32 },
+    /// A handle of a clip of sound: 0 fade in, 1 fade out, 2 level, 3 and 4 the bends of the two fades.
+    /// With it the clip, the picture's left and right edge, and where the drag began (height and value).
+    Fade { clip: usize, which: u8, left: f32, right: f32, y0: f32, v0: f32 },
     /// A press that has done its work and waits for the button to come up.
     Spent,
+}
+
+/// Where the handles of a clip of sound sit in its picture: fade in, fade out, level, and the two bends.
+fn fade_handles(fx: &cereal_engine::song::ClipFx, body: Rect, left: f32, right: f32, px_per_ms: f32) -> [Pos2; 5] {
+    use cereal_engine::song::ClipFx;
+    let w = (right - left).max(1.0);
+    let fi = (fx.fade_in * px_per_ms).clamp(0.0, w);
+    let fo = (fx.fade_out * px_per_ms).clamp(0.0, w);
+    let top = body.top() + 4.0;
+    let y_of = |v: f32| body.bottom() - v * (body.bottom() - top);
+    [
+        Pos2::new(left + fi, top),
+        Pos2::new(right - fo, top),
+        Pos2::new((left + right) * 0.5, top),
+        Pos2::new(left + fi * 0.5, y_of(ClipFx::curve(0.5, fx.in_tension))),
+        Pos2::new(right - fo * 0.5, y_of(ClipFx::curve(0.5, fx.out_tension))),
+    ]
 }
 
 /// The shapes a line between two automation points can take, with the number the file gives each.
@@ -921,7 +941,7 @@ impl App {
         let pi = self.song.patterns.len() - 1;
         let group = 0;
         self.song.clips.retain(|c| !(c.track as usize == tr && matches!(c.src, ClipSrc::Pattern(_))));
-        self.song.clips.push(Clip { pos: start, len: end - start, track: tr as u16, src: ClipSrc::Pattern(pi), offset: 0, muted: false, group });
+        self.song.clips.push(Clip { pos: start, len: end - start, track: tr as u16, src: ClipSrc::Pattern(pi), offset: 0, muted: false, group, fine: 0.0, fx: Default::default() });
         self.song.clips.sort_by_key(|c| c.pos);
         self.playlist.sel.clear();
         self.dirty = true;
@@ -1081,7 +1101,7 @@ impl App {
         let ci = self.song.channels.len() - 1;
         let ntracks = self.song.tracks.len().max(1) as u16;
         let track = (0..ntracks).find(|&tr| !self.song.clips.iter().any(|c| c.track == tr)).unwrap_or(0);
-        self.song.clips.push(Clip { pos, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false, group: 0 });
+        self.song.clips.push(Clip { pos, len, track, src: ClipSrc::Automation(ci), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         self.show_playlist = true;
         self.dirty = true;
         self.status = format!("Automation clip made for {}", self.song.target_name(t));
@@ -1301,6 +1321,10 @@ impl App {
         let mut hit_corner = false;
         // the automation clip whose picture the pointer is over: clip, channel, picture, left edge, offset
         let mut auto_under: Option<(usize, usize, Rect, f32, u32)> = None;
+        // the clip of sound whose picture the pointer is over: clip, picture, left and right edge
+        let mut fade_under: Option<(usize, Rect, f32, f32)> = None;
+        // milliseconds a tick lasts at the song tempo
+        let ms_per_tick = 60_000.0 / self.song.tempo.max(1.0) / ppq;
         let gp = ui.painter_at(grid);
         let font = FontId::proportional(10.5);
         for (i, c) in self.song.clips.iter().enumerate() {
@@ -1372,24 +1396,74 @@ impl App {
                         }
                     }
                     ClipSrc::Audio(ch) => {
-                        if let Some(smp) = self.song.channels.get(ch).and_then(|c| c.sample.as_ref()) {
-                            // frames per tick at the song tempo
-                            let fpt = smp.rate as f32 * 60.0 / self.song.tempo.max(1.0) / ppq;
+                        if let Some((chan, smp)) = self.song.channels.get(ch).and_then(|c| c.sample.as_ref().map(|s| (c, s))) {
+                            // frames of the recording per tick at the song tempo, stretch and pitch counted in
+                            let fpt = cereal_engine::song::clip_ms_per_tick(chan, self.song.tempo, self.song.ppq) * smp.rate as f32 / 1000.0;
+                            let lead = c.fine * smp.rate as f32 / 1000.0;
                             let cp = gp.with_clip_rect(body.intersect(grid));
                             let x_from = r.left().max(grid.left()) as i32;
                             let x_to = r.right().min(grid.right()) as i32;
                             let mid = body.center().y;
+                            let fx = c.fx;
+                            let shaped = opts & plo::FADE_PREVIEW != 0 && fx != cereal_engine::song::ClipFx::default();
+                            let env = |x: f32| {
+                                let ms = (x - r.left()) / px * ms_per_tick;
+                                let whole = c.len as f32 * ms_per_tick;
+                                let a = if ms < fx.fade_in { cereal_engine::song::ClipFx::curve(ms / fx.fade_in, fx.in_tension) } else { 1.0 };
+                                let b = if whole - ms < fx.fade_out { cereal_engine::song::ClipFx::curve((whole - ms) / fx.fade_out, fx.out_tension) } else { 1.0 };
+                                a * b
+                            };
                             for x in x_from..x_to {
                                 let t0 = (x as f32 - r.left()) / px + c.offset as f32;
-                                let a = (t0 * fpt) as usize;
-                                let b = (((t0 + 1.0 / px) * fpt) as usize).min(smp.frames.len());
+                                let a = (t0 * fpt + lead) as usize;
+                                let b = (((t0 + 1.0 / px) * fpt + lead) as usize).min(smp.frames.len());
                                 if a >= b {
                                     break;
                                 }
                                 let stride = ((b - a) / 32).max(1);
                                 let peak = smp.frames[a..b].iter().step_by(stride).fold(0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()));
+                                let peak = if shaped { (peak * fx.gain * env(x as f32)).min(1.0) } else { peak };
                                 let h = (peak * body.height() * 0.5).max(0.5);
                                 cp.line_segment([Pos2::new(x as f32, mid - h), Pos2::new(x as f32, mid + h)], Stroke::new(1.0_f32, Color32::from_gray(240)));
+                            }
+                            if body.height() > 18.0 && r.width() > 24.0 {
+                                // the fades as lines, and the handles that set them
+                                let hs = fade_handles(&fx, body, r.left(), r.right(), px / ms_per_tick);
+                                let top = body.top() + 4.0;
+                                let line = Stroke::new(1.0_f32, Color32::from_white_alpha(170));
+                                for (on, from, to) in [(fx.fade_in > 0.0, r.left(), hs[0].x), (fx.fade_out > 0.0, r.right(), hs[1].x)] {
+                                    if on && (to - from).abs() > 2.0 {
+                                        let n = ((to - from).abs() / 3.0).clamp(4.0, 64.0) as usize;
+                                        let tension = if from < to { fx.in_tension } else { fx.out_tension };
+                                        let pts: Vec<Pos2> = (0..=n)
+                                            .map(|k| {
+                                                let u = k as f32 / n as f32;
+                                                Pos2::new(from + (to - from) * u, body.bottom() - cereal_engine::song::ClipFx::curve(u, tension) * (body.bottom() - top))
+                                            })
+                                            .collect();
+                                        cp.add(egui::Shape::line(pts, line));
+                                    }
+                                }
+                                let near = pointer.map(|pp| body.expand(4.0).contains(pp) && grid.contains(pp)).unwrap_or(false);
+                                if near {
+                                    fade_under = Some((i, body, r.left(), r.right()));
+                                }
+                                if near || fx != cereal_engine::song::ClipFx::default() {
+                                    let fill = Color32::from_gray(250);
+                                    cp.add(egui::Shape::convex_polygon(vec![hs[0] + Vec2::new(-4.0, -3.0), hs[0] + Vec2::new(4.0, -3.0), hs[0] + Vec2::new(-4.0, 5.0)], fill, Stroke::NONE));
+                                    cp.add(egui::Shape::convex_polygon(vec![hs[1] + Vec2::new(-4.0, -3.0), hs[1] + Vec2::new(4.0, -3.0), hs[1] + Vec2::new(4.0, 5.0)], fill, Stroke::NONE));
+                                    cp.rect_filled(Rect::from_center_size(hs[2], Vec2::new(12.0, 4.0)), 1.0, fill);
+                                    if fx.fade_in > 0.0 && hs[0].x - r.left() > 14.0 {
+                                        cp.circle_stroke(hs[3], 3.0, Stroke::new(1.0_f32, fill));
+                                    }
+                                    if fx.fade_out > 0.0 && r.right() - hs[1].x > 14.0 {
+                                        cp.circle_stroke(hs[4], 3.0, Stroke::new(1.0_f32, fill));
+                                    }
+                                    if opts & plo::GAIN_VALUE != 0 && fx.gain != 1.0 {
+                                        let db = 20.0 * fx.gain.max(1e-5).log10();
+                                        cp.text(hs[2] + Vec2::new(9.0, 0.0), Align2::LEFT_CENTER, format!("{db:+.1} dB"), FontId::proportional(9.0), fill);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1652,6 +1726,33 @@ impl App {
                 }
             }
         }
+        // and so do the fade and level handles of a clip of sound
+        if let (Some(pp), Some((clip, body, left, right))) = (over, fade_under) {
+            if self.playlist.drag.is_none() && matches!(tool, Tool::Draw | Tool::Paint) && (pressed || sec_pressed) {
+                let fx = self.song.clips[clip].fx;
+                let hs = fade_handles(&fx, body, left, right, px / ms_per_tick);
+                let shown = [true, true, true, fx.fade_in > 0.0 && hs[0].x - left > 14.0, fx.fade_out > 0.0 && right - hs[1].x > 14.0];
+                let on = [3usize, 4, 0, 1, 2].into_iter().find(|&k| shown[k] && hs[k].distance(pp) <= 6.0);
+                if let Some(k) = on {
+                    if pressed {
+                        let v0 = [fx.fade_in, fx.fade_out, fx.gain, fx.in_tension, fx.out_tension][k];
+                        self.playlist.drag = Some(Drag::Fade { clip, which: k as u8, left, right, y0: pp.y, v0 });
+                    } else {
+                        // a right click puts the handle back
+                        let fx = &mut self.song.clips[clip].fx;
+                        match k {
+                            0 => fx.fade_in = 0.0,
+                            1 => fx.fade_out = 0.0,
+                            2 => fx.gain = 1.0,
+                            3 => fx.in_tension = 0.0,
+                            _ => fx.out_tension = 0.0,
+                        }
+                        self.dirty = true;
+                        self.playlist.drag = Some(Drag::Spent);
+                    }
+                }
+            }
+        }
         if let Some(pp) = over {
             let tab = marker_tabs.iter().rev().find(|(r, _)| r.contains(pp)).map(|(_, i)| *i);
             if let (Some(i), true, true) = (tab, sec_pressed, self.playlist.drag.is_none()) {
@@ -1718,7 +1819,7 @@ impl App {
                             None if tool == Tool::Slip => {}
                             None => {
                                 let (src, len, offset) = self.brush_on(track, pat);
-                                let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false, group: 0 };
+                                let c = Clip { pos: snap(tick_of(pp.x)), len, track: track as u16, src, offset, muted: false, group: 0, fine: 0.0, fx: Default::default() };
                                 self.song.clips.push(c.clone());
                                 self.playlist.sel.clear();
                                 self.playlist.drag = Some(if tool == Tool::Paint { Drag::Paint } else { Drag::Clips { mode: Mode::Move, anchor_tick: tick_of(pp.x), anchor_track: track as i32, orig: vec![(self.song.clips.len() - 1, c)] } });
@@ -1901,7 +2002,7 @@ impl App {
                         let unit = len.max(g).max(1);
                         let pos = snap(tick_of(pp.x)) / unit * unit;
                         if !self.song.clips.iter().any(|c| c.track == track && c.pos < pos + len && pos < c.pos + c.len) {
-                            self.song.clips.push(Clip { pos, len, track, src, offset, muted: false, group: 0 });
+                            self.song.clips.push(Clip { pos, len, track, src, offset, muted: false, group: 0, fine: 0.0, fx: Default::default() });
                             self.dirty = true;
                         }
                     } else if !down {
@@ -1948,6 +2049,36 @@ impl App {
                                 a.points[*idx].tension = (t0 + pull).clamp(-1.0, 1.0);
                                 self.dirty = true;
                             }
+                        }
+                    } else {
+                        done = true;
+                    }
+                }
+                Drag::Fade { clip, which, left, right, y0, v0 } => {
+                    if down {
+                        if let Some(c) = self.song.clips.get_mut(*clip) {
+                            let len_ms = c.len as f32 * ms_per_tick;
+                            // a fade's length keeps to the grid when the option asks for it
+                            let ticks = |x: f32| {
+                                let t = (x / px).max(0.0);
+                                if opts & plo::SNAP_FADES != 0 && !mods.alt { snap(t) as f32 } else { t }
+                            };
+                            // a bend runs from none to a great deal over a hand's width of travel
+                            let bend = |v0: f32, pull: f32| {
+                                let at = v0.signum() * v0.abs().ln_1p() + pull / 30.0;
+                                (at.signum() * (at.abs().exp() - 1.0)).clamp(-1000.0, 1000.0)
+                            };
+                            match *which {
+                                0 => c.fx.fade_in = (ticks(pp.x - *left) * ms_per_tick).clamp(0.0, len_ms),
+                                1 => c.fx.fade_out = (ticks(*right - pp.x) * ms_per_tick).clamp(0.0, len_ms),
+                                2 => {
+                                    let db = 20.0 * v0.max(1e-5).log10() + (*y0 - pp.y) / 4.0;
+                                    c.fx.gain = if db <= -60.0 { 0.0 } else { 10f32.powf(db.min(18.0) / 20.0) };
+                                }
+                                3 => c.fx.in_tension = bend(*v0, *y0 - pp.y),
+                                _ => c.fx.out_tension = bend(*v0, *y0 - pp.y),
+                            }
+                            self.dirty = true;
                         }
                     } else {
                         done = true;
@@ -2212,7 +2343,7 @@ impl App {
         let n = self.song.channels.len() - 1;
         let gone: BTreeSet<usize> = picked.into_iter().collect();
         self.pl_remove(&gone);
-        self.song.clips.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Automation(n), offset: 0, muted: false, group: 0 });
+        self.song.clips.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Automation(n), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         self.playlist.sel = [self.song.clips.len() - 1].into_iter().collect();
         self.dirty = true;
     }
@@ -2573,7 +2704,7 @@ impl App {
             self.song.ensure_pattern(p);
             self.song.patterns[p].notes = notes;
             self.song.patterns[p].name = "Merged".into();
-            made.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Pattern(p), offset: 0, muted: false, group: 0 });
+            made.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Pattern(p), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
             gone.extend(set.iter().copied());
         }
         self.pl_remove(&gone);
@@ -2846,7 +2977,7 @@ impl App {
         self.song.ensure_pattern(pat);
         let len = self.song.pattern_length(pat).max(1);
         let mut part = self.song.clone();
-        part.clips = vec![Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0 }];
+        part.clips = vec![Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(pat), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() }];
         part.markers.clear();
         part.prepare();
         let rate = 44_100u32;

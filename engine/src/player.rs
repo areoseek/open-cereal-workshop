@@ -1030,6 +1030,10 @@ struct Voice {
     delay: u32,
     /// Frames until the note is let go; None plays the sample out.
     remaining: Option<u64>,
+    /// The fades of a playlist clip of sound.
+    clipfade: Option<ClipEnv>,
+    /// Where the played part of the recording ends: from there on the last value is held while the end fades.
+    stop_at: Option<f64>,
     level: f32,
     attack: f32,
     /// The release falls along half a cosine instead of a straight line.
@@ -1445,6 +1449,8 @@ impl Voice {
                     if ran_out {
                         self.releasing = true;
                         *smp.frames.last().unwrap()
+                    } else if self.stop_at.is_some_and(|e| self.pos >= e) {
+                        smp.at_step((self.stop_at.unwrap() - self.step_now).max(0.0), self.step_now)
                     } else if self.stretch {
                         // two overlapping grains read at the note's pitch while the read point moves at `rate`
                         let w = self.hop_t as f32 / self.hop as f32;
@@ -1510,7 +1516,18 @@ impl Voice {
             } else {
                 self.level
             };
-            let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
+            let mut g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
+            if let Some(e) = self.clipfade.as_mut() {
+                if e.at < e.fade_in {
+                    g *= crate::song::ClipFx::curve(e.at / e.fade_in, e.in_tension);
+                }
+                e.at += 1.0;
+                if let Some(r) = self.remaining {
+                    if (r as f32) < e.fade_out {
+                        g *= crate::song::ClipFx::curve(r as f32 / e.fade_out, e.out_tension);
+                    }
+                }
+            }
             self.env_now += self.env_inc;
             if self.lr_left == 0 && self.lr_nx_left > 0 {
                 self.lr_inc = self.lr_nx;
@@ -1552,6 +1569,16 @@ impl Voice {
         }
         wrote
     }
+}
+
+/// The fades of a clip of sound, in frames; `at` counts from the clip's start.
+#[derive(Debug, Clone, Copy)]
+struct ClipEnv {
+    at: f32,
+    fade_in: f32,
+    in_tension: f32,
+    fade_out: f32,
+    out_tension: f32,
 }
 
 /// How long an end takes to fade in each way of smoothing, in milliseconds (measured).
@@ -3444,7 +3471,7 @@ impl Player {
     /// ticks and starts `offset` ticks into its source; `t0` is where the block began. Voices carry `tag` (one
     /// more than the track of a clip played by hand) so that the track can cut them short.
     #[allow(clippy::too_many_arguments)]
-    fn play_clip(&mut self, song: &Song, src: ClipSrc, pos0: f64, len: f64, offset: f64, a: f64, b: f64, t0: f64, tpf: f64, tempo: f32, chase: bool, tag: u16) {
+    fn play_clip(&mut self, song: &Song, src: ClipSrc, fx: crate::song::ClipFx, fine: f32, pos0: f64, len: f64, offset: f64, a: f64, b: f64, t0: f64, tpf: f64, tempo: f32, chase: bool, tag: u16) {
         let end = pos0 + len;
         if end <= a || pos0 >= b {
             return;
@@ -3466,13 +3493,13 @@ impl Player {
                 }
                 let begin = a.max(pos0);
                 let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                // ticks into the audio at which we begin
-                let into = begin - pos0 + offset;
-                let secs = into / song.beat_ticks() as f64 * 60.0 / tempo as f64;
+                // how far along the clip we begin; where the clip itself begins in the recording is added below
+                let secs = (begin - pos0) / song.beat_ticks() as f64 * 60.0 / tempo as f64;
+                let lead_ms = offset * crate::song::clip_ms_per_tick(ch, song.tempo, song.ppq) as f64 + fine as f64;
                 let f = &ch.smp;
                 // an audio clip at the default channel volume plays the recording as it is
                 let clip_gain = law::adjust_gain(f.gain) * law::clip_gain(1.0);
-                let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * clip_gain;
+                let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * clip_gain * fx.gain;
                 let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
                 // the pitch the clip sounds at, and how fast the read point crosses the sample
                 let step = smp.rate as f64 / self.sr as f64 * 2f64.powf((ch.pitch_cents + f.stretch_cents) as f64 / 1200.0);
@@ -3486,12 +3513,20 @@ impl Player {
                 };
                 let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
                 let step = if f.keep_pitch { step } else { rate };
-                let pos = secs * self.sr as f64 * rate + f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64;
+                let pos = secs * self.sr as f64 * rate + lead_ms / 1000.0 * smp.rate as f64 + f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64;
                 let remaining = Some(((end - begin) / tpf) as u64);
+                let stop_at = Some(pos + (end - begin) / tpf * rate);
                 // (measured: a clip's end fades after it, the way the channel smooths ends)
                 let mode = f.declick.min(5);
-                let rel = 1.0 / (self.sr * DECLICK_MS[mode as usize] / 1000.0);
-                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, fade: mode + 1, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: clip_gain, follow: true, ptrack: tag, ..Default::default() });
+                let (rel, fade) = if fx.hard_end() { (1.0, 0) } else { (1.0 / (self.sr * DECLICK_MS[mode as usize] / 1000.0), mode + 1) };
+                let clipfade = (fx.fade_in > 0.0 || fx.fade_out > 0.0).then(|| ClipEnv {
+                    at: ((begin - pos0) / tpf) as f32,
+                    fade_in: fx.fade_in * self.sr / 1000.0,
+                    in_tension: fx.in_tension,
+                    fade_out: fx.fade_out * self.sr / 1000.0,
+                    out_tension: fx.out_tension,
+                });
+                self.start(Voice { clipfade, stop_at, sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, fade, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: clip_gain, follow: true, ptrack: tag, ..Default::default() });
             }
             ClipSrc::Automation(_) => {}
         }
@@ -3674,7 +3709,7 @@ impl Player {
                 let stop = t1.min(end).min(due).max(from);
                 if let Some((l, c)) = live {
                     if stop > from && enabled {
-                        self.play_clip(song, c.src, l.start, end - l.start, c.offset as f64 + l.offset, from, stop, t0, tpf, tempo, l.fresh, k as u16 + 1);
+                        self.play_clip(song, c.src, c.fx, c.fine, l.start, end - l.start, c.offset as f64 + l.offset, from, stop, t0, tpf, tempo, l.fresh, k as u16 + 1);
                     }
                     if let Some(l) = self.perf[k].live.as_mut() {
                         l.fresh = false;
@@ -3932,7 +3967,7 @@ impl Player {
                         let late = (begins && c.offset > 0 && song.truncated) || (!begins && pickup);
                         self.fire_pattern(song, p, a, b, shift, t0, tpf, Some(c.len + c.offset), late);
                     }
-                    ClipSrc::Audio(_) => self.play_clip(song, c.src, c.pos as f64, c.len as f64, c.offset as f64, t0, t1, t0, tpf, tempo, chase, 0),
+                    ClipSrc::Audio(_) => self.play_clip(song, c.src, c.fx, c.fine, c.pos as f64, c.len as f64, c.offset as f64, t0, t1, t0, tpf, tempo, chase, 0),
                     ClipSrc::Automation(_) => {}
                 }
             }
@@ -5368,9 +5403,9 @@ mod tests {
     fn song_mode_plays_clips_and_respects_mutes() {
         let mut s = click_song();
         s.patterns[0].toggle_step(0, 0);
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-        s.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: true, group: 0 });
-        s.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: true, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         let (h, mut p) = new_player(s, 48_000.0);
         h.transport.set_song_mode(true);
         h.transport.set_looping(false);
@@ -5394,7 +5429,7 @@ mod tests {
         s.performance = true;
         s.markers.push(TimeMarker { pos: 768, kind: 5, name: "Start".into(), ..Default::default() });
         for t in 0..3 {
-            s.clips.push(Clip { pos: 0, len: 384, track: t, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+            s.clips.push(Clip { pos: 0, len: 384, track: t, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
             s.tracks[t as usize].perf.sync = 0;
         }
         s.tracks[1].grouped = true;
@@ -5423,9 +5458,9 @@ mod tests {
         s.performance = true;
         s.markers.push(TimeMarker { pos: 768, kind: 5, name: "Start".into(), ..Default::default() });
         // two one-bar clips in the zone on track 0, one on track 1
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-        s.clips.push(Clip { pos: 384, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 384, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         s.tracks[0].perf.motion = 1;
         s.tracks[1].perf.sync = 3;
         s.tracks[1].perf.tolerant = false;
@@ -5476,8 +5511,8 @@ mod tests {
         };
         s.channels.push(Chan { auto: ramp(1.0, 0.0, Target::ChanVolume(0)), ..Chan::automation() });
         let ac = s.channels.len() - 1;
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         let (h, mut p) = new_player(s.clone(), 48_000.0);
         h.transport.set_song_mode(true);
         h.transport.set_looping(false);
@@ -6003,8 +6038,8 @@ mod tests {
             let pts = vec![crate::song::AutoPt { tick: 0.0, value, tension: 0.0, mode: 0 }, crate::song::AutoPt { tick: len as f64, value, tension: 0.0, mode: 0 }];
             s.channels.push(Chan { auto: Some(Arc::new(crate::song::Automation { points: pts, targets: vec![Target::SlotParam(0, 0, 0)] })), ..Chan::automation() });
             let ac = s.channels.len() - 1;
-            s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-            s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
+            s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+            s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
             let got = loud(&crate::render_song(&s, 48_000.0, true, 0, 0.0), 0.1, 0.4);
             assert!((got / plain - want).abs() < 0.1, "{got} against {plain}, wanted {want} times");
             assert_eq!(s.target_name(Target::SlotParam(0, 0, 0)).rsplit(" - ").next(), Some("Gain"));
@@ -6055,7 +6090,7 @@ mod tests {
         let mut s = tone_song(4.0);
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].len = 384;
-        s.clips.push(Clip { pos: 0, len: 192, track: 0, src: ClipSrc::Pattern(0), offset: 96, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 192, track: 0, src: ClipSrc::Pattern(0), offset: 96, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         s.truncated = true;
         let buf = crate::render_song(&s, 48_000.0, true, 0, 0.5);
         assert!(loud(&buf, 0.0, 0.3) > 0.1, "the note starts with the clip");
@@ -6188,7 +6223,7 @@ mod tests {
         s.channels[0].kind = ChannelKind::AudioClip;
         s.channels[0].smp.stretch_beats = 4.0;
         s.channels[0].smp.keep_pitch = true;
-        s.clips.push(Clip { pos: 0, len: 96 * 8, track: 0, src: ClipSrc::Audio(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 96 * 8, track: 0, src: ClipSrc::Audio(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         let buf = crate::render_song(&s, 48_000.0, true, 0, 0.0);
         assert!(loud(&buf, 1.5, 1.9) > 0.1, "still sounding in its second second");
         assert!(loud(&buf, 2.1, 3.0) < 1e-3);

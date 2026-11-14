@@ -187,8 +187,12 @@ impl AudioRec {
 
     /// Where the take belongs and how much of its head to drop, once the time sound spends on its way out to the
     /// speakers and back in is taken off. `out_lag` is the way out in seconds, `tps` ticks a second.
-    pub fn placed(&self, song_mode: bool, out_lag: f64, tps: f64) -> (u32, f64) {
+    pub fn placed(&self, song_mode: bool, out_lag: f64, tps: f64, comp: bool) -> (u32, f64) {
         let first = self.first.load(Relaxed);
+        if !comp {
+            // left where it was heard, the way in and out not taken off
+            return if song_mode && first != u64::MAX { place(f64::from_bits(first), 0.0, tps) } else { (self.at, 0.0) };
+        }
         if !song_mode || first == u64::MAX {
             return (self.at, 0.0);
         }
@@ -196,7 +200,7 @@ impl AudioRec {
     }
 
     /// Stop and write what was heard to a WAV file in `dir`. Nothing is written for silence shorter than a blink.
-    pub fn finish(self, dir: &Path, trim_secs: f64) -> Result<PathBuf, String> {
+    pub fn finish(self, dir: &Path, trim_secs: f64, bits: u16) -> Result<PathBuf, String> {
         let Self { _stream, buf, rate, channels, .. } = self;
         drop(_stream);
         let raw = buf.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default();
@@ -210,7 +214,7 @@ impl AudioRec {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = (0..1000).map(|i| dir.join(if i == 0 { format!("Rec_{stamp}.wav") } else { format!("Rec_{stamp}_{i}.wav") })).find(|p| !p.exists()).ok_or("no free file name")?;
         let f = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        cereal_engine::wav::write(std::io::BufWriter::new(f), &stereo, rate, 2, 24).map_err(|e| e.to_string())?;
+        cereal_engine::wav::write(std::io::BufWriter::new(f), &stereo, rate, 2, bits).map_err(|e| e.to_string())?;
         Ok(path)
     }
 }

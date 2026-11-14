@@ -215,6 +215,7 @@ impl App {
         let tr = self.handle.transport.clone();
         let dir = crate::record::folder(self.path.as_deref());
         let rate = 44_100u32;
+        let bits = [16u16, 24, 32][((self.settings.mixer_opts >> crate::mixer::mxo::FORMAT_SHIFT) & 3).min(2) as usize];
         let mut done = 0;
         let mut failed = None;
         for i in tracks {
@@ -229,7 +230,7 @@ impl App {
                     }
                     n += 1;
                 };
-                crate::wav::write(std::io::BufWriter::new(std::fs::File::create(&path)?), &buf, rate, 2, 24)
+                crate::wav::write(std::io::BufWriter::new(std::fs::File::create(&path)?), &buf, rate, 2, bits)
             });
             match made {
                 Ok(_) => done += 1,

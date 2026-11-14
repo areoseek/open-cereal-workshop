@@ -50,6 +50,10 @@ fn item_size(d: &[u8]) -> Option<usize> {
     [32usize, 60, 80, 88, 96, 104, 112, 120, 128].into_iter().find(|&s| !d.is_empty() && d.len() % s == 0 && d.chunks_exact(s).all(|it| u16at(it, 4) == ITEM_BASE))
 }
 
+/// The version our own new projects say they are, and the one they move to once clips carry fades.
+const SKELETON_VERSION: &[u8] = b"20.8.4.2576\0";
+const GROWN_VERSION: &[u8] = b"21.0.3.3517\0";
+
 fn item_size_for(ver: (u32, u32, u32, u32)) -> usize {
     if ver >= (24, 2, 99, 0) {
         80
@@ -160,7 +164,7 @@ fn blank_channel(index: u16, unicode: bool, word_insert: bool) -> Vec<Event> {
 /// wrote: 32-byte playlist items, 500 tracks, 127 inserts.
 fn skeleton(song: &Song) -> Flp {
     let mut ev = vec![
-        Event::data(id::VERSION, b"20.8.4.2576\0".to_vec()),
+        Event::data(id::VERSION, SKELETON_VERSION.to_vec()),
         Event::int(id::BUILD, 2576),
         Event::int(id::TEMPO, 140_000),
         Event::word(id::CURRENT_PATTERN, 1),
@@ -1241,7 +1245,8 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             }
         }
     }
-    let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.mode_number());
+    let float_len = ev.iter().find(|e| e.id == id::VERSION).and_then(|e| e.bytes()).map(|b| version_tuple(&latin1(b))).is_some_and(|v| v >= (24, 2, 0, 0));
+    let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, crate::song::STRETCH_UNITS), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.mode_number());
     if par(now) != par(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
             if let Value::Data(d) = &mut ev[i].value {
@@ -1250,10 +1255,10 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
                     d[80] = a.0 as u8;
                     d[81] = a.1 as u8;
                     if a.2 != b.2 {
-                        // newer files keep the length as a float, older ones as a whole number
-                        let raw = u32::from_le_bytes([d[96], d[97], d[98], d[99]]);
-                        let float = raw >= 0x3000_0000 || (raw == 0 && d.len() >= 156);
-                        put_u32(d, 96, if float { (now.stretch_beats * 384.0).to_bits() } else { a.2 as u32 });
+                        // files from 24.2 on keep the length as a float, older ones as a whole number
+                        // (every project looked at agrees, and the original reads it by the file's version)
+                        let float = float_len;
+                        put_u32(d, 96, if float { (now.stretch_beats * crate::song::STRETCH_UNITS).to_bits() } else { a.2 as u32 });
                     }
                     if a.3 != b.3 {
                         put_u32(d, 100, a.3 as u32);
@@ -1760,7 +1765,15 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
                 (false, 0) if size == 32 => (0, c.len),
                 (_, 0) => (none, none),
                 (false, o) => (o, o + c.len),
-                (true, o) => ((o as f32 / ppq).to_bits(), ((o + c.len) as f32 / ppq).to_bits()),
+                (true, o) => {
+                    // beats for an automation clip, milliseconds of the recording for a clip of sound
+                    let per = match c.src {
+                        ClipSrc::Audio(ch) => song.channels.get(ch).map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq)),
+                        _ => 1.0 / ppq,
+                    };
+                    let from = o as f32 * per + c.fine;
+                    (from.to_bits(), (from + c.len as f32 * per).to_bits())
+                }
             };
             put_u32(&mut it, size - 8, a);
             put_u32(&mut it, size - 4, b);
@@ -1775,8 +1788,27 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
         }
         return;
     }
-    let size = item_size(&old).unwrap_or_else(|| item_size_for(flp.version_tuple()));
+    let mut size = item_size(&old).unwrap_or_else(|| item_size_for(flp.version_tuple()));
     let ppq = song.ppq.max(1) as f32;
+    // A project we started ourselves is written in a layout whose items have no room for fades and levels.
+    // Once a clip has either, the items grow to the next layout and the file says so.
+    let mut old = old;
+    let ours = ev.iter().find(|e| e.id == id::VERSION).and_then(|e| e.bytes()).is_some_and(|b| b == SKELETON_VERSION);
+    if size == 32 && ours && now.iter().any(|c| c.fx != crate::song::ClipFx::default()) {
+        let mut grown = Vec::with_capacity(old.len() / 32 * 60);
+        for (n, it) in old.chunks_exact(32).enumerate() {
+            let mut it = it.to_vec();
+            it.resize(60, 0);
+            put_u32(&mut it, 32, n as u32 + 1);
+            put_u32(&mut it, 52, 1.0f32.to_bits());
+            grown.extend(it);
+        }
+        old = grown;
+        size = 60;
+        if let Some(e) = ev.iter_mut().find(|e| e.id == id::VERSION) {
+            e.value = Value::Data(GROWN_VERSION.to_vec());
+        }
+    }
 
     let mut pool: HashMap<(u32, u32, u16, u16), Vec<&[u8]>> = HashMap::new();
     let mut next_uid = 0u32;
@@ -1793,9 +1825,9 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
 
     let mut data = Vec::with_capacity(now.len() * size);
     for c in &now {
-        let (index, audio) = match c.src {
-            ClipSrc::Pattern(p) => (ITEM_BASE + p as u16 + 1, false),
-            ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => (ch as u16, true),
+        let index = match c.src {
+            ClipSrc::Pattern(p) => ITEM_BASE + p as u16 + 1,
+            ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => ch as u16,
         };
         let track = (tracks - 1).saturating_sub(c.track);
         let reused = pool.get_mut(&(c.pos, c.len, track, index)).and_then(|v| v.pop());
@@ -1831,15 +1863,33 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
             let f = u16at(&it, 18);
             put_u16(&mut it, 18, if c.muted { f | 0x2000 } else { f & !0x2000 });
         }
-        if fresh || before.map(|b| b.offset != c.offset).unwrap_or(true) {
-            let (a, b) = match (audio, c.offset) {
-                (false, 0) => (u32::MAX, u32::MAX),
-                (false, o) => (o, o + c.len),
-                (true, 0) => ((-1.0f32).to_bits(), (-1.0f32).to_bits()),
-                (true, o) => ((o as f32 / ppq).to_bits(), ((o + c.len) as f32 / ppq).to_bits()),
+        if fresh || before.map(|b| b.offset != c.offset || b.fine != c.fine).unwrap_or(true) {
+            let none = (-1.0f32).to_bits();
+            let (a, b) = match (c.src, c.offset) {
+                (ClipSrc::Pattern(_), 0) => (u32::MAX, u32::MAX),
+                (ClipSrc::Pattern(_), o) => (o, o + c.len),
+                (ClipSrc::Automation(_), 0) => (none, none),
+                (ClipSrc::Automation(_), o) => ((o as f32 / ppq).to_bits(), ((o + c.len) as f32 / ppq).to_bits()),
+                // a clip of sound says where it starts and ends in milliseconds of its recording, unless it
+                // shows the recording whole (a clip that says nothing plays the whole of it, whatever its length)
+                (ClipSrc::Audio(ch), o) => {
+                    let chan = song.channels.get(ch);
+                    let per = chan.map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq));
+                    let from = o as f32 * per + c.fine;
+                    let to = from + c.len as f32 * per;
+                    let whole = chan.and_then(|x| x.sample.as_ref()).map(|s| s.seconds() * 1000.0);
+                    if from <= 0.0 && whole.is_some_and(|w| to >= w - per) { (none, none) } else { (from.to_bits(), to.to_bits()) }
+                }
             };
             put_u32(&mut it, 24, a);
             put_u32(&mut it, 28, b);
+        }
+        let fx_new = if fresh { c.fx != crate::song::ClipFx::default() } else { before.map(|b| b.fx != c.fx).unwrap_or(true) };
+        if size >= 60 && fx_new {
+            for (o, v) in [(36, c.fx.fade_in), (40, c.fx.in_tension), (44, c.fx.fade_out), (48, c.fx.out_tension), (52, c.fx.gain)] {
+                put_u32(&mut it, o, v.to_bits());
+            }
+            put_u32(&mut it, 56, c.fx.flags);
         }
         data.extend(it);
     }
@@ -2675,6 +2725,23 @@ mod tests {
     }
 
     #[test]
+    fn fades_on_a_new_project_survive_a_save() {
+        let mut s = Song::new();
+        s.channels[3].kind = ChannelKind::AudioClip;
+        let fx = crate::song::ClipFx { fade_in: 120.0, in_tension: -0.5, fade_out: 300.0, out_tension: 2.0, gain: 0.7, flags: 0 };
+        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false, group: 0, fine: 0.0, fx });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.prepare();
+        let bytes = to_bytes(&s, None).unwrap();
+        let (r, flp) = reload(&bytes);
+        assert_eq!(flp.version_tuple(), (21, 0, 3, 3517));
+        assert_eq!(r.clips, s.clips);
+        // and a second save from the reloaded project keeps them
+        let again = to_bytes(&r, Some(&flp)).unwrap();
+        assert_eq!(reload(&again).0.clips, s.clips);
+    }
+
+    #[test]
     fn a_new_project_round_trips() {
         let mut s = Song::new();
         s.title = "Test".into();
@@ -2684,7 +2751,7 @@ mod tests {
         s.channels[1].volume = 0.5;
         s.channels[1].pan = -0.25;
         s.channels[3].kind = ChannelKind::AudioClip;
-        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         s.channels[2].insert = 3;
         s.patterns[0].events = vec![crate::song::PatEvent { tick: 0, param: 0, dest: 1, raw: 12800 }, crate::song::PatEvent { tick: 48, param: 0, dest: 1, raw: 400 }];
         s.patterns[0].toggle_step(0, 0);
@@ -2694,8 +2761,8 @@ mod tests {
         s.ensure_pattern(2);
         s.patterns[2].name = "Fill".into();
         s.patterns[2].toggle_step(3, 24);
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
-        s.clips.push(Clip { pos: 384, len: 192, track: 2, src: ClipSrc::Pattern(2), offset: 96, muted: true, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
+        s.clips.push(Clip { pos: 384, len: 192, track: 2, src: ClipSrc::Pattern(2), offset: 96, muted: true, group: 0, fine: 0.0, fx: Default::default() });
         s.inserts[3].name = "Drums".into();
         s.inserts[3].volume = 0.8;
         s.inserts[3].pan = 0.5;
@@ -3049,9 +3116,9 @@ mod tests {
         r.patterns[0].notes.push(Note { pos: 0, len: 24, key: 60, group: 3, ..Default::default() });
         r.patterns[0].notes.push(Note { pos: 24, len: 24, key: 62, group: 3, ..Default::default() });
         r.patterns[0].notes.push(Note { pos: 48, len: 24, key: 64, ..Default::default() });
-        r.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2 });
-        r.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2 });
-        r.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        r.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2, fine: 0.0, fx: Default::default() });
+        r.clips.push(Clip { pos: 384, len: 384, track: 1, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 2, fine: 0.0, fx: Default::default() });
+        r.clips.push(Clip { pos: 768, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
         let (mut r2, _) = reload(&bytes2);
         assert_eq!(r2.patterns[0].notes.iter().map(|n| n.group).collect::<Vec<_>>(), [3, 3, 0]);
@@ -3151,7 +3218,7 @@ mod tests {
         let pts = vec![AutoPt { tick: 0.0, value: 0.25, tension: 0.0, mode: 0 }, AutoPt { tick: 96.0, value: 1.0, tension: 0.5, mode: 0 }, AutoPt { tick: 384.0, value: 0.0, tension: -0.25, mode: 2 }];
         let ac = r.channels.len();
         r.channels.push(Chan { name: "Kick - Volume".into(), auto: Some(std::sync::Arc::new(Automation { points: pts.clone(), targets: vec![Target::ChanVolume(0), Target::InsertPan(2)] })), ..Chan::automation() });
-        r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
+        r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         r.prepare();
         let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();
         let (mut r2, _) = reload(&bytes2);
@@ -3262,7 +3329,7 @@ mod tests {
             s.ensure_pattern(extra);
             s.patterns[extra].name = "Brand new".into();
             s.patterns[extra].notes.push(Note::step(0, 0));
-            s.clips.push(Clip { pos: 96 * 4 * 300, len: 96, track: 1, src: ClipSrc::Pattern(extra), offset: 0, muted: false, group: 0 });
+            s.clips.push(Clip { pos: 96 * 4 * 300, len: 96, track: 1, src: ClipSrc::Pattern(extra), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
             if s.inserts.len() > 2 {
                 s.inserts[1].name = "Renamed".into();
                 s.inserts[1].volume = 0.5;

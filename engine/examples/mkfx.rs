@@ -96,7 +96,7 @@ fn main() {
     let ci = song.channels.len() - 1;
     song.song_mode = true;
     if !sampler {
-        song.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Audio(ci), offset: 0, muted: false, group: 0 });
+        song.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Audio(ci), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
     } else {
         // MKFX_NOTE=ticks: how long the one note is held (default: the sample's length); MKFX_KEY its key
         let hold = std::env::var("MKFX_NOTE").ok().and_then(|v| v.parse().ok()).unwrap_or(len);
@@ -116,7 +116,7 @@ fn main() {
                 far = far.max(p[0] as u32 + p[1] as u32);
             }
         }
-        song.clips.push(Clip { pos: 0, len: far, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        song.clips.push(Clip { pos: 0, len: far, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
     }
     if let Some(ident) = a.get(4).filter(|s| s.as_str() != "-") {
         let def = cereal_engine::fx::DEFS.iter().find(|d| d.ident == ident).expect("no such effect");

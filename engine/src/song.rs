@@ -600,7 +600,7 @@ impl Sampler {
             echo_mod_x: ((c.echo_mod.1 as f32 - 128.0) / 128.0).clamp(-1.0, 1.0),
             echo_mod_y: ((c.echo_mod.0 as f32 - 128.0) / 128.0).clamp(-1.0, 1.0),
             echo_steps: c.echo[4] as f32 / 48.0,
-            stretch_beats: (c.stretch.0 / 384.0).max(0.0),
+            stretch_beats: (c.stretch.0 / STRETCH_UNITS).max(0.0),
             stretch_cents: c.stretch.1 as f32,
             stretch_mul: (c.stretch.2 as f32 / 10000.0).exp2(),
             keep_pitch: c.stretch.3 != 0,
@@ -1351,7 +1351,36 @@ pub struct Clip {
     pub muted: bool,
     /// Clips that share a number other than 0 are grouped and are picked and moved as one.
     pub group: u16,
+    /// A clip of sound starts this much further into its recording than `offset` says, in milliseconds of the
+    /// recording (less than a tick's worth; files keep the start in milliseconds).
+    pub fine: f32,
+    /// Fades and level; only clips of sound use it.
+    pub fx: ClipFx,
 }
+
+/// How many milliseconds of a channel's recording pass in one tick of a clip of it, at a tempo. Files keep the
+/// start and end of a clip of sound in these (seen across every project looked at, and measured).
+pub fn clip_ms_per_tick(ch: &Chan, tempo: f32, ppq: u32) -> f32 {
+    let line = 60_000.0 / tempo.max(1.0) / ppq.max(1) as f32;
+    let f = &ch.smp;
+    let mul = f.stretch_mul.max(1e-6);
+    if f.stretch_beats > 0.0 {
+        match &ch.sample {
+            Some(s) => s.seconds() * 1000.0 / (f.stretch_beats * mul * ppq.max(1) as f32),
+            None => line,
+        }
+    } else if f.keep_pitch {
+        line / mul
+    } else {
+        line * 2f32.powf((ch.pitch_cents + f.stretch_cents) / 1200.0) / mul
+    }
+}
+
+pub use crate::flp::ClipFx;
+
+/// How many of the file's units of stretched length make a beat. (Clips that show the whole of a stretched
+/// sound are this long in every project looked at.)
+pub const STRETCH_UNITS: f32 = 192.0;
 
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -1886,11 +1915,22 @@ impl Song {
             p.events.iter_mut().for_each(|e| e.tick = m(e.tick));
             p.markers.iter_mut().for_each(|k| k.pos = m(k.pos));
         }
+        // a clip of sound starts at a place in its recording, which is counted out again in the new ticks
+        let per: Vec<(f32, f32)> = self.channels.iter().map(|ch| (clip_ms_per_tick(ch, self.tempo, old as u32), clip_ms_per_tick(ch, self.tempo, new as u32))).collect();
         for c in self.clips.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut())) {
             let end = m(c.pos + c.len);
             c.pos = m(c.pos);
             c.len = end.saturating_sub(c.pos).max(1);
-            c.offset = len(c.offset);
+            match (c.src, c.offset > 0 || c.fine > 0.0) {
+                (ClipSrc::Audio(ch), true) if per.get(ch).is_some_and(|p| p.0 > 0.0 && p.1 > 0.0) => {
+                    let (was, now) = per[ch];
+                    let ms = c.offset as f32 * was + c.fine;
+                    let ticks = (ms / now + 1e-3).floor().clamp(0.0, 4.0e9);
+                    c.offset = ticks as u32;
+                    c.fine = (ms - ticks * now).max(0.0);
+                }
+                _ => c.offset = len(c.offset),
+            }
         }
         self.markers.iter_mut().chain(self.arrangements.iter_mut().flat_map(|a| a.markers.iter_mut())).for_each(|k| k.pos = m(k.pos));
         for ch in &mut self.channels {
@@ -2660,6 +2700,7 @@ impl Song {
                 tracks = a.tracks.iter().map(|t| Track { name: t.name.clone(), color: color(t.color), enabled: t.enabled, perf: Perf { press: t.press.min(3) as u8, motion: t.motion.min(6) as u8, sync: t.trigger_sync.min(6) as u8, pos_sync: t.position_sync.min(6) as u8, queue: t.queued, tolerant: t.tolerant }, grouped: t.grouped, lock_content: t.content_locked, size: if t.height > 0.0 { t.height } else { 1.0 } }).collect();
             }
             for it in &a.items {
+                let mut fine = 0.0;
                 let (src, offset) = match it.source {
                     ClipSource::Pattern(p) => {
                         let off = it.start_offset as i32;
@@ -2667,15 +2708,22 @@ impl Song {
                     }
                     ClipSource::Channel(c) => {
                         let c = c as usize;
-                        let beats = f32::from_bits(it.start_offset);
-                        let off = if beats.is_finite() && beats > 0.0 { (beats * ppq as f32) as u32 } else { 0 };
+                        let at = f32::from_bits(it.start_offset);
+                        let at = if at.is_finite() && at > 0.0 { at } else { 0.0 };
                         match f.channels.get(c).map(|c| c.kind) {
-                            Some(ChannelKind::AutomationClip) => (ClipSrc::Automation(c), off),
-                            _ => (ClipSrc::Audio(c), off),
+                            // an automation clip counts its start in beats
+                            Some(ChannelKind::AutomationClip) => (ClipSrc::Automation(c), (at * ppq as f32) as u32),
+                            // a clip of sound in milliseconds of its recording
+                            _ => {
+                                let per = channels.get(c).map_or(60_000.0 / f.tempo.max(1.0) / ppq as f32, |ch| clip_ms_per_tick(ch, f.tempo, ppq));
+                                let ticks = (at / per + 1e-3).floor().clamp(0.0, 4.0e9);
+                                fine = (at - ticks * per).max(0.0);
+                                (ClipSrc::Audio(c), ticks as u32)
+                            }
                         }
                     }
                 };
-                clips.push(Clip { pos: it.position, len: it.length, track: it.track, src, offset, muted: it.muted, group: it.group });
+                clips.push(Clip { pos: it.position, len: it.length, track: it.track, src, offset, muted: it.muted, group: it.group, fine, fx: it.fx });
             }
         }
         let mut markers: Vec<TimeMarker> = a.markers.iter().map(|m| TimeMarker { pos: m.position, name: m.name.clone(), kind: m.kind, sig: m.sig }).collect();
@@ -3064,7 +3112,7 @@ mod tests {
         let mut s = Song::new();
         s.patterns[0].notes.push(Note { pos: 36, len: 12, key: 60, ..Default::default() });
         s.patterns[0].notes.push(Note { pos: 96, len: 0, key: 62, ..Default::default() });
-        s.clips.push(Clip { pos: 384, len: 100, track: 0, src: ClipSrc::Pattern(0), offset: 48, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 384, len: 100, track: 0, src: ClipSrc::Pattern(0), offset: 48, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         s.markers.push(TimeMarker { pos: 768, name: "x".into(), kind: 0, sig: (4, 4) });
         s.set_ppq(192);
         assert_eq!((s.ppq, s.bar()), (192, 768));
@@ -3082,7 +3130,7 @@ mod tests {
         s.ensure_pattern(1);
         s.patterns[0].notes.push(Note { pos: 0, chan: 0, ..Default::default() });
         s.patterns[0].notes.push(Note { pos: 96, chan: 1, ..Default::default() });
-        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         assert_eq!(s.move_pattern(0, true), 0);
         assert_eq!(s.move_pattern(0, false), 1);
         assert_eq!(s.clips[0].src, ClipSrc::Pattern(1));

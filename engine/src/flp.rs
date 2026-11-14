@@ -617,6 +617,53 @@ pub enum ClipSource {
     Channel(u16),
 }
 
+/// What a clip of sound carries on top of its recording: a fade at each end with its bend, and a level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipFx {
+    /// Milliseconds.
+    pub fade_in: f32,
+    pub in_tension: f32,
+    pub fade_out: f32,
+    pub out_tension: f32,
+    /// Linear, 1 leaves the recording as it is.
+    pub gain: f32,
+    /// Kept as read. Bit 1 is seen on clips whose end is cut without the usual smoothing.
+    pub flags: u32,
+}
+
+impl Default for ClipFx {
+    fn default() -> Self {
+        Self { fade_in: 0.0, in_tension: 0.0, fade_out: 0.0, out_tension: 0.0, gain: 1.0, flags: 0 }
+    }
+}
+
+impl ClipFx {
+    /// Read from a playlist item of 60 bytes or more.
+    pub(crate) fn read(it: &[u8]) -> Self {
+        if it.len() < 60 {
+            return Self::default();
+        }
+        let f = |o: usize, d: f32, lo: f32, hi: f32| {
+            let v = f32::from_le_bytes(it[o..o + 4].try_into().unwrap());
+            if v.is_finite() { v.clamp(lo, hi) } else { d }
+        };
+        Self { fade_in: f(36, 0.0, 0.0, 3.6e6), in_tension: f(40, 0.0, -1e6, 1e6), fade_out: f(44, 0.0, 0.0, 3.6e6), out_tension: f(48, 0.0, -1e6, 1e6), gain: f(52, 1.0, 0.0, 64.0), flags: u32at(it, 56) }
+    }
+
+    /// The level of a fade `u` (0 at its silent end, 1 at its full end) of the way through. Measured on a held
+    /// level: half a cosine, bent in level by an exponential that spans `1 + |tension|` times.
+    pub fn curve(u: f32, tension: f32) -> f32 {
+        let b = 0.5 - 0.5 * (std::f32::consts::PI * u.clamp(0.0, 1.0)).cos();
+        let k = -tension.signum() * tension.abs().ln_1p();
+        if k.abs() < 1e-4 { b } else { ((k * b).exp() - 1.0) / (k.exp() - 1.0) }
+    }
+
+    /// Whether the clip's end is cut hard (measured: any fade out, a level other than 1, or flag bit 1).
+    pub fn hard_end(&self) -> bool {
+        self.fade_out > 0.0 || self.gain != 1.0 || self.flags & 2 != 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaylistItem {
     pub position: u32,
@@ -630,6 +677,7 @@ pub struct PlaylistItem {
     /// Raw bits of the start/end offsets: ticks (i32, -1 = none) for pattern clips, f32 for audio clips.
     pub start_offset: u32,
     pub end_offset: u32,
+    pub fx: ClipFx,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1503,7 +1551,7 @@ fn parse_playlist(d: &[u8], ver: (u32, u32, u32, u32)) -> (Vec<PlaylistItem>, bo
                 let group = if size == 32 { u16at(it, 14) } else { 0 };
                 if u16at(it, 4) == 0 {
                     let p = block_pattern(it);
-                    PlaylistItem { position: u32at(it, 0), length: u32at(it, 8), track: used.binary_search(&p).unwrap_or(0) as u16, source: ClipSource::Pattern(p), muted, group, start_offset: u32::MAX, end_offset: u32::MAX }
+                    PlaylistItem { position: u32at(it, 0), length: u32at(it, 8), track: used.binary_search(&p).unwrap_or(0) as u16, source: ClipSource::Pattern(p), muted, group, fx: ClipFx::default(), start_offset: u32::MAX, end_offset: u32::MAX }
                 } else {
                     let ix = u16at(it, 6);
                     PlaylistItem {
@@ -1513,6 +1561,7 @@ fn parse_playlist(d: &[u8], ver: (u32, u32, u32, u32)) -> (Vec<PlaylistItem>, bo
                         source: if ix > BASE { ClipSource::Pattern(ix - BASE) } else { ClipSource::Channel(ix) },
                         muted,
                         group,
+                        fx: ClipFx::default(),
                         start_offset: start,
                         end_offset: end,
                     }
@@ -1538,6 +1587,7 @@ fn parse_playlist(d: &[u8], ver: (u32, u32, u32, u32)) -> (Vec<PlaylistItem>, bo
                 source: if item_index > BASE { ClipSource::Pattern(item_index - BASE) } else { ClipSource::Channel(item_index) },
                 muted: u16at(it, 18) & 0x2000 != 0,
                 group: u16at(it, 14),
+                fx: ClipFx::read(it),
                 start_offset: u32at(it, 24),
                 end_offset: u32at(it, 28),
             }
