@@ -481,6 +481,10 @@ impl App {
                     self.audio_editor_on(i);
                 }
                 Key::D if !repeat => self.mixer_sel.clear(),
+                Key::Enter if !repeat => {
+                    self.settings.mixer_opts ^= crate::mixer::mxo::HIDE_PANEL;
+                    let _ = self.settings.save();
+                }
                 _ => return false,
             }
             return true;

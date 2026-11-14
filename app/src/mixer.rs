@@ -78,7 +78,7 @@ impl App {
             }
             u
         };
-        let font = FontId::proportional(if self.settings.mixer_view == 1 { 9.0 } else { 10.5 });
+        let font = FontId::proportional(if self.view_base() == 1 { 9.0 } else { 10.5 });
         let mut route: Option<(usize, usize, bool)> = None;
         let sw = self.strip_w();
         ui.horizontal(|ui| {
@@ -91,13 +91,20 @@ impl App {
                 let _ = self.settings.save();
             }
             let shown = self.settings.mixer_opts & mxo::HIDE_PANEL == 0;
-            if ui.selectable_label(shown, "FX panel").hint("Track inspector & FX panel: shows or hides the selected track's slots and settings").clicked() {
+            if ui.selectable_label(shown, "FX panel").hint("Shows or hides the selected track's slots and settings (Ctrl+Enter)").clicked() {
                 self.settings.mixer_opts ^= mxo::HIDE_PANEL;
                 let _ = self.settings.save();
             }
-            let names = ["Wide", "Compact", "Extra large"];
-            egui::ComboBox::from_id_salt("mixer-layout").width(86.0).selected_text(names[(self.settings.mixer_view as usize).min(2)]).show_ui(ui, |ui| {
-                for k in [1u8, 0, 2] {
+            if ui.button("+").hint("An empty track after the selected one").clicked() && self.sel_insert < self.last_regular() {
+                self.sel_insert += 1;
+                self.mixer_insert_tracks(1);
+            }
+            let names = ["Wide", "Compact", "Extra large", "Compact 2", "Compact alt", "Wide 2", "Wide 3", "Wide alt"];
+            egui::ComboBox::from_id_salt("mixer-layout").width(86.0).height(300.0).selected_text(names[(self.settings.mixer_view as usize).min(7)]).show_ui(ui, |ui| {
+                for k in [1u8, 3, 4, 0, 5, 6, 7, 2] {
+                    if k == 0 || k == 2 {
+                        ui.separator();
+                    }
                     if ui.selectable_label(self.settings.mixer_view == k, names[k as usize]).clicked() {
                         self.settings.mixer_view = k;
                         let _ = self.settings.save();
@@ -491,7 +498,12 @@ impl App {
     /// One mixer track as a strip: name plate, mute light, pan, fader with its meter, and the routing arrow.
     /// How wide a track is in the chosen view.
     fn strip_w(&self) -> f32 {
-        [50.0, 36.0, 78.0][(self.settings.mixer_view as usize).min(2)]
+        [50.0, 36.0, 78.0, 40.0, 36.0, 48.0, 56.0, 50.0][(self.settings.mixer_view as usize).min(7)]
+    }
+
+    /// The family of the chosen view: 0 wide, 1 compact, 2 extra large.
+    fn view_base(&self) -> usize {
+        [0, 1, 2, 1, 1, 0, 0, 0][(self.settings.mixer_view as usize).min(7)]
     }
 
     /// The selected track's level, both sides, tall and with a scale.
@@ -529,11 +541,12 @@ impl App {
 
     fn strip(&mut self, ui: &mut Ui, i: usize, n: usize, used: usize, font: &FontId, route: &mut Option<(usize, usize, bool)>) {
         let sw = self.strip_w();
-        let view = (self.settings.mixer_view as usize).min(2);
+        let view = self.view_base();
         let selected = self.sel_insert == i || self.mixer_sel.contains(&i);
         let name = self.song.insert_name(i);
         let o = self.settings.mixer_opts;
-        let names_top = o & mxo::NAMES_TOP != 0;
+        // the alt views always carry the names under the faders
+        let names_top = o & mxo::NAMES_TOP != 0 && !matches!(self.settings.mixer_view, 4 | 7);
         let alt = o & mxo::ALT_HL != 0;
         // how much of the track's own colour its strip takes
         let tint = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
