@@ -226,8 +226,8 @@ pub struct State {
     color: u8,
     helper: Option<HelperRun>,
     /// The scale whose keys the grid lights up: root (0 = C) and an index into the scale list (0 = none).
-    scale_root: u8,
-    scale: usize,
+    pub(crate) scale_root: u8,
+    pub(crate) scale: usize,
     drag: Option<Drag>,
     sounding: Option<(u16, u8)>,
     pub tool: Tool,
@@ -617,6 +617,20 @@ impl App {
     }
 
     /// The snap grid in ticks.
+    /// The places Events snap (note edges) or Markers snap (the pattern's time markers) pull to.
+    fn pr_snap_points(&self) -> Vec<u32> {
+        let pick = if self.piano.snap == SNAP_MAIN { self.main_snap } else { self.piano.snap };
+        let Some(p) = self.song.patterns.get(self.handle.transport.pattern()) else { return vec![] };
+        let mut v: Vec<u32> = match SNAPS[pick.min(SNAPS.len() - 1)].0 {
+            "Events" => p.notes.iter().flat_map(|n| [n.pos, n.pos + n.len]).collect(),
+            "Markers" => p.markers.iter().map(|m| m.pos).collect(),
+            _ => vec![],
+        };
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     pub(crate) fn pr_snap(&self) -> u32 {
         let pick = if self.piano.snap == SNAP_MAIN { self.main_snap } else { self.piano.snap };
         let (_, unit, div) = SNAPS[pick.min(SNAPS.len() - 1)];
@@ -2302,7 +2316,12 @@ impl App {
             }
         }
         let g = if mods.alt { 1 } else { self.pr_snap() };
-        let snap_floor = |t: f32| ((t.max(0.0) as u32) / g) * g;
+        // Events and Markers snap pull to the nearest note edge or time marker instead of a grid
+        let points: Vec<u32> = if mods.alt { vec![] } else { self.pr_snap_points() };
+        // (the pull reaches 16 pixels; further out the pointer moves freely)
+        let near = |t: f32, skip: &[u32]| points.iter().copied().filter(|p| !skip.contains(p) && (*p as f32 - t).abs() * px <= 16.0).min_by_key(|p| (*p as i64 - t as i64).abs());
+        let g = if points.is_empty() { g } else { 1 };
+        let snap_floor = |t: f32| near(t.max(0.0), &[]).unwrap_or(((t.max(0.0) as u32) / g) * g);
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
 
         let p = ui.painter_at(rect);
@@ -2681,6 +2700,16 @@ impl App {
 
         // ---- interaction
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
+        // magic lasso: a loop drawn round notes with no button held picks them
+        if opts & pro::LASSO != 0 {
+            let free = self.piano.drag.is_none() && !down && !sec_down;
+            if let Some(poly) = crate::widgets::magic_lasso(ui, egui::Id::new("pr-lasso"), over.filter(|pp| free && grid.contains(*pp))) {
+                let got: BTreeSet<usize> = self.song.patterns[pat].notes.iter().enumerate().filter(|(_, n)| n.chan == chan && crate::widgets::in_outline(&poly, egui::pos2((x_of(n.pos as f32) + x_of((n.pos + n.len) as f32)) * 0.5, y_of(n.key as i32) + KEY_H * 0.5))).map(|(i, _)| i).collect();
+                if !got.is_empty() {
+                    self.piano.sel = got;
+                }
+            }
+        }
         if let Some(pp) = over {
             // the right Shift and right Alt keys turn a click into a slice or a mute, whichever tool is picked
             let ralt = egui_winit::key_side::right_alt();
@@ -2843,7 +2872,17 @@ impl App {
             match drag {
                 Drag::Notes { mode, anchor_tick, anchor_key, orig } => {
                     if down {
-                        let dt = snap_delta(tick_of(pp.x) - anchor_tick);
+                        let raw = tick_of(pp.x) - anchor_tick;
+                        let dt = if points.is_empty() {
+                            snap_delta(raw)
+                        } else {
+                            let own: Vec<u32> = orig.iter().flat_map(|(_, n)| [n.pos, n.pos + n.len]).collect();
+                            let first = orig.iter().map(|(_, n)| n.pos).min().unwrap_or(0);
+                            match near((first as f32 + raw).max(0.0), &own) {
+                                Some(p) => p as i64 - first as i64,
+                                None => snap_delta(raw),
+                            }
+                        };
                         let dk = key_of(pp.y) - anchor_key;
                         let notes = &mut self.song.patterns[pat].notes;
                         match mode {

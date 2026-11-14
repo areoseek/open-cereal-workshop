@@ -273,3 +273,49 @@ pub fn name_field(ui: &mut Ui, text: &mut String) -> Response {
     }
     out.response
 }
+
+/// Magic lasso: follows the pointer while no button is held (`at` None forgets the path) and, when the path of
+/// the last second or so crosses itself, gives back the loop it closed.
+pub fn magic_lasso(ui: &egui::Ui, id: egui::Id, at: Option<egui::Pos2>) -> Option<Vec<egui::Pos2>> {
+    let now = ui.input(|i| i.time);
+    ui.data_mut(|d| {
+        let path = d.get_temp_mut_or_default::<Vec<(egui::Pos2, f64)>>(id);
+        let Some(at) = at else {
+            path.clear();
+            return None;
+        };
+        path.retain(|(_, t)| now - *t < 1.5);
+        if path.last().is_some_and(|(p, _)| p.distance(at) < 4.0) {
+            return None;
+        }
+        path.push((at, now));
+        let n = path.len();
+        if n < 6 {
+            return None;
+        }
+        let (a, b) = (path[n - 2].0, path[n - 1].0);
+        let side = |p: egui::Pos2, q: egui::Pos2, r: egui::Pos2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+        let cross = (0..n - 3).rev().find(|&i| {
+            let (c, e) = (path[i].0, path[i + 1].0);
+            side(a, b, c) * side(a, b, e) < 0.0 && side(c, e, a) * side(c, e, b) < 0.0
+        });
+        // a loop that comes back to where it began without quite crossing counts as closed too
+        let cross = cross.or_else(|| (0..n.saturating_sub(10)).rev().find(|&i| path[i].0.distance(b) < 8.0))?;
+        let poly: Vec<egui::Pos2> = path[cross + 1..n - 1].iter().map(|(p, _)| *p).collect();
+        path.clear();
+        let area: f32 = (0..poly.len()).map(|i| { let (p, q) = (poly[i], poly[(i + 1) % poly.len()]); p.x * q.y - q.x * p.y }).sum::<f32>().abs() * 0.5;
+        (area >= 300.0).then_some(poly)
+    })
+}
+
+/// Whether a point lies inside a closed outline.
+pub fn in_outline(poly: &[egui::Pos2], p: egui::Pos2) -> bool {
+    let mut inside = false;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + poly.len() - 1) % poly.len()]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+    }
+    inside
+}

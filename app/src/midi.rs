@@ -37,6 +37,8 @@ pub static MUTE_CHAN: AtomicUsize = AtomicUsize::new(0);
 pub static MARKER_CHAN: AtomicUsize = AtomicUsize::new(0);
 /// Every note plays at the default velocity, however hard the key was struck.
 pub static FLAT_VEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The scale keys played in are pulled to: its number in the scale list times 256 plus the root key, 0 for none.
+pub static SCALE_SNAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// The foot pedal is an ordinary controller that can be linked, not a note hold.
 pub static PEDAL_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Presses on the muting (0) and marker (1) channels since the app last looked, with the key's number from
@@ -193,7 +195,8 @@ pub fn take_controls() -> Vec<(u8, u8)> {
 }
 
 struct Held {
-    down: Vec<(u8, u16)>,
+    /// the key as it arrived, its channel, and the key that sounded
+    down: Vec<(u8, u16, u8)>,
     /// Released while the pedal was down.
     pedal: Vec<(u8, u16)>,
     hold: bool,
@@ -206,14 +209,17 @@ impl Held {
             let (k, c) = self.pedal.remove(i);
             to.send(cereal_engine::Cmd::NoteOff { chan: c, key: k });
         }
-        self.down.push((key, chan));
+        let snap = SCALE_SNAP.load(Ordering::Relaxed);
+        let raw = key;
+        let key = if snap >> 8 != 0 { crate::prtools::to_scale(key, (snap & 255) as u8, (snap >> 8) as usize) } else { key };
+        self.down.push((raw, chan, key));
         let vel = if FLAT_VEL.load(Ordering::Relaxed) { 100 } else { vel };
         to.send(cereal_engine::Cmd::NoteOn { chan, key, vel: (vel as f32 / 127.0).powf(0.8) });
     }
 
     fn off(&mut self, to: &CmdSender, key: u8) {
-        if let Some(i) = self.down.iter().position(|(k, _)| *k == key) {
-            let (k, c) = self.down.remove(i);
+        if let Some(i) = self.down.iter().position(|(k, _, _)| *k == key) {
+            let (_, c, k) = self.down.remove(i);
             if self.hold {
                 self.pedal.push((k, c));
             } else {

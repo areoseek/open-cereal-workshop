@@ -21,6 +21,8 @@ pub struct State {
     line: Option<(u32, i32)>,
     /// The last point a free-hand drag wrote, so fast strokes leave no holes.
     last: Option<(u32, i32)>,
+    /// The ticks the free-hand stroke under way has covered.
+    stroke: Option<(u32, u32)>,
     /// The events last copied: tick and raw value.
     copied: Vec<(u32, i32)>,
     /// The LFO or scale tool while its box is open.
@@ -416,6 +418,8 @@ impl App {
                 let from = self.events.last.unwrap_or(here);
                 write(&mut self.song.patterns[pat].events, from, here);
                 self.events.last = Some(here);
+                let (lo, hi) = (from.0.min(here.0), from.0.max(here.0));
+                self.events.stroke = Some(self.events.stroke.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
                 self.dirty = true;
             } else if sec_down && shift && rect.contains(pp) {
                 let t0 = here.0 / snap * snap;
@@ -432,6 +436,19 @@ impl App {
         }
         if !down {
             self.events.last = None;
+            // auto smoothing: a finished free-hand stroke is evened out, each event taking the mean of itself
+            // and its two neighbours on either side
+            if let Some((t0, t1)) = self.events.stroke.take() {
+                if self.settings.pr_opts & crate::pianoroll::pro::AUTO_SMOOTH != 0 {
+                    let events = &mut self.song.patterns[pat].events;
+                    let at: Vec<usize> = (0..events.len()).filter(|&i| (events[i].param, events[i].dest) == (param, dest) && events[i].tick + snap > t0 && events[i].tick <= t1).collect();
+                    let raw: Vec<i32> = at.iter().map(|&i| events[i].raw).collect();
+                    for (k, &i) in at.iter().enumerate() {
+                        let (a, b) = (k.saturating_sub(2), (k + 3).min(raw.len()));
+                        events[i].raw = (raw[a..b].iter().map(|v| *v as f32).sum::<f32>() / (b - a) as f32).round() as i32;
+                    }
+                }
+            }
         }
         if !sec_down && pointer.is_none() {
             self.events.line = None;

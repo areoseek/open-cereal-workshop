@@ -3223,7 +3223,13 @@ impl App {
                 }
                 _ => {
                     if self.typing_keys && !repeat {
-                        let notes = self.typed_notes(key);
+                        let mut notes = self.typed_notes(key);
+                        // with "snap incoming MIDI" on, played keys land on the piano roll's scale
+                        if self.piano.scale != 0 && self.settings.pr_opts & crate::pianoroll::pro::SNAP_MIDI != 0 {
+                            for k in notes.iter_mut() {
+                                *k = crate::prtools::to_scale(*k, self.piano.scale_root, self.piano.scale);
+                            }
+                        }
                         if !notes.is_empty() {
                             let chan = self.recv.iter().find(|r| r.0.is_empty() && r.1 < self.song.channels.len()).map_or(self.sel_chan, |r| r.1) as u16;
                             for &k in &notes {
@@ -4146,6 +4152,8 @@ impl eframe::App for App {
         // a stretch of time picked out on a ruler plays round and round: the playlist's in song mode, the piano roll's otherwise
         let tr = &self.handle.transport;
         tr.set_range(if tr.song_mode() { self.playlist.time_sel } else { self.piano.time_sel });
+        let snap = if self.piano.scale != 0 && self.settings.pr_opts & crate::pianoroll::pro::SNAP_MIDI != 0 { (self.piano.scale as u32) << 8 | self.piano.scale_root as u32 } else { 0 };
+        crate::midi::SCALE_SNAP.store(snap, std::sync::atomic::Ordering::Relaxed);
         if !std::mem::replace(&mut self.prefs_win.scaled, true) && self.settings.scale > 0.0 {
             self.apply_scale(ctx);
         }

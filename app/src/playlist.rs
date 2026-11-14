@@ -1551,7 +1551,12 @@ impl App {
         self.playlist.left_tick = tick_of(grid.left()) as u32;
         self.playlist.view_w = grid.width();
         let g = if mods.alt { 1 } else { self.pl_snap() };
-        let snap = |t: f32| ((t.max(0.0) as u32) / g) * g;
+        // Events and Markers snap pull to the nearest clip edge or time marker instead of a grid
+        let points: Vec<u32> = if mods.alt { vec![] } else { self.pl_snap_points() };
+        // (the pull reaches 16 pixels; further out the pointer moves freely)
+        let near = |t: f32, skip: &[u32]| points.iter().copied().filter(|p| !skip.contains(p) && (*p as f32 - t).abs() * px <= 16.0).min_by_key(|p| (*p as i64 - t as i64).abs());
+        let g = if points.is_empty() { g } else { 1 };
+        let snap = |t: f32| near(t.max(0.0), &[]).unwrap_or(((t.max(0.0) as u32) / g) * g);
         let snap_delta = |d: f32| ((d / g as f32).round() as i64) * g as i64;
         // a sound dragged from the browser becomes an audio clip where it is dropped
         if let Some(path) = resp.dnd_release_payload::<std::path::PathBuf>() {
@@ -1566,6 +1571,19 @@ impl App {
         let ralt = egui_winit::key_side::right_alt();
         let tool = if egui_winit::key_side::right_shift() { Tool::Slice } else if ralt { Tool::Mute } else { self.playlist.tool };
         let over = pointer.filter(|pp| resp.hovered() && rect.contains(*pp));
+        // magic lasso: a loop drawn round clips with no button held picks them
+        if self.settings.pl_opts & plo::LASSO != 0 {
+            let free = self.playlist.drag.is_none() && !down && !sec_down;
+            if let Some(poly) = crate::widgets::magic_lasso(ui, egui::Id::new("pl-lasso"), over.filter(|pp| free && grid.contains(*pp))) {
+                let got: BTreeSet<usize> = self.song.clips.iter().enumerate().filter(|(_, c)| {
+                    let tr = (c.track as usize).min(ntracks.saturating_sub(1));
+                    crate::widgets::in_outline(&poly, egui::pos2((x_of(c.pos as f32) + x_of((c.pos + c.len) as f32)) * 0.5, (y_of(tr) + y_of(tr + 1)) * 0.5))
+                }).map(|(i, _)| i).collect();
+                if !got.is_empty() {
+                    self.playlist.sel = got;
+                }
+            }
+        }
         // performance mode: presses in the zone play clips; nothing there is edited while the mode is on
         let mut over = over;
         if !down && !self.playlist.perf_press.is_empty() {
@@ -1758,7 +1776,18 @@ impl App {
             match drag {
                 Drag::Clips { mode, anchor_tick, anchor_track, orig } => {
                     if down {
-                        let dt = snap_delta(tick_of(pp.x) - anchor_tick);
+                        let raw = tick_of(pp.x) - anchor_tick;
+                        let dt = if points.is_empty() {
+                            snap_delta(raw)
+                        } else {
+                            // the moved clips' own edges are not targets; the first clip's start does the snapping
+                            let own: Vec<u32> = orig.iter().flat_map(|(_, c)| [c.pos, c.pos + c.len]).collect();
+                            let first = orig.iter().map(|(_, c)| c.pos).min().unwrap_or(0);
+                            match near((first as f32 + raw).max(0.0), &own) {
+                                Some(p) => p as i64 - first as i64,
+                                None => snap_delta(raw),
+                            }
+                        };
                         let dtr = track_of(pp.y) as i32 - anchor_track;
                         let dt_move = dt.max(-(orig.iter().map(|(_, c)| c.pos).min().unwrap_or(0) as i64));
                         let dtr = dtr.clamp(-(orig.iter().map(|(_, c)| c.track as i32).min().unwrap_or(0)), ntracks as i32 - 1 - orig.iter().map(|(_, c)| c.track as i32).max().unwrap_or(0));
@@ -1993,6 +2022,19 @@ impl App {
         self.auto_point_menu(ui.ctx());
         self.track_menu(ui.ctx());
         self.clip_menu(ui.ctx());
+    }
+
+    /// The places Events snap (clip edges) or Markers snap (time markers) pull to; empty for grid snaps.
+    fn pl_snap_points(&self) -> Vec<u32> {
+        let pick = if self.playlist.snap == SNAP_MAIN { self.main_snap } else { self.playlist.snap };
+        let mut v: Vec<u32> = match SNAPS[pick.min(SNAPS.len() - 1)].0 {
+            "Events" => self.song.clips.iter().flat_map(|c| [c.pos, c.pos + c.len]).collect(),
+            "Markers" => self.song.markers.iter().map(|m| m.pos).collect(),
+            _ => vec![],
+        };
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     fn pl_snap(&self) -> u32 {

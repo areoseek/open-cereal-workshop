@@ -1100,6 +1100,9 @@ struct Voice {
     lr: [f32; 2],
     lr_inc: [f32; 2],
     lr_left: u32,
+    /// the stretch that follows the one under way, worked out ahead so it starts right on its tick
+    lr_nx: [f32; 2],
+    lr_nx_left: u32,
     lt_next: f32,
     ltick: f32,
     /// Where the voice sits between the speakers before the pan wobble.
@@ -1216,29 +1219,38 @@ impl Voice {
             }
             // level and pan: (measured) set once a tick for the end of that tick, reached in a straight line, and
             // never moving either side faster than `GAIN_SLEW`; the first tick of a note sits at its end value
-            if (lfos[0].amount != 0.0 || lfos[1].amount != 0.0) && (self.t == 0 || self.t as f32 >= self.lt_next) {
+            if (lfos[0].amount != 0.0 || lfos[1].amount != 0.0) && (self.t == 0 || (self.lr_nx_left == 0 && (self.t + CTL) as f32 > self.lt_next)) {
                 let tick = self.ltick.max(1.0);
                 let first = self.t == 0;
-                let end = if first { tick } else { self.lt_next + tick * (((self.t as f32 - self.lt_next) / tick).floor() + 1.0) };
+                let start = if first { 0.0 } else { self.lt_next };
+                let end = start + tick;
                 let te = end / self.sr;
                 let base = law::pan(self.pan0.clamp(-1.0, 1.0));
                 let base = [base.0.max(1e-3), base.1.max(1e-3)];
                 let now = law::pan((self.pan0 + val(0, te)).clamp(-1.0, 1.0));
                 let level = (1.0 + val(1, te)).max(0.0);
-                let frames = (end - self.t as f32).max(1.0);
+                let frames = (end.round() - start.round()).max(1.0);
                 let most = GAIN_SLEW / self.sr * tick;
+                let mut nx = [0.0f32; 2];
                 for (c, side) in [now.0, now.1].into_iter().enumerate() {
                     let want = level * side;
                     if first {
                         self.lr[c] = want / base[c] - 1.0;
                         self.lr_inc[c] = 0.0;
                     } else {
-                        let cur = (1.0 + self.lr[c]) * base[c];
+                        // where the stretch under way leaves this side
+                        let cur = (1.0 + self.lr[c] + self.lr_inc[c] * self.lr_left as f32) * base[c];
                         let to = cur + (want - cur).clamp(-most, most);
-                        self.lr_inc[c] = (to - cur) / base[c] / frames;
+                        nx[c] = (to - cur) / base[c] / frames;
                     }
                 }
-                self.lr_left = frames as u32;
+                if first {
+                    self.lr_left = frames as u32;
+                    self.lr_nx_left = 0;
+                } else {
+                    self.lr_nx = nx;
+                    self.lr_nx_left = frames as u32;
+                }
                 self.lt_next = end;
             }
         }
@@ -1500,6 +1512,11 @@ impl Voice {
             };
             let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
+            if self.lr_left == 0 && self.lr_nx_left > 0 {
+                self.lr_inc = self.lr_nx;
+                self.lr_left = self.lr_nx_left;
+                self.lr_nx_left = 0;
+            }
             if self.lr_left > 0 {
                 self.lr_left -= 1;
                 self.lr[0] += self.lr_inc[0];
@@ -2010,7 +2027,8 @@ impl Player {
                 *p *= k;
             }
             if tick_s > 0.0 {
-                *p = (*p / tick_s).round().max(1.0) * tick_s;
+                // (measured: the speed knob at its fastest still takes three ticks a turn)
+                *p = (*p / tick_s).round().max(3.0) * tick_s;
                 l.delay = (l.delay / tick_s).round() * tick_s;
                 l.attack = (l.attack / tick_s).ceil() * tick_s;
             }
