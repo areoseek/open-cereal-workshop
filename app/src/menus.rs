@@ -26,7 +26,7 @@ pub(crate) fn tick(ui: &mut Ui, on: bool, label: &str, keys: &str) -> egui::Resp
 }
 
 /// One column of a menu that has several side by side.
-fn col<R>(ui: &mut Ui, width: f32, body: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn col<R>(ui: &mut Ui, width: f32, body: impl FnOnce(&mut Ui) -> R) -> R {
     ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
         ui.set_width(width);
         body(ui)

@@ -442,110 +442,118 @@ impl App {
         let mut act: Option<u8> = None;
         let area = egui::Area::new(egui::Id::new("pl_track_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_width(380.0);
-                let t = &mut self.song.tracks[tr];
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    let r = ui.add(egui::TextEdit::singleline(&mut t.name).hint_text(format!("Track {}", tr + 1)).desired_width(180.0));
-                    changed |= r.changed();
-                    close |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Change color");
-                    changed |= ui.color_edit_button_srgb(&mut t.color).changed();
-                    if ui.button("Reset").clicked() {
-                        t.color = cereal_engine::song::Track::default().color;
-                        changed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Auto name").hint("Name the track after the first clip on it").clicked() {
-                        act = Some(0);
-                    }
-                    if ui.button("Auto color").hint("Take the colour of the first clip on it").clicked() {
-                        act = Some(1);
-                    }
-                });
-                ui.separator();
-                changed |= ui.checkbox(&mut t.enabled, "On").changed();
-                ui.horizontal(|ui| {
-                    if ui.button("Solo").clicked() {
-                        act = Some(2);
-                    }
-                    if ui.button("Select all clips").clicked() {
-                        act = Some(3);
-                    }
-                    if ui.button("Mute all clips").clicked() {
-                        act = Some(8);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Insert one").hint("An empty track here; the ones below move down").clicked() {
-                        act = Some(4);
-                    }
-                    if ui.button("Delete one").hint("Remove this track and its clips; the ones below move up").clicked() {
-                        act = Some(5);
-                    }
-                    if ui.button("Move up").clicked() {
-                        act = Some(6);
-                    }
-                    if ui.button("Move down").clicked() {
-                        act = Some(7);
-                    }
-                });
-                ui.separator();
-                if tr > 0 {
-                    changed |= ui.checkbox(&mut t.grouped, "Group with above track").changed();
+                use crate::menus::{mi, tick};
+                ui.set_width(230.0);
+                let v = ui.visuals_mut();
+                v.button_frame = false;
+                for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+                    w.bg_stroke = Stroke::NONE;
                 }
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                let t = &mut self.song.tracks[tr];
+                ui.menu_button("Rename, color and icon...", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        let r = ui.add(egui::TextEdit::singleline(&mut t.name).hint_text(format!("Track {}", tr + 1)).desired_width(180.0));
+                        changed |= r.changed();
+                        close |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        changed |= ui.color_edit_button_srgb(&mut t.color).changed();
+                    });
+                });
+                for (k, label, hint) in [(15u8, "Random color", ""), (0, "Auto name", "Name the track after the first clip on it"), (1, "Auto color", "Take the colour of the first clip on it"), (18, "Auto name clips", "The patterns and channels of the clips on the track take the track's name"), (16, "Reset", "Name and colour back to how a new track has them")] {
+                    let r = mi(ui, label, "");
+                    if (if hint.is_empty() { r } else { r.hint(hint) }).clicked() {
+                        act = Some(k);
+                    }
+                }
+                ui.separator();
+                ui.menu_button("Performance settings", |ui| {
+                    let row = |ui: &mut Ui, title: &str, names: &[&str], v: &mut u8| {
+                        let mut changed = false;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(title).small().color(TEXT_DIM));
+                            for (i, n) in names.iter().enumerate() {
+                                if ui.selectable_label(*v as usize == i, RichText::new(*n).small()).clicked() {
+                                    *v = i as u8;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        changed
+                    };
+                    ui.set_max_width(380.0);
+                    changed |= row(ui, "Press", &PERF_PRESS, &mut t.perf.press);
+                    changed |= row(ui, "Motion", &PERF_MOTION, &mut t.perf.motion);
+                    changed |= row(ui, "Trigger sync", &PERF_SYNC, &mut t.perf.sync);
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(&mut t.perf.queue, "Queue").hint("A new clip waits for the playing one to end").changed();
+                        changed |= ui.checkbox(&mut t.perf.tolerant, "Tolerant").hint("A press that is a little late starts at once, inside the clip").changed();
+                    });
+                    changed |= row(ui, "Position sync", &PERF_SYNC, &mut t.perf.pos_sync);
+                });
+                ui.separator();
                 ui.menu_button("Size", |ui| {
                     for pc in [25u32, 50, 75, 100, 150, 200, 300, 400] {
                         if ui.radio(((t.size * 100.0).round() as u32) == pc, format!("{pc}%")).clicked() {
                             t.size = pc as f32 / 100.0;
                             changed = true;
-                            ui.close_menu();
+                            close = true;
                         }
                     }
                     ui.separator();
                     if ui.button("Resize all tracks").hint("Give every track this one's height").clicked() {
                         act = Some(9);
-                        ui.close_menu();
                     }
                 });
-                ui.horizontal(|ui| {
-                    if ui.button("Auto color group").hint("Every track of this group takes the colour of the group's first track").clicked() {
-                        act = Some(10);
-                    }
-                    if ui.button("Merge pattern clips").hint("The pattern clips on this track become one clip of a new pattern").clicked() {
-                        act = Some(12);
-                    }
-                    if ui.button("Consolidate this track").hint("Render the clips on this track into one audio clip").clicked() {
-                        act = Some(11);
-                    }
-                });
-                changed |= ui.checkbox(&mut t.lock_content, "Lock to content").on_hover_text("Drawing on this track puts down the clip that already lies on it").changed();
                 ui.separator();
-                ui.label(RichText::new("Performance settings").color(TEXT_DIM).small());
-                let row = |ui: &mut Ui, title: &str, names: &[&str], v: &mut u8| {
-                    let mut changed = false;
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(title).small().color(TEXT_DIM));
-                        for (i, n) in names.iter().enumerate() {
-                            if ui.selectable_label(*v as usize == i, RichText::new(*n).small()).clicked() {
-                                *v = i as u8;
-                                changed = true;
-                            }
-                        }
-                    });
-                    changed
-                };
-                changed |= row(ui, "Press", &PERF_PRESS, &mut t.perf.press);
-                changed |= row(ui, "Motion", &PERF_MOTION, &mut t.perf.motion);
-                changed |= row(ui, "Trigger sync", &PERF_SYNC, &mut t.perf.sync);
-                ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut t.perf.queue, "Queue").hint("A new clip waits for the playing one to end").changed();
-                    changed |= ui.checkbox(&mut t.perf.tolerant, "Tolerant").hint("A press that is a little late starts at once, inside the clip").changed();
+                let grouped = t.grouped;
+                if ui.add_enabled(tr > 0 && !grouped, egui::Button::new("Group with above track")).clicked() {
+                    t.grouped = true;
+                    changed = true;
+                    close = true;
+                }
+                if ui.add_enabled(grouped, egui::Button::new("Ungroup")).clicked() {
+                    t.grouped = false;
+                    changed = true;
+                    close = true;
+                }
+                if mi(ui, "Auto color group", "").hint("Every track of this group takes the colour of the group's first track").clicked() {
+                    act = Some(10);
+                }
+                ui.separator();
+                if tick(ui, t.lock_content, "Lock to content", "").hint("Drawing on this track puts down the clip that already lies on it").clicked() {
+                    t.lock_content = !t.lock_content;
+                    changed = true;
+                    close = true;
+                }
+                if mi(ui, "Merge clips", "").hint("The pattern clips on this track become one clip of a new pattern").clicked() {
+                    act = Some(12);
+                }
+                if mi(ui, "Consolidate track(s)", "").hint("Render the clips on this track into one audio clip").clicked() {
+                    act = Some(11);
+                }
+                for (k, label) in [(3u8, "Select all clips"), (8, "Mute all clips"), (14, "Unmute all clips"), (2, "Solo")] {
+                    if mi(ui, label, "").clicked() {
+                        act = Some(k);
+                    }
+                }
+                ui.separator();
+                for (k, label, hint) in [(4u8, "Insert one", "An empty track here; the ones below move down"), (13, "Clone", "A copy of the track and its clips just below"), (5, "Delete", "Remove this track and its clips; the ones below move up")] {
+                    if mi(ui, label, "").hint(hint).clicked() {
+                        act = Some(k);
+                    }
+                }
+                ui.separator();
+                if ui.add_enabled(tr > 0, egui::Button::new("Move up")).clicked() {
+                    act = Some(6);
+                }
+                if ui.add_enabled(tr + 1 < self.song.tracks.len(), egui::Button::new("Move down")).clicked() {
+                    act = Some(7);
+                }
                 });
-                changed |= row(ui, "Position sync", &PERF_SYNC, &mut t.perf.pos_sync);
             });
         });
         if let Some(k) = act {
@@ -597,10 +605,56 @@ impl App {
                 3 => {
                     self.playlist.sel = self.song.clips.iter().enumerate().filter(|(_, c)| c.track as usize == tr).map(|(i, _)| i).collect();
                 }
-                8 => {
-                    let all = self.song.clips.iter().filter(|c| c.track as usize == tr).all(|c| c.muted);
+                8 | 14 => {
                     for c in self.song.clips.iter_mut().filter(|c| c.track as usize == tr) {
-                        c.muted = !all;
+                        c.muted = k == 8;
+                    }
+                }
+                13 => {
+                    // the last track falls off the end only when it is empty
+                    if tr + 1 < n && !self.song.clips.iter().any(|c| c.track as usize == n - 1) {
+                        self.song.tracks.pop();
+                        let copy = self.song.tracks[tr].clone();
+                        self.song.tracks.insert(tr + 1, copy);
+                        for c in self.song.clips.iter_mut().filter(|c| c.track as usize > tr) {
+                            c.track += 1;
+                        }
+                        let twins: Vec<Clip> = self.song.clips.iter().filter(|c| c.track as usize == tr).cloned().map(|mut c| {
+                            c.track += 1;
+                            c
+                        }).collect();
+                        self.song.clips.extend(twins);
+                    }
+                }
+                15 => {
+                    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+                    self.song.tracks[tr].color = std::array::from_fn(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        70 + (seed % 150) as u8
+                    });
+                }
+                16 => {
+                    let d = cereal_engine::song::Track::default();
+                    self.song.tracks[tr].name = d.name;
+                    self.song.tracks[tr].color = d.color;
+                }
+                18 => {
+                    let name = self.song.tracks[tr].name.clone();
+                    let srcs: Vec<ClipSrc> = self.song.clips.iter().filter(|c| c.track as usize == tr).map(|c| c.src).collect();
+                    for src in srcs.into_iter().filter(|_| !name.is_empty()) {
+                        match src {
+                            ClipSrc::Pattern(p) => {
+                                self.song.ensure_pattern(p);
+                                self.song.patterns[p].name = name.clone();
+                            }
+                            ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                                if let Some(c) = self.song.channels.get_mut(c) {
+                                    c.name = name.clone();
+                                }
+                            }
+                        }
                     }
                 }
                 4 => {
@@ -633,10 +687,11 @@ impl App {
                 _ => {}
             }
             changed = true;
-            close |= k >= 2;
+            close = true;
         }
         self.dirty |= changed;
-        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|p| !area.response.rect.contains(p)).unwrap_or(true));
+        // a press on one of its own submenus is not a press outside
+        let outside = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()).is_some_and(|p| !area.response.rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l.order < egui::Order::Foreground));
         if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.playlist.track_menu = None;
         }

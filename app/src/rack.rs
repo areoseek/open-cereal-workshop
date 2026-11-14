@@ -376,14 +376,45 @@ impl App {
                     let hover = if missing { format!("Missing sample: {}", c.sample_path) } else if !c.sample_path.is_empty() { c.sample_path.clone() } else { c.plugin.clone() };
                     let resp = if hover.is_empty() { resp } else { resp.hint(hover) };
                     resp.context_menu(|ui| {
-                        if ui.button("Piano roll").clicked() {
+                        use crate::menus::{mi, tick};
+                        ui.horizontal_top(|ui| {
+                        crate::menus::col(ui, 210.0, |ui| {
+                        if tick(ui, self.show_piano && self.sel_chan == ci, "Piano roll", "F7").clicked() {
                             self.sel_chan = ci;
                             self.show_piano = true;
                             ui.close_menu();
                         }
-                        if ui.button("Graph editor").clicked() {
+                        if mi(ui, "Graph editor", "").clicked() {
                             self.sel_chan = ci;
                             self.rack.graph = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if mi(ui, "Rename, color and icon...", "F2").clicked() {
+                            self.rack.rename = Some((ci, self.song.channels[ci].name.clone()));
+                            ui.close_menu();
+                        }
+                        if mi(ui, "Random color", "").clicked() {
+                            let keep = std::mem::replace(&mut self.rack.sel, [ci].into_iter().collect());
+                            let was = std::mem::replace(&mut self.sel_chan, ci);
+                            self.color_channels(true);
+                            self.rack.sel = keep;
+                            self.sel_chan = was;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if mi(ui, "Load sample...", "").clicked() {
+                            ui.close_menu();
+                            if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff", "wv"]).pick_file() {
+                                self.actions.push(crate::Action::LoadSample(p, Some(ci)));
+                            }
+                        }
+                        let own = ci as u16 + 1;
+                        let itself = self.song.channels[ci].smp.cut == own && self.song.channels[ci].smp.cut_by == own;
+                        if tick(ui, itself, "Cut itself", "").hint("A new note on the channel stops the one still sounding").clicked() {
+                            let f = &mut self.song.channels[ci].smp;
+                            (f.cut, f.cut_by) = if itself { (0, 0) } else { (own, own) };
+                            self.dirty = true;
                             ui.close_menu();
                         }
                         ui.separator();
@@ -413,30 +444,35 @@ impl App {
                                 self.sel_chan = ci;
                             }
                         });
-                        ui.separator();
-                        if ui.button("Rename, color and icon...                F2").clicked() {
-                            self.rack.rename = Some((ci, self.song.channels[ci].name.clone()));
+                        if mi(ui, "Clone", "").clicked() {
+                            clone = Some(ci);
                             ui.close_menu();
                         }
+                        if mi(ui, "Delete...", "").clicked() {
+                            delete = Some(ci);
+                            ui.close_menu();
+                        }
+                        });
                         ui.separator();
-                        if ui.button("Cut                                                  Ctrl+X").clicked() {
+                        crate::menus::col(ui, 230.0, |ui| {
+                        if mi(ui, "Cut", "").clicked() {
                             self.sel_chan = ci;
                             self.rack_copy(true);
                             ui.close_menu();
                         }
-                        if ui.button("Copy                                               Ctrl+C").clicked() {
+                        if mi(ui, "Copy", "").clicked() {
                             self.sel_chan = ci;
                             self.rack_copy(false);
                             ui.close_menu();
                         }
-                        if ui.add_enabled(!self.rack.clip.is_empty(), egui::Button::new("Paste                                              Ctrl+V")).clicked() {
+                        if ui.add_enabled(!self.rack.clip.is_empty(), egui::Button::new("Paste")).clicked() {
                             self.sel_chan = ci;
                             self.rack_paste();
                             ui.close_menu();
                         }
                         ui.separator();
                         for every in [2u32, 4, 8] {
-                            if ui.button(format!("Fill each {every} steps")).clicked() {
+                            if mi(ui, &format!("Fill each {every} steps"), "").clicked() {
                                 for s in (0..nsteps as u32).step_by(every as usize) {
                                     self.song.patterns[pat].set_step_in(ci as u16, s * step, step, true);
                                 }
@@ -444,7 +480,7 @@ impl App {
                                 ui.close_menu();
                             }
                         }
-                        ui.menu_button("Advanced fill", |ui| {
+                        ui.menu_button("Advanced fill...", |ui| {
                             let id = egui::Id::new("adv_fill");
                             let (mut every, mut shift, mut keep): (u32, u32, bool) = ui.data(|d| d.get_temp(id)).unwrap_or((4, 0, false));
                             egui::Grid::new("adv_fill_grid").num_columns(2).show(ui, |ui| {
@@ -468,13 +504,9 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        if ui.button("Clear steps").clicked() {
-                            self.song.patterns[pat].notes.retain(|n| n.chan != ci as u16);
-                            self.dirty = true;
-                            ui.close_menu();
-                        }
-                        for (name, right) in [("Rotate left                    Shift+Ctrl+Left", false), ("Rotate right                Shift+Ctrl+Right", true)] {
-                            if ui.button(name).clicked() {
+                        ui.separator();
+                        for (name, keys, right) in [("Rotate left", "Shift+Ctrl+Left", false), ("Rotate right", "Shift+Ctrl+Right", true)] {
+                            if mi(ui, name, keys).clicked() {
                                 self.sel_chan = ci;
                                 self.rack_shift(right);
                                 ui.close_menu();
@@ -490,25 +522,6 @@ impl App {
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("Assign to free mixer track               Ctrl+L").clicked() {
-                            match self.free_insert() {
-                                Some(i) => {
-                                    self.link_channel(ci, i);
-                                    self.sel_insert = i;
-                                }
-                                None => self.status = "No free mixer track".into(),
-                            }
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Open channel state...").clicked() {
-                            self.state_ask = Some(crate::StateAsk::OpenChan(ci));
-                            ui.close_menu();
-                        }
-                        if ui.button("Save channel state as...").clicked() {
-                            self.state_ask = Some(crate::StateAsk::SaveChan(ci));
-                            ui.close_menu();
-                        }
                         ui.menu_button("Receive notes from", |ui| {
                             ui.label(RichText::new("A device ticked here plays this channel whichever channel is selected").color(TEXT_DIM).small());
                             let mut names = vec![String::new()];
@@ -526,6 +539,7 @@ impl App {
                                 }
                             }
                         });
+                        ui.separator();
                         ui.menu_button("Burn MIDI to", |ui| {
                             ui.label(RichText::new("The notes this channel really plays in the pattern, arpeggio steps and echoes written out").color(TEXT_DIM).small());
                             let names: Vec<String> = self.song.channels.iter().map(|c| c.name.clone()).collect();
@@ -553,15 +567,8 @@ impl App {
                                 }
                             }
                         });
-                        ui.separator();
-                        if ui.button("Clone").clicked() {
-                            clone = Some(ci);
-                            ui.close_menu();
-                        }
-                        if ui.button("Delete").clicked() {
-                            delete = Some(ci);
-                            ui.close_menu();
-                        }
+                        });
+                        });
                     });
                     ui.add_space(8.0);
 

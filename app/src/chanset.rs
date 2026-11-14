@@ -223,6 +223,18 @@ impl App {
 
         // the strip every channel has: level, pan, pitch, mixer track
         ui.horizontal(|ui| {
+            ui.menu_button("\u{23F7}", |ui| {
+                if crate::menus::mi(ui, "Open channel state...", "").clicked() {
+                    self.state_ask = Some(crate::StateAsk::OpenChan(ci));
+                    ui.close_menu();
+                }
+                if crate::menus::mi(ui, "Save preset as...", "").clicked() {
+                    self.state_ask = Some(crate::StateAsk::SaveChan(ci));
+                    ui.close_menu();
+                }
+            })
+            .response
+            .hint("Channel menu");
             let c = &mut self.song.channels[ci];
             use cereal_engine::song::Target;
             changed |= cap_knob_for(ui, "PAN", &mut c.pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0), Some(Target::ChanPan(ci)));
