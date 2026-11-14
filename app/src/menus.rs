@@ -9,19 +9,19 @@ use eframe::egui::{self, RichText, Ui};
 use std::path::PathBuf;
 
 /// A caption strip between groups of entries.
-fn sect(ui: &mut Ui, name: &str) {
+pub(crate) fn sect(ui: &mut Ui, name: &str) {
     let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(60.0), 15.0), egui::Sense::hover());
     ui.painter().rect_filled(r, 0.0, ui.visuals().extreme_bg_color);
     ui.painter().text(r.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(10.5), TEXT_DIM);
 }
 
 /// A menu entry with its keys on the right.
-fn mi(ui: &mut Ui, label: &str, keys: &str) -> egui::Response {
+pub(crate) fn mi(ui: &mut Ui, label: &str, keys: &str) -> egui::Response {
     ui.add(egui::Button::new(label).shortcut_text(RichText::new(keys).color(TEXT_DIM)))
 }
 
 /// A menu entry that is a switch.
-fn tick(ui: &mut Ui, on: bool, label: &str, keys: &str) -> egui::Response {
+pub(crate) fn tick(ui: &mut Ui, on: bool, label: &str, keys: &str) -> egui::Response {
     ui.add(egui::Button::new(format!("{}  {label}", if on { "\u{2714}" } else { "    " })).shortcut_text(RichText::new(keys).color(TEXT_DIM)))
 }
 
@@ -585,7 +585,10 @@ impl App {
                     ui.close_menu();
                 }
                 if mi(ui, "Transpose...", "").hint("Move every note of the pattern up or down by a number of semitones").clicked() {
-                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("transpose-ask"), Some(0i32)));
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new("transpose-chans"), Vec::<usize>::new());
+                        d.insert_temp(egui::Id::new("transpose-ask"), Some(0i32));
+                    });
                     ui.close_menu();
                 }
                 ui.separator();
@@ -653,7 +656,8 @@ impl App {
                     if ui.button("Accept").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let p = self.handle.transport.pattern();
                         self.song.ensure_pattern(p);
-                        for n in self.song.patterns[p].notes.iter_mut() {
+                        let only: Vec<usize> = ctx.data(|d| d.get_temp(egui::Id::new("transpose-chans"))).unwrap_or_default();
+                        for n in self.song.patterns[p].notes.iter_mut().filter(|n| only.is_empty() || only.contains(&(n.chan as usize))) {
                             n.key = (n.key as i32 + by).clamp(0, 131) as u8;
                         }
                         self.dirty = true;
@@ -1007,23 +1011,54 @@ impl App {
             ui.close_menu();
         }
         if mi(ui, "Purge unused audio clips", "").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
-            let mut n = 0;
-            for ci in (0..self.song.channels.len()).rev() {
-                let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.all_clips().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(a) if a == ci));
-                if unused && self.song.channels.len() > 1 {
-                    self.delete_channel(ci);
-                    n += 1;
-                }
-            }
+            let n = self.purge_audio_clips();
             self.status = format!("{n} unused audio clips removed");
             ui.close_menu();
         }
-        ui.menu_button("Switch all audio clip channels to", |ui| {
+        self.audio_clip_switch(ui, "Switch all audio clip channels to", false);
+        self.audio_clip_switch(ui, "Switch selected audio clip channels to", true);
+        self.track_macros(ui);
+        if mi(ui, "Remove all Wave Recorder instances", "").hint("Takes every Wave Recorder out of the mixer's effect slots").clicked() {
+            let mut n = 0;
+            for ins in self.song.inserts.iter_mut() {
+                let before = ins.slots.len();
+                ins.slots.retain(|s| !s.plugin.eq_ignore_ascii_case("Edison"));
+                n += before - ins.slots.len();
+            }
+            if n > 0 {
+                self.fx_open = None;
+                self.dirty = true;
+            }
+            self.status = format!("{n} Wave Recorders removed");
+            ui.close_menu();
+        }
+        if mi(ui, "Delete empty patterns", "").hint("Patterns with no notes or events that lie nowhere on the playlist; named ones are kept").clicked() {
+            let n = self.purge_patterns();
+            self.status = format!("{n} empty patterns removed");
+            ui.close_menu();
+        }
+    }
+
+    fn purge_audio_clips(&mut self) -> usize {
+        let mut n = 0;
+        for ci in (0..self.song.channels.len()).rev() {
+            let unused = self.song.channels[ci].kind == cereal_engine::flp::ChannelKind::AudioClip && !self.song.all_clips().any(|c| matches!(c.src, cereal_engine::song::ClipSrc::Audio(a) if a == ci));
+            if unused && self.song.channels.len() > 1 {
+                self.delete_channel(ci);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn audio_clip_switch(&mut self, ui: &mut Ui, label: &str, selected: bool) {
+        ui.menu_button(label, |ui| {
             for (keep, label) in [(false, "Resample"), (true, "Stretch")] {
-                if ui.button(label).hint(if keep { "Every audio clip keeps its pitch when its length is changed" } else { "Every audio clip changes pitch with its speed" }).clicked() {
+                if ui.button(label).hint(if keep { "The audio clips keep their pitch when their length is changed" } else { "The audio clips change pitch with their speed" }).clicked() {
+                    let targets = self.rack_targets();
                     let mut n = 0;
-                    for ch in self.song.channels.iter_mut().filter(|c| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
-                        if ch.smp.keep_pitch != keep {
+                    for (ci, ch) in self.song.channels.iter_mut().enumerate().filter(|(_, c)| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
+                        if (!selected || targets.contains(&ci)) && ch.smp.keep_pitch != keep {
                             ch.smp.keep_pitch = keep;
                             n += 1;
                         }
@@ -1034,6 +1069,203 @@ impl App {
                 }
             }
         });
+    }
+
+    /// The channel rack's own menu.
+    pub(crate) fn rack_menu(&mut self, ui: &mut Ui) {
+        use egui::{Key, Modifiers};
+        const A: Modifiers = Modifiers::ALT;
+        const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
+        const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
+        let targets = self.rack_targets();
+        let mut press = None;
+        ui.horizontal_top(|ui| {
+            col(ui, 300.0, |ui| {
+                ui.menu_button("Add one", |ui| self.add_columns(ui));
+                if mi(ui, "Purge unused audio clips", "").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
+                    let n = self.purge_audio_clips();
+                    self.status = format!("{n} unused audio clips removed");
+                    ui.close_menu();
+                }
+                sect(ui, "Channels");
+                if mi(ui, "Select unused channels", "").hint("Channels with no notes in any pattern and no clip on the playlist").clicked() {
+                    let n = self.select_unused_channels();
+                    self.status = format!("{n} unused channels selected");
+                    ui.close_menu();
+                }
+                for (label, keys, m, k) in [("Clone selected", "Alt+C", A, Key::C), ("Delete selected...", "Alt+Del", A, Key::Delete)] {
+                    if mi(ui, label, keys).clicked() {
+                        press = Some((m, k));
+                        ui.close_menu();
+                    }
+                }
+                if mi(ui, "Create layer with selected channels", "").hint("A layer channel that plays every selected channel from its own notes").clicked() {
+                    let mut c = Chan { name: "Layer".into(), kind: cereal_engine::flp::ChannelKind::Layer, ..Chan::default() };
+                    c.children = targets.iter().map(|&t| t as u16).collect();
+                    self.song.channels.push(c);
+                    self.sel_chan = self.song.channels.len() - 1;
+                    self.rack.sel.clear();
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                for (label, keys, k) in [("Move selected up", "Alt+Up", Key::ArrowUp), ("Move selected down", "Alt+Down", Key::ArrowDown)] {
+                    if mi(ui, label, keys).clicked() {
+                        press = Some((A, k));
+                        ui.close_menu();
+                    }
+                }
+                ui.menu_button("Sort by", |ui| {
+                    for (k, label) in ["Color", "Name", "Track number", "Type"].into_iter().enumerate() {
+                        if ui.button(label).clicked() {
+                            self.sort_channels(k);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
+                if mi(ui, "Group selected...", "Alt+G").clicked() {
+                    self.rack.group_name = Some(String::new());
+                    ui.close_menu();
+                }
+                ui.menu_button("Color selected", |ui| {
+                    if mi(ui, "Gradient...", "Shift+Alt+C").hint("From the first selected channel's colour to the last one's").clicked() {
+                        self.color_channels(false);
+                        ui.close_menu();
+                    }
+                    if mi(ui, "Random", "Ctrl+Alt+C").clicked() {
+                        self.color_channels(true);
+                        ui.close_menu();
+                    }
+                });
+                for (label, on) in [("Mute selected", false), ("Unmute selected", true)] {
+                    if mi(ui, label, "").clicked() {
+                        for &c in &targets {
+                            self.song.channels[c].enabled = on;
+                        }
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
+                }
+                if mi(ui, "Transpose selected...", "").hint("Move the selected channels' notes in this pattern up or down by a number of semitones").clicked() {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new("transpose-chans"), targets.clone());
+                        d.insert_temp(egui::Id::new("transpose-ask"), Some(0i32));
+                    });
+                    ui.close_menu();
+                }
+                ui.menu_button("Set swing mix for selected", |ui| {
+                    for pc in [0, 25, 50, 75, 100] {
+                        if ui.button(format!("{pc}%")).hint("How much of the project's swing these channels take").clicked() {
+                            for &c in &targets {
+                                self.song.channels[c].smp.swing = pc as f32 / 100.0;
+                            }
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if mi(ui, "Assign selected to free mixer track(s)", "Ctrl+L").clicked() {
+                    press = Some((Modifiers::COMMAND, Key::L));
+                    ui.close_menu();
+                }
+                if mi(ui, "Select mixer tracks for the selected channels", "").clicked() {
+                    if let Some(&c) = targets.first() {
+                        self.sel_insert = self.song.channels[c].insert;
+                        self.show_mixer = true;
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                for (label, keys, k) in [("Zip selected", "Alt+Z", Key::Z), ("Unzip all", "Alt+U", Key::U)] {
+                    if mi(ui, label, keys).clicked() {
+                        press = Some((A, k));
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if mi(ui, "Restretch all", "Ctrl+Alt+R").clicked() {
+                    press = Some((CA, Key::R));
+                    ui.close_menu();
+                }
+                for (label, keys, k) in [("Shift steps left", "Shift+Ctrl+Left", Key::ArrowLeft), ("Shift steps right", "Shift+Ctrl+Right", Key::ArrowRight)] {
+                    if mi(ui, label, keys).clicked() {
+                        press = Some((CS, k));
+                        ui.close_menu();
+                    }
+                }
+                sect(ui, "Options");
+                if tick(ui, !self.rack.hide_selectors, "Show mixer track selectors", "Alt+M").clicked() {
+                    self.rack.hide_selectors = !self.rack.hide_selectors;
+                    ui.close_menu();
+                }
+            });
+            col(ui, 270.0, |ui| {
+                if tick(ui, self.detached[1], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
+                    self.detached[1] = !self.detached[1];
+                    ui.close_menu();
+                }
+                sect(ui, "Switch");
+                self.audio_clip_switch(ui, "Switch all audio clip channels to", false);
+                self.audio_clip_switch(ui, "Switch selected audio clip channels to", true);
+            });
+        });
+        if let Some((m, k)) = press {
+            self.rack_key(k, m, false);
+        }
+    }
+
+    /// The selected channels' colours: a run from the first one's to the last one's, or each its own at random.
+    pub(crate) fn color_channels(&mut self, random: bool) {
+        let targets = self.rack_targets();
+        if random {
+            let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+            for &c in &targets {
+                self.song.channels[c].color = std::array::from_fn(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    70 + (seed % 150) as u8
+                });
+            }
+        } else if let (Some(&a), Some(&b)) = (targets.first(), targets.last()) {
+            let (ca, cb) = (self.song.channels[a].color, self.song.channels[b].color);
+            let n = targets.len().max(2) - 1;
+            for (i, &c) in targets.iter().enumerate() {
+                let f = i as f32 / n as f32;
+                self.song.channels[c].color = std::array::from_fn(|k| (ca[k] as f32 + (cb[k] as f32 - ca[k] as f32) * f).round() as u8);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The channels put in order: 0 by colour, 1 by name, 2 by mixer track, 3 by kind.
+    fn sort_channels(&mut self, by: usize) {
+        let n = self.song.channels.len();
+        let key = |c: &Chan| -> (u32, String) {
+            match by {
+                0 => {
+                    let h = egui::ecolor::Hsva::from(egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]));
+                    ((h.h * 3600.0) as u32, String::new())
+                }
+                1 => (0, c.name.to_lowercase()),
+                2 => (c.insert as u32, String::new()),
+                _ => (0, format!("{:?} {}", c.kind, c.plugin.to_lowercase())),
+            }
+        };
+        for i in 0..n {
+            let min = (i..n).min_by_key(|&j| (key(&self.song.channels[j]), j)).unwrap_or(i);
+            // a run of swaps keeps the rest in the order they were in
+            for j in (i..min).rev() {
+                self.song.swap_channels(j, j + 1);
+            }
+        }
+        self.rack.sel.clear();
+        self.dirty = true;
+    }
+
+    /// The playlist track entries that the TOOLS macros and the playlist's own menu share.
+    fn track_macros(&mut self, ui: &mut Ui) {
         for (on, label) in [(true, "Lock all playlist tracks to content"), (false, "Unlock all playlist tracks from content")] {
             if mi(ui, label, "").clicked() {
                 let mut n = 0;
@@ -1064,24 +1296,357 @@ impl App {
             self.status = format!("{n} empty tracks reset");
             ui.close_menu();
         }
-        if mi(ui, "Remove all Wave Recorder instances", "").hint("Takes every Wave Recorder out of the mixer's effect slots").clicked() {
-            let mut n = 0;
-            for ins in self.song.inserts.iter_mut() {
-                let before = ins.slots.len();
-                ins.slots.retain(|s| !s.plugin.eq_ignore_ascii_case("Edison"));
-                n += before - ins.slots.len();
+    }
+
+    /// The playlist's own menu, behind the arrow at the left of its toolbar.
+    pub(crate) fn playlist_menu(&mut self, ui: &mut Ui) {
+        use egui::{Key, Modifiers};
+        const N: Modifiers = Modifiers::NONE;
+        const C: Modifiers = Modifiers::COMMAND;
+        const A: Modifiers = Modifiers::ALT;
+        const S: Modifiers = Modifiers::SHIFT;
+        const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
+        const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
+        const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
+        const CSA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: true };
+        type Item = (&'static str, &'static str, Modifiers, Key);
+        // every entry presses its own key, so the menu and the keyboard can never drift apart
+        let mut press: Option<(Modifiers, Key)> = None;
+        let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
+            for (label, keys, m, k) in items {
+                if label.is_empty() {
+                    ui.separator();
+                } else if mi(ui, label, keys).clicked() {
+                    *press = Some((*m, *k));
+                    ui.close_menu();
+                }
             }
-            if n > 0 {
-                self.fx_open = None;
-                self.dirty = true;
+        };
+        ui.set_min_width(250.0);
+        ui.menu_button("Edit", |ui| {
+            ui.set_min_width(290.0);
+            for (label, keys, cut) in [("Cut", "Ctrl+X", true), ("Copy", "Ctrl+C", false)] {
+                if mi(ui, label, keys).clicked() {
+                    self.pl_copy(ui.ctx(), cut);
+                    ui.close_menu();
+                }
             }
-            self.status = format!("{n} Wave Recorders removed");
+            if mi(ui, "Paste", "Ctrl+V").clicked() {
+                self.pl_paste();
+                ui.close_menu();
+            }
+            list(
+                ui,
+                &[
+                    ("Duplicate", "Ctrl+B", C, Key::B),
+                    ("Delete", "Del", N, Key::Delete),
+                    ("", "", N, Key::F35),
+                    ("Shift left", "Shift+Left", S, Key::ArrowLeft),
+                    ("Shift right", "Shift+Right", S, Key::ArrowRight),
+                    ("Shift up", "Shift+Up", S, Key::ArrowUp),
+                    ("Shift down", "Shift+Down", S, Key::ArrowDown),
+                    ("Make unique", "Shift+Ctrl+V", CS, Key::V),
+                    ("", "", N, Key::F35),
+                    ("Mute", "Alt+M", A, Key::M),
+                    ("Unmute", "Shift+Alt+M", SA, Key::M),
+                    ("", "", N, Key::F35),
+                    ("Insert space", "Ctrl+Ins", C, Key::Insert),
+                    ("Delete space", "Ctrl+Del", C, Key::Delete),
+                    ("", "", N, Key::F35),
+                    ("Merge selected clips", "Ctrl+G", C, Key::G),
+                    ("Merge similar pattern clips", "Shift+Ctrl+G", CS, Key::G),
+                ],
+                &mut press,
+            );
+            if mi(ui, "Purge unused audio clips", "").clicked() {
+                let n = self.purge_audio_clips();
+                self.status = format!("{n} unused audio clips removed");
+                ui.close_menu();
+            }
+            list(
+                ui,
+                &[
+                    ("", "", N, Key::F35),
+                    ("Pitch selected audio clips one semitone down", "7", N, Key::Num7),
+                    ("Pitch selected audio clips one semitone up", "8", N, Key::Num8),
+                    ("Reverse selected audio clips", "9", N, Key::Num9),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Tools", |ui| {
+            list(ui, &[("Quick quantize start times", "Shift+Q", S, Key::Q), ("", "", N, Key::F35)], &mut press);
+            ui.menu_button("Consolidate playlist selection", |ui| {
+                list(ui, &[("From track start", "Ctrl+Alt+C", CA, Key::C), ("From song start", "Shift+Ctrl+Alt+C", CSA, Key::C)], &mut press);
+            });
+        });
+        ui.menu_button("View", |ui| {
+            sect(ui, "Grid");
+            if mi(ui, "Grid color...", "").clicked() {
+                self.grid_win = !self.grid_win;
+                ui.close_menu();
+            }
+        });
+        ui.menu_button("Snap", |ui| {
+            for (i, name) in Self::pl_snap_names().into_iter().enumerate() {
+                if ui.radio(self.playlist.snap == i, name).clicked() {
+                    self.playlist.snap = i;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Select", |ui| {
+            ui.set_min_width(260.0);
+            list(ui, &[("Deselect", "Ctrl+D", C, Key::D), ("Select all", "Ctrl+A", C, Key::A), ("Select by selected source", "Shift+C", S, Key::C)], &mut press);
+            if mi(ui, "Select muted", "").clicked() {
+                self.playlist.sel = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].muted).collect();
+                ui.close_menu();
+            }
+            if mi(ui, "Select overlapping clips", "").hint("Clips that share a stretch of their track with another clip").clicked() {
+                let c = &self.song.clips;
+                self.playlist.sel = (0..c.len()).filter(|&i| (0..c.len()).any(|j| j != i && c[j].track == c[i].track && c[j].pos < c[i].pos + c[i].len && c[i].pos < c[j].pos + c[j].len)).collect();
+                ui.close_menu();
+            }
+            list(
+                ui,
+                &[
+                    ("Invert selection", "Shift+I", S, Key::I),
+                    ("", "", N, Key::F35),
+                    ("Select time around selection", "Ctrl+Enter", C, Key::Enter),
+                    ("Select previous time", "Ctrl+Left", C, Key::ArrowLeft),
+                    ("Select next time", "Ctrl+Right", C, Key::ArrowRight),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Group", |ui| list(ui, &[("Group", "Shift+G", S, Key::G), ("Ungroup", "Alt+G", A, Key::G)], &mut press));
+        ui.menu_button("Zoom", |ui| {
+            ui.set_min_width(230.0);
+            list(
+                ui,
+                &[
+                    ("Zoom in", "PgUp", N, Key::PageUp),
+                    ("Zoom out", "PgDn", N, Key::PageDown),
+                    ("", "", N, Key::F35),
+                    ("Quick zoom 1", "Shift+1", S, Key::Num1),
+                    ("Quick zoom 2", "Shift+2", S, Key::Num2),
+                    ("Quick zoom 3", "Shift+3", S, Key::Num3),
+                    ("", "", N, Key::F35),
+                    ("Zoom out far", "Shift+4", S, Key::Num4),
+                    ("Zoom on selection", "Shift+5", S, Key::Num5),
+                    ("", "", N, Key::F35),
+                    ("Zoom on performance clips", "Shift+6", S, Key::Num6),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Time markers", |ui| {
+            ui.set_min_width(260.0);
+            list(ui, &[("Add one...", "Alt+T", A, Key::T), ("Add time signature change...", "Shift+Alt+T", SA, Key::T), ("", "", N, Key::F35), ("Jump to the previous", "Alt+/", A, Key::Slash)], &mut press);
+        });
+        ui.menu_button("Picker panel", |ui| {
+            if tick(ui, self.playlist.picker, "Enable", "Alt+P").clicked() {
+                self.playlist.picker = !self.playlist.picker;
+                ui.close_menu();
+            }
+        });
+        ui.separator();
+        if mi(ui, "Prepare for performance mode", "").clicked() {
+            self.prepare_performance();
             ui.close_menu();
         }
-        if mi(ui, "Delete empty patterns", "").hint("Patterns with no notes or events that lie nowhere on the playlist; named ones are kept").clicked() {
-            let n = self.purge_patterns();
-            self.status = format!("{n} empty patterns removed");
+        if tick(ui, self.song.performance, "Performance mode", "Ctrl+P").clicked() {
+            self.toggle_performance();
             ui.close_menu();
+        }
+        ui.separator();
+        self.audio_clip_switch(ui, "Switch all audio clip channels to", false);
+        self.audio_clip_switch(ui, "Switch selected audio clip channels to", true);
+        self.track_macros(ui);
+        ui.separator();
+        if mi(ui, "Center", "Shift+0").hint("Bring the play position to the middle").clicked() {
+            press = Some((S, Key::Num0));
+            ui.close_menu();
+        }
+        ui.separator();
+        if tick(ui, self.detached[0], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
+            self.detached[0] = !self.detached[0];
+            ui.close_menu();
+        }
+        if let Some((m, k)) = press {
+            self.playlist_key(k, m, false);
+        }
+    }
+
+    /// The mixer's own menu, behind the arrow at the left of its toolbar. It works on the selected tracks.
+    pub(crate) fn mixer_menu(&mut self, ui: &mut Ui) {
+        use egui::{Key, Modifiers};
+        let n = self.song.inserts.len();
+        if n == 0 {
+            return;
+        }
+        let i = self.sel_insert.min(n - 1);
+        let mut targets: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().filter(|k| *k < n).collect() } else { vec![i] };
+        targets.sort_unstable();
+        const A: Modifiers = Modifiers::ALT;
+        const C: Modifiers = Modifiers::COMMAND;
+        const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
+        let mut press: Option<(Modifiers, Key)> = None;
+        let mut key = |ui: &mut Ui, label: &str, keys: &str, m: Modifiers, k: Key| {
+            if mi(ui, label, keys).clicked() {
+                press = Some((m, k));
+                ui.close_menu();
+            }
+        };
+        ui.horizontal_top(|ui| {
+            col(ui, 270.0, |ui| {
+                sect(ui, "Options");
+                ui.menu_button("Disk recording", |ui| {
+                    ui.set_min_width(300.0);
+                    key(ui, "Render armed tracks to wave file(s)...", "Alt+R", A, Key::R);
+                });
+                ui.menu_button("View", |ui| {
+                    for (k, name) in [(1u8, "Compact"), (0, "Wide"), (2, "Extra large")] {
+                        if ui.radio(self.settings.mixer_view == k, name).clicked() {
+                            self.settings.mixer_view = k;
+                            let _ = self.settings.save();
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if tick(ui, self.mixer_wave, "Waveforms", "Alt+W").clicked() {
+                        self.mixer_wave = !self.mixer_wave;
+                        ui.close_menu();
+                    }
+                    if tick(ui, self.settings.mixer_big, "Big meter", "").hint("A tall meter for the selected track at the left of the mixer").clicked() {
+                        self.settings.mixer_big = !self.settings.mixer_big;
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                });
+                if tick(ui, self.detached[3], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
+                    self.detached[3] = !self.detached[3];
+                    ui.close_menu();
+                }
+                let name = if i == 0 { "Master".to_string() } else if self.song.inserts[i].name.is_empty() { format!("Insert {i}") } else { self.song.inserts[i].name.clone() };
+                sect(ui, &format!("Mixer track ({name})"));
+                key(ui, "Rename, color and icon...", "F2", Modifiers::NONE, Key::F2);
+                if mi(ui, "Random color", "").clicked() {
+                    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+                    for &k in &targets {
+                        self.song.inserts[k].color = Some(std::array::from_fn(|_| {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 17;
+                            seed ^= seed << 5;
+                            70 + (seed % 150) as u8
+                        }));
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                if ui.add_enabled(targets.len() > 1, egui::Button::new("Gradient color...")).hint("The selected tracks shade from the first one's colour to the last one's").clicked() {
+                    let grey = [92u8, 100, 106];
+                    let (ca, cb) = (self.song.inserts[targets[0]].color.unwrap_or(std::array::from_fn(|k| grey[k.min(2)])), self.song.inserts[targets[targets.len() - 1]].color.unwrap_or(std::array::from_fn(|k| grey[k.min(2)])));
+                    let steps = targets.len() - 1;
+                    for (s, &k) in targets.iter().enumerate() {
+                        let f = s as f32 / steps as f32;
+                        self.song.inserts[k].color = Some(std::array::from_fn(|c| (ca[c] as f32 + (cb[c] as f32 - ca[c] as f32) * f).round() as u8));
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.menu_button("File", |ui| {
+                    ui.set_min_width(280.0);
+                    if mi(ui, "Open mixer track state...", "").clicked() {
+                        self.state_ask = Some(crate::StateAsk::OpenTrack(i));
+                        ui.close_menu();
+                    }
+                    key(ui, "Save mixer track state as...", "Shift+Ctrl+S", CS, Key::S);
+                });
+                key(ui, "Open audio editor", "Ctrl+E", C, Key::E);
+                ui.separator();
+                if mi(ui, "Reset selected track(s) to default", "").hint("Name, colour, level, panning, stereo and equaliser back to how an empty track has them; the effects stay").clicked() {
+                    let d = cereal_engine::song::Insert::default();
+                    for &k in targets.iter().filter(|k| **k > 0) {
+                        let ins = &mut self.song.inserts[k];
+                        ins.name.clear();
+                        ins.color = None;
+                        (ins.volume, ins.pan, ins.sep, ins.eq, ins.invert, ins.swap, ins.enabled) = (d.volume, d.pan, d.sep, d.eq, d.invert, d.swap, true);
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                sect(ui, "Routing");
+                ui.menu_button("Channel routing", |ui| {
+                    ui.set_min_width(360.0);
+                    key(ui, "Route selected channels to this track", "Ctrl+L", C, Key::L);
+                    key(ui, "Route selected channels starting from this track", "Shift+Ctrl+L", CS, Key::L);
+                });
+                ui.menu_button("Select", |ui| {
+                    ui.set_min_width(280.0);
+                    key(ui, "Channels routed to this track", "Alt+L", A, Key::L);
+                    if mi(ui, "Tracks this one is routed to", "").clicked() {
+                        self.mixer_sel = self.song.inserts[i].sends.iter().copied().collect();
+                        ui.close_menu();
+                    }
+                    if mi(ui, "Tracks routed to this one", "").clicked() {
+                        self.mixer_sel = (0..n).filter(|&k| self.song.inserts[k].sends.contains(&i)).collect();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    key(ui, "All", "Ctrl+A", C, Key::A);
+                });
+                if mi(ui, "Reset selected track(s) routing", "").hint("Each plays into the master and nowhere else").clicked() {
+                    for &k in targets.iter().filter(|k| **k > 0 && **k + 1 < n) {
+                        self.song.inserts[k].sends = vec![0];
+                        self.song.inserts[k].levels.clear();
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                if mi(ui, "Unroute tracks routed to the selected track(s)", "").clicked() {
+                    for k in 1..n {
+                        if !targets.contains(&k) {
+                            self.song.inserts[k].sends.retain(|d| *d == 0 || !targets.contains(d));
+                        }
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                key(ui, "Solo selected track(s)", "S", Modifiers::NONE, Key::S);
+                key(ui, "Alt solo selected track(s)", "Alt+S", A, Key::S);
+                sect(ui, "Group");
+                if tick(ui, self.song.inserts[i].separator, "Separator", "").hint("A gap after the track").clicked() {
+                    let on = !self.song.inserts[i].separator;
+                    for &k in &targets {
+                        self.song.inserts[k].separator = on;
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+            });
+            ui.separator();
+            col(ui, 190.0, |ui| {
+                sect(ui, "Layout");
+                ui.menu_button("Dock to", |ui| {
+                    for (d, t) in [(0u8, "Left"), (1, "Middle"), (2, "Right")] {
+                        if ui.radio(self.song.inserts[i].dock.min(2) == d, t).clicked() {
+                            for &k in &targets {
+                                self.song.inserts[k].dock = d;
+                            }
+                            self.dirty = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                key(ui, "Move left", "Alt+Left", A, Key::ArrowLeft);
+                key(ui, "Move right", "Alt+Right", A, Key::ArrowRight);
+            });
+        });
+        if let Some((m, k)) = press {
+            self.mixer_key(k, m, false);
         }
     }
 }

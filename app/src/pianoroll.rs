@@ -39,8 +39,8 @@ pub struct HelperRun {
 
 /// The helper tools in menu order: label with its key, and the Alt+key that opens it.
 const HELPERS: [(&str, Key); 14] = [
-    ("Riff machine                Alt+E", Key::E),
-    ("Quantise...                 Alt+Q", Key::Q),
+    ("Riff machine...             Alt+E", Key::E),
+    ("Quantize...                 Alt+Q", Key::Q),
     ("Chop...                     Alt+U", Key::U),
     ("Arpeggiate...               Alt+A", Key::A),
     ("Strum...                    Alt+S", Key::S),
@@ -48,11 +48,11 @@ const HELPERS: [(&str, Key); 14] = [
     ("Claw machine...             Alt+W", Key::W),
     ("Limit...                    Alt+K", Key::K),
     ("Flip...                     Alt+Y", Key::Y),
-    ("Randomise...                Alt+R", Key::R),
+    ("Randomize...                Alt+R", Key::R),
     ("Scale levels...             Alt+X", Key::X),
     ("LFO...                      Alt+O", Key::O),
     ("Articulate...               Alt+L", Key::L),
-    ("Chord progression...", Key::F35),
+    ("Generate chord progression...  Alt+P", Key::P),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -617,6 +617,44 @@ impl App {
         self.piano.sel = (0..notes.len()).filter(|&i| notes[i].chan == chan).collect();
     }
 
+    /// Turn the notes round inside the stretch they cover, one snap step at a time: what leaves
+    /// one end comes back in at the other.
+    fn pr_rotate(&mut self, right: bool) {
+        let pat = self.pr_pat();
+        let t = self.pr_targets(pat);
+        let step = self.pr_snap().max(1);
+        let notes = &mut self.song.patterns[pat].notes;
+        let Some(start) = t.iter().map(|&i| notes[i].pos).min() else { return };
+        let end = t.iter().map(|&i| notes[i].pos + notes[i].len.max(1)).max().unwrap_or(start + step);
+        let span = (end - start).div_ceil(step).max(1) * step;
+        for &i in &t {
+            let rel = notes[i].pos - start;
+            notes[i].pos = start + if right { (rel + step) % span } else { (rel + span - step % span) % span };
+        }
+        self.pr_sort(pat);
+        self.dirty = true;
+    }
+
+    /// Pick this channel's notes by a rule: 0 every other one, 1 the muted, 2 those that overlap
+    /// another on the same key, 3 those that start together with another on the same key.
+    fn pr_select_where(&mut self, rule: u8) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let notes = &self.song.patterns[pat].notes;
+        let mine: Vec<usize> = (0..notes.len()).filter(|&i| notes[i].chan == chan).collect();
+        let hit = |i: usize, same_start: bool| {
+            mine.iter().any(|&j| {
+                j != i && notes[j].key == notes[i].key && if same_start { notes[j].pos == notes[i].pos } else { notes[j].pos < notes[i].pos + notes[i].len && notes[i].pos < notes[j].pos + notes[j].len }
+            })
+        };
+        self.piano.sel = match rule {
+            0 => mine.iter().copied().step_by(2).collect(),
+            1 => mine.iter().copied().filter(|&i| notes[i].muted).collect(),
+            2 => mine.iter().copied().filter(|&i| hit(i, false)).collect(),
+            _ => mine.iter().copied().filter(|&i| hit(i, true)).collect(),
+        };
+    }
+
     fn pr_invert_selection(&mut self) {
         let pat = self.pr_pat();
         let chan = self.sel_chan as u16;
@@ -1137,6 +1175,7 @@ impl App {
     pub(crate) fn piano_key(&mut self, key: Key, m: Modifiers, repeat: bool) -> bool {
         if m.command && !m.alt {
             match key {
+                Key::ArrowLeft | Key::ArrowRight if m.shift => self.pr_rotate(key == Key::ArrowRight),
                 Key::A => self.pr_select_all(),
                 Key::D => {
                     self.piano.sel.clear();
@@ -1157,6 +1196,10 @@ impl App {
                 Key::ArrowRight => self.pr_select_beside(true),
                 _ => return false,
             }
+            return true;
+        }
+        if m.alt && m.command && key == Key::V && !repeat {
+            self.piano.ghost_edit = !self.piano.ghost_edit;
             return true;
         }
         if m.alt && !m.command {
@@ -1194,6 +1237,7 @@ impl App {
                 Key::C => self.pr_select_colour(),
                 Key::R => self.pr_select_random(),
                 Key::D => self.pr_discard_lengths(),
+                Key::O if !repeat => self.pr_select_where(0),
                 Key::Q => self.pr_quantise_starts(),
                 Key::F => {
                     let at = LANES.iter().position(|l| l.0 == self.piano.lane).unwrap_or(0);
@@ -1249,163 +1293,278 @@ impl App {
         true
     }
 
+    /// The piano roll's own menu, behind the arrow at the left of its toolbar.
+    fn piano_menu(&mut self, ui: &mut Ui) {
+        use crate::menus::{mi, sect, tick};
+        const N: Modifiers = Modifiers::NONE;
+        const C: Modifiers = Modifiers::COMMAND;
+        const A: Modifiers = Modifiers::ALT;
+        const S: Modifiers = Modifiers::SHIFT;
+        const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
+        const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
+        type Item = (&'static str, &'static str, Modifiers, Key);
+        // every entry presses its own key, so the menu and the keyboard can never drift apart
+        let mut press: Option<(Modifiers, Key)> = None;
+        let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
+            for (label, keys, m, k) in items {
+                if label.is_empty() {
+                    ui.separator();
+                } else if mi(ui, label, keys).clicked() {
+                    *press = Some((*m, *k));
+                    ui.close_menu();
+                }
+            }
+        };
+        const GAP: Item = ("", "", N, Key::F35);
+        ui.set_min_width(190.0);
+        ui.menu_button("File", |ui| {
+            ui.set_min_width(250.0);
+            if mi(ui, "Open score...", "").clicked() {
+                ui.close_menu();
+                self.open_score_dialog();
+            }
+            if mi(ui, "Save score as...", "").clicked() {
+                ui.close_menu();
+                self.save_score_dialog();
+            }
+            ui.separator();
+            if mi(ui, "Import MIDI file...", "Ctrl+M").clicked() {
+                ui.close_menu();
+                self.open_score_dialog();
+            }
+            if mi(ui, "Export as MIDI file...", "Shift+Ctrl+M").clicked() {
+                ui.close_menu();
+                self.export_midi();
+            }
+            ui.separator();
+            if mi(ui, "Export as score sheet...", "").clicked() {
+                ui.close_menu();
+                self.export_sheet();
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            ui.set_min_width(270.0);
+            for (label, keys, cut) in [("Cut", "Ctrl+X", true), ("Copy", "Ctrl+C", false)] {
+                if mi(ui, label, keys).clicked() {
+                    self.pr_copy(ui.ctx(), cut);
+                    ui.close_menu();
+                }
+            }
+            if mi(ui, "Paste", "Ctrl+V").clicked() {
+                self.pr_paste();
+                ui.close_menu();
+            }
+            list(
+                ui,
+                &[
+                    ("Duplicate", "Ctrl+B", C, Key::B),
+                    ("Delete", "Del", N, Key::Delete),
+                    GAP,
+                    ("Shift left", "Shift+Left", S, Key::ArrowLeft),
+                    ("Shift right", "Shift+Right", S, Key::ArrowRight),
+                    ("Rotate left", "Shift+Ctrl+Left", CS, Key::ArrowLeft),
+                    ("Rotate right", "Shift+Ctrl+Right", CS, Key::ArrowRight),
+                    ("Transpose up", "Shift+Up", S, Key::ArrowUp),
+                    ("Transpose down", "Shift+Down", S, Key::ArrowDown),
+                    ("Transpose one octave up", "Ctrl+Up", C, Key::ArrowUp),
+                    ("Transpose one octave down", "Ctrl+Down", C, Key::ArrowDown),
+                    ("Discard lengths", "Shift+D", S, Key::D),
+                    GAP,
+                    ("Change color", "Alt+C", A, Key::C),
+                    ("Mute", "Alt+M", A, Key::M),
+                    ("Unmute", "Shift+Alt+M", SA, Key::M),
+                    GAP,
+                    ("Insert space", "Ctrl+Ins", C, Key::Insert),
+                    ("Delete space", "Ctrl+Del", C, Key::Delete),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Tools", |ui| {
+            ui.set_min_width(250.0);
+            let mut helper = None;
+            let mut h = |ui: &mut Ui, i: usize| {
+                let (name, keys) = HELPERS[i].0.split_once("  ").unwrap_or((HELPERS[i].0, ""));
+                if mi(ui, name, keys.trim()).clicked() {
+                    helper = Some(i);
+                    ui.close_menu();
+                }
+            };
+            h(ui, 0);
+            h(ui, 13);
+            ui.separator();
+            list(ui, &[("Quick legato", "Ctrl+L", C, Key::L)], &mut press);
+            h(ui, 12);
+            ui.separator();
+            list(ui, &[("Quick quantize", "Ctrl+Q", C, Key::Q), ("Quick quantize start times", "Shift+Q", S, Key::Q)], &mut press);
+            h(ui, 1);
+            ui.separator();
+            list(ui, &[("Quick chop", "Ctrl+U", C, Key::U)], &mut press);
+            h(ui, 2);
+            ui.separator();
+            list(ui, &[("Glue", "Ctrl+G", C, Key::G), GAP], &mut press);
+            for i in 3..=9 {
+                h(ui, i);
+            }
+            ui.separator();
+            h(ui, 10);
+            h(ui, 11);
+            if let Some(i) = helper {
+                self.pr_helper(i);
+            }
+        });
+        ui.menu_button("Stamp", |ui| {
+            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                for (i, (n, _)) in STAMPS.iter().enumerate() {
+                    if ui.radio(self.piano.stamp == i, if i == 0 { "(none)        Shift+N" } else { n }).clicked() {
+                        self.piano.stamp = i;
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+        ui.menu_button("View", |ui| {
+            ui.set_min_width(250.0);
+            sect(ui, "Helpers");
+            if tick(ui, self.piano.rows, "Note grid highlights", "Alt+B").clicked() {
+                self.piano.rows = !self.piano.rows;
+            }
+            ui.menu_button("Scale highlighting", |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        for (i, n) in NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.piano.scale_root, i as u8, *n);
+                        }
+                    });
+                    ui.vertical(|ui| {
+                        for (i, (n, _)) in SCALES.iter().enumerate() {
+                            ui.selectable_value(&mut self.piano.scale, i, *n);
+                        }
+                    });
+                });
+            });
+            if tick(ui, self.piano.names, "Note names", "M").clicked() {
+                self.piano.names = !self.piano.names;
+            }
+            ui.separator();
+            if tick(ui, self.piano.ghosts, "Ghost channels", "Alt+V").clicked() {
+                self.piano.ghosts = !self.piano.ghosts;
+            }
+            if tick(ui, self.piano.ghost_edit, "Editable ghosts", "Ctrl+Alt+V").hint("A double click on another channel's note turns the piano roll to that channel").clicked() {
+                self.piano.ghost_edit = !self.piano.ghost_edit;
+            }
+            ui.separator();
+            if tick(ui, self.piano.wave, "Background waveform", "Alt+N").clicked() {
+                self.piano.wave = !self.piano.wave;
+            }
+        });
+        ui.menu_button("Snap", |ui| {
+            for (i, (label, _, _)) in SNAPS.iter().enumerate() {
+                if ui.radio(self.piano.snap == i, *label).clicked() {
+                    self.piano.snap = i;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Select", |ui| {
+            ui.set_min_width(260.0);
+            list(
+                ui,
+                &[
+                    ("Deselect", "Ctrl+D", C, Key::D),
+                    ("Select all", "Ctrl+A", C, Key::A),
+                    ("Select one at random", "Shift+R", S, Key::R),
+                    ("Select more at random", "Shift+M", S, Key::M),
+                    ("Select by color", "Shift+C", S, Key::C),
+                    ("Select odd", "Shift+O", S, Key::O),
+                ],
+                &mut press,
+            );
+            for (rule, label) in [(1, "Select muted"), (2, "Select overlapping notes"), (3, "Select stacked notes")] {
+                if mi(ui, label, "").clicked() {
+                    self.pr_select_where(rule);
+                    ui.close_menu();
+                }
+            }
+            list(
+                ui,
+                &[
+                    ("Invert selection", "Shift+I", S, Key::I),
+                    GAP,
+                    ("Select time around selection", "Ctrl+Enter", C, Key::Enter),
+                    ("Select previous time", "Ctrl+Left", C, Key::ArrowLeft),
+                    ("Select next time", "Ctrl+Right", C, Key::ArrowRight),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Group", |ui| list(ui, &[("Group", "Shift+G", S, Key::G), ("Ungroup", "Alt+G", A, Key::G)], &mut press));
+        ui.menu_button("Zoom", |ui| {
+            ui.set_min_width(220.0);
+            list(
+                ui,
+                &[
+                    ("Zoom in", "PgUp", N, Key::PageUp),
+                    ("Zoom out", "PgDn", N, Key::PageDown),
+                    GAP,
+                    ("Quick zoom 1", "Shift+1", S, Key::Num1),
+                    ("Quick zoom 2", "Shift+2", S, Key::Num2),
+                    ("Quick zoom 3", "Shift+3", S, Key::Num3),
+                    GAP,
+                    ("Zoom out far", "Shift+4", S, Key::Num4),
+                    ("Zoom on selection", "Shift+5", S, Key::Num5),
+                ],
+                &mut press,
+            );
+        });
+        ui.menu_button("Time markers", |ui| {
+            ui.set_min_width(200.0);
+            list(ui, &[("Add one...", "Alt+T", A, Key::T)], &mut press);
+            if mi(ui, "Delete", "").clicked() {
+                let pat = self.pr_pat();
+                self.song.patterns[pat].markers.retain(|m| m.kind != 0);
+                self.dirty = true;
+                ui.close_menu();
+            }
+        });
+        ui.separator();
+        ui.menu_button("Target channel", |ui| {
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for c in 0..self.song.channels.len() {
+                    if ui.radio(c == self.sel_chan, self.song.channels[c].name.clone()).clicked() {
+                        self.sel_chan = c;
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+        ui.menu_button("Target control", |ui| {
+            for (lane, name) in LANES.iter().map(|l| (l.0, l.1)) {
+                if ui.radio(self.piano.lane == lane, name).clicked() {
+                    self.piano.lane = lane;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.separator();
+        if mi(ui, "Center", "Shift+0").clicked() {
+            press = Some((S, Key::Num0));
+            ui.close_menu();
+        }
+        ui.separator();
+        if tick(ui, self.detached[2], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
+            self.detached[2] = !self.detached[2];
+            ui.close_menu();
+        }
+        if let Some((m, k)) = press {
+            self.piano_key(k, m, false);
+        }
+    }
+
     fn piano_header(&mut self, ui: &mut Ui, pat: usize) {
         let name = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("Open score...").clicked() {
-                    ui.close_menu();
-                    self.open_score_dialog();
-                }
-                if ui.button("Save score as...").clicked() {
-                    ui.close_menu();
-                    self.save_score_dialog();
-                }
-                if ui.button("Import MIDI file...     Ctrl+M").clicked() {
-                    ui.close_menu();
-                    self.open_score_dialog();
-                }
-                if ui.button("Export as MIDI file...  Shift+Ctrl+M").clicked() {
-                    ui.close_menu();
-                    self.export_midi();
-                }
-                if ui.button("Export as score sheet...").clicked() {
-                    ui.close_menu();
-                    self.export_sheet();
-                }
-            });
-            // every entry presses its own key, so the menus and the keyboard can never drift apart
-            const N: Modifiers = Modifiers::NONE;
-            const C: Modifiers = Modifiers::COMMAND;
-            const A: Modifiers = Modifiers::ALT;
-            const S: Modifiers = Modifiers::SHIFT;
-            const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
-            type Item = (&'static str, Modifiers, Key);
-            const EDIT: [Item; 16] = [
-                ("Delete                      Del", N, Key::Delete),
-                ("Duplicate                   Ctrl+B", C, Key::B),
-                ("", N, Key::F35),
-                ("Shift left                  Shift+Left", S, Key::ArrowLeft),
-                ("Shift right                 Shift+Right", S, Key::ArrowRight),
-                ("Transpose up                Shift+Up", S, Key::ArrowUp),
-                ("Transpose down              Shift+Down", S, Key::ArrowDown),
-                ("Transpose one octave up     Ctrl+Up", C, Key::ArrowUp),
-                ("Transpose one octave down   Ctrl+Down", C, Key::ArrowDown),
-                ("", N, Key::F35),
-                ("Discard lengths             Shift+D", S, Key::D),
-                ("Change color                Alt+C", A, Key::C),
-                ("Mute                        Alt+M", A, Key::M),
-                ("Unmute                      Shift+Alt+M", SA, Key::M),
-                ("Insert space                Ctrl+Ins", C, Key::Insert),
-                ("Delete space                Ctrl+Del", C, Key::Delete),
-            ];
-            const QUICK: [Item; 5] = [
-                ("Quick legato                Ctrl+L", C, Key::L),
-                ("Quick quantise              Ctrl+Q", C, Key::Q),
-                ("Quick quantise start times  Shift+Q", S, Key::Q),
-                ("Quick chop                  Ctrl+U", C, Key::U),
-                ("Glue                        Ctrl+G", C, Key::G),
-            ];
-            const SELECT: [Item; 8] = [
-                ("Select all                  Ctrl+A", C, Key::A),
-                ("Deselect                    Ctrl+D", C, Key::D),
-                ("Invert selection            Shift+I", S, Key::I),
-                ("Select time around selection  Ctrl+Enter", C, Key::Enter),
-                ("Select previous             Ctrl+Left", C, Key::ArrowLeft),
-                ("Select next                 Ctrl+Right", C, Key::ArrowRight),
-                ("Select by colour            Shift+C", S, Key::C),
-                ("Select random               Shift+R", S, Key::R),
-            ];
-            const GROUP: [Item; 2] = [("Group                       Shift+G", S, Key::G), ("Ungroup                     Alt+G", A, Key::G)];
-            const ZOOM: [Item; 8] = [
-                ("Zoom in                     PgUp", N, Key::PageUp),
-                ("Zoom out                    PgDn", N, Key::PageDown),
-                ("One bar                     Shift+1", S, Key::Num1),
-                ("Four bars                   Shift+2", S, Key::Num2),
-                ("Sixteen bars                Shift+3", S, Key::Num3),
-                ("Show all                    Shift+4", S, Key::Num4),
-                ("Zoom on selection           Shift+5", S, Key::Num5),
-                ("Centre on the play position Shift+0", S, Key::Num0),
-            ];
-            let mut press: Option<(Modifiers, Key)> = None;
-            let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
-                for (label, m, k) in items {
-                    if label.is_empty() {
-                        ui.separator();
-                    } else if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
-                        *press = Some((*m, *k));
-                        ui.close_menu();
-                    }
-                }
-            };
-            ui.menu_button("Edit", |ui| {
-                for (label, cut) in [("Cut                         Ctrl+X", true), ("Copy                        Ctrl+C", false)] {
-                    if ui.button(RichText::new(label).monospace().size(11.0)).clicked() {
-                        self.pr_copy(ui.ctx(), cut);
-                        ui.close_menu();
-                    }
-                }
-                if ui.button(RichText::new("Paste                       Ctrl+V").monospace().size(11.0)).clicked() {
-                    self.pr_paste();
-                    ui.close_menu();
-                }
-                list(ui, &EDIT, &mut press);
-            });
-            ui.menu_button("Tools", |ui| {
-                let mut helper = None;
-                if ui.button(RichText::new(HELPERS[0].0).monospace().size(11.0)).clicked() {
-                    helper = Some(0);
-                    ui.close_menu();
-                }
-                ui.separator();
-                list(ui, &QUICK, &mut press);
-                ui.separator();
-                for (i, (label, _)) in HELPERS.iter().enumerate().skip(1) {
-                    if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
-                        helper = Some(i);
-                        ui.close_menu();
-                    }
-                }
-                if let Some(i) = helper {
-                    self.pr_helper(i);
-                }
-            });
-            ui.menu_button("View", |ui| {
-                let f = |t: &str| RichText::new(t.to_string()).monospace().size(11.0);
-                ui.checkbox(&mut self.piano.ghosts, f("Ghost channels              Alt+V"));
-                ui.add_enabled(self.piano.ghosts, egui::Checkbox::new(&mut self.piano.ghost_edit, "Editable ghosts")).hint("A double click on another channel's note turns the piano roll to that channel");
-                ui.checkbox(&mut self.piano.rows, f("Row highlights              Alt+B"));
-                ui.checkbox(&mut self.piano.wave, f("Background waveform         Alt+N"));
-                ui.checkbox(&mut self.piano.names, f("Note names                  M"));
-                ui.separator();
-                ui.checkbox(&mut self.detached[2], f("Detached")).hint("The window leaves the main one, to sit on another screen");
-            });
-            ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
-            ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
-            ui.menu_button("Zoom", |ui| list(ui, &ZOOM, &mut press));
-            ui.menu_button("Time markers", |ui| {
-                const MARK: [Item; 1] = [("Add one                     Alt+T", A, Key::T)];
-                list(ui, &MARK, &mut press);
-                if ui.button(RichText::new("Delete all").monospace().size(11.0)).clicked() {
-                    let pat = self.pr_pat();
-                    self.song.patterns[pat].markers.retain(|m| m.kind != 0);
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("Target channel", |ui| {
-                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    for c in 0..self.song.channels.len() {
-                        if ui.selectable_label(c == self.sel_chan, self.song.channels[c].name.clone()).clicked() {
-                            self.sel_chan = c;
-                            ui.close_menu();
-                        }
-                    }
-                });
-            });
-            if let Some((m, k)) = press {
-                self.piano_key(k, m, false);
-            }
+            ui.menu_button("\u{23F7}", |ui| self.piano_menu(ui)).response.hint("Piano roll menu");
             for (t, label, hint) in TOOLS {
                 if ui.selectable_label(self.piano.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.piano.tool = t;

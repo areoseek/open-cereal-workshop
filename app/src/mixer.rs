@@ -54,26 +54,7 @@ impl App {
         let mut route: Option<(usize, usize, bool)> = None;
         let sw = self.strip_w();
         ui.horizontal(|ui| {
-            ui.menu_button(RichText::new("View").small(), |ui| {
-                for (k, name) in [(1u8, "Compact"), (0, "Wide"), (2, "Extra large")] {
-                    if ui.radio(self.settings.mixer_view == k, name).clicked() {
-                        self.settings.mixer_view = k;
-                        let _ = self.settings.save();
-                        ui.close_menu();
-                    }
-                }
-                ui.separator();
-                if ui.checkbox(&mut self.mixer_wave, "Wave meters     Alt+W").clicked() {
-                    ui.close_menu();
-                }
-                if ui.checkbox(&mut self.detached[3], "Detached").hint("The window leaves the main one, to sit on another screen").clicked() {
-                    ui.close_menu();
-                }
-                if ui.checkbox(&mut self.settings.mixer_big, "Big meter").hint("A tall meter for the selected track at the left of the mixer").clicked() {
-                    let _ = self.settings.save();
-                    ui.close_menu();
-                }
-            });
+            ui.menu_button("\u{23F7}", |ui| self.mixer_menu(ui)).response.hint("Mixer menu");
         });
         ui.horizontal_top(|ui| {
             if self.settings.mixer_big {

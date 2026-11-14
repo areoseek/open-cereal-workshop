@@ -109,6 +109,7 @@ keyboard off and outside the channel rack.
 | Click, Shift+click, right-click the selector beside a name | Select that channel alone, add or drop it, select all on show | yes |
 | Alt+G | Put the selected channels in a new or existing group, by name | yes |
 | Alt+Z / Alt+U | Zip the selected channels to a thin strip / unzip | yes |
+| Shift+Alt+C / Ctrl+Alt+C | Colour the selected channels as a gradient from the first to the last / at random | yes |
 | PgUp / PgDn | Next / previous channel group | yes |
 | Ctrl+Alt+R | Restretch all audio clips (stretching already follows the tempo live; this redoes the treated copies) | yes |
 | Shift+wheel on a channel name | Move that channel up / down | yes |
@@ -129,6 +130,7 @@ keyboard off and outside the channel rack.
 | Ctrl+click, Shift+click a name plate, Shift+Left / Right | Add to the selection, select the run up to it; the selected tracks' faders, pans and mutes move together | yes |
 | Alt+R | Render the selected tracks to audio files, one each, in the project's Recorded folder | yes |
 | Alt+W | Wave view: the meters show each track's latest sound as a wave | yes |
+| Ctrl+E | Open the audio editor on the track | yes |
 | Shift+wheel on a track's name plate | Move that track left / right | yes |
 
 ## Piano roll
@@ -173,6 +175,10 @@ keyboard off and outside the channel rack.
 | M | Keyboard / note names view | yes |
 | Alt+B, Alt+N | Note helpers (the light rows), waveform helper (the channel sample behind the notes) | yes |
 | Alt+G / Shift+G | Ungroup / group the selected notes; a group is picked, moved and copied as one | yes |
+| Shift+Ctrl+Left / Right | Rotate the selected notes inside the stretch they cover, one snap step | yes |
+| Shift+O | Select every other note | yes |
+| Ctrl+Alt+V | Editable ghosts | yes |
+| Alt+P | Generate chord progression | yes |
 | Ctrl+I | Write the control's current value (with the event editor open: an event at the play position) | yes |
 | Alt+O (event editor) | LFO tool | yes |
 | Alt+X (event editor) | Scale levels tool | yes |
@@ -223,7 +229,8 @@ keyboard off and outside the channel rack.
 | Shift+Alt+T | Time signature change at the start of the picked time or on the current bar | yes |
 | Shift+G / Alt+G | Group / ungroup the selected clips; a group is picked, moved and copied as one | yes |
 | Ctrl+Alt+C, Ctrl+Alt+Shift+C | Consolidate the selected clips into one audio clip (from the song start with Shift); the clips are muted under it | yes |
-| Ctrl+Alt+G | Grid colour (kept in the settings; the piano roll takes it too) | yes |
+| Ctrl+G / Shift+Ctrl+G | Merge the selected pattern clips into one new pattern / merge clips of the same pattern on the same track | yes |
+| Shift+Ctrl+V | Make unique: each selected clip gets its own copy of its pattern or channel | yes |
 | Ctrl+Enter | Select the time round the selection | yes |
 | Ctrl+drag on the ruler | Pick out a stretch of time; it plays round and round, and Ctrl+Ins, Ctrl+Del, Ctrl+Left and Ctrl+Right work on it; Ctrl+D lets go of it | yes |
 | Alt+P | Picker panel: the patterns, audio clips and automation clips at the left of the playlist; a click picks what is drawn next | yes |

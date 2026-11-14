@@ -79,7 +79,7 @@ pub struct State {
     size_drag: Option<(usize, f32, f32)>,
     drag: Option<Drag>,
     pub tool: Tool,
-    snap: usize,
+    pub(crate) snap: usize,
     pub sel: BTreeSet<usize>,
     /// The stretch of time picked out on the ruler; it plays round and round and edits by time work on it.
     pub(crate) time_sel: Option<(u32, u32)>,
@@ -1826,6 +1826,86 @@ impl App {
         }
     }
 
+    pub(crate) fn pl_snap_names() -> Vec<&'static str> {
+        SNAPS.iter().map(|s| s.0).collect()
+    }
+
+    /// Every selected clip gets a copy of its pattern or channel for itself.
+    fn pl_make_unique(&mut self) {
+        for i in self.pl_targets() {
+            match self.song.clips[i].src {
+                ClipSrc::Pattern(p) => {
+                    let n = self.song.clone_pattern(p);
+                    self.song.clips[i].src = ClipSrc::Pattern(n);
+                }
+                ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                    if let Some(copy) = self.song.channels.get(c).cloned() {
+                        self.song.channels.push(copy);
+                        let n = self.song.channels.len() - 1;
+                        self.song.clips[i].src = if matches!(self.song.clips[i].src, ClipSrc::Audio(_)) { ClipSrc::Audio(n) } else { ClipSrc::Automation(n) };
+                    }
+                }
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// The selected pattern clips become one clip of a new pattern that holds what they played; with
+    /// `similar`, clips of the same pattern on the same track are merged among themselves only.
+    fn pl_merge(&mut self, similar: bool) {
+        let picked: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| matches!(self.song.clips.get(i).map(|c| c.src), Some(ClipSrc::Pattern(_)))).collect();
+        let mut sets: Vec<Vec<usize>> = Vec::new();
+        if similar {
+            for &i in &picked {
+                let c = &self.song.clips[i];
+                match sets.iter_mut().find(|s| self.song.clips[s[0]].src == c.src && self.song.clips[s[0]].track == c.track) {
+                    Some(s) => s.push(i),
+                    None => sets.push(vec![i]),
+                }
+            }
+        } else {
+            sets.push(picked);
+        }
+        sets.retain(|s| s.len() > 1);
+        if sets.is_empty() {
+            self.status = "Select two or more pattern clips to merge".into();
+            return;
+        }
+        let mut gone = BTreeSet::new();
+        let mut made = Vec::new();
+        for set in &sets {
+            let start = set.iter().map(|&i| self.song.clips[i].pos).min().unwrap_or(0);
+            let end = set.iter().map(|&i| self.song.clips[i].pos + self.song.clips[i].len).max().unwrap_or(0);
+            let track = set.iter().map(|&i| self.song.clips[i].track).min().unwrap_or(0);
+            let mut notes = Vec::new();
+            for &i in set {
+                let c = self.song.clips[i].clone();
+                let ClipSrc::Pattern(p) = c.src else { continue };
+                for n in self.song.patterns.get(p).map(|p| p.notes.as_slice()).unwrap_or(&[]) {
+                    if n.pos >= c.offset && n.pos < c.offset + c.len {
+                        let mut n = n.clone();
+                        let room = c.offset + c.len - n.pos;
+                        n.len = n.len.min(room);
+                        n.pos = c.pos - start + (n.pos - c.offset);
+                        notes.push(n);
+                    }
+                }
+            }
+            notes.sort_by_key(|n| n.pos);
+            let p = self.song.patterns.len();
+            self.song.ensure_pattern(p);
+            self.song.patterns[p].notes = notes;
+            self.song.patterns[p].name = "Merged".into();
+            made.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Pattern(p), offset: 0, muted: false, group: 0 });
+            gone.extend(set.iter().copied());
+        }
+        self.pl_remove(&gone);
+        let n = self.song.clips.len();
+        self.song.clips.extend(made);
+        self.playlist.sel = (n..self.song.clips.len()).collect();
+        self.dirty = true;
+    }
+
     /// Pull clip starts onto the snap grid.
     fn pl_quantise(&mut self) {
         let g = self.pl_snap().max(1);
@@ -2162,7 +2242,6 @@ impl App {
         if m.command && m.alt {
             match key {
                 Key::C if !repeat => self.pl_consolidate(m.shift),
-                Key::G if !repeat => self.grid_win = !self.grid_win,
                 _ => return false,
             }
             return true;
@@ -2176,6 +2255,8 @@ impl App {
                 }
                 Key::Enter if !repeat => self.playlist.time_sel = self.pl_clip_span(),
                 Key::B => self.pl_duplicate(),
+                Key::G if !repeat => self.pl_merge(m.shift),
+                Key::V if m.shift && !repeat => self.pl_make_unique(),
                 Key::Insert if !m.shift => self.pl_space(true),
                 Key::Delete => self.pl_space(false),
                 Key::ArrowLeft => self.pl_select_beside(false),
@@ -2306,112 +2387,7 @@ impl App {
 
     fn playlist_header(&mut self, ui: &mut Ui, pat: usize) {
         ui.horizontal(|ui| {
-            // every entry presses its own key, so the menus and the keyboard can never drift apart
-            const N: Modifiers = Modifiers::NONE;
-            const C: Modifiers = Modifiers::COMMAND;
-            const A: Modifiers = Modifiers::ALT;
-            const S: Modifiers = Modifiers::SHIFT;
-            const SA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false };
-            const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
-            const CSA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: true };
-            type Item = (&'static str, Modifiers, Key);
-            const EDIT: [Item; 14] = [
-                ("Delete                      Del", N, Key::Delete),
-                ("Duplicate                   Ctrl+B", C, Key::B),
-                ("", N, Key::F35),
-                ("Shift left                  Shift+Left", S, Key::ArrowLeft),
-                ("Shift right                 Shift+Right", S, Key::ArrowRight),
-                ("Shift up                    Shift+Up", S, Key::ArrowUp),
-                ("Shift down                  Shift+Down", S, Key::ArrowDown),
-                ("", N, Key::F35),
-                ("Mute                        Alt+M", A, Key::M),
-                ("Unmute                      Shift+Alt+M", SA, Key::M),
-                ("Quick quantise              Shift+Q", S, Key::Q),
-                ("", N, Key::F35),
-                ("Insert space                Ctrl+Ins", C, Key::Insert),
-                ("Delete space                Ctrl+Del", C, Key::Delete),
-            ];
-            const TOOLS_M: [Item; 2] = [
-                ("Consolidate from track start  Ctrl+Alt+C", CA, Key::C),
-                ("Consolidate from song start   Shift+Ctrl+Alt+C", CSA, Key::C),
-            ];
-            const SELECT: [Item; 7] = [
-                ("Select all                  Ctrl+A", C, Key::A),
-                ("Deselect                    Ctrl+D", C, Key::D),
-                ("Invert selection            Shift+I", S, Key::I),
-                ("Select time around selection  Ctrl+Enter", C, Key::Enter),
-                ("Select previous             Ctrl+Left", C, Key::ArrowLeft),
-                ("Select next                 Ctrl+Right", C, Key::ArrowRight),
-                ("Select all of the same source  Shift+C", S, Key::C),
-            ];
-            const GROUP: [Item; 2] = [("Group                       Shift+G", S, Key::G), ("Ungroup                     Alt+G", A, Key::G)];
-            const ZOOM: [Item; 8] = [
-                ("Zoom in                     PgUp", N, Key::PageUp),
-                ("Zoom out                    PgDn", N, Key::PageDown),
-                ("Close                       Shift+1", S, Key::Num1),
-                ("Medium                      Shift+2", S, Key::Num2),
-                ("Far                         Shift+3", S, Key::Num3),
-                ("Show all                    Shift+4", S, Key::Num4),
-                ("Zoom on selection           Shift+5", S, Key::Num5),
-                ("Centre on the play position Shift+0", S, Key::Num0),
-            ];
-            const MARKERS: [Item; 3] = [
-                ("Add one                     Alt+T", A, Key::T),
-                ("Add time signature          Shift+Alt+T", SA, Key::T),
-                ("Jump to the previous        Alt+/", A, Key::Slash),
-            ];
-            let mut press: Option<(Modifiers, Key)> = None;
-            let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
-                for (label, m, k) in items {
-                    if label.is_empty() {
-                        ui.separator();
-                    } else if ui.button(RichText::new(*label).monospace().size(11.0)).clicked() {
-                        *press = Some((*m, *k));
-                        ui.close_menu();
-                    }
-                }
-            };
-            let f = |t: &str| RichText::new(t.to_string()).monospace().size(11.0);
-            ui.menu_button("Edit", |ui| {
-                for (label, cut) in [("Cut                         Ctrl+X", true), ("Copy                        Ctrl+C", false)] {
-                    if ui.button(f(label)).clicked() {
-                        self.pl_copy(ui.ctx(), cut);
-                        ui.close_menu();
-                    }
-                }
-                if ui.button(f("Paste                       Ctrl+V")).clicked() {
-                    self.pl_paste();
-                    ui.close_menu();
-                }
-                list(ui, &EDIT, &mut press);
-            });
-            ui.menu_button("Tools", |ui| {
-                list(ui, &TOOLS_M, &mut press);
-                ui.separator();
-                let mut on = self.song.performance;
-                if ui.checkbox(&mut on, f("Performance mode            Ctrl+P")).changed() {
-                    self.toggle_performance();
-                    ui.close_menu();
-                }
-                if ui.button(f("Prepare for performance mode")).clicked() {
-                    self.prepare_performance();
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.grid_win, f("Grid colours...             Ctrl+Alt+G"));
-                ui.checkbox(&mut self.playlist.picker, f("Picker panel                Alt+P"));
-                ui.checkbox(&mut self.playlist.stretch, f("Stretch mode                Shift+M"));
-                ui.separator();
-                ui.checkbox(&mut self.detached[0], f("Detached")).hint("The window leaves the main one, to sit on another screen");
-            });
-            ui.menu_button("Select", |ui| list(ui, &SELECT, &mut press));
-            ui.menu_button("Group", |ui| list(ui, &GROUP, &mut press));
-            ui.menu_button("Zoom", |ui| list(ui, &ZOOM, &mut press));
-            ui.menu_button("Time markers", |ui| list(ui, &MARKERS, &mut press));
-            if let Some((m, k)) = press {
-                self.playlist_key(k, m, false);
-            }
+            ui.menu_button("\u{23F7}", |ui| self.playlist_menu(ui)).response.hint("Playlist menu");
             for (t, label, hint) in TOOLS {
                 if ui.selectable_label(self.playlist.tool == t, RichText::new(label).small()).hint(hint).clicked() {
                     self.playlist.tool = t;

@@ -269,6 +269,12 @@ impl App {
             }
             return true;
         }
+        if m.alt && (m.command || m.shift) && key == Key::C {
+            if !repeat {
+                self.color_channels(m.command);
+            }
+            return true;
+        }
         if m.command && m.alt && key == Key::R {
             // stretched clips follow the tempo as they play; this redoes the treated copies as well
             if !repeat {
@@ -465,6 +471,9 @@ impl App {
                 }
                 Key::S if m.shift && !repeat => self.state_ask = Some(crate::StateAsk::SaveTrack(i)),
                 Key::A if !repeat => self.mixer_sel = (1..n.saturating_sub(1).max(1)).collect(),
+                Key::E if !repeat => {
+                    self.audio_editor_on(i);
+                }
                 Key::D if !repeat => self.mixer_sel.clear(),
                 _ => return false,
             }
