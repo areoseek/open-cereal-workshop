@@ -68,8 +68,21 @@ fn main() {
         let hold = std::env::var("MKFX_NOTE").ok().and_then(|v| v.parse().ok()).unwrap_or(len);
         let key = std::env::var("MKFX_KEY").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
         let pos = std::env::var("MKFX_POS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        song.patterns[0].notes.push(cereal_engine::song::Note { pos, len: hold, chan: ci as u16, key, ..Default::default() });
-        song.clips.push(Clip { pos: 0, len: len.max(hold) + pos, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
+        // MKFX_MOD="x:y": the first note's two free controls, -1..=1
+        let md: Vec<f32> = std::env::var("MKFX_MOD").unwrap_or_default().split(':').filter_map(|x| x.parse().ok()).collect();
+        let (mod_x, mod_y) = (md.first().copied().unwrap_or(0.0), md.get(1).copied().unwrap_or(0.0));
+        song.patterns[0].notes.push(cereal_engine::song::Note { pos, len: hold, chan: ci as u16, key, mod_x, mod_y, ..Default::default() });
+        // MKFX_NOTES="pos:len:key[:modx:mody] ...": more notes after the first
+        let mut far = len.max(hold) + pos;
+        for w in std::env::var("MKFX_NOTES").unwrap_or_default().split_whitespace() {
+            let p: Vec<f32> = w.split(':').filter_map(|x| x.parse().ok()).collect();
+            if p.len() >= 3 {
+                let get = |i: usize| p.get(i).copied().unwrap_or(0.0);
+                song.patterns[0].notes.push(cereal_engine::song::Note { pos: p[0] as u32, len: p[1] as u32, chan: ci as u16, key: p[2] as u8, mod_x: get(3), mod_y: get(4), ..Default::default() });
+                far = far.max(p[0] as u32 + p[1] as u32);
+            }
+        }
+        song.clips.push(Clip { pos: 0, len: far, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
     }
     if let Some(ident) = a.get(4).filter(|s| s.as_str() != "-") {
         let def = cereal_engine::fx::DEFS.iter().find(|d| d.ident == ident).expect("no such effect");

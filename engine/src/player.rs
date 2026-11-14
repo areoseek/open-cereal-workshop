@@ -2269,9 +2269,12 @@ impl Player {
         let glide = 1.0 / (self.sr * 0.12);
         for v in self.voices.iter_mut().filter(|v| v.active && v.born > mark) {
             v.color = n.color;
-            if v.fon {
-                v.fcut = (v.fcut + n.mod_x * 0.5).clamp(0.0, 1.0);
-                v.fres = (v.fres + n.mod_y * 0.5).clamp(0.0, 1.0);
+            // measured: a note's two free controls add to the cutoff and resonance at full scale, the same as the
+            // channel's own offsets, and wake a filter that would otherwise rest
+            if v.fon || (v.sample.is_some() && v.ftype != 255 && (n.mod_x < 0.0 || n.mod_y > 0.0)) {
+                v.fcut = (v.fcut + n.mod_x).clamp(0.0, 1.0);
+                v.fres = (v.fres + n.mod_y).clamp(0.0, 1.0);
+                v.fon = v.fon || v.fcut < 0.999 || v.fres > 0.0;
             }
             if let Some(from) = from {
                 v.slide = from - v.key as f32 / 12.0;
@@ -2502,19 +2505,8 @@ impl Player {
                 if glided {
                     return;
                 }
-                // a channel with a voice limit gives up its oldest notes to make room for this one
-                if f.max_poly > 0 && !f.mono {
-                    loop {
-                        let mine = |v: &&mut Voice| v.active && !v.preview && !v.kill && v.sample.is_some() && v.chan == n.chan;
-                        if self.voices.iter_mut().filter(mine).count() < f.max_poly as usize {
-                            break;
-                        }
-                        let Some(v) = self.voices.iter_mut().filter(mine).min_by_key(|v| v.born) else { break };
-                        v.kill = true;
-                        v.release = v.release.max(fade);
-                        v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
-                    }
-                }
+                // the channel's voice limit (`max_poly`) is kept and saved but not applied: in renders of the
+                // reference, overlapping pattern notes over the limit all sound in full, held or released
                 let filter_on = !f.filter_idle();
                 let mods = self.voice_mods(song, ch, delay);
                 {
