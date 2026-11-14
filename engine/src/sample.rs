@@ -15,43 +15,31 @@ use symphonia::core::probe::Hint;
 static QUALITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
 /// The names of the ways a sample is read between its frames, cheapest first.
-pub const QUALITIES: [&str; 4] = ["Linear", "4-point Hermite", "16-point sinc", "64-point sinc"];
+pub const QUALITIES: [&str; 9] = [
+    "2-point linear",
+    "6-point Hermite",
+    "16-point sinc",
+    "24-point sinc",
+    "32-point sinc",
+    "64-point sinc",
+    "128-point sinc",
+    "256-point sinc",
+    "512-point sinc",
+];
+
+/// Where the list of `QUALITIES` is split under headings, and the headings.
+pub const QUALITY_GROUPS: [(usize, &str); 3] = [(0, "Low quality / fastest"), (2, "Average quality"), (5, "High quality / slowest")];
+
+/// The way of reading a rendering starts with.
+pub const RENDER_QUALITY: u8 = 4;
 
 /// Choose how samples are read between their frames (an index into `QUALITIES`), for everything that plays.
 pub fn set_quality(q: u8) {
-    QUALITY.store(q.min(3), std::sync::atomic::Ordering::Relaxed);
+    QUALITY.store(q.min(QUALITIES.len() as u8 - 1), std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn quality() -> u8 {
     QUALITY.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-const SINC_PHASES: usize = 512;
-
-/// Windowed sinc weights: one row of `taps` for each of `SINC_PHASES` + 1 places between two frames.
-fn sinc_table(taps: usize) -> &'static [f32] {
-    static T16: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    static T64: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    let make = move || {
-        let half = taps as f64 / 2.0;
-        let mut t = Vec::with_capacity((SINC_PHASES + 1) * taps);
-        for k in 0..=SINC_PHASES {
-            let frac = k as f64 / SINC_PHASES as f64;
-            let row: Vec<f64> = (0..taps)
-                .map(|j| {
-                    let x = j as f64 - (half - 1.0) - frac;
-                    let s = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
-                    let w = (x / half).clamp(-1.0, 1.0);
-                    // Blackman window
-                    s * (0.42 + 0.5 * (std::f64::consts::PI * w).cos() + 0.08 * (2.0 * std::f64::consts::PI * w).cos())
-                })
-                .collect();
-            let sum: f64 = row.iter().sum();
-            t.extend(row.iter().map(|v| (v / sum) as f32));
-        }
-        t
-    };
-    if taps == 16 { T16.get_or_init(make) } else { T64.get_or_init(make) }
 }
 
 /// A decoded sample, always held as stereo frames (mono files are doubled).
@@ -75,7 +63,7 @@ impl Sample {
     }
 
     /// The sound at a fractional frame position, read between the frames the way `set_quality` chose
-    /// (four-point Hermite unless told otherwise).
+    /// (six-point Hermite unless told otherwise).
     #[inline]
     pub fn at(&self, pos: f64) -> [f32; 2] {
         self.at_with(pos, QUALITY.load(std::sync::atomic::Ordering::Relaxed))
@@ -84,6 +72,130 @@ impl Sample {
     /// The same, with the way of reading (an index into `QUALITIES`) given.
     #[inline]
     pub fn at_with(&self, pos: f64, quality: u8) -> [f32; 2] {
+        self.at_step_with(pos, 1.0, quality)
+    }
+
+    /// The sound at a fractional place while the read point moves `step` frames each output frame: the sinc ways
+    /// of reading lower their cutoff when the sample is read faster than it was recorded, so nothing folds back.
+    #[inline]
+    pub fn at_step(&self, pos: f64, step: f64) -> [f32; 2] {
+        self.at_step_with(pos, step, QUALITY.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// A windowed sinc read over `half` frames each side. The window is 0.34 + 0.5 cos + 0.16 cos 2, the cutoff
+    /// drops to 1 / step when the read moves faster than one frame at a time.
+    fn sinc_read(&self, pos: f64, step: f64, half: usize) -> [f32; 2] {
+        use std::f64::consts::PI;
+        let f = &self.frames;
+        let n = f.len() as isize;
+        let i = pos.floor();
+        let t = pos - i;
+        let i = i as isize;
+        let c = (1.0 / step.abs().max(1e-9)).min(1.0);
+        if t < 1e-9 && c >= 1.0 {
+            return if i >= 0 && i < n { f[i as usize] } else { [0.0, 0.0] };
+        }
+        let h = half as isize;
+        // x runs from the first frame used to the last, measured from the read point
+        let x0 = -(h - 1) as f64 - t;
+        let (mut ss, mut sc) = (PI * c * x0).sin_cos();
+        let (rs, rc) = (PI * c).sin_cos();
+        let (mut ws, mut wc) = (PI * x0 / half as f64).sin_cos();
+        let (qs, qc) = (PI / half as f64).sin_cos();
+        let mut out = [0.0f64; 2];
+        for j in 0..2 * h {
+            let x = x0 + j as f64;
+            let at = i - (h - 1) + j;
+            if at >= 0 && at < n {
+                let w = 0.34 + 0.5 * wc + 0.16 * (2.0 * wc * wc - 1.0);
+                let k = if x.abs() < 1e-7 { c } else { ss / (PI * x) };
+                let s = f[at as usize];
+                out[0] += s[0] as f64 * k * w;
+                out[1] += s[1] as f64 * k * w;
+            }
+            let (a, b) = (ss * rc + sc * rs, sc * rc - ss * rs);
+            ss = a;
+            sc = b;
+            let (a, b) = (ws * qc + wc * qs, wc * qc - ws * qs);
+            ws = a;
+            wc = b;
+        }
+        [out[0] as f32, out[1] as f32]
+    }
+
+    /// This sample brought to another sample rate, the way a channel with Resample on holds it: a 128-point
+    /// windowed sinc read. Results are kept while the source is alive.
+    pub fn to_rate(self: &Arc<Sample>, rate: u32) -> Arc<Sample> {
+        if self.rate == rate || self.rate == 0 || rate == 0 || self.frames.is_empty() {
+            return self.clone();
+        }
+        type Kept = Vec<(std::sync::Weak<Sample>, u32, Arc<Sample>)>;
+        static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(Vec::new());
+        {
+            let mut kept = KEPT.lock().unwrap();
+            kept.retain(|(w, _, _)| w.strong_count() > 0);
+            if let Some((_, _, s)) = kept.iter().find(|(w, r, _)| *r == rate && std::ptr::eq(w.as_ptr(), Arc::as_ptr(self))) {
+                return s.clone();
+            }
+        }
+        const HALF: isize = 64;
+        fn gcd(a: u64, b: u64) -> u64 {
+            if b == 0 { a } else { gcd(b, a % b) }
+        }
+        let g = gcd(self.rate as u64, rate as u64);
+        let (up, down) = (self.rate as u64 / g, rate as u64 / g);
+        let n_in = self.frames.len();
+        let n_out = ((n_in as u64 * down + up / 2) / up) as usize;
+        // going down in rate, the cutoff drops to the new rate's half
+        let cut = (down as f64 / up as f64).min(1.0);
+        let weights = |t: f64| -> Vec<f32> {
+            use std::f64::consts::PI;
+            (0..2 * HALF)
+                .map(|j| {
+                    let x = (j - (HALF - 1)) as f64 - t;
+                    let s = if x.abs() < 1e-9 { cut } else { (PI * cut * x).sin() / (PI * x) };
+                    let a = PI * x / HALF as f64;
+                    (s * (0.34 + 0.5 * a.cos() + 0.16 * (2.0 * a).cos())) as f32
+                })
+                .collect()
+        };
+        let table: Option<Vec<Vec<f32>>> = (down <= 2048).then(|| (0..down).map(|p| weights(p as f64 / down as f64)).collect());
+        let f = &self.frames;
+        let mut frames = Vec::with_capacity(n_out);
+        for i in 0..n_out as u64 {
+            let (whole, part) = ((i * up / down) as isize, i * up % down);
+            if part == 0 && cut >= 1.0 {
+                frames.push(f.get(whole as usize).copied().unwrap_or([0.0, 0.0]));
+                continue;
+            }
+            let own;
+            let w: &[f32] = match &table {
+                Some(t) => &t[part as usize],
+                None => {
+                    own = weights(part as f64 / down as f64);
+                    &own
+                }
+            };
+            let first = whole - (HALF - 1);
+            // (measured: past either end the edge frame carries on, so a sample that starts or stops away
+            // from zero does not ring)
+            let mut out = [0.0f32; 2];
+            for at in first..first + 2 * HALF {
+                let (s, k) = (f[at.clamp(0, n_in as isize - 1) as usize], w[(at - first) as usize]);
+                out[0] += s[0] * k;
+                out[1] += s[1] * k;
+            }
+            frames.push(out);
+        }
+        let scale = |v: u32| ((v as u64 * down + up / 2) / up) as u32;
+        let made = Arc::new(Sample { name: self.name.clone(), rate, mono: self.mono, frames, loop_pts: self.loop_pts.map(|(a, b)| (scale(a), scale(b))) });
+        KEPT.lock().unwrap().push((Arc::downgrade(self), rate, made.clone()));
+        made
+    }
+
+    /// The same, with the way of reading (an index into `QUALITIES`) given.
+    #[inline]
+    pub fn at_step_with(&self, pos: f64, step: f64, quality: u8) -> [f32; 2] {
         let i = pos as usize;
         let f = &self.frames;
         let n = f.len();
@@ -98,36 +210,23 @@ impl Sample {
                 let p2 = if i + 1 < n { f[i + 1] } else { [0.0, 0.0] };
                 return [p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t];
             }
-            q => {
-                let taps = if q == 2 { 16 } else { 64 };
-                let table = sinc_table(taps);
-                let ph = t * SINC_PHASES as f32;
-                let k = (ph as usize).min(SINC_PHASES - 1);
-                let fr = ph - k as f32;
-                let (ra, rb) = (&table[k * taps..(k + 1) * taps], &table[(k + 1) * taps..(k + 2) * taps]);
-                let first = i as isize - (taps as isize / 2 - 1);
-                let mut out = [0.0f32; 2];
-                for j in 0..taps {
-                    let at = first + j as isize;
-                    if at >= 0 && (at as usize) < n {
-                        let w = ra[j] + (rb[j] - ra[j]) * fr;
-                        let s = f[at as usize];
-                        out[0] += s[0] * w;
-                        out[1] += s[1] * w;
-                    }
-                }
-                return out;
-            }
+            q => return self.sinc_read(pos, step, [8, 12, 16, 32, 64, 128, 256][(q as usize - 2).min(6)]),
         }
-        let p0 = if i > 0 { f[i - 1] } else { p1 };
-        let p2 = if i + 1 < n { f[i + 1] } else { [0.0, 0.0] };
-        let p3 = if i + 2 < n { f[i + 2] } else { [0.0, 0.0] };
+        // six-point, fifth-order Hermite
+        let g = |k: isize| -> [f32; 2] {
+            let at = i as isize + k;
+            if at < 0 { f[0] } else if (at as usize) < n { f[at as usize] } else { [0.0, 0.0] }
+        };
+        let (m2, m1, p2, p3, p4) = (g(-2), g(-1), g(1), g(2), g(3));
         let mut out = [0.0f32; 2];
         for c in 0..2 {
-            let a = -0.5 * p0[c] + 1.5 * p1[c] - 1.5 * p2[c] + 0.5 * p3[c];
-            let b = p0[c] - 2.5 * p1[c] + 2.0 * p2[c] - 0.5 * p3[c];
-            let cc = -0.5 * p0[c] + 0.5 * p2[c];
-            out[c] = ((a * t + b) * t + cc) * t + p1[c];
+            let (ym2, ym1, y0, y1, y2, y3) = (m2[c], m1[c], p1[c], p2[c], p3[c], p4[c]);
+            let c1 = (ym2 - y2) / 12.0 + (y1 - ym1) * (2.0 / 3.0);
+            let c2 = ym1 * (13.0 / 12.0) - y0 * (25.0 / 12.0) + y1 * 1.5 - y2 * (11.0 / 24.0) + y3 / 12.0 - ym2 / 8.0;
+            let c3 = y0 * (5.0 / 12.0) - y1 * (7.0 / 12.0) + y2 * (7.0 / 24.0) - (ym2 + ym1 + y3) / 24.0;
+            let c4 = ym2 / 8.0 - ym1 * (7.0 / 12.0) + y0 * (13.0 / 12.0) - y1 + y2 * (11.0 / 24.0) - y3 / 12.0;
+            let c5 = (y3 - ym2) / 24.0 + (ym1 - y2) * (5.0 / 24.0) + (y1 - y0) * (5.0 / 12.0);
+            out[c] = ((((c5 * t + c4) * t + c3) * t + c2) * t + c1) * t + y0;
         }
         out
     }

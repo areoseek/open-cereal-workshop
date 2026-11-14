@@ -248,6 +248,14 @@ pub struct Sampler {
     pub echo_feedback: f32,
     pub echo_pan: f32,
     pub echo_cents: f32,
+    /// What each echo adds to the note's two free controls, -1..1.
+    pub echo_mod_x: f32,
+    pub echo_mod_y: f32,
+    /// Treatments older projects carry, kept as stored: one side late (2048 = neither, above it
+    /// the left by that many frames), a pitch sweep along the sample (256 = none), ring
+    /// modulation (amount low, rate high), reverb (kind in the high half, length in the low),
+    /// boost, tone (128 = flat), cut (1024 = open) and the cut's peak.
+    pub old_fx: [u32; 8],
     pub echo_steps: f32,
     /// Beats the sample is fitted to (0 = its own length), extra pitch in cents, length multiplier, and whether
     /// pitch follows speed (plain resampling) or is kept.
@@ -496,6 +504,9 @@ impl Default for Sampler {
             echo_feedback: 0.0,
             echo_pan: 0.0,
             echo_cents: 0.0,
+            echo_mod_x: 0.0,
+            echo_mod_y: 0.0,
+            old_fx: OLD_FX_OFF,
             echo_steps: 3.0,
             stretch_beats: 0.0,
             stretch_cents: 0.0,
@@ -549,6 +560,12 @@ fn track(t: Option<&[i32; 4]>, mid: f32) -> [f32; 4] {
     }
 }
 
+/// The older treatments at rest.
+/// The sample rate a project works at (where samples with Resample on are brought when loaded).
+pub const PROJECT_RATE: u32 = 44_100;
+
+pub const OLD_FX_OFF: [u32; 8] = [2048, 256, 0x0080_0000, 0x0001_0000, 0, 128, 1024, 0];
+
 impl Sampler {
     fn from_flp(c: &flp::FlpChannel) -> Self {
         let env = |i: usize, scale: f32| c.envelopes.get(i).map(|e| Env::from_flp(e, scale)).unwrap_or_default();
@@ -579,6 +596,9 @@ impl Sampler {
             echo_feedback: (c.echo[0] as f32 / 12800.0).clamp(0.0, 1.0),
             echo_pan: (c.echo[1] as f32 - 6400.0) / 6400.0,
             echo_cents: c.echo[2] as f32,
+            old_fx: c.old_fx,
+            echo_mod_x: ((c.echo_mod.1 as f32 - 128.0) / 128.0).clamp(-1.0, 1.0),
+            echo_mod_y: ((c.echo_mod.0 as f32 - 128.0) / 128.0).clamp(-1.0, 1.0),
             echo_steps: c.echo[4] as f32 / 48.0,
             stretch_beats: (c.stretch.0 / 384.0).max(0.0),
             stretch_cents: c.stretch.1 as f32,
@@ -624,6 +644,11 @@ impl Sampler {
         }
     }
 
+    /// The sweep's amount, -1..1: above nothing the pitch starts high and falls.
+    fn pogo(&self) -> f64 {
+        (self.old_fx[1] as f64 - 256.0).clamp(-256.0, 256.0) / 256.0
+    }
+
     fn treats_sample(&self) -> bool {
         self.reverse
             || self.swap_stereo
@@ -637,6 +662,7 @@ impl Sampler {
             || self.smp_len < 1.0
             || self.crossfade > 0.0
             || self.trim > 0.0
+            || self.old_fx != OLD_FX_OFF
     }
 
     /// The stretch mode number to store: the one chosen, unless what is heard was switched apart from it.
@@ -686,6 +712,10 @@ impl Chan {
             return;
         };
         let f = &self.smp;
+        // Resample on: the sample is held at the project's rate, and every treatment below works on that
+        // (a sliced loop keeps its own frames, the cuts count in them)
+        let own = matches!(self.kind, ChannelKind::Sampler | ChannelKind::AudioClip) && self.slices.is_none();
+        let raw = if f.resample && own { raw.to_rate(PROJECT_RATE) } else { raw };
         if !f.treats_sample() {
             self.sample = Some(raw);
             return;
@@ -716,8 +746,46 @@ impl Chan {
                 (e > s).then_some((s, e))
             });
         }
+        // one side held back (measured: by the stored distance from the middle, in frames, ahead of the turning round)
+        let late = f.old_fx[0] as i64 - 2048;
+        if late != 0 && !frames.is_empty() {
+            let n = frames.len();
+            // (measured: the sample grows by the wait, so the late side still plays to its end)
+            let (side, d) = (if late > 0 { 0 } else { 1 }, late.unsigned_abs() as usize);
+            frames.resize(n + d, [0.0; 2]);
+            for i in (0..n + d).rev() {
+                frames[i][side] = if i >= d { frames[i - d][side] } else { 0.0 };
+            }
+        }
         if f.reverse {
             frames.reverse();
+        }
+        // the pitch sweep reads the sample along a bent line (measured: a blend of the straight
+        // line with a quarter sine one way, and a quarter arc from the far end the other way)
+        let a = f.pogo();
+        if a != 0.0 && frames.len() > 1 {
+            let n = frames.len();
+            let src = std::mem::take(&mut frames);
+            // (measured: read through a four point curve)
+            let get = |i: i64, c: usize| if i < 0 || i >= n as i64 { 0.0 } else { src[i as usize][c] };
+            let at = |p: f64| {
+                let p = p.clamp(0.0, (n - 1) as f64);
+                let (i, t) = (p.floor() as i64, (p - p.floor()) as f32);
+                let mut o = [0f32; 2];
+                for (c, o) in o.iter_mut().enumerate() {
+                    let (a, b, d, e) = (get(i - 1, c), get(i, c), get(i + 1, c), get(i + 2, c));
+                    *o = b + 0.5 * t * (d - a + t * (2.0 * a - 5.0 * b + 4.0 * d - e + t * (3.0 * (b - d) + e - a)));
+                }
+                o
+            };
+            frames = (0..n)
+                .map(|i| {
+                    let x = i as f64 / (n - 1) as f64;
+                    let bent = if a > 0.0 { (x * std::f64::consts::FRAC_PI_2).sin() } else { (1.0 - x).acos() / std::f64::consts::FRAC_PI_2 };
+                    at((n - 1) as f64 * (x + a.abs() * (bent - x)))
+                })
+                .collect();
+            loop_pts = None;
         }
         // fades (measured: the knob is a slope over the whole sample, a quarter turn spans all
         // of it, further turns reach silence sooner and leave the rest silent)
@@ -791,6 +859,27 @@ impl Chan {
                 s[1] *= g.sin();
             }
         }
+        // boost (measured: sixteen steps of the stored number double the level)
+        if f.old_fx[4] != 0 {
+            let g = 1.0 + f.old_fx[4] as f32 / 16.0;
+            for s in &mut frames {
+                s[0] *= g;
+                s[1] *= g;
+            }
+        }
+        // ring modulation (measured: a sine on the left and a cosine on the right, both the sine
+        // for a one sided sample, from 61.25 Hz up in steps of an eighth of that)
+        let (ring, rate) = ((f.old_fx[2] & 0xffff).min(256) as f32 / 256.0, (f.old_fx[2] >> 16).min(256) as f64);
+        if ring > 0.0 {
+            let w = std::f64::consts::TAU / 720.0 * (1.0 + rate / 8.0);
+            for (i, s) in frames.iter_mut().enumerate() {
+                let (sin, cos) = (w * i as f64).sin_cos();
+                s[0] *= 1.0 - ring + ring * sin as f32;
+                s[1] *= 1.0 - ring + ring * if raw.mono { sin } else { cos } as f32;
+            }
+        }
+        old_tone(&mut frames, f.old_fx[5], f.old_fx[6], f.old_fx[7]);
+        old_reverb(&mut frames, f.old_fx[3]);
         for s in &mut frames {
             if f.swap_stereo {
                 s.swap(0, 1);
@@ -800,8 +889,93 @@ impl Chan {
                 s[1] = -s[1];
             }
         }
-        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo && !f.fade_stereo, frames, loop_pts: if f.reverse { None } else { loop_pts } }));
+        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo && !f.fade_stereo && f.old_fx[0] == 2048 && f.old_fx[3] < 0x1_0001, frames, loop_pts: if f.reverse { None } else { loop_pts } }));
     }
+}
+
+/// The older tone knobs worked into the sample: EQ, then the low-pass with its resonance. All measured:
+/// the EQ is one pole at 0.75 x (stored - 128) / 128 (below the middle it brightens, above it darkens and
+/// lifts), the low-pass is `y += f (x - y) + fb (y - y before)` where f climbs as e^(6.4 x) from the knob
+/// and the resonance is the same curve read backwards, stopping at 640.
+fn old_tone(frames: &mut [[f32; 2]], eq: u32, cut: u32, res: u32) {
+    if eq != 128 {
+        let p = 0.75 * (eq.min(256) as f64 - 128.0) / 128.0;
+        let mut y = [0.0f64; 2];
+        for s in frames.iter_mut() {
+            for c in 0..2 {
+                y[c] = s[c] as f64 + p * y[c];
+                s[c] = y[c] as f32;
+            }
+        }
+    }
+    if cut < 1024 || res > 0 {
+        let curve = |v: f64| (((6.4 * v / 1024.0).exp() - 1.0) / (6.4f64.exp() - 1.0)).max(0.00023);
+        let f = curve(cut.min(1024) as f64);
+        let fb = if res == 0 { 0.0 } else { 1.0 - curve(1024.0 - res.min(640) as f64) };
+        let (mut y1, mut y2) = ([0.0f64; 2], [0.0f64; 2]);
+        for s in frames.iter_mut() {
+            for c in 0..2 {
+                let y = y1[c] + f * (s[c] as f64 - y1[c]) + fb * (y1[c] - y2[c]);
+                y2[c] = y1[c];
+                y1[c] = y;
+                s[c] = y as f32;
+            }
+        }
+    }
+}
+
+/// The older reverb, worked into the sample (measured from what one click comes back as: a
+/// bank of repeating delays that die away over the stored length, 256 = one second, then a chain
+/// of spreading delays, softened, under seven tenths of the sample itself).
+fn old_reverb(frames: &mut Vec<[f32; 2]>, stored: u32) {
+    let (second, amount) = (stored >= 0x1_0000, (stored & 0xffff).min(256));
+    if amount == 0 || stored > 0x1_0100 {
+        return;
+    }
+    let ring = 44100.0 * amount as f64 / 256.0;
+    // (measured: the sample grows to hold the tail, and ends at the last frame above two thousandths)
+    frames.resize(frames.len() + 22050, [0.0; 2]);
+    let bank: &[usize] = if second { &[2467, 2767, 3217, 3533, 3877, 4127] } else { &[1777, 1847, 1993, 2137] };
+    for c in 0..2 {
+        let chain: &[usize] = match (second, c) {
+            (false, _) => &[43, 127, 389],
+            (true, 0) => &[67, 97, 101, 197, 599],
+            (true, _) => &[67, 79, 101, 197, 599],
+        };
+        let n = frames.len();
+        let dry: Vec<f32> = frames.iter().map(|s| s[c]).collect();
+        let mut wet = vec![0f32; n];
+        for &d in bank {
+            let g = 10f64.powf(-3.0 * d as f64 / ring) as f32;
+            let mut y = vec![0f32; n];
+            for i in 0..n {
+                y[i] = dry[i] + if i >= d { g * y[i - d] } else { 0.0 };
+                wet[i] += y[i];
+            }
+        }
+        let share = 1.0 / bank.len() as f32;
+        wet.iter_mut().for_each(|v| *v *= share);
+        for &d in chain {
+            let x = std::mem::replace(&mut wet, vec![0f32; n]);
+            for i in 0..n {
+                wet[i] = -0.7 * x[i] + if i >= d { x[i - d] + 0.7 * wet[i - d] } else { 0.0 };
+            }
+        }
+        if second {
+            let mut y = 0f32;
+            for (s, w) in frames.iter_mut().zip(&wet) {
+                y = 0.3 * w + 0.7 * y;
+                s[c] = 0.7 * s[c] + 0.541 * y;
+            }
+        } else {
+            for i in 0..n {
+                let (a, b) = (if i >= 2 { wet[i - 2] } else { 0.0 }, if i >= 1 { wet[i - 1] } else { 0.0 });
+                frames[i][c] = 0.7 * dry[i] + 1.2 * (0.25 * a + 0.5 * b + 0.25 * wet[i]);
+            }
+        }
+    }
+    let keep = frames.iter().rposition(|s| s[0].abs() > 0.002 || s[1].abs() > 0.002).map_or(0, |i| i + 1);
+    frames.truncate(keep);
 }
 
 /// A control an automation clip can drive.

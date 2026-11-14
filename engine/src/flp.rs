@@ -111,6 +111,15 @@ pub mod id {
     pub const CHAN_SWING: u8 = 97;
     pub const CHAN_CUT_GROUP: u8 = 132;
     pub const CHAN_ECHO: u8 = 209;
+    /// What each echo adds to a note's two free controls: two words, 128 in the middle, the second control's first.
+    pub const CHAN_ECHO_MOD: u8 = 138;
+    pub const CHAN_OLD_EQ: u8 = 69;
+    pub const CHAN_OLD_CUT: u8 = 71;
+    pub const CHAN_OLD_RES: u8 = 83;
+    pub const CHAN_STEREO_DELAY: u8 = 85;
+    pub const CHAN_POGO: u8 = 86;
+    pub const CHAN_RING_MOD: u8 = 131;
+    pub const CHAN_REVERB: u8 = 139;
     /// The root note up to version 11, written only when it was moved off C5.
     pub const CHAN_ROOT: u8 = 135;
     pub const CHAN_POLY: u8 = 221;
@@ -465,6 +474,10 @@ pub struct FlpChannel {
     pub swing: u16,
     /// Echo: feedback (0..=12800), pan (centre 6400), pitch step in cents, count, time (48 = one step).
     pub echo: [i32; 5],
+    pub echo_mod: (u16, u16),
+    /// Older treatments of the sample, as stored: one side late (2048 = neither), pitch sweep
+    /// (256 = none), ring modulation, reverb, boost, tone (128 = flat), cut (1024 = open), its peak.
+    pub old_fx: [u32; 8],
     /// Filter: cutoff and resonance (0..=256) and type.
     pub filter: (u32, u32, u32),
     /// Polyphony: max voices, slide time, flags (1 mono, 2 portamento).
@@ -1009,7 +1022,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, main_pitch: true, key_range: (0, 256), bend_range: 2, smp_len: 1.0, ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo_mod: (128, 128), old_fx: [2048, 256, 0x0080_0000, 0x0001_0000, 0, 128, 1024, 0], echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, main_pitch: true, key_range: (0, 256), bend_range: 2, smp_len: 1.0, ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     in_pattern = false;
@@ -1289,11 +1302,22 @@ impl Flp {
                             c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32), flags: i(0), tension: [i(56), i(60), i(64)], lfo: [i(36), i(40), i(44), if d.len() >= 52 { i(48) } else { 32950 }, i(52)] });
                         }
                         (id::CHAN_FX_FLAGS, Value::Word(v)) => c.fx_flags = *v,
-                        (id::CHAN_PREAMP, Value::Word(v)) => c.preamp = *v,
+                        (id::CHAN_PREAMP, Value::Word(v)) => {
+                            c.preamp = *v;
+                            c.old_fx[4] = *v as u32;
+                        }
+                        (id::CHAN_OLD_EQ, Value::Word(v)) => c.old_fx[5] = *v as u32,
+                        (id::CHAN_OLD_CUT, Value::Word(v)) => c.old_fx[6] = *v as u32,
+                        (id::CHAN_OLD_RES, Value::Word(v)) => c.old_fx[7] = *v as u32,
                         (id::CHAN_FADE_IN, Value::Word(v)) => c.fade_in = *v,
                         (id::CHAN_FADE_OUT, Value::Word(v)) => c.fade_out = *v,
                         (id::CHAN_TIME_SHIFT, Value::Word(v)) => c.time_shift = *v,
                         (id::CHAN_SWING, Value::Word(v)) => c.swing = *v,
+                        (id::CHAN_STEREO_DELAY, Value::Word(v)) => c.old_fx[0] = *v as u32,
+                        (id::CHAN_POGO, Value::Word(v)) => c.old_fx[1] = *v as u32,
+                        (id::CHAN_RING_MOD, Value::Int(v)) => c.old_fx[2] = *v,
+                        (id::CHAN_REVERB, Value::Int(v)) => c.old_fx[3] = *v,
+                        (id::CHAN_ECHO_MOD, Value::Int(v)) => c.echo_mod = ((*v & 0xffff) as u16, (*v >> 16) as u16),
                         (id::CHAN_CUT_GROUP, Value::Int(v)) => c.cut_group = ((*v & 0xffff) as u16, (*v >> 16) as u16),
                         (id::CHAN_GROUP, Value::Int(v)) => c.rack_group = *v,
                         (id::CHAN_ZIPPED, Value::Byte(v)) => c.zipped = *v != 0,

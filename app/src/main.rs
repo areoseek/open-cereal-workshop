@@ -1325,7 +1325,7 @@ impl App {
     /// Ctrl+R opens the rendering window; its Start button asks where to save and writes the file.
     fn export(&mut self) {
         if self.render.is_none() {
-            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false, tempo_info: false, no_inserts: false, no_master: false, resample: 3 });
+            self.render = Some(RenderOpts { flac: false, lossy: 0, kbps: 192, quality: 6.0, bits: 16, rate: 44_100, tail: 6.0, song: self.handle.transport.song_mode(), tail_mode: 1, split: false, mono: false, range: true, marks: false, dither: false, tempo_info: false, no_inserts: false, no_master: false, resample: cereal_engine::sample::RENDER_QUALITY });
         }
     }
 
@@ -1686,8 +1686,11 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("Resampling");
-                egui::ComboBox::from_id_salt("render_resample").width(140.0).selected_text(cereal_engine::sample::QUALITIES[o.resample.min(3) as usize]).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("render_resample").width(140.0).height(320.0).selected_text(cereal_engine::sample::QUALITIES[o.resample.min(8) as usize]).show_ui(ui, |ui| {
                     for (k, n) in cereal_engine::sample::QUALITIES.iter().enumerate() {
+                        if let Some((_, head)) = cereal_engine::sample::QUALITY_GROUPS.iter().find(|(at, _)| *at == k) {
+                            ui.weak(*head);
+                        }
                         ui.selectable_value(&mut o.resample, k as u8, *n);
                     }
                 });

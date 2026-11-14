@@ -1112,6 +1112,16 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             d[8] = (d[8] & !3) | fl;
         });
     }
+    let old = [id::CHAN_STEREO_DELAY, id::CHAN_POGO, id::CHAN_RING_MOD, id::CHAN_REVERB, id::CHAN_PREAMP, id::CHAN_OLD_EQ, id::CHAN_OLD_CUT, id::CHAN_OLD_RES];
+    for (k, id) in old.into_iter().enumerate() {
+        if now.old_fx[k] != was.old_fx[k] {
+            put(ev, start, &mut end, if id < 128 { Event::word(id, now.old_fx[k] as u16) } else { Event::int(id, now.old_fx[k]) });
+        }
+    }
+    let echo_mod = |f: &Sampler| (q(f.echo_mod_y, 128.0) + 128) as u32 & 0xffff | ((q(f.echo_mod_x, 128.0) + 128) as u32 & 0xffff) << 16;
+    if echo_mod(now) != echo_mod(was) {
+        put(ev, start, &mut end, Event::int(id::CHAN_ECHO_MOD, echo_mod(now)));
+    }
     let echo = |f: &Sampler| (q(f.echo_feedback, 12800.0), q(f.echo_pan, 6400.0) + 6400, q(f.echo_cents, 1.0), f.echoes, q(f.echo_steps, 48.0));
     if echo(now) != echo(was) {
         let (mut fb, mut pan, cents, n, time) = echo(now);
@@ -2767,6 +2777,9 @@ mod tests {
             f.echoes = 6;
             f.echo_steps = 2.0;
             f.echo_cents = 100.0;
+            f.echo_mod_x = 0.5;
+            f.old_fx = [2368, 282, 0x0100_0100, 0x100, 44, 100, 900, 12];
+            f.echo_mod_y = -0.25;
             f.stretch_beats = 4.0;
             f.stretch_cents = -200.0;
             f.keep_pitch = true;
@@ -2825,13 +2838,14 @@ mod tests {
         assert_eq!((b.add_to_key, b.key_lo, b.key_hi), (true, 48, 72));
         assert_eq!((b.main_pitch, b.max_poly, b.gain, b.adjust_pan, b.adjust_x, b.adjust_y), (false, 4, 0.5, -0.25, 0.5, -0.5));
         assert_eq!((a.track_vel, a.track_key), (b.track_vel, b.track_key));
+        assert_eq!(b.old_fx, [2368, 282, 0x0100_0100, 0x100, 44, 100, 900, 12]);
         assert!(b.remove_dc && b.fade_stereo && b.keep_on_disk && !b.resample && b.load_regions);
         assert_eq!((b.declick, b.bend_range), (3, 12));
         let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
         for (x, y) in [
             (a.smp_start, b.smp_start), (a.smp_len, b.smp_len), (a.start_offset, b.start_offset), (a.crossfade, b.crossfade), (a.trim, b.trim),
             (a.fade_in, b.fade_in), (a.fade_out, b.fade_out), (a.swing, b.swing), (a.cutoff, b.cutoff), (a.resonance, b.resonance), (a.slide, b.slide),
-            (a.echo_feedback, b.echo_feedback), (a.echo_steps, b.echo_steps), (a.echo_cents, b.echo_cents), (a.stretch_beats, b.stretch_beats),
+            (a.echo_feedback, b.echo_feedback), (a.echo_steps, b.echo_steps), (a.echo_cents, b.echo_cents), (a.echo_mod_x, b.echo_mod_x), (a.echo_mod_y, b.echo_mod_y), (a.stretch_beats, b.stretch_beats),
             (a.stretch_cents, b.stretch_cents), (a.vol_env.attack, b.vol_env.attack), (a.vol_env.sustain, b.vol_env.sustain), (a.vol_env.release, b.vol_env.release),
             (a.vol_env.tension[0], b.vol_env.tension[0]), (a.vol_env.tension[1], b.vol_env.tension[1]), (a.pitch_env.amount, b.pitch_env.amount),
             (a.pitch_env.decay, b.pitch_env.decay), (a.cut_env.amount, b.cut_env.amount), (a.arp_steps, b.arp_steps), (a.arp_gate, b.arp_gate),

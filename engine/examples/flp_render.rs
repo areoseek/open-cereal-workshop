@@ -8,6 +8,7 @@ use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    cereal_engine::sample::set_quality(std::env::var("CEREAL_QUALITY").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(cereal_engine::sample::RENDER_QUALITY));
     if args.len() < 2 {
         eprintln!("usage: flp_render <in.flp> <out.wav> [--pattern N]");
         std::process::exit(2);

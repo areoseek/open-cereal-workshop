@@ -263,6 +263,11 @@ fn sample_right(ui: &mut Ui, f: &mut cereal_engine::song::Sampler, changed: &mut
         *rebake |= cap_knob(ui, "IN", &mut f.fade_in, 0.0, 1.0, 0.0, |v: f32| format!("Fade in {:.0} %", v * 100.0));
         *rebake |= cap_knob(ui, "OUT", &mut f.fade_out, 0.0, 1.0, 0.0, |v: f32| format!("Fade out {:.0} %", v * 100.0));
         ui.add_space(8.0);
+        let mut pogo = (f.old_fx[1].min(512) as f32 - 256.0) / 256.0;
+        if cap_knob(ui, "POGO", &mut pogo, -1.0, 1.0, 0.0, |v: f32| format!("Pitch bend {:+.0} %", v * 100.0)) {
+            f.old_fx[1] = (256.0 + pogo * 256.0).round().clamp(0.0, 512.0) as u32;
+            *rebake = true;
+        }
         *rebake |= cap_knob(ui, "CROSSFADE", &mut f.crossfade, 0.0, 1.0, 0.0, |v: f32| format!("Crossfade {:.0} %", v * 100.0));
         *rebake |= cap_knob(ui, "TRIM", &mut f.trim, 0.0, 1.0, 0.0, |v: f32| format!("Trim {:.0} %", v * 100.0));
     });
@@ -1046,6 +1051,8 @@ impl App {
                         ui.horizontal(|ui| {
                             changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
                             changed |= cap_knob(ui, "PAN", &mut f.echo_pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD X", &mut f.echo_mod_x, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD Y", &mut f.echo_mod_y, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
                             changed |= cap_knob(ui, "PITCH", &mut f.echo_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
                             changed |= cap_knob(ui, "TIME", &mut f.echo_steps, 0.0, 8.0, 3.0, |v: f32| format!("{:.2} steps", v));
                         });

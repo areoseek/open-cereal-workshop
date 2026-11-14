@@ -232,8 +232,11 @@ impl App {
             ui.end_row();
             ui.label("Resampling quality").hint("How samples are read between their frames while playing; the rendering window has its own choice");
             let mut q = cereal_engine::sample::quality();
-            egui::ComboBox::from_id_salt("audio_resample").width(140.0).selected_text(cereal_engine::sample::QUALITIES[q as usize]).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("audio_resample").width(140.0).height(320.0).selected_text(cereal_engine::sample::QUALITIES[q as usize]).show_ui(ui, |ui| {
                 for (k, n) in cereal_engine::sample::QUALITIES.iter().enumerate() {
+                    if let Some((_, head)) = cereal_engine::sample::QUALITY_GROUPS.iter().find(|(at, _)| *at == k) {
+                        ui.weak(*head);
+                    }
                     if ui.selectable_value(&mut q, k as u8, *n).changed() {
                         cereal_engine::sample::set_quality(q);
                         self.settings.resample = Some(q);

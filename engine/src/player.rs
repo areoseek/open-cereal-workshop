@@ -1127,8 +1127,11 @@ impl Voice {
                 // value is the one wanted when this stretch ends
                 let tick = self.ltick.max(1.0);
                 let at = |t: f32| {
-                    let v = self.rel_from - (t / tick).floor() * self.rel_fall;
-                    if v <= 0.0 { -1.0 } else { v - v.min(self.rel_fall) * (t / tick).fract() }
+                    // (measured) the first tick falls by the limit, the later ones by half the level each
+                    let k = (t / tick).floor();
+                    let half = 0.5 * self.rel_from;
+                    let (v, fall) = if k < 1.0 { (self.rel_from, self.rel_fall) } else { (self.rel_from - self.rel_fall - (k - 1.0) * half, half) };
+                    if v <= 0.0 { -1.0 } else if k < 1.0 { v - v.min(fall) * (t / tick).fract() } else { (v - fall * (t / tick).fract()).max(0.0) }
                 };
                 if at(self.rel_t as f32) < 0.0 { -1.0 } else { at((self.rel_t + CTL) as f32).max(0.0) }
             } else if self.releasing {
@@ -1398,7 +1401,7 @@ impl Voice {
                         // two overlapping grains read at the note's pitch while the read point moves at `rate`
                         let w = self.hop_t as f32 / self.hop as f32;
                         let wb = 0.5 - 0.5 * (std::f32::consts::PI * w).cos();
-                        let (sa, sb) = (smp.at(self.a_pos), smp.at(self.b_pos));
+                        let (sa, sb) = (smp.at_step(self.a_pos, self.step_now), smp.at_step(self.b_pos, self.step_now));
                         self.a_pos += self.step_now;
                         self.b_pos += self.step_now;
                         self.pos += self.rate;
@@ -1412,8 +1415,8 @@ impl Voice {
                     } else {
                         // going back, the place counts on past the loop's end and is read mirrored
                         let s = match self.loop_pts {
-                            Some((_, b)) if self.ping && self.pos > b - 1.0 => smp.at((2.0 * (b - 1.0) - self.pos).max(0.0)),
-                            _ => smp.at(self.pos),
+                            Some((_, b)) if self.ping && self.pos > b - 1.0 => smp.at_step((2.0 * (b - 1.0) - self.pos).max(0.0), self.step_now),
+                            _ => smp.at_step(self.pos, self.step_now),
                         };
                         self.pos += self.step_now;
                         if let Some((a, b)) = self.loop_pts {
@@ -2325,6 +2328,8 @@ impl Player {
                         vel: law::scale_velocity(n.vel, each / 2.0),
                         pan: side(n.pan + sign * f.echo_pan * k as f32),
                         fine_cents: n.fine_cents + sign * f.echo_cents * k as f32,
+                        mod_x: (n.mod_x + f.echo_mod_x * k as f32).clamp(-1.0, 1.0),
+                        mod_y: (n.mod_y + f.echo_mod_y * k as f32).clamp(-1.0, 1.0),
                         porta: false,
                         ..n.clone()
                     };
@@ -2337,6 +2342,8 @@ impl Player {
                 vel: law::scale_velocity(n.vel, f.echo_feedback.powi(k as i32)),
                 pan: side(n.pan + f.echo_pan * k as f32),
                 fine_cents: n.fine_cents + f.echo_cents * k as f32,
+                mod_x: (n.mod_x + f.echo_mod_x * k as f32).clamp(-1.0, 1.0),
+                mod_y: (n.mod_y + f.echo_mod_y * k as f32).clamp(-1.0, 1.0),
                 porta: n.porta && k == 0,
                 ..n.clone()
             };
@@ -5717,6 +5724,7 @@ mod tests {
     fn a_slicer_key_plays_its_slice_and_no_more() {
         let mut s = tone_song(2.0);
         s.channels[0].kind = ChannelKind::Plugin;
+        s.channels[0].bake();
         let cut = |pos| crate::slicer::Cut { pos, key: -1, reverse: false, name: String::new() };
         s.channels[0].slices = Some(Arc::new(crate::slicer::Slices { beats: 4.0, bpm: 120.0, path: String::new(), cuts: vec![cut(0), cut(24_000), cut(48_000)], base: 60, full: false, rate: 48_000 }));
         s.patterns[0].toggle_step(0, 0);
