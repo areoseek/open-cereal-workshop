@@ -336,6 +336,9 @@ pub(crate) struct App {
     rec_audio: bool,
     /// The recording filter: whether hand-turned controls and played notes are taken down.
     rec_automation: bool,
+    half_speed: bool,
+    /// The record button's other switches, the REC_ bits.
+    rec_opts: u16,
     rec_score: bool,
     /// Where each control being recorded was written last: (pattern, tick), keyed by its address.
     rec_ctl: std::collections::HashMap<(u16, u16), (usize, u32)>,
@@ -493,7 +496,7 @@ impl App {
             typing_keys: true,
             main_snap: 0,
             auto_scroll: true,
-            rec_quantise: false,
+            rec_quantise: true,
             focus: Win::None,
             raise: None,
             layout_gen: 0,
@@ -567,6 +570,8 @@ impl App {
             rec_held: Vec::new(),
             rec_audio: false,
             rec_automation: true,
+            half_speed: false,
+            rec_opts: REC_STARTS | REC_MARKERS | REC_Q_START | REC_Q_END | REC_Q_AUTO,
             rec_score: true,
             rec_ctl: Default::default(),
             audio_rec: None,
@@ -755,6 +760,9 @@ impl App {
         self.handle.transport.set_playing(false);
         self.record_notes(true);
         self.handle.transport.seek(0);
+        if self.rec_opts & REC_DISARM != 0 {
+            self.handle.transport.set_recording(false);
+        }
     }
 
     /// Keep the sound card inputs open exactly while some mixer track listens to one.
@@ -925,8 +933,9 @@ impl App {
             } else if let Some(i) = self.rec_held.iter().position(|h| (h.0, h.1) == (e.chan, e.key)) {
                 let (chan, key, start, vel) = self.rec_held.remove(i);
                 let mut pos = clip(&self.song, start).round().max(0.0);
-                if self.rec_quantise {
-                    let grid = self.pr_snap().max(1) as f64;
+                let raw_pos = pos;
+                let grid = self.pr_snap().max(1) as f64;
+                if self.rec_quantise && self.rec_opts & REC_Q_START != 0 {
                     pos = (pos / grid).round() * grid;
                     if !song_mode && pos >= plen && plen > 0.0 {
                         pos = 0.0;
@@ -936,6 +945,14 @@ impl App {
                 if len < 0.0 && !song_mode {
                     // the loop came round while the key was down
                     len = (plen - start).max(1.0);
+                }
+                if self.rec_quantise && self.rec_opts & REC_Q_END != 0 && self.rec_opts & REC_Q_LEAVE == 0 && len > 0.0 {
+                    // the end lands on a snap line too, never before the first one after the start
+                    let end = (((raw_pos + len) / grid).round() * grid).max(pos + grid);
+                    len = end - pos;
+                } else if self.rec_opts & REC_Q_LEAVE == 0 && len > 0.0 {
+                    // the start moved and the end stays where the key came up
+                    len = (raw_pos + len - pos).max(1.0);
                 }
                 let note = cereal_engine::song::Note { pos: pos as u32, len: len.round().max(1.0) as u32, chan, key, vel, pan: 0.0, fine_cents: 0.0, muted: false, ..Default::default() };
                 if !self.rec_blend {
@@ -3328,27 +3345,47 @@ impl App {
                 let rec = tr.recording();
                 let rec_btn = ui.add_sized([34.0, 24.0], egui::Button::new(RichText::new("REC").strong().color(if rec { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }))).hint("Record what you play into the current pattern (R)");
                 rec_btn.context_menu(|ui| {
-                    ui.label(RichText::new("Recording filter").color(TEXT_DIM).small());
-                    ui.checkbox(&mut self.rec_automation, "Automation").hint("Controls turned while recording are written into the pattern");
-                    ui.checkbox(&mut self.rec_score, "Notes");
-                    ui.checkbox(&mut self.rec_audio, "Audio").hint("Sound from the input device, as an audio clip on the playlist");
-                    ui.separator();
-                    let (mut count, mut wait, mut met) = (tr.countdown(), tr.waiting(), tr.metronome());
-                    if ui.checkbox(&mut count, "Recording countdown   Ctrl+P").changed() {
-                        tr.set_countdown(count);
-                    }
-                    if ui.checkbox(&mut wait, "Wait for input to start playing   Ctrl+I").changed() {
-                        tr.set_waiting(wait);
-                    }
-                    if ui.checkbox(&mut met, "Metronome   Ctrl+M").changed() {
-                        tr.set_metronome(met);
-                    }
-                    ui.checkbox(&mut self.rec_blend, "Blend recorded notes   Ctrl+B");
-                    ui.checkbox(&mut self.rec_loop, "Loop recording");
-                    ui.checkbox(&mut self.rec_quantise, "Snap recorded notes to the grid");
+                    use crate::menus::{col, sect, tick};
+                    ui.horizontal_top(|ui| {
+                        col(ui, 200.0, |ui| {
+                            sect(ui, "Recording filter");
+                            if tick(ui, self.rec_automation, "Automation", "").hint("Controls turned while recording are written into the pattern").clicked() {
+                                self.rec_automation = !self.rec_automation;
+                            }
+                            if tick(ui, self.rec_score, "Notes", "").clicked() {
+                                self.rec_score = !self.rec_score;
+                            }
+                            if tick(ui, self.rec_audio, "Audio", "").hint("Sound from the input device, as an audio clip on the playlist").clicked() {
+                                self.rec_audio = !self.rec_audio;
+                            }
+                            for (bit, label) in [(REC_CLIPS, "Clips")] {
+                                if tick(ui, self.rec_opts & bit != 0, label, "").clicked() {
+                                    self.rec_opts ^= bit;
+                                }
+                            }
+                            sect(ui, "Options");
+                            for (bit, label) in [(REC_STARTS, "Recording starts playback"), (REC_DISARM, "Disarm on stop"), (REC_MARKERS, "Enable recording markers")] {
+                                if tick(ui, self.rec_opts & bit != 0, label, "").clicked() {
+                                    self.rec_opts ^= bit;
+                                }
+                            }
+                        });
+                        col(ui, 200.0, |ui| {
+                            sect(ui, "Quantize");
+                            for (bit, label) in [(REC_Q_START, "Note start time"), (REC_Q_END, "Note end time"), (REC_Q_LEAVE, "Leave note duration"), (REC_Q_STEPS, "Record to step sequencer"), (REC_Q_AUTO, "Automations")] {
+                                if tick(ui, self.rec_opts & bit != 0, label, "").clicked() {
+                                    self.rec_opts ^= bit;
+                                }
+                            }
+                        });
+                    });
                 });
                 if rec_btn.clicked() {
                     tr.set_recording(!rec);
+                    if !rec && self.rec_opts & REC_STARTS != 0 && !tr.playing() && !tr.step_edit() {
+                        // recording starts playback
+                        self.play();
+                    }
                 }
             }
             1 => {
@@ -3361,23 +3398,34 @@ impl App {
                 }
                 let mut set_tempo = None;
                 tempo_box.context_menu(|ui| {
-                    if ui.button("Tap").hint("Click in time, four times or more").clicked() {
-                        self.tap_tempo();
-                    }
-                    ui.separator();
-                    for (label, t) in [("Half", self.song.tempo / 2.0), ("Double", self.song.tempo * 2.0)] {
-                        if ui.button(label).clicked() {
-                            set_tempo = Some(t);
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
-                    for t in [80.0, 90.0, 100.0, 110.0, 120.0, 128.0, 130.0, 140.0, 150.0, 160.0, 174.0] {
-                        if ui.button(format!("{t:.0}")).clicked() {
-                            set_tempo = Some(t);
-                            ui.close_menu();
-                        }
-                    }
+                    use crate::menus::{col, mi, tick};
+                    ui.horizontal_top(|ui| {
+                        col(ui, 190.0, |ui| {
+                            if let Some(a) = widgets::control_items(ui) {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("ctl_ask"), Some((cereal_engine::song::Target::Tempo, a))));
+                                ui.close_menu();
+                            }
+                        });
+                        col(ui, 190.0, |ui| {
+                            if tick(ui, self.show_tapper, "Tempo tapper", "Ctrl+F5").hint("Click in time, four times or more").clicked() {
+                                self.show_tapper = !self.show_tapper;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            for t in [80.0f32, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0] {
+                                if mi(ui, &format!("{t:.0} BPM"), "").clicked() {
+                                    set_tempo = Some(t);
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if tick(ui, self.half_speed, "Half speed", "").hint("The song plays at half its tempo until this is switched off").clicked() {
+                                self.half_speed = !self.half_speed;
+                                set_tempo = Some(if self.half_speed { self.song.tempo / 2.0 } else { self.song.tempo * 2.0 });
+                                ui.close_menu();
+                            }
+                        });
+                    });
                 });
                 if let Some(t) = set_tempo {
                     self.song.tempo = t.clamp(10.0, 522.0);
@@ -3548,8 +3596,8 @@ impl App {
             8 => {
                 ui.label(RichText::new("Snap").color(TEXT_DIM));
                 let r = egui::ComboBox::from_id_salt("main_snap").width(74.0).selected_text(pianoroll::SNAPS[self.main_snap.min(pianoroll::SNAPS.len() - 1)].0).show_ui(ui, |ui| {
-                    for (i, (label, _, _)) in pianoroll::SNAPS.iter().enumerate() {
-                        ui.selectable_value(&mut self.main_snap, i, *label);
+                    for (i, label) in pianoroll::snap_order() {
+                        ui.selectable_value(&mut self.main_snap, i, label);
                     }
                 });
                 r.response.hint("Main snap: windows whose own snap is set to Main follow it");
@@ -3558,6 +3606,16 @@ impl App {
         }
     }
 }
+
+const REC_CLIPS: u16 = 1;
+const REC_STARTS: u16 = 2;
+const REC_DISARM: u16 = 4;
+const REC_MARKERS: u16 = 8;
+const REC_Q_START: u16 = 16;
+const REC_Q_END: u16 = 32;
+const REC_Q_LEAVE: u16 = 64;
+const REC_Q_STEPS: u16 = 128;
+const REC_Q_AUTO: u16 = 256;
 
 impl App {
     /// Project info, the pattern rename box and the about box.
@@ -3835,6 +3893,15 @@ impl eframe::App for App {
                         self.dirty = true;
                         self.status = format!("{} starts from here", self.song.target_name(target));
                     }
+                }
+                widgets::CtlAsk::DelInit => {
+                    let pat = self.handle.transport.pattern();
+                    self.song.ensure_pattern(pat);
+                    let (param, dest) = self.song.event_address(target);
+                    let ev = &mut self.song.patterns[pat].events;
+                    let had = ev.len();
+                    ev.retain(|e| (e.param, e.dest, e.tick) != (param, dest, 0));
+                    self.dirty |= ev.len() != had;
                 }
                 widgets::CtlAsk::Copy => self.value_clip = Some(self.target_travel(target)),
                 widgets::CtlAsk::Paste => {

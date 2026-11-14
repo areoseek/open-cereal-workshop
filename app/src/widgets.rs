@@ -90,6 +90,7 @@ pub enum CtlAsk {
     AutoClip,
     Events,
     Init,
+    DelInit,
     Link,
     Copy,
     Paste,
@@ -98,28 +99,35 @@ pub enum CtlAsk {
 
 /// The lines of a control's menu; the pick, when one was clicked.
 pub fn control_items(ui: &mut Ui) -> Option<CtlAsk> {
+    use crate::menus::{mi, sect};
     let mut ask = None;
-    if ui.button("Edit events").clicked() || ui.button("Edit events in new window").clicked() {
+    ui.set_min_width(170.0);
+    if mi(ui, "Edit events", "").clicked() || mi(ui, "Edit events in new window", "").clicked() || mi(ui, "Edit events in piano roll", "").clicked() {
         ask = Some(CtlAsk::Events);
     }
-    if ui.button("Init song with this position").hint("Write where the control stands now at the start of the pattern").clicked() {
+    if mi(ui, "Init song with this position", "").hint("Write where the control stands now at the start of the pattern").clicked() {
         ask = Some(CtlAsk::Init);
     }
+    if mi(ui, "Delete initial value", "").hint("Take the starting value of this control out of the pattern").clicked() {
+        ask = Some(CtlAsk::DelInit);
+    }
     ui.separator();
-    if ui.button("Create automation clip").clicked() {
+    if mi(ui, "Create automation clip", "").clicked() {
         ask = Some(CtlAsk::AutoClip);
     }
-    if ui.button("Link to controller...").clicked() {
+    ui.add_enabled(false, egui::Button::new("Edit automation clip..."));
+    sect(ui, "Remote control");
+    if mi(ui, "Link to controller...", "").clicked() || mi(ui, "Override global link...", "").clicked() {
         ask = Some(CtlAsk::Link);
     }
-    ui.separator();
-    if ui.button("Copy value").clicked() {
+    sect(ui, "Value");
+    if mi(ui, "Copy value", "").clicked() {
         ask = Some(CtlAsk::Copy);
     }
-    if ui.button("Paste value").clicked() {
+    if mi(ui, "Paste value", "").clicked() {
         ask = Some(CtlAsk::Paste);
     }
-    if ui.button("Type in value...").clicked() {
+    if mi(ui, "Type in value...", "").clicked() || mi(ui, "Set...", "").clicked() {
         ask = Some(CtlAsk::TypeIn);
     }
     ask

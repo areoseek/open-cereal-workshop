@@ -121,7 +121,7 @@ pub fn snap_label(i: usize) -> &'static str {
     if i == SNAP_MAIN { "Main" } else { SNAPS[i.min(SNAPS.len() - 1)].0 }
 }
 
-pub const SNAPS: [(&str, u8, u32); 13] = [
+pub const SNAPS: [(&str, u8, u32); 14] = [
     ("Line", 0, 1),
     ("(none)", 1, 1),
     ("1/6 step", 2, 6),
@@ -135,7 +135,13 @@ pub const SNAPS: [(&str, u8, u32); 13] = [
     ("1/2 beat", 3, 2),
     ("Beat", 3, 1),
     ("Bar", 4, 1),
+    ("Cell", 0, 1),
 ];
+
+/// The snap choices in the order the lists show them, each with its place in `SNAPS`.
+pub fn snap_order() -> impl Iterator<Item = (usize, &'static str)> {
+    [0usize, 13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].into_iter().map(|i| (i, SNAPS[i].0))
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -1481,8 +1487,8 @@ impl App {
                 self.piano.snap = SNAP_MAIN;
                 ui.close_menu();
             }
-            for (i, (label, _, _)) in SNAPS.iter().enumerate() {
-                if ui.radio(self.piano.snap == i, *label).clicked() {
+            for (i, label) in snap_order() {
+                if ui.radio(self.piano.snap == i, label).clicked() {
                     self.piano.snap = i;
                     ui.close_menu();
                 }
@@ -1595,8 +1601,8 @@ impl App {
             ui.separator();
             egui::ComboBox::from_id_salt("pr_snap").width(74.0).selected_text(snap_label(self.piano.snap)).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.piano.snap, SNAP_MAIN, "Main");
-                for (i, (label, _, _)) in SNAPS.iter().enumerate() {
-                    ui.selectable_value(&mut self.piano.snap, i, *label);
+                for (i, label) in snap_order() {
+                    ui.selectable_value(&mut self.piano.snap, i, label);
                 }
             })
             .response

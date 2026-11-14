@@ -1889,9 +1889,6 @@ impl App {
         }
     }
 
-    pub(crate) fn pl_snap_names() -> Vec<&'static str> {
-        SNAPS.iter().map(|s| s.0).collect()
-    }
 
     /// Every selected clip gets a copy of its pattern or channel for itself.
     fn pl_make_unique(&mut self) {
@@ -2462,8 +2459,8 @@ impl App {
             ui.separator();
             egui::ComboBox::from_id_salt("pl_snap").width(74.0).selected_text(snap_label(self.playlist.snap)).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.playlist.snap, SNAP_MAIN, "Main");
-                for (i, (label, _, _)) in SNAPS.iter().enumerate() {
-                    ui.selectable_value(&mut self.playlist.snap, i, *label);
+                for (i, label) in crate::pianoroll::snap_order() {
+                    ui.selectable_value(&mut self.playlist.snap, i, label);
                 }
             })
             .response

@@ -1428,7 +1428,7 @@ impl App {
                 self.playlist.snap = crate::pianoroll::SNAP_MAIN;
                 ui.close_menu();
             }
-            for (i, name) in Self::pl_snap_names().into_iter().enumerate() {
+            for (i, name) in crate::pianoroll::snap_order() {
                 if ui.radio(self.playlist.snap == i, name).clicked() {
                     self.playlist.snap = i;
                     ui.close_menu();
