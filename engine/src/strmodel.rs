@@ -270,6 +270,9 @@ pub fn tail(p: &[f32]) -> tailfx::Set {
     }
     let sync = SYNC[if p[112].is_finite() { (p[112].round().max(0.0) as usize).min(8) } else { 0 }];
     tailfx::Set {
+        split: false,
+        tone_at: 0,
+        op: None,
         tone: None,
         more: [None; 2],
         rack: None,

@@ -832,11 +832,13 @@ pub struct Band {
 }
 
 impl Band {
+    /// Where the band stands (measured on noise through the reference: about 10 Hz to 16 kHz).
     pub fn hz(&self) -> f32 {
-        20.0 * 1000f32.powf(self.freq.clamp(0.0, 1.0))
+        crate::fm::tone_hz(self.freq)
     }
-    pub fn width(&self) -> f32 {
-        0.25 * (self.q.clamp(0.0, 1.0) * 4.0).exp2()
+    /// How sharp the band is; `band` is 0 for the low shelf, 1 for the peak, 2 for the high shelf.
+    pub fn sharp(&self, band: usize) -> f32 {
+        crate::fm::tone_q(if band == 1 { 1 } else { 0 }, self.q)
     }
 }
 

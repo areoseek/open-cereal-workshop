@@ -1300,6 +1300,13 @@ pub struct Tone {
     pub mini: Option<std::sync::Arc<crate::minis::Patch>>,
 }
 
+impl Tone {
+    /// This instrument sends a share of each note to its own effects, apart from the note's plain sound.
+    pub fn sends(&self) -> bool {
+        self.fm.as_ref().is_some_and(|p| p.send.iter().any(|&s| s != 0.0))
+    }
+}
+
 /// Running state of one sounding note.
 #[derive(Debug, Clone, Default)]
 pub struct ToneState {
@@ -1371,13 +1378,27 @@ impl ToneState {
         (self.seed as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
+    /// The tempo the note starts at, for instruments with lines drawn in beats.
+    pub fn set_bpm(&mut self, bpm: f32) {
+        if let Some(v) = &mut self.fm {
+            v.beat = (bpm / 60.0).clamp(0.1, 20.0);
+        }
+    }
+
     /// Tell the voice about its note; the additive instrument needs this before the first frame.
     pub fn note(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, dphase: f32) {
+        self.note_at(tone, sr, key, vel, [vel, 0.5, 0.5], dphase)
+    }
+
+    /// The same, with the note's place on the velocity, X and Y axes of the operator synth's maps given apart from
+    /// its loudness (measured: the first is the velocity over 128, so a default note sits at 0.78; the other two
+    /// sit in the middle whatever the instrument's own settings say, so only the note can move them).
+    pub fn note_at(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, axis: [f32; 3], dphase: f32) {
         if let Some(p) = &tone.add {
             self.add = Some(Box::new(crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed)));
         }
         if let Some(p) = &tone.fm {
-            self.fm = Some(Box::new(crate::fm::Voice::start(p, sr, key, vel, dphase, self.seed)));
+            self.fm = Some(Box::new(crate::fm::Voice::start(p, sr, key, axis, dphase, self.seed)));
         }
         if let Some(p) = &tone.mini {
             self.mini = Some(crate::minis::Voice::start(p, sr, key, vel, dphase, self.seed));
@@ -1395,10 +1416,16 @@ impl ToneState {
         match (&tone.fm, &mut self.fm) {
             (Some(p), Some(v)) => {
                 v.release();
-                p.tail_s(v.seconds())
+                p.tail_s(v.seconds(), v.beat)
             }
             _ => 0.0,
         }
+    }
+
+    /// What the last frame sent to the instrument's effects, for the instruments that keep that apart.
+    #[inline]
+    pub fn sent(&self) -> [f32; 2] {
+        self.fm.as_ref().map_or([0.0; 2], |v| v.sent())
     }
 
     /// One frame. `dphase` is the note's cycles per frame.

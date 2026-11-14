@@ -1915,6 +1915,7 @@ pub fn note_unit_ui(ui: &mut Ui, ident: &str, block: &mut Vec<u8>) -> bool {
                             if ui.checkbox(&mut on, "Line").changed() {
                                 put(&mut d, e - 16, (on as i32).to_le_bytes());
                             }
+                            env.live = on;
                             let done = ui.push_id(("mover-env", art, part), |ui| crate::curve::curve_editor(ui, &mut env, crate::curve::Line::Envelope, 90.0)).inner;
                             if done {
                                 Curve::replace_at(&mut d, 16, &env);
@@ -1929,6 +1930,7 @@ pub fn note_unit_ui(ui: &mut Ui, ident: &str, block: &mut Vec<u8>) -> bool {
                                     if ui.checkbox(&mut on, "Slow wave").changed() {
                                         put(&mut d, l - 16, (on as i32).to_le_bytes());
                                     }
+                                    lfo.live = on;
                                     let mut sp = int(&d, l).clamp(0, 65536);
                                     let hz = |v: i32| 0.05 * (v as f32 / 65536.0 * 11.0).exp2();
                                     if ui.add(egui::Slider::new(&mut sp, 0..=65536).custom_formatter(move |v, _| format!("{:.2} Hz", hz(v as i32)))).changed() {

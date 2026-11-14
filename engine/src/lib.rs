@@ -28,6 +28,7 @@ pub mod psola;
 pub mod additive;
 pub mod analog;
 pub mod duo;
+pub mod opfx;
 pub mod tailfx;
 pub mod strmodel;
 pub mod hybrid;

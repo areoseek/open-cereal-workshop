@@ -582,6 +582,7 @@ mod tests {
                     let on = int(&d, e - 16).unwrap() != 0;
                     set_int(&mut d, e - 16, !on as i32);
                     let mut c2 = c.clone();
+                    c2.live = !on;
                     c2.pts.push(crate::fm::Pt { x: 0.25, y: 0.75, ..Default::default() });
                     assert!(crate::fm::Curve::replace_at(&mut d, 16, &c2));
                     let back = Motion::decode(&Motion::splice(&block, r.clone(), &d)).expect("still a mover");

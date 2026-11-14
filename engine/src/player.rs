@@ -1177,9 +1177,12 @@ impl Voice {
         x
     }
 
-    fn render(&mut self, bus: &mut [[f32; 2]]) -> bool {
+    /// Add this note's next frames to `bus`. What it sends to its instrument's effects goes to `side` when
+    /// that is kept apart, and into `bus` with the rest when it is not.
+    fn render(&mut self, bus: &mut [[f32; 2]], mut side: Option<&mut [[f32; 2]]>) -> bool {
         let mut wrote = false;
-        for out in bus.iter_mut() {
+        let sends = self.tone.as_ref().is_some_and(|t| t.sends());
+        for (at, out) in bus.iter_mut().enumerate() {
             if self.delay > 0 {
                 self.delay -= 1;
                 continue;
@@ -1282,9 +1285,19 @@ impl Voice {
             let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
-            let side = self.mo[2] + self.sc[2];
-            out[0] += s[0] * self.gl * g * (1.0 - side).clamp(0.0, 1.0);
-            out[1] += s[1] * self.gr * g * (1.0 + side).clamp(0.0, 1.0);
+            let lean = self.mo[2] + self.sc[2];
+            let (gl, gr) = (self.gl * g * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + lean).clamp(0.0, 1.0));
+            out[0] += s[0] * gl;
+            out[1] += s[1] * gr;
+            if sends {
+                let x = self.tstate.sent();
+                let to = match side.as_mut() {
+                    Some(b) => &mut b[at],
+                    None => out,
+                };
+                to[0] += x[0] * gl;
+                to[1] += x[1] * gr;
+            }
             self.t += 1;
             if self.releasing {
                 self.rel_t += 1;
@@ -2575,7 +2588,8 @@ impl Player {
                         g.tone()
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
-                    v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
+                    v.tstate.note_at(&tone, sr, key, note_gain.min(1.0), [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
+                    v.tstate.set_bpm(self.ov.tempo.unwrap_or(song.tempo));
                     // the three-oscillator instrument starts at full level on its first sample (measured)
                     let osc3 = g.kind == crate::synth::Kind::Osc3;
                     v.attack = if osc3 { 1.0 } else { ms(1.5) };
@@ -3494,7 +3508,7 @@ fn eq_coeffs(band: usize, b: &crate::song::Band, rate: f32) -> [f32; 5] {
     let a = 10f32.powf(b.gain_db / 40.0);
     let w = 2.0 * std::f32::consts::PI * (b.hz() / rate).min(0.49);
     let (sn, cs) = w.sin_cos();
-    let alpha = sn / (2.0 * b.width());
+    let alpha = sn / (2.0 * b.sharp(band));
     let (b0, b1, b2, a0, a1, a2);
     match band {
         1 => {
@@ -3533,6 +3547,8 @@ struct ChanFx {
     /// The effects the channel's own instrument carries after its voices.
     tail: Option<(crate::tailfx::Set, crate::tailfx::State)>,
     buf: Vec<[f32; 2]>,
+    /// What the notes send to the instrument's effects, when it keeps that apart.
+    send: Vec<[f32; 2]>,
     dirty: bool,
     ring: usize,
 }
@@ -3564,11 +3580,11 @@ impl Player {
                 (None, None, None) => {}
                 (None, None, Some(_)) => *slot = None,
                 (None, Some(t), Some(ChanFx { tail: Some(have), .. })) => have.0 = t,
-                (None, Some(t), _) => *slot = Some(ChanFx { unit: None, tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+                (None, Some(t), _) => *slot = Some(ChanFx { unit: None, tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], send: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
                 (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
                 // only settings were turned: the running units take them and keep their sound
                 (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| a.same_wiring(b)) => u.fx.sub = b.fx.sub.clone(),
-                (Some(b), _, _) => *slot = Some(ChanFx { unit: Some(fx::Unit::new(b.fx.clone(), self.sr)), tail: None, buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+                (Some(b), _, _) => *slot = Some(ChanFx { unit: Some(fx::Unit::new(b.fx.clone(), self.sr)), tail: None, buf: vec![[0.0; 2]; BLOCK], send: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
             }
         }
         // instrument settings a clip, an event or a cable has just moved reach the notes already sounding
@@ -3622,15 +3638,17 @@ impl Player {
                 }
             }
             if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {
+                let apart = v.feed == 0 && cf.tail.as_ref().is_some_and(|t| t.0.split);
+                let side = if apart { Some(&mut cf.send[..n]) } else { None };
                 let into = if v.feed == 0 { Some(&mut cf.buf[..n]) } else { cf.unit.as_mut().and_then(|u| u.bay_feed(v.feed as usize - 1, n)) };
-                if into.is_some_and(|b| v.render(b)) {
+                if into.is_some_and(|b| v.render(b, side)) {
                     cf.dirty = true;
                 }
                 spent(t0, &self.transport, v.chan);
                 continue;
             }
             let i = if v.insert < ni { v.insert } else { 0 };
-            if v.render(&mut self.buses[i][..n]) {
+            if v.render(&mut self.buses[i][..n], None) {
                 self.dirty[i] = true;
             }
             spent(t0, &self.transport, v.chan);
@@ -3676,7 +3694,11 @@ impl Player {
                 }
             }
             if let Some((set, st)) = &mut cf.tail {
-                st.process(set, &mut cf.buf[..n], cx.step, at_step);
+                if set.split {
+                    st.split(set, &mut cf.buf[..n], &mut cf.send[..n], cx.step, at_step);
+                } else {
+                    st.process(set, &mut cf.buf[..n], cx.step, at_step);
+                }
                 ring = set.tail(cx.sr, cx.step);
             }
             cf.ring = if cf.dirty { ring } else { cf.ring.saturating_sub(n) };

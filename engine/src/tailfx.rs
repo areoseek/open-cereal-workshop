@@ -119,26 +119,24 @@ pub struct Band {
     pub kind: u8,
     pub hz: f32,
     pub db: f32,
-    /// Width in octaves (peaks only).
-    pub octaves: f32,
+    /// Sharpness: a peak's centre over its width, a shelf's steepness (0.707 is the steepest without a bump).
+    pub q: f32,
 }
 
 impl Band {
     /// The filter as (b0, b1, b2, a1, a2), after the well-known cookbook formulas.
     fn coefs(&self, sr: f32) -> [f32; 5] {
         let a = 10f32.powf(self.db / 40.0);
-        let w = TAU * self.hz.clamp(20.0, sr * 0.45) / sr;
+        let w = TAU * self.hz.clamp(5.0, sr * 0.45) / sr;
         let (sn, cs) = w.sin_cos();
+        let alpha = sn / (2.0 * self.q.clamp(0.05, 200.0));
         let (b, a0, a1, a2);
         match self.kind {
             1 => {
-                let alpha = sn * (std::f32::consts::LN_2 / 2.0 * self.octaves.clamp(0.1, 6.0) * w / sn).sinh();
                 b = [1.0 + alpha * a, -2.0 * cs, 1.0 - alpha * a];
                 (a0, a1, a2) = (1.0 + alpha / a, -2.0 * cs, 1.0 - alpha / a);
             }
             k => {
-                // a shelf of the gentlest slope without a bump
-                let alpha = sn / 2.0 * std::f32::consts::SQRT_2;
                 let r = 2.0 * a.sqrt() * alpha;
                 // the high shelf is the low one mirrored
                 let s = if k == 0 { 1.0 } else { -1.0 };
@@ -162,16 +160,25 @@ pub struct Set {
     pub gate: Option<Gate>,
     pub body: Option<Body>,
     pub reverb: Option<Reverb>,
+    /// The instrument hands over what it sends to the effects apart from the rest of its sound.
+    pub split: bool,
+    /// With `split`: the equaliser stands on everything (0 or 1), on the plain part (2) or on the sent part (3).
+    pub tone_at: u8,
+    /// The effects section of the operator synth, which stands in for everything above but the equaliser.
+    pub op: Option<crate::opfx::Set>,
 }
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.split || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
     pub fn tail(&self, sr: f32, step: f32) -> usize {
         let mut n = 0.0;
+        if let Some(o) = &self.op {
+            return o.tail(sr, step);
+        }
         for d in self.delay.iter().chain(self.more.iter().flatten()) {
             let time = if d.free > 0.0 { d.free * sr } else { d.left.max(d.right) * step };
             let repeats = if d.fb > 0.001 { (0.001f32.ln() / d.fb.ln()).ceil().min(60.0) } else { 1.0 };
@@ -211,6 +218,7 @@ pub struct State {
     tone: [[[f32; 2]; 2]; 3],
     more: [Side; 2],
     dry: Vec<[f32; 2]>,
+    op: Option<Box<crate::opfx::State>>,
 }
 
 /// What one of the further echoes remembers.
@@ -227,12 +235,39 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new() }
+        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
     /// sixteenth notes while it plays, so the gate keeps its place in the bar.
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        self.tone(set, buf);
+        self.rest(set, buf, step, song);
+    }
+
+    /// For an instrument that sends only a share of its sound to the effects: `sent` goes through them and
+    /// joins `plain`, and the equaliser works on whichever part it is set to (see `Set::tone_at`).
+    pub fn split(&mut self, set: &Set, plain: &mut [[f32; 2]], sent: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        match set.tone_at {
+            2 => self.tone(set, plain),
+            3 => self.tone(set, sent),
+            _ => {}
+        }
+        match &set.op {
+            Some(o) => self.op.get_or_insert_with(|| Box::new(crate::opfx::State::new(self.sr))).process(o, sent, step),
+            None => self.rest(set, sent, step, song),
+        }
+        for (o, f) in plain.iter_mut().zip(sent.iter_mut()) {
+            o[0] += f[0];
+            o[1] += f[1];
+            *f = [0.0; 2];
+        }
+        if set.tone_at < 2 {
+            self.tone(set, plain);
+        }
+    }
+
+    fn tone(&mut self, set: &Set, buf: &mut [[f32; 2]]) {
         let sr = self.sr;
         if let Some(bands) = &set.tone {
             for (band, z) in bands.iter().zip(self.tone.iter_mut()) {
@@ -251,6 +286,10 @@ impl State {
                 }
             }
         }
+    }
+
+    fn rest(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        let sr = self.sr;
         if let Some(r) = &set.rack {
             self.rack_first(r, buf);
         }
@@ -672,7 +711,7 @@ mod tone_tests {
 
     #[test]
     fn the_three_bands_lift_and_cut_where_they_stand() {
-        let band = |kind, hz, db| Band { kind, hz, db, octaves: 1.0 };
+        let band = |kind: u8, hz, db| Band { kind, hz, db, q: if kind == 1 { std::f32::consts::SQRT_2 } else { std::f32::consts::FRAC_1_SQRT_2 } };
         let low = Set { tone: Some([band(0, 200.0, -12.0), band(1, 1000.0, 0.0), band(2, 5000.0, 0.0)]), ..Default::default() };
         assert!((level(&low, 40.0) + 12.0).abs() < 1.0 && level(&low, 4000.0).abs() < 0.5);
         let mid = Set { tone: Some([band(0, 200.0, 0.0), band(1, 1000.0, 9.0), band(2, 5000.0, 0.0)]), ..Default::default() };

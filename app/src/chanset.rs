@@ -2826,7 +2826,7 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.horizontal(|ui| {
                 let mut on = c.on();
                 if ui.checkbox(&mut on, "On").changed() {
-                    c.flags ^= 1;
+                    c.live = on;
                     touched = true;
                 }
                 if which == 0 {

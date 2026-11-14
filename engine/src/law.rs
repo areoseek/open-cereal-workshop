@@ -15,10 +15,10 @@ pub fn fader_gain(v: f32) -> f32 {
     v.clamp(0.0, 1.25).powf(2.9)
 }
 
-/// Note velocity: `v` is 0..=1.28 where 1.0 is the default velocity of 100.
+/// Note velocity: `v` is 0..=1.28 where 1.0 is the default velocity of 100. Measured on an instrument channel at
+/// velocities 25, 50, 100 and 128 (0.082, 0.232, 1 and 2.05 times): the channel volume curve again.
 pub fn velocity_gain(v: f32) -> f32 {
-    let v = v.clamp(0.0, 1.28);
-    v * v
+    (11f32.powf(v.clamp(0.0, 1.28)) - 1.0) / 10.0
 }
 
 /// Sampler note level for a velocity (`v` as in [`velocity_gain`]): measured against the reference at thirteen
