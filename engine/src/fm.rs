@@ -1736,6 +1736,13 @@ impl Voice {
                         };
                         let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -kk, -1.0]));
+                        // the two widest slopes move their later stages up, like the low-pass family
+                        let far: [f32; 2] = if f.slope == 4 { [0.43, 0.43] } else { [0.71, 0.49] };
+                        if f.slope >= 4 {
+                            for st in 1..n {
+                                plan[st] = stage(g_at(band_hz(1.0 - far[st - 1] * (1.0 - c))), kk, [1.0, -kk, -1.0]);
+                            }
+                        }
                     }
                     8..=10 => {
                         // shelves and the peak are one stage whatever the slope says
@@ -1761,7 +1768,7 @@ impl Voice {
                         // (corner fitted to where the peaks of a ten-stage row sit at four settings of the knob;
                         // the row's coefficient comes straight from the corner, with no bending for the sample rate)
                         s.fg[k] = PI * (93.9 * 150f32.powf(c) - 86.4).clamp(1.0, sr * 0.45) / sr;
-                        s.fk[k] = 0.98 * r.sqrt();
+                        s.fk[k] = 0.916 * r.powf(0.40);
                     }
                     11 => {
                         // the drive kind is a ladder of four plain stages per slope step, with the resonance
@@ -1791,12 +1798,11 @@ impl Voice {
                         // the low-pass family: one stage rings, the rest stay just short of ringing; the two
                         // widest slopes put their other stages part of the way up to the top and ring there
                         let far: [f32; 3] = match (f.slope, kind) {
-                            (4, 3) => [0.0, 0.05, 0.0],
-                            (5, 3) => [0.0, 0.538, 0.163],
                             (4, 0) => [0.0, 0.53, 0.0],
                             (5, 0) => [0.0, 0.774, 0.592],
-                            (4, _) => [0.0, 0.41, 0.0],
-                            _ => [0.0, 0.716, 0.492],
+                            // (these lean a little on where the corner is)
+                            (4, _) => [0.0, 0.521 - 0.1 * (c - 0.375), 0.0],
+                            _ => [0.0, 0.769 - 0.106 * (c - 0.375), 0.582 - 0.18 * (c - 0.375)],
                         };
                         let spread = f.slope >= 4;
                         let ringer = if spread { n - 1 } else { 0 };
