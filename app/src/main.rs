@@ -3787,7 +3787,7 @@ impl App {
             8 => {
                 ui.label(RichText::new("Snap").color(TEXT_DIM));
                 let r = egui::ComboBox::from_id_salt("main_snap").width(74.0).selected_text(pianoroll::SNAPS[self.main_snap.min(pianoroll::SNAPS.len() - 1)].0).show_ui(ui, |ui| {
-                    for (i, label) in pianoroll::snap_order() {
+                    for (i, label) in pianoroll::snap_order().filter(|(i, _)| *i < 14) {
                         ui.selectable_value(&mut self.main_snap, i, label);
                     }
                 });
