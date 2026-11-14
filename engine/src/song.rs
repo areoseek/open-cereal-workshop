@@ -202,7 +202,49 @@ pub struct Sampler {
     /// then pan, mod x and mod y, -1..=1.
     pub track_vel: [f32; 4],
     pub track_key: [f32; 4],
+    /// Take the constant offset out of the sample, and pan it from the left to the right along its length.
+    pub remove_dc: bool,
+    pub fade_stereo: bool,
+    /// Share of the sample cut from its start, and share of the rest that is kept, 0..=1.
+    pub smp_start: f32,
+    pub smp_len: f32,
+    /// The end is blended into the start over this share of half the sample, 0..=1.
+    pub crossfade: f32,
+    /// Quiet ends are cut off below this level, 0..=1 (1 = 256 steps of a 16 bit sample).
+    pub trim: f32,
+    /// Share of the sample skipped when a note starts, 0..=1.
+    pub start_offset: f32,
+    /// How note starts and ends are smoothed, see [`DECLICK`].
+    pub declick: u8,
+    /// Semitones the pitch knob and the pitch wheel reach each way.
+    pub bend_range: u8,
+    /// The way of stretching as the file numbers it, see [`STRETCH_MODES`]; `keep_pitch` is what is heard.
+    pub stretch_mode: i8,
+    /// How the sample is held: streamed from disk, resampled to the project rate when loaded, and whether
+    /// the regions and slice markers stored in it are read.
+    pub keep_on_disk: bool,
+    pub resample: bool,
+    pub load_regions: bool,
+    pub load_slices: bool,
 }
+
+/// The ways of smoothing note starts and ends, in file order.
+pub const DECLICK: [&str; 6] = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
+
+/// The ways of stretching and the number each has in the file, in the order they are listed.
+pub const STRETCH_MODES: [(&str, i8); 11] = [
+    ("Resample", 0),
+    ("E3 generic", 1),
+    ("E3 mono", 2),
+    ("Stretch", -1),
+    ("Slice stretch", 3),
+    ("Slice map", 4),
+    ("Auto", 5),
+    ("E2 generic", 6),
+    ("E2 transient", 7),
+    ("E2 mono", 8),
+    ("E2 speech", 9),
+];
 
 /// The gate knob at its right end: notes keep their length.
 pub const GATE_OFF: f32 = 1.99;
@@ -269,6 +311,20 @@ impl Default for Sampler {
             stretch_cents: 0.0,
             stretch_mul: 1.0,
             keep_pitch: false,
+            remove_dc: false,
+            fade_stereo: false,
+            smp_start: 0.0,
+            smp_len: 1.0,
+            crossfade: 0.0,
+            trim: 0.0,
+            start_offset: 0.0,
+            declick: 0,
+            bend_range: 2,
+            stretch_mode: 0,
+            keep_on_disk: false,
+            resample: true,
+            load_regions: true,
+            load_slices: false,
             gain: 1.0,
             arp_dir: 0,
             arp_range: 1,
@@ -331,6 +387,20 @@ impl Sampler {
             stretch_cents: c.stretch.1 as f32,
             stretch_mul: (c.stretch.2 as f32 / 10000.0).exp2(),
             keep_pitch: c.stretch.3 != 0,
+            remove_dc: c.remove_dc,
+            fade_stereo: c.fx_flags & 1 != 0,
+            smp_start: c.smp_start as f32,
+            smp_len: c.smp_len as f32,
+            crossfade: c.crossfade as f32 / 1024.0,
+            trim: c.trim as f32 / 256.0,
+            start_offset: c.start_offset as f32,
+            declick: c.declick.min(5),
+            bend_range: c.bend_range.clamp(0, 48) as u8,
+            stretch_mode: c.stretch.3.clamp(-1, 9) as i8,
+            keep_on_disk: c.sample_flags & 256 != 0,
+            resample: c.sample_flags & 1 != 0,
+            load_regions: c.sample_flags & 2 != 0,
+            load_slices: c.sample_flags & 4 != 0,
             gain: (c.adjust[1] as f32 / 12800.0).clamp(0.0, 4.0),
             arp_dir: c.arp[0].clamp(0, 5) as u8,
             arp_range: c.arp[1].clamp(1, 10) as u8,
@@ -353,7 +423,27 @@ impl Sampler {
     }
 
     fn treats_sample(&self) -> bool {
-        self.reverse || self.swap_stereo || self.normalize || self.invert || self.fade_in > 0.0 || self.fade_out > 0.0
+        self.reverse
+            || self.swap_stereo
+            || self.normalize
+            || self.invert
+            || self.fade_in > 0.0
+            || self.fade_out > 0.0
+            || self.remove_dc
+            || self.fade_stereo
+            || self.smp_start > 0.0
+            || self.smp_len < 1.0
+            || self.crossfade > 0.0
+            || self.trim > 0.0
+    }
+
+    /// The stretch mode number to store: the one chosen, unless what is heard was switched apart from it.
+    pub fn mode_number(&self) -> i8 {
+        match (self.keep_pitch, self.stretch_mode != 0) {
+            (true, false) => -1,
+            (false, true) => 0,
+            _ => self.stretch_mode,
+        }
     }
 }
 
@@ -399,6 +489,56 @@ impl Chan {
             return;
         }
         let mut frames = raw.frames.clone();
+        let mut loop_pts = raw.loop_pts;
+        // the cut comes first: a share off the start, then a share of what is left
+        if f.smp_start > 0.0 || f.smp_len < 1.0 {
+            let n = frames.len();
+            let a = ((f.smp_start.clamp(0.0, 1.0) as f64 * n as f64).round() as usize).min(n);
+            let keep = ((f.smp_len.clamp(0.0, 1.0) as f64 * (n - a) as f64).round() as usize).min(n - a);
+            frames = frames[a..a + keep].to_vec();
+            // (measured: a cut edge is eased over half a millisecond)
+            let e = ((raw.rate as f32 * 0.0005) as usize).min(keep / 2);
+            for i in 0..e {
+                let g = 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / e as f32).cos();
+                if a > 0 {
+                    frames[i][0] *= g;
+                    frames[i][1] *= g;
+                }
+                if a + keep < n {
+                    frames[keep - 1 - i][0] *= g;
+                    frames[keep - 1 - i][1] *= g;
+                }
+            }
+            loop_pts = loop_pts.and_then(|(s, e)| {
+                let (s, e) = (s.saturating_sub(a as u32).min(keep as u32), e.saturating_sub(a as u32).min(keep as u32));
+                (e > s).then_some((s, e))
+            });
+        }
+        if f.reverse {
+            frames.reverse();
+        }
+        // fades (measured: the knob is a slope over the whole sample, a quarter turn spans all
+        // of it, further turns reach silence sooner and leave the rest silent)
+        if f.fade_in > 0.0 || f.fade_out > 0.0 {
+            let n = frames.len().max(1) as f32;
+            let (ki, ko) = (f.fade_in * 4.0, f.fade_out * 4.0);
+            for (i, s) in frames.iter_mut().enumerate() {
+                let t = i as f32 / n;
+                let g = (1.0 - ki * (1.0 - t)).clamp(0.0, 1.0) * (1.0 - ko * t).clamp(0.0, 1.0);
+                s[0] *= g;
+                s[1] *= g;
+            }
+        }
+        // (measured: the offset is taken off and the level raised after the fades)
+        if f.remove_dc && !frames.is_empty() {
+            let n = frames.len() as f64;
+            let (l, r) = frames.iter().fold((0f64, 0f64), |m, s| (m.0 + s[0] as f64, m.1 + s[1] as f64));
+            let (l, r) = ((l / n) as f32, (r / n) as f32);
+            for s in &mut frames {
+                s[0] -= l;
+                s[1] -= r;
+            }
+        }
         if f.normalize {
             let peak = frames.iter().fold(0f32, |m, s| m.max(s[0].abs()).max(s[1].abs()));
             if peak > 1e-6 {
@@ -409,21 +549,45 @@ impl Chan {
                 }
             }
         }
-        if f.reverse {
-            frames.reverse();
+        // quiet ends go (measured: after levelling and fades): everything before the first and after the last frame at the trim level
+        // (measured: the level is the knob's 0..256 counted in steps of a 16 bit sample)
+        if f.trim > 0.0 {
+            let thr = f.trim * 256.0 / 32768.0;
+            let loud = |s: &[f32; 2]| s[0].abs() >= thr || s[1].abs() >= thr;
+            match (frames.iter().position(loud), frames.iter().rposition(loud)) {
+                (Some(a), Some(b)) => {
+                    frames = frames[a..=b].to_vec();
+                    loop_pts = loop_pts.and_then(|(s, e)| {
+                        let (s, e) = (s.saturating_sub(a as u32).min((b + 1 - a) as u32), e.saturating_sub(a as u32).min((b + 1 - a) as u32));
+                        (e > s).then_some((s, e))
+                    });
+                }
+                _ => {
+                    frames.clear();
+                    loop_pts = None;
+                }
+            }
         }
         let n = frames.len();
-        let fi = (f.fade_in * n as f32) as usize;
-        for (i, s) in frames.iter_mut().take(fi).enumerate() {
-            let g = i as f32 / fi as f32;
-            s[0] *= g;
-            s[1] *= g;
+        // the end is blended into the start so the sample can go round without a step
+        // (measured: at full the second half fades out as the first half fades in over it)
+        if f.crossfade > 0.0 {
+            let x = ((f.crossfade.min(1.0) as f64 * n as f64 / 2.0).round() as usize).min(n / 2);
+            for i in 0..x {
+                let g = i as f32 / x as f32;
+                let from = frames[i];
+                let s = &mut frames[n - x + i];
+                s[0] = s[0] * (1.0 - g) + from[0] * g;
+                s[1] = s[1] * (1.0 - g) + from[1] * g;
+            }
         }
-        let fo = (f.fade_out * n as f32) as usize;
-        for (i, s) in frames.iter_mut().rev().take(fo).enumerate() {
-            let g = i as f32 / fo as f32;
-            s[0] *= g;
-            s[1] *= g;
+        if f.fade_stereo && n > 1 {
+            for (i, s) in frames.iter_mut().enumerate() {
+                // (measured: the two sides keep equal power between them)
+                let g = i as f32 / (n - 1) as f32 * std::f32::consts::FRAC_PI_2;
+                s[0] *= g.cos();
+                s[1] *= g.sin();
+            }
         }
         for s in &mut frames {
             if f.swap_stereo {
@@ -434,7 +598,7 @@ impl Chan {
                 s[1] = -s[1];
             }
         }
-        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo, frames, loop_pts: if f.reverse { None } else { raw.loop_pts } }));
+        self.sample = Some(Arc::new(Sample { name: raw.name.clone(), rate: raw.rate, mono: raw.mono && !f.swap_stereo && !f.fade_stereo, frames, loop_pts: if f.reverse { None } else { loop_pts } }));
     }
 }
 

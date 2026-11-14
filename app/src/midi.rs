@@ -320,9 +320,9 @@ fn run(to: CmdSender, chan: Arc<AtomicUsize>, seen: Arc<AtomicUsize>) -> Result<
                 }
             }
             EventType::Pitchbend => {
-                // two semitones each way, the usual wheel range
+                // the channel's bend range each way
                 if let Some(cc) = ev.get_data::<EvCtrl>() {
-                    to.send(cereal_engine::Cmd::Bend { chan: c, octaves: cc.value as f32 / 8192.0 * 2.0 / 12.0 });
+                    to.send(cereal_engine::Cmd::Wheel { chan: c, share: cc.value as f32 / 8192.0 });
                 }
             }
             EventType::Controller => {
@@ -365,7 +365,7 @@ impl Held {
             0xb0 => heard_control(d1 & 127, d2 & 127),
             0xe0 => {
                 let v = ((d2 as i32 & 127) << 7 | (d1 as i32 & 127)) - 8192;
-                to.send(cereal_engine::Cmd::Bend { chan, octaves: v as f32 / 8192.0 * 2.0 / 12.0 });
+                to.send(cereal_engine::Cmd::Wheel { chan, share: v as f32 / 8192.0 });
             }
             _ => {}
         }

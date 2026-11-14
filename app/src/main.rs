@@ -4515,7 +4515,7 @@ impl eframe::App for App {
         }
         let mut open = self.show_chanset;
         let title = self.song.channels.get(self.sel_chan).map(|c| c.name.clone()).unwrap_or_default();
-        egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - right_col, top]).default_width(420.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
+        egui::Window::new(format!("Channel settings - {title}")).id(egui::Id::new("chanset")).open(&mut open).frame(frame).default_pos([screen.width() - 580.0, top]).default_width(560.0).resizable(false).show(ctx, |ui| self.chanset_ui(ui));
         self.show_chanset = open;
         let mut open = self.show_events;
         let shown = egui::Window::new("Event editor").open(&mut open).frame(frame).default_pos([left + 60.0, top + 80.0]).default_size([760.0, 260.0]).show(ctx, |ui| self.events_ui(ui));

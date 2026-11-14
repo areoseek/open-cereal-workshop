@@ -472,6 +472,21 @@ pub struct FlpChannel {
     /// Stretch: length (384 = one beat, 0 = natural), pitch shift in cents, length multiplier as log2 * 10000, mode
     /// (0 resample, anything else keeps the pitch).
     pub stretch: (f32, i32, i32, i32),
+    /// Take the constant offset out of the sample.
+    pub remove_dc: bool,
+    /// How note starts and ends are smoothed: 0 ends only, 1 transient without overlap, 2 transient,
+    /// 3 generic, 4 smooth, 5 crossfade.
+    pub declick: u8,
+    /// Loop crossfade (0..=1024) and silence trim (0..=256).
+    pub crossfade: u32,
+    pub trim: u32,
+    /// Pitch bend range in semitones.
+    pub bend_range: u32,
+    /// Share of the sample cut from its start and share kept, worked out ahead of time, and the share
+    /// skipped when a note starts.
+    pub smp_start: f64,
+    pub smp_len: f64,
+    pub start_offset: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -990,7 +1005,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, key_range: (0, 256), ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, key_range: (0, 256), bend_range: 2, smp_len: 1.0, ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     in_pattern = false;
@@ -1221,6 +1236,7 @@ impl Flp {
                                 c.root_key = u32at(d, 16);
                             }
                             c.echo_flags = d[10];
+                            c.remove_dc = d[9] != 0;
                             if d.len() >= 66 {
                                 let i = |o: usize| u32at(d, o) as i32;
                                 c.arp = [i(40), i(44), i(48), i(52), i(56), c.arp[5]];
@@ -1238,6 +1254,23 @@ impl Flp {
                             if d.len() >= 84 {
                                 c.normalize = d[80] != 0;
                                 c.invert = d[81] != 0;
+                            }
+                            if d.len() >= 92 {
+                                c.declick = d[83];
+                                c.crossfade = u32at(d, 84).min(1024);
+                                c.trim = u32at(d, 88).min(256);
+                            }
+                            if d.len() >= 116 {
+                                c.bend_range = u32at(d, 112).min(48);
+                            }
+                            if d.len() >= 152 {
+                                let f = |o: usize, or: f64| {
+                                    let v = f64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+                                    if v.is_finite() { v.clamp(0.0, 1.0) } else { or }
+                                };
+                                c.smp_start = f(128, 0.0);
+                                c.smp_len = f(136, 1.0);
+                                c.start_offset = f(144, 0.0);
                             }
                             if d.len() >= 112 {
                                 // the length is a whole number in older files and a float in newer ones

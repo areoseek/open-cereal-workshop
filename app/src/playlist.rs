@@ -1021,7 +1021,7 @@ impl App {
         let v = match t {
             Target::ChanVolume(c) => s.channels.get(c).map(|c| c.volume),
             Target::ChanPan(c) => s.channels.get(c).map(|c| c.pan * 0.5 + 0.5),
-            Target::ChanPitch(c) => s.channels.get(c).map(|c| c.pitch_cents / 400.0 + 0.5),
+            Target::ChanPitch(c) => s.channels.get(c).map(|c| c.pitch_cents / (c.smp.bend_range.max(1) as f32 * 200.0) + 0.5),
             Target::InsertVolume(i) => s.inserts.get(i).map(|i| i.volume / 1.25),
             Target::InsertPan(i) => s.inserts.get(i).map(|i| i.pan * 0.5 + 0.5),
             Target::Tempo => Some((s.tempo - 60.0) / 120.0),

@@ -126,14 +126,14 @@ fn cap_knob_for(ui: &mut Ui, label: &str, v: &mut f32, min: f32, max: f32, defau
     let mut changed = false;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
-        ui.set_width(44.0);
+        ui.set_width(44f32.max(label.len() as f32 * 6.0 + 4.0));
         ui.vertical_centered(|ui| {
             let r = knob(ui, v, min, max, default, 26.0).hint(hint(*v));
             if let Some(t) = target {
                 control_menu(&r, t);
             }
             changed = r.changed();
-            ui.label(RichText::new(label).small().color(TEXT_DIM));
+            ui.add(egui::Label::new(RichText::new(label).small().color(TEXT_DIM)).extend());
         });
     });
     changed
@@ -155,6 +155,90 @@ fn time_knob(ui: &mut Ui, label: &str, v: &mut f32) -> bool {
         *v = 16.0 * x * x * x;
     }
     hit
+}
+
+/// The left half of the sample page: how the sample is held, declicking and playback.
+fn sample_left(ui: &mut Ui, f: &mut cereal_engine::song::Sampler, sampler: bool, changed: &mut bool) {
+    section(ui, "CONTENT");
+    ui.horizontal_wrapped(|ui| {
+        *changed |= ui.checkbox(&mut f.keep_on_disk, "Keep on disk").on_hover_text("Read the sample from disk while it plays instead of holding it in memory").changed();
+        *changed |= ui.checkbox(&mut f.resample, "Resample").on_hover_text("Bring the sample to the project's sample rate when it is loaded").changed();
+        *changed |= ui.checkbox(&mut f.load_regions, "Load regions").on_hover_text("Read the regions stored in the sample").changed();
+        *changed |= ui.checkbox(&mut f.load_slices, "Load slice markers").on_hover_text("Read the slice markers stored in the sample").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Declicking mode");
+        egui::ComboBox::from_id_salt("declick-mode").width(170.0).selected_text(cereal_engine::song::DECLICK[f.declick.min(5) as usize]).show_ui(ui, |ui| {
+            for (k, n) in cereal_engine::song::DECLICK.iter().enumerate() {
+                *changed |= ui.selectable_value(&mut f.declick, k as u8, *n).changed();
+            }
+        });
+    });
+    if sampler {
+        section(ui, "PLAYBACK");
+        ui.horizontal(|ui| {
+            *changed |= cap_knob(ui, "START OFFSET", &mut f.start_offset, 0.0, 1.0, 0.0, |v: f32| format!("Start offset {:.0} %", v * 100.0));
+            ui.vertical(|ui| {
+                *changed |= ui.checkbox(&mut f.use_loop, "Use loop points").on_hover_text("Go round the loop stored in the sample while the note is held").changed();
+                *changed |= ui.checkbox(&mut f.ping_pong, "Ping pong loop").on_hover_text("Play the loop forth and back instead of jumping to its start").changed();
+            });
+        });
+    }
+}
+
+/// The right half of the sample page: time stretching and the treatments worked out ahead of time.
+fn sample_right(ui: &mut Ui, f: &mut cereal_engine::song::Sampler, changed: &mut bool, rebake: &mut bool) {
+    section(ui, "TIME STRETCHING");
+    ui.horizontal(|ui| {
+        *changed |= cap_knob(ui, "PITCH", &mut f.stretch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+        let mut m = f.stretch_mul.max(1e-6).log2();
+        if cap_knob(ui, "MUL", &mut m, -2.0, 2.0, 0.0, |v: f32| format!("x {:.3}", v.exp2())) {
+            f.stretch_mul = m.exp2();
+            *changed = true;
+        }
+        ui.vertical(|ui| {
+            ui.set_width(70.0);
+            *changed |= ui.add(egui::DragValue::new(&mut f.stretch_beats).range(0.0..=1024.0).speed(0.05).custom_formatter(|v, _| if v <= 0.0 { "none".into() } else { format!("{v:.2} beats") })).hint("Length the sample is fitted to").changed();
+            ui.label(RichText::new("TIME").small().color(TEXT_DIM));
+        });
+        ui.vertical(|ui| {
+            let modes = &cereal_engine::song::STRETCH_MODES;
+            let now = f.mode_number();
+            let name = modes.iter().find(|m| m.1 == now).map_or("Stretch", |m| m.0);
+            egui::ComboBox::from_id_salt("stretch-mode").width(110.0).selected_text(name).show_ui(ui, |ui| {
+                for (n, k) in modes {
+                    if ui.selectable_label(now == *k, *n).clicked() && now != *k {
+                        f.stretch_mode = *k;
+                        f.keep_pitch = *k != 0;
+                        *changed = true;
+                    }
+                }
+            });
+            ui.label(RichText::new("MODE").small().color(TEXT_DIM));
+        });
+    });
+    section(ui, "PRECOMPUTED EFFECTS");
+    egui::Grid::new("precomputed").num_columns(2).spacing([14.0, 2.0]).show(ui, |ui| {
+        *rebake |= ui.checkbox(&mut f.remove_dc, "Remove DC offset").changed();
+        *rebake |= ui.checkbox(&mut f.invert, "Reverse polarity").changed();
+        ui.end_row();
+        *rebake |= ui.checkbox(&mut f.normalize, "Normalize").changed();
+        *rebake |= ui.checkbox(&mut f.fade_stereo, "Fade stereo").changed();
+        ui.end_row();
+        *rebake |= ui.checkbox(&mut f.reverse, "Reverse").changed();
+        *rebake |= ui.checkbox(&mut f.swap_stereo, "Swap stereo").changed();
+        ui.end_row();
+    });
+    ui.horizontal(|ui| {
+        *rebake |= cap_knob(ui, "SMP START", &mut f.smp_start, 0.0, 1.0, 0.0, |v: f32| format!("Sample start {:.0} %", v * 100.0));
+        *rebake |= cap_knob(ui, "LENGTH", &mut f.smp_len, 0.0, 1.0, 1.0, |v: f32| format!("Length {:.0} %", v * 100.0));
+        ui.add_space(8.0);
+        *rebake |= cap_knob(ui, "IN", &mut f.fade_in, 0.0, 1.0, 0.0, |v: f32| format!("Fade in {:.0} %", v * 100.0));
+        *rebake |= cap_knob(ui, "OUT", &mut f.fade_out, 0.0, 1.0, 0.0, |v: f32| format!("Fade out {:.0} %", v * 100.0));
+        ui.add_space(8.0);
+        *rebake |= cap_knob(ui, "CROSSFADE", &mut f.crossfade, 0.0, 1.0, 0.0, |v: f32| format!("Crossfade {:.0} %", v * 100.0));
+        *rebake |= cap_knob(ui, "TRIM", &mut f.trim, 0.0, 1.0, 0.0, |v: f32| format!("Trim {:.0} %", v * 100.0));
+    });
 }
 
 fn section(ui: &mut Ui, title: &str) {
@@ -239,7 +323,18 @@ impl App {
             use cereal_engine::song::Target;
             changed |= cap_knob_for(ui, "PAN", &mut c.pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0), Some(Target::ChanPan(ci)));
             changed |= cap_knob_for(ui, "VOL", &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, |v: f32| format!("{:.0} %", v * 128.0), Some(Target::ChanVolume(ci)));
-            changed |= cap_knob_for(ui, "PITCH", &mut c.pitch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v), Some(Target::ChanPitch(ci)));
+            let reach = c.smp.bend_range.max(1) as f32 * 100.0;
+            changed |= cap_knob_for(ui, "PITCH", &mut c.pitch_cents, -reach, reach, 0.0, |v: f32| format!("{:+.0} cents", v), Some(Target::ChanPitch(ci)));
+            ui.vertical(|ui| {
+                ui.set_width(40.0);
+                let mut r = c.smp.bend_range;
+                if ui.add_sized([32.0, 22.0], egui::DragValue::new(&mut r).range(1..=48).speed(0.1)).hint("Pitch knob range in semitones").changed() {
+                    c.smp.bend_range = r;
+                    c.pitch_cents = c.pitch_cents.clamp(-(r as f32) * 100.0, r as f32 * 100.0);
+                    changed = true;
+                }
+                ui.label(RichText::new("RANGE").small().color(TEXT_DIM));
+            });
             ui.vertical(|ui| {
                 ui.set_width(52.0);
                 let mut ins = c.insert;
@@ -566,6 +661,20 @@ impl App {
                         let missing = c.sample.is_none() && !c.sample_path.is_empty();
                         ui.label(RichText::new(if file.is_empty() { "(no sample)".to_string() } else { file }).color(if missing { Color32::from_rgb(255, 120, 110) } else { TEXT })).hint(c.sample_path.clone());
                     });
+                    let sampler = c.kind == ChannelKind::Sampler;
+                    let f = &mut c.smp;
+                    let (mut ch, mut rb) = (false, false);
+                    if ui.available_width() >= 540.0 {
+                        ui.columns(2, |col| {
+                            sample_left(&mut col[0], f, sampler, &mut ch);
+                            sample_right(&mut col[1], f, &mut ch, &mut rb);
+                        });
+                    } else {
+                        sample_left(ui, f, sampler, &mut ch);
+                        sample_right(ui, f, &mut ch, &mut rb);
+                    }
+                    changed |= ch;
+                    rebake |= rb;
                     if let Some(s) = &c.sample {
                         let r = draw_wave(ui, &s.frames, rgb(c.color).lerp_to_gamma(Color32::WHITE, 0.4));
                         ui.interact(r, ui.id().with(("wave menu", ci)), Sense::click()).context_menu(|ui| {
@@ -577,42 +686,6 @@ impl App {
                         let len = s.frames.len() as f32 / s.rate.max(1) as f32;
                         ui.label(RichText::new(format!("{} Hz, {}, {}", s.rate, if s.mono { "mono" } else { "stereo" }, secs(len))).small().color(TEXT_DIM));
                     }
-                    let f = &mut c.smp;
-                    section(ui, "LOOP");
-                    rebake |= ui.checkbox(&mut f.use_loop, "Use loop points").on_hover_text("Go round the loop stored in the sample while the note is held").changed();
-                    rebake |= ui.checkbox(&mut f.ping_pong, "Ping pong loop").on_hover_text("Play the loop forth and back instead of jumping to its start").changed();
-                    section(ui, "PRECOMPUTED EFFECTS");
-                    ui.horizontal_wrapped(|ui| {
-                        rebake |= ui.checkbox(&mut f.normalize, "Normalize").changed();
-                        rebake |= ui.checkbox(&mut f.reverse, "Reverse").changed();
-                        rebake |= ui.checkbox(&mut f.invert, "Reverse polarity").changed();
-                        rebake |= ui.checkbox(&mut f.swap_stereo, "Swap stereo").changed();
-                    });
-                    ui.horizontal(|ui| {
-                        rebake |= cap_knob(ui, "IN", &mut f.fade_in, 0.0, 1.0, 0.0, |v: f32| format!("Fade in {:.0} %", v * 100.0));
-                        rebake |= cap_knob(ui, "OUT", &mut f.fade_out, 0.0, 1.0, 0.0, |v: f32| format!("Fade out {:.0} %", v * 100.0));
-                    });
-                    section(ui, "TIME STRETCHING");
-                    ui.horizontal(|ui| {
-                        changed |= cap_knob(ui, "PITCH", &mut f.stretch_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
-                        let mut m = f.stretch_mul.max(1e-6).log2();
-                        if cap_knob(ui, "MUL", &mut m, -2.0, 2.0, 0.0, |v: f32| format!("x {:.3}", v.exp2())) {
-                            f.stretch_mul = m.exp2();
-                            changed = true;
-                        }
-                        ui.vertical(|ui| {
-                            ui.set_width(70.0);
-                            changed |= ui.add(egui::DragValue::new(&mut f.stretch_beats).range(0.0..=1024.0).speed(0.05).custom_formatter(|v, _| if v <= 0.0 { "none".into() } else { format!("{v:.2} beats") })).hint("Length the sample is fitted to; none keeps its own length").changed();
-                            ui.label(RichText::new("TIME").small().color(TEXT_DIM));
-                        });
-                        ui.vertical(|ui| {
-                            egui::ComboBox::from_id_salt("stretch-mode").width(110.0).selected_text(if f.keep_pitch { "Stretch" } else { "Resample" }).show_ui(ui, |ui| {
-                                changed |= ui.selectable_value(&mut f.keep_pitch, false, "Resample").changed();
-                                changed |= ui.selectable_value(&mut f.keep_pitch, true, "Stretch").changed();
-                            });
-                            ui.label(RichText::new("MODE").small().color(TEXT_DIM));
-                        });
-                    });
                 }
                 if stems {
                     self.ask_stems(ci);

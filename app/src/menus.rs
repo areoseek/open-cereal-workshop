@@ -1151,29 +1151,37 @@ impl App {
                         sect(ui, head);
                         for n in names {
                             if ui.button(*n).hint(if *n == "Resample" { "The audio clips change pitch with their length" } else { "The audio clips keep their pitch when their length is changed" }).clicked() {
-                                pick = Some(*n != "Resample");
+                                pick = Some(match *n {
+                                    "Resample" => 0i8,
+                                    "e3 generic" => 1,
+                                    "e3 mono" => 2,
+                                    "Slice stretch" => 3,
+                                    "Slice map" => 4,
+                                    _ => -1,
+                                });
                             }
                         }
                     }
                 });
                 col(ui, 110.0, |ui| {
                     if ui.button("Auto").hint("The audio clips keep their pitch when their length is changed").clicked() {
-                        pick = Some(true);
+                        pick = Some(5);
                     }
                     sect(ui, "Legacy");
-                    for n in ["e2 generic", "e2 transient", "e2 mono", "e2 speech"] {
+                    for (k, n) in ["e2 generic", "e2 transient", "e2 mono", "e2 speech"].into_iter().enumerate() {
                         if ui.button(n).hint("The audio clips keep their pitch when their length is changed").clicked() {
-                            pick = Some(true);
+                            pick = Some(6 + k as i8);
                         }
                     }
                 });
             });
-            if let Some(keep) = pick {
+            if let Some(mode) = pick {
                 let targets = self.rack_targets();
                 let mut n = 0;
                 for (ci, ch) in self.song.channels.iter_mut().enumerate().filter(|(_, c)| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
-                    if (!selected || targets.contains(&ci)) && ch.smp.keep_pitch != keep {
-                        ch.smp.keep_pitch = keep;
+                    if (!selected || targets.contains(&ci)) && ch.smp.mode_number() != mode {
+                        ch.smp.stretch_mode = mode;
+                        ch.smp.keep_pitch = mode != 0;
                         n += 1;
                     }
                 }

@@ -25,6 +25,8 @@ pub enum Cmd {
     NoteOff { chan: u16, key: u8 },
     /// The pitch wheel: bend everything on a channel by this many octaves.
     Bend { chan: u16, octaves: f32 },
+    /// The pitch wheel as a share of its travel, -1..=1: the channel's own bend range decides how far that is.
+    Wheel { chan: u16, share: f32 },
     /// Audition a sample (browser preview).
     Preview(Arc<Sample>),
     /// Hear a sample from a place along it (0 = the start, 1 = the end).
@@ -817,7 +819,7 @@ impl Overrides {
             }
             Target::ChanPitch(c) => {
                 if let Some(o) = self.pitch.get_mut(c) {
-                    *o = Some((v * 2.0 - 1.0) * 200.0);
+                    *o = Some(v * 2.0 - 1.0);
                     self.any_chan = true;
                 }
             }
@@ -991,6 +993,9 @@ struct Voice {
     attack: f32,
     /// The release falls along half a cosine instead of a straight line.
     ease: bool,
+    /// One more than the channel's way of smoothing ends (0: none of them); the fade then follows that
+    /// way's curve, and a sample that runs out is held at its last frame while it fades.
+    fade: u8,
     /// Its fade out follows the falling curve of a cut slice.
     droop: bool,
     release: f32,
@@ -1221,11 +1226,15 @@ impl Voice {
             }
             let mut s = match &self.sample {
                 Some(smp) => {
-                    if self.pos >= smp.frames.len() as f64 && !(self.ping && self.loop_pts.is_some()) {
+                    let ran_out = self.pos >= smp.frames.len() as f64 && !(self.ping && self.loop_pts.is_some());
+                    if ran_out && (self.fade == 0 || self.venv.on || smp.frames.is_empty()) {
                         self.active = false;
                         break;
                     }
-                    if self.stretch {
+                    if ran_out {
+                        self.releasing = true;
+                        *smp.frames.last().unwrap()
+                    } else if self.stretch {
                         // two overlapping grains read at the note's pitch while the read point moves at `rate`
                         let w = self.hop_t as f32 / self.hop as f32;
                         let wb = 0.5 - 0.5 * (std::f32::consts::PI * w).cos();
@@ -1283,6 +1292,8 @@ impl Voice {
             let level = if self.droop && self.releasing {
                 // falls like a discharge with a time constant of 650 frames, cut off where it would have reached 1%
                 (((self.level - 1.0) * 4.54).exp() - 0.010_67) / 0.989_33
+            } else if self.fade > 0 && self.releasing && !self.kill {
+                declick_curve(self.fade - 1, 1.0 - self.level)
             } else if self.ease && self.releasing {
                 0.5 - 0.5 * (std::f32::consts::PI * self.level).cos()
             } else {
@@ -1314,6 +1325,28 @@ impl Voice {
             self.sample = None;
         }
         wrote
+    }
+}
+
+/// How long an end takes to fade in each way of smoothing, in milliseconds (measured).
+const DECLICK_MS: [f32; 6] = [10.0, 8.43, 20.0, 20.0, 100.0, 200.0];
+
+/// The fade's level `t` (0..1) of the way through, for a way of smoothing ends (measured on a held level).
+fn declick_curve(mode: u8, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match mode {
+        1 => {
+            // slow to leave, quick to land
+            const C: [f32; 33] = [
+                0.9999, 0.9993, 0.9985, 0.9975, 0.9962, 0.9944, 0.9921, 0.9894, 0.9854, 0.9808, 0.9749, 0.9666, 0.9567, 0.9429, 0.9269, 0.9045, 0.8787,
+                0.8466, 0.8030, 0.7541, 0.6898, 0.6204, 0.5338, 0.4461, 0.3542, 0.2552, 0.1725, 0.0988, 0.0507, 0.0195, 0.0062, 0.0012, 0.0,
+            ];
+            let x = t * 32.0;
+            let i = (x as usize).min(31);
+            C[i] + (C[i + 1] - C[i]) * (x - i as f32)
+        }
+        5 => 0.5 + 0.5 * (std::f32::consts::PI * t.powf(1.5)).cos(),
+        _ => 0.5 + 0.5 * (std::f32::consts::PI * t).cos(),
     }
 }
 
@@ -2293,6 +2326,7 @@ impl Player {
                     let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
                     self.start(Voice {
+                        pos: f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64,
                         sample: Some(smp.clone()),
                         loop_pts,
                         ping: f.ping_pong,
@@ -2300,8 +2334,9 @@ impl Player {
                         level: 1.0,
                         attack: 1.0,
                         // (measured: with the envelope off, a note that ends fades over 10 ms along half a cosine)
-                        release: ms(10.0),
+                        release: ms(DECLICK_MS[f.declick.min(5) as usize]),
                         ease: true,
+                        fade: f.declick.min(5) + 1,
                         remaining,
                         venv,
                         penv: f.pitch_env,
@@ -2884,6 +2919,14 @@ impl Player {
                         v.let_go();
                     }
                 }
+                Cmd::Wheel { chan, share } => {
+                    let c = chan as usize;
+                    if self.wheel.len() <= c {
+                        self.wheel.resize(c + 1, 0.0);
+                    }
+                    let range = song.channels.get(c).map_or(2.0, |ch| ch.smp.bend_range as f32);
+                    self.wheel[c] = share.clamp(-1.0, 1.0) * range / 12.0;
+                }
                 Cmd::Bend { chan, octaves } => {
                     let c = chan as usize;
                     if self.wheel.len() <= c {
@@ -3027,10 +3070,12 @@ impl Player {
                 };
                 let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
                 let step = if f.keep_pitch { step } else { rate };
-                let pos = secs * self.sr as f64 * rate;
+                let pos = secs * self.sr as f64 * rate + f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64;
                 let remaining = Some(((end - begin) / tpf) as u64);
-                let rel = 1.0 / (self.sr * 0.005);
-                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: clip_gain, follow: true, ptrack: tag, ..Default::default() });
+                // (measured: a clip's end fades after it, the way the channel smooths ends)
+                let mode = f.declick.min(5);
+                let rel = 1.0 / (self.sr * DECLICK_MS[mode as usize] / 1000.0);
+                self.start(Voice { sample: Some(smp), pos, a_pos: pos, b_pos: pos, step, rate, stretch, hop: (self.sr * 0.03) as u32, level: 1.0, attack: 1.0, release: rel, fade: mode + 1, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, remaining, chan: chi as u16, note_gain: clip_gain, follow: true, ptrack: tag, ..Default::default() });
             }
             ClipSrc::Automation(_) => {}
         }
@@ -3649,8 +3694,10 @@ impl Player {
                         v.gr = g * pr;
                     }
                 }
-                if let Some(Some(cents)) = self.ov.pitch.get(v.chan as usize) {
-                    v.bend = (cents - song.channels[v.chan as usize].pitch_cents) / 1200.0;
+                if let Some(Some(share)) = self.ov.pitch.get(v.chan as usize) {
+                    // the knob's whole travel is the channel's bend range each way
+                    let ch = &song.channels[v.chan as usize];
+                    v.bend = (share * ch.smp.bend_range as f32 * 100.0 - ch.pitch_cents) / 1200.0;
                 }
             }
             if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {

@@ -1061,10 +1061,10 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
     }
     let q = |v: f32, scale: f32| (v * scale).round() as i32;
 
-    let flags = |f: &Sampler| (f.reverse as u16) << 1 | (f.swap_stereo as u16) << 8;
+    let flags = |f: &Sampler| f.fade_stereo as u16 | (f.reverse as u16) << 1 | (f.swap_stereo as u16) << 8;
     if flags(now) != flags(was) {
         let old = (start..end).find(|&i| ev[i].id == id::CHAN_FX_FLAGS).and_then(|i| ev[i].as_u32()).unwrap_or(0) as u16;
-        put(ev, start, &mut end, Event::word(id::CHAN_FX_FLAGS, (old & !0x102) | flags(now)));
+        put(ev, start, &mut end, Event::word(id::CHAN_FX_FLAGS, (old & !0x103) | flags(now)));
     }
     if q(now.fade_in, 1024.0) != q(was.fade_in, 1024.0) {
         put(ev, start, &mut end, Event::word(id::CHAN_FADE_IN, q(now.fade_in, 1024.0) as u16));
@@ -1189,7 +1189,7 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             }
         }
     }
-    let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.keep_pitch);
+    let par = |f: &Sampler| (f.normalize, f.invert, q(f.stretch_beats, 384.0), q(f.stretch_cents, 1.0), q(f.stretch_mul.max(1e-6).log2(), 10000.0), f.mode_number());
     if par(now) != par(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
             if let Value::Data(d) = &mut ev[i].value {
@@ -1210,7 +1210,7 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
                         put_u32(d, 104, a.4 as u32);
                     }
                     if a.5 != b.5 {
-                        put_u32(d, 108, if a.5 { -1i32 as u32 } else { 0 });
+                        put_u32(d, 108, a.5 as i32 as u32);
                     }
                 }
             }
@@ -1225,10 +1225,42 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             }
         }
     }
-    if now.use_loop != was.use_loop {
+    let held = |f: &Sampler| f.resample as u32 | (f.load_regions as u32) << 1 | (f.load_slices as u32) << 2 | (f.use_loop as u32) << 3 | (f.keep_on_disk as u32) << 8;
+    if held(now) != held(was) {
         if let Some(i) = (start..end).find(|&i| ev[i].id == id::SAMPLE_FLAGS) {
             if let Value::Int(v) = &mut ev[i].value {
-                *v = (*v & !8) | if now.use_loop { 8 } else { 0 };
+                let changed = held(now) ^ held(was);
+                *v = (*v & !changed) | (held(now) & changed);
+            }
+        }
+    }
+    let cut = |f: &Sampler| (f.remove_dc, f.declick, q(f.crossfade, 1024.0), q(f.trim, 256.0), f.bend_range, f.smp_start.to_bits(), f.smp_len.to_bits(), f.start_offset.to_bits());
+    if cut(now) != cut(was) {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                let (a, b) = (cut(now), cut(was));
+                if d.len() > 9 {
+                    d[9] = a.0 as u8;
+                }
+                if d.len() >= 92 {
+                    d[83] = a.1;
+                    if a.2 != b.2 {
+                        put_u32(d, 84, a.2 as u32);
+                    }
+                    if a.3 != b.3 {
+                        put_u32(d, 88, a.3 as u32);
+                    }
+                }
+                if d.len() >= 116 && a.4 != b.4 {
+                    put_u32(d, 112, a.4 as u32);
+                }
+                if d.len() >= 152 {
+                    for (o, x, y) in [(128, now.smp_start, was.smp_start), (136, now.smp_len, was.smp_len), (144, now.start_offset, was.start_offset)] {
+                        if x != y {
+                            d[o..o + 8].copy_from_slice(&(x as f64).to_le_bytes());
+                        }
+                    }
+                }
             }
         }
     }
@@ -2638,6 +2670,17 @@ mod tests {
             f.normalize = true;
             f.fade_in = 0.25;
             f.fade_out = 0.5;
+            f.remove_dc = true;
+            f.fade_stereo = true;
+            f.smp_start = 0.25;
+            f.smp_len = 0.5;
+            f.start_offset = 0.125;
+            f.crossfade = 0.5;
+            f.trim = 0.25;
+            f.declick = 3;
+            f.bend_range = 12;
+            f.keep_on_disk = true;
+            f.resample = false;
             f.swing = 0.5;
             f.cut = 3;
             f.cut_by = 3;
@@ -2692,8 +2735,11 @@ mod tests {
         assert!(b.echo_ping && !b.echo_fat);
         assert_eq!((b.add_to_key, b.key_lo, b.key_hi), (true, 48, 72));
         assert_eq!((a.track_vel, a.track_key), (b.track_vel, b.track_key));
+        assert!(b.remove_dc && b.fade_stereo && b.keep_on_disk && !b.resample && b.load_regions);
+        assert_eq!((b.declick, b.bend_range), (3, 12));
         let near = |x: f32, y: f32| (x - y).abs() <= 0.01 * y.abs().max(1.0);
         for (x, y) in [
+            (a.smp_start, b.smp_start), (a.smp_len, b.smp_len), (a.start_offset, b.start_offset), (a.crossfade, b.crossfade), (a.trim, b.trim),
             (a.fade_in, b.fade_in), (a.fade_out, b.fade_out), (a.swing, b.swing), (a.cutoff, b.cutoff), (a.resonance, b.resonance), (a.slide, b.slide),
             (a.echo_feedback, b.echo_feedback), (a.echo_steps, b.echo_steps), (a.echo_cents, b.echo_cents), (a.stretch_beats, b.stretch_beats),
             (a.stretch_cents, b.stretch_cents), (a.vol_env.attack, b.vol_env.attack), (a.vol_env.sustain, b.vol_env.sustain), (a.vol_env.release, b.vol_env.release),
