@@ -1398,14 +1398,14 @@ impl App {
                     ClipSrc::Audio(ch) => {
                         if let Some((chan, smp)) = self.song.channels.get(ch).and_then(|c| c.sample.as_ref().map(|s| (c, s))) {
                             // frames of the recording per tick at the song tempo, stretch and pitch counted in
-                            let fpt = cereal_engine::song::clip_ms_per_tick(chan, self.song.tempo, self.song.ppq) * smp.rate as f32 / 1000.0;
+                            let fpt = cereal_engine::song::clip_ms_per_tick(chan, self.song.tempo, self.song.ppq) / c.fx.speed * smp.rate as f32 / 1000.0;
                             let lead = c.fine * smp.rate as f32 / 1000.0;
                             let cp = gp.with_clip_rect(body.intersect(grid));
                             let x_from = r.left().max(grid.left()) as i32;
                             let x_to = r.right().min(grid.right()) as i32;
                             let mid = body.center().y;
                             let fx = c.fx;
-                            let shaped = opts & plo::FADE_PREVIEW != 0 && fx != cereal_engine::song::ClipFx::default();
+                            let shaped = opts & plo::FADE_PREVIEW != 0 && fx.shaped();
                             let env = |x: f32| {
                                 let ms = (x - r.left()) / px * ms_per_tick;
                                 let whole = c.len as f32 * ms_per_tick;
@@ -1448,7 +1448,7 @@ impl App {
                                 if near {
                                     fade_under = Some((i, body, r.left(), r.right()));
                                 }
-                                if near || fx != cereal_engine::song::ClipFx::default() {
+                                if near || fx.shaped() {
                                     let fill = Color32::from_gray(250);
                                     cp.add(egui::Shape::convex_polygon(vec![hs[0] + Vec2::new(-4.0, -3.0), hs[0] + Vec2::new(4.0, -3.0), hs[0] + Vec2::new(-4.0, 5.0)], fill, Stroke::NONE));
                                     cp.add(egui::Shape::convex_polygon(vec![hs[1] + Vec2::new(-4.0, -3.0), hs[1] + Vec2::new(4.0, -3.0), hs[1] + Vec2::new(4.0, 5.0)], fill, Stroke::NONE));

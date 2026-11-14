@@ -3495,7 +3495,7 @@ impl Player {
                 let delay = (((begin - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                 // how far along the clip we begin; where the clip itself begins in the recording is added below
                 let secs = (begin - pos0) / song.beat_ticks() as f64 * 60.0 / tempo as f64;
-                let lead_ms = offset * crate::song::clip_ms_per_tick(ch, song.tempo, song.ppq) as f64 + fine as f64;
+                let lead_ms = offset * crate::song::clip_ms_per_tick(ch, song.tempo, song.ppq) as f64 / fx.speed as f64 + fine as f64;
                 let f = &ch.smp;
                 // an audio clip at the default channel volume plays the recording as it is
                 let clip_gain = law::adjust_gain(f.gain) * law::clip_gain(1.0);
@@ -3511,6 +3511,8 @@ impl Player {
                 } else {
                     step / f.stretch_mul as f64
                 };
+                // a clip can be slowed on its own, on top of what its channel says
+                let rate = rate / fx.speed as f64;
                 let stretch = f.keep_pitch && (rate / step - 1.0).abs() > 0.002;
                 let step = if f.keep_pitch { step } else { rate };
                 let pos = secs * self.sr as f64 * rate + lead_ms / 1000.0 * smp.rate as f64 + f.start_offset.clamp(0.0, 1.0) as f64 * smp.frames.len() as f64;

@@ -1923,9 +1923,10 @@ impl Song {
             c.len = end.saturating_sub(c.pos).max(1);
             match (c.src, c.offset > 0 || c.fine > 0.0) {
                 (ClipSrc::Audio(ch), true) if per.get(ch).is_some_and(|p| p.0 > 0.0 && p.1 > 0.0) => {
-                    let (was, now) = per[ch];
+                    // a clip slowed on its own covers less of the recording in a tick
+                    let (was, now) = (per[ch].0 / c.fx.speed, per[ch].1 / c.fx.speed);
                     let ms = c.offset as f32 * was + c.fine;
-                    let ticks = (ms / now + 1e-3).floor().clamp(0.0, 4.0e9);
+                    let ticks = (ms / now * (1.0 + 2e-6) + 1e-3).floor().clamp(0.0, 4.0e9);
                     c.offset = ticks as u32;
                     c.fine = (ms - ticks * now).max(0.0);
                 }
@@ -2715,8 +2716,8 @@ impl Song {
                             Some(ChannelKind::AutomationClip) => (ClipSrc::Automation(c), (at * ppq as f32) as u32),
                             // a clip of sound in milliseconds of its recording
                             _ => {
-                                let per = channels.get(c).map_or(60_000.0 / f.tempo.max(1.0) / ppq as f32, |ch| clip_ms_per_tick(ch, f.tempo, ppq));
-                                let ticks = (at / per + 1e-3).floor().clamp(0.0, 4.0e9);
+                                let per = channels.get(c).map_or(60_000.0 / f.tempo.max(1.0) / ppq as f32, |ch| clip_ms_per_tick(ch, f.tempo, ppq)) / it.fx.speed;
+                                let ticks = (at / per * (1.0 + 2e-6) + 1e-3).floor().clamp(0.0, 4.0e9);
                                 fine = (at - ticks * per).max(0.0);
                                 (ClipSrc::Audio(c), ticks as u32)
                             }

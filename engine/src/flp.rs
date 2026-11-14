@@ -629,11 +629,14 @@ pub struct ClipFx {
     pub gain: f32,
     /// Kept as read. Bit 1 is seen on clips whose end is cut without the usual smoothing.
     pub flags: u32,
+    /// How many times slower than its channel plays it this one clip runs (1 = as the channel says). Newer
+    /// files keep it for clips stretched on their own.
+    pub speed: f32,
 }
 
 impl Default for ClipFx {
     fn default() -> Self {
-        Self { fade_in: 0.0, in_tension: 0.0, fade_out: 0.0, out_tension: 0.0, gain: 1.0, flags: 0 }
+        Self { fade_in: 0.0, in_tension: 0.0, fade_out: 0.0, out_tension: 0.0, gain: 1.0, flags: 0, speed: 1.0 }
     }
 }
 
@@ -643,11 +646,15 @@ impl ClipFx {
         if it.len() < 60 {
             return Self::default();
         }
+        let speed = match it.get(64..72) {
+            Some(b) => Some(f64::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite() && *v > 0.0).map_or(1.0, |v| v.clamp(0.01, 100.0) as f32),
+            None => 1.0,
+        };
         let f = |o: usize, d: f32, lo: f32, hi: f32| {
             let v = f32::from_le_bytes(it[o..o + 4].try_into().unwrap());
             if v.is_finite() { v.clamp(lo, hi) } else { d }
         };
-        Self { fade_in: f(36, 0.0, 0.0, 3.6e6), in_tension: f(40, 0.0, -1e6, 1e6), fade_out: f(44, 0.0, 0.0, 3.6e6), out_tension: f(48, 0.0, -1e6, 1e6), gain: f(52, 1.0, 0.0, 64.0), flags: u32at(it, 56) }
+        Self { fade_in: f(36, 0.0, 0.0, 3.6e6), in_tension: f(40, 0.0, -1e6, 1e6), fade_out: f(44, 0.0, 0.0, 3.6e6), out_tension: f(48, 0.0, -1e6, 1e6), gain: f(52, 1.0, 0.0, 64.0), flags: u32at(it, 56), speed }
     }
 
     /// The level of a fade `u` (0 at its silent end, 1 at its full end) of the way through. Measured on a held
@@ -656,6 +663,11 @@ impl ClipFx {
         let b = 0.5 - 0.5 * (std::f32::consts::PI * u.clamp(0.0, 1.0)).cos();
         let k = -tension.signum() * tension.abs().ln_1p();
         if k.abs() < 1e-4 { b } else { ((k * b).exp() - 1.0) / (k.exp() - 1.0) }
+    }
+
+    /// Whether a fade or a level is set.
+    pub fn shaped(&self) -> bool {
+        self.fade_in > 0.0 || self.fade_out > 0.0 || self.gain != 1.0 || self.in_tension != 0.0 || self.out_tension != 0.0
     }
 
     /// Whether the clip's end is cut hard (measured: any fade out, a level other than 1, or flag bit 1).

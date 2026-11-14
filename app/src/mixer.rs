@@ -108,6 +108,7 @@ impl App {
             if insp_left {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 self.inspector(ui, n, side, &font);
+                ui.separator();
             }
             let held = |d: u8| -> Vec<usize> { (0..n).filter(|&i| self.song.inserts[i].dock.min(2) == d).collect() };
             let (left, middle, right) = (held(0), held(1), held(2));
@@ -120,11 +121,21 @@ impl App {
             if !left.is_empty() {
                 ui.separator();
             }
-            let strips_w = (ui.available_width() - if insp_left { 0.0 } else { side } - rw - 20.0).max(120.0);
+            let strips_w = (ui.available_width() - if insp_left { 0.0 } else { side } - rw - 38.0).max(120.0);
             let _ = lw;
             ui.allocate_ui(Vec2::new(strips_w, ui.available_height()), |ui| {
                 // the bar gets room of its own, so it never lies over the foot of the strips
                 ui.spacing_mut().scroll.floating = false;
+                // the wheel rolls the strips sideways
+                let over = ui.max_rect();
+                if ui.rect_contains_pointer(over) {
+                    ui.input_mut(|i| {
+                        if i.smooth_scroll_delta.x == 0.0 && !i.modifiers.any() {
+                            i.smooth_scroll_delta.x = i.smooth_scroll_delta.y;
+                            i.smooth_scroll_delta.y = 0.0;
+                        }
+                    });
+                }
                 egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     ui.horizontal_top(|ui| {
@@ -143,6 +154,8 @@ impl App {
             ui.spacing_mut().item_spacing.x = 8.0;
 
             if !insp_left {
+                // a line of its own, so the last strip in view does not run into the panel
+                ui.separator();
                 self.inspector(ui, n, side, &font);
             }
         });
@@ -425,7 +438,7 @@ impl App {
                 let col = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
                 ui.painter().rect_filled(rect, 2.0, col);
                 ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
-                ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
+                ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, name, rect.width() - 8.0, &font), font.clone(), Color32::from_gray(240));
                 if self.mixer_armed.contains(&i) {
                     ui.painter().circle_filled(rect.right_top() + Vec2::new(-5.0, 5.0), 3.0, Color32::from_rgb(235, 70, 60));
                 }

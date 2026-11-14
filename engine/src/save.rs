@@ -1768,7 +1768,7 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
                 (true, o) => {
                     // beats for an automation clip, milliseconds of the recording for a clip of sound
                     let per = match c.src {
-                        ClipSrc::Audio(ch) => song.channels.get(ch).map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq)),
+                        ClipSrc::Audio(ch) => song.channels.get(ch).map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq)) / c.fx.speed,
                         _ => 1.0 / ppq,
                     };
                     let from = o as f32 * per + c.fine;
@@ -1874,7 +1874,7 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
                 // shows the recording whole (a clip that says nothing plays the whole of it, whatever its length)
                 (ClipSrc::Audio(ch), o) => {
                     let chan = song.channels.get(ch);
-                    let per = chan.map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq));
+                    let per = chan.map_or(60_000.0 / song.tempo.max(1.0) / ppq, |x| crate::song::clip_ms_per_tick(x, song.tempo, song.ppq)) / c.fx.speed;
                     let from = o as f32 * per + c.fine;
                     let to = from + c.len as f32 * per;
                     let whole = chan.and_then(|x| x.sample.as_ref()).map(|s| s.seconds() * 1000.0);
@@ -1890,6 +1890,10 @@ fn patch_playlist(ev: &mut Vec<Event>, song: &Song, base: &Song, flp: &Flp) {
                 put_u32(&mut it, o, v.to_bits());
             }
             put_u32(&mut it, 56, c.fx.flags);
+        }
+        // a clip's own speed, where the items have room for it
+        if size >= 72 && (fresh || before.is_some_and(|b| b.fx.speed != c.fx.speed)) {
+            it[64..72].copy_from_slice(&(c.fx.speed as f64).to_le_bytes());
         }
         data.extend(it);
     }
@@ -2728,7 +2732,7 @@ mod tests {
     fn fades_on_a_new_project_survive_a_save() {
         let mut s = Song::new();
         s.channels[3].kind = ChannelKind::AudioClip;
-        let fx = crate::song::ClipFx { fade_in: 120.0, in_tension: -0.5, fade_out: 300.0, out_tension: 2.0, gain: 0.7, flags: 0 };
+        let fx = crate::song::ClipFx { fade_in: 120.0, in_tension: -0.5, fade_out: 300.0, out_tension: 2.0, gain: 0.7, flags: 0, speed: 1.0 };
         s.clips.push(Clip { pos: 96, len: 500, track: 4, src: ClipSrc::Audio(3), offset: 0, muted: false, group: 0, fine: 0.0, fx });
         s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0, fine: 0.0, fx: Default::default() });
         s.prepare();
