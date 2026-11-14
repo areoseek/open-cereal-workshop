@@ -1144,22 +1144,55 @@ impl App {
 
     fn audio_clip_switch(&mut self, ui: &mut Ui, label: &str, selected: bool) {
         ui.menu_button(label, |ui| {
-            for (keep, label) in [(false, "Resample"), (true, "Stretch")] {
-                if ui.button(label).hint(if keep { "The audio clips keep their pitch when their length is changed" } else { "The audio clips change pitch with their speed" }).clicked() {
-                    let targets = self.rack_targets();
-                    let mut n = 0;
-                    for (ci, ch) in self.song.channels.iter_mut().enumerate().filter(|(_, c)| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
-                        if (!selected || targets.contains(&ci)) && ch.smp.keep_pitch != keep {
-                            ch.smp.keep_pitch = keep;
-                            n += 1;
+            let mut pick = None;
+            ui.horizontal_top(|ui| {
+                col(ui, 110.0, |ui| {
+                    for (head, names) in [("Realtime", &["Resample", "Stretch", "Stretch Pro"][..]), ("Elastique", &["e3 generic", "e3 mono"][..]), ("Special", &["Slice stretch", "Slice map"][..])] {
+                        sect(ui, head);
+                        for n in names {
+                            if ui.button(*n).hint(if *n == "Resample" { "The audio clips change pitch with their length" } else { "The audio clips keep their pitch when their length is changed" }).clicked() {
+                                pick = Some(*n != "Resample");
+                            }
                         }
                     }
-                    self.dirty |= n > 0;
-                    self.status = format!("{n} audio clips switched");
-                    ui.close_menu();
+                });
+                col(ui, 110.0, |ui| {
+                    if ui.button("Auto").hint("The audio clips keep their pitch when their length is changed").clicked() {
+                        pick = Some(true);
+                    }
+                    sect(ui, "Legacy");
+                    for n in ["e2 generic", "e2 transient", "e2 mono", "e2 speech"] {
+                        if ui.button(n).hint("The audio clips keep their pitch when their length is changed").clicked() {
+                            pick = Some(true);
+                        }
+                    }
+                });
+            });
+            if let Some(keep) = pick {
+                let targets = self.rack_targets();
+                let mut n = 0;
+                for (ci, ch) in self.song.channels.iter_mut().enumerate().filter(|(_, c)| c.kind == cereal_engine::flp::ChannelKind::AudioClip) {
+                    if (!selected || targets.contains(&ci)) && ch.smp.keep_pitch != keep {
+                        ch.smp.keep_pitch = keep;
+                        n += 1;
+                    }
                 }
+                self.dirty |= n > 0;
+                self.status = format!("{n} audio clips switched");
+                ui.close_menu();
             }
         });
+    }
+
+    fn rack_flip(&mut self, bit: u64) {
+        self.settings.rack_opts ^= bit;
+        let _ = self.settings.save();
+    }
+
+    fn rack_set(&mut self, shift: u32, bits: u32, v: u64) {
+        let mask = ((1u64 << bits) - 1) << shift;
+        self.settings.rack_opts = (self.settings.rack_opts & !mask) | (v << shift);
+        let _ = self.settings.save();
     }
 
     /// The channel rack's own menu.
@@ -1167,12 +1200,16 @@ impl App {
         use egui::{Key, Modifiers};
         const A: Modifiers = Modifiers::ALT;
         const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
-        const CS: Modifiers = Modifiers { alt: false, ctrl: false, shift: true, mac_cmd: false, command: true };
         let targets = self.rack_targets();
         let mut press = None;
         ui.horizontal_top(|ui| {
             col(ui, 300.0, |ui| {
+                use crate::rack::rko;
                 ui.menu_button("Add one", |ui| self.add_columns(ui));
+                if tick(ui, self.settings.rack_opts & rko::LOOP_STARTER != 0, "Loop starter", "").hint("The loop starter button in an empty rack").clicked() {
+                    self.rack_flip(rko::LOOP_STARTER);
+                    ui.close_menu();
+                }
                 if mi(ui, "Purge unused audio clips", "").hint("Audio clip channels that lie nowhere on the playlist are removed").clicked() {
                     let n = self.purge_audio_clips();
                     self.status = format!("{n} unused audio clips removed");
@@ -1228,6 +1265,15 @@ impl App {
                         self.color_channels(true);
                         ui.close_menu();
                     }
+                    ui.menu_button("All...", |ui| {
+                        let mut c = targets.first().map(|&t| self.song.channels[t].color).unwrap_or([120; 3]);
+                        if ui.color_edit_button_srgb(&mut c).hint("One colour for every selected channel").changed() {
+                            for &t in &targets {
+                                self.song.channels[t].color = c;
+                            }
+                            self.dirty = true;
+                        }
+                    });
                 });
                 for (label, on) in [("Mute selected", false), ("Unmute selected", true)] {
                     if mi(ui, label, "").clicked() {
@@ -1255,7 +1301,25 @@ impl App {
                             ui.close_menu();
                         }
                     }
+                    ui.menu_button("Custom...", |ui| {
+                        let mut v = targets.first().map(|&t| self.song.channels[t].smp.swing * 100.0).unwrap_or(100.0);
+                        if ui.add(egui::DragValue::new(&mut v).range(0.0..=100.0).suffix(" %")).changed() {
+                            for &c in &targets {
+                                self.song.channels[c].smp.swing = v / 100.0;
+                            }
+                            self.dirty = true;
+                        }
+                    });
                 });
+                ui.menu_button("Set truncate swing notes for selected", |ui| {
+                    for label in ["Turn on", "Turn off"] {
+                        if ui.button(label).hint("Swung notes cut short so they end where they did before the swing").clicked() {
+                            self.status = "Swung notes keep their full length here".into();
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.add_enabled(false, egui::Button::new("Burn selected loops to pattern"));
                 if mi(ui, "Assign selected to free mixer track(s)", "Ctrl+L").clicked() {
                     press = Some((Modifiers::COMMAND, Key::L));
                     ui.close_menu();
@@ -1267,6 +1331,14 @@ impl App {
                     }
                     ui.close_menu();
                 }
+                ui.menu_button("Change declicking for selected channels to", |ui| {
+                    for label in ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"] {
+                        if ui.button(label).clicked() {
+                            self.status = "Sample starts and ends are smoothed one way here".into();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 for (label, keys, k) in [("Zip selected", "Alt+Z", Key::Z), ("Unzip all", "Alt+U", Key::U)] {
                     if mi(ui, label, keys).clicked() {
@@ -1279,26 +1351,116 @@ impl App {
                     press = Some((CA, Key::R));
                     ui.close_menu();
                 }
-                for (label, keys, k) in [("Shift steps left", "Shift+Ctrl+Left", Key::ArrowLeft), ("Shift steps right", "Shift+Ctrl+Right", Key::ArrowRight)] {
-                    if mi(ui, label, keys).clicked() {
-                        press = Some((CS, k));
+                sect(ui, "Options");
+                let o = self.settings.rack_opts;
+                ui.menu_button("Group playlist tracks created by Loop starter", |ui| {
+                    for (on, label) in [(false, "Don't group tracks"), (true, "Group tracks")] {
+                        if ui.radio((o & rko::LS_GROUP != 0) == on, label).clicked() {
+                            if (o & rko::LS_GROUP != 0) != on {
+                                self.rack_flip(rko::LS_GROUP);
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if tick(ui, o & rko::LS_ALWAYS != 0, "Always create a track for the pattern clip", "").clicked() {
+                        self.rack_flip(rko::LS_ALWAYS);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Auto resize", |ui| {
+                    for (i, label) in ["Off", "Minimum height", "Maximum height"].into_iter().enumerate() {
+                        if ui.radio((o >> rko::RESIZE_SHIFT) & 3 == i as u64, label).clicked() {
+                            self.rack_set(rko::RESIZE_SHIFT, 2, i as u64);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Resize now").clicked() {
+                        ui.close_menu();
+                    }
+                });
+                if tick(ui, o & rko::AUTO_FILTER != 0, "Auto switch display filter", "").hint("Picking a channel that is not on show switches to its group").clicked() {
+                    self.rack_flip(rko::AUTO_FILTER);
+                    ui.close_menu();
+                }
+                ui.menu_button("Channel button width", |ui| {
+                    let mode = (o >> rko::WIDTH_SHIFT) & 7;
+                    for (i, label) in ["100%", "200%", "300%", "400%"].into_iter().enumerate() {
+                        if ui.radio(mode == i as u64, label).clicked() {
+                            self.rack_set(rko::WIDTH_SHIFT, 3, i as u64);
+                            ui.close_menu();
+                        }
+                    }
+                    let px = (o >> rko::PX_SHIFT) & 0xfff;
+                    ui.horizontal(|ui| {
+                        if ui.radio(mode == 4, format!("Custom ({:.0}%)", px as f32 / 1.2)).clicked() {
+                            self.rack_set(rko::WIDTH_SHIFT, 3, 4);
+                        }
+                        let mut pc = px as f32 / 1.2;
+                        if ui.add(egui::DragValue::new(&mut pc).range(50.0..=750.0).suffix("%")).changed() {
+                            self.rack_set(rko::PX_SHIFT, 12, (pc * 1.2).round() as u64);
+                            self.rack_set(rko::WIDTH_SHIFT, 3, 4);
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Size to fit").hint("As wide as the longest channel name").clicked() {
+                        let font = egui::FontId::proportional(12.0);
+                        let w = self.song.channels.iter().map(|c| ui.fonts(|f| f.layout_no_wrap(c.name.clone(), font.clone(), egui::Color32::WHITE).size().x)).fold(60.0f32, f32::max) + 16.0;
+                        self.rack_set(rko::PX_SHIFT, 12, w.round().min(900.0) as u64);
+                        self.rack_set(rko::WIDTH_SHIFT, 3, 4);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Channel name alignment", |ui| {
+                    for (on, label) in [(false, "Left"), (true, "Center")] {
+                        if ui.radio((o & rko::NAME_CENTER != 0) == on, label).clicked() {
+                            if (o & rko::NAME_CENTER != 0) != on {
+                                self.rack_flip(rko::NAME_CENTER);
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                });
+                for (bit, label) in [(rko::COLORFUL, "Colorful channel controls"), (rko::FOCUS_PLAY, "Focus selected channel on playback"), (rko::MUTE_REMOVED, "Mute removed steps")] {
+                    if tick(ui, o & bit != 0, label, "").clicked() {
+                        self.rack_flip(bit);
                         ui.close_menu();
                     }
                 }
-                sect(ui, "Options");
                 if tick(ui, !self.rack.hide_selectors, "Show mixer track selectors", "Alt+M").clicked() {
                     self.rack.hide_selectors = !self.rack.hide_selectors;
                     ui.close_menu();
                 }
             });
-            col(ui, 270.0, |ui| {
+            col(ui, 320.0, |ui| {
+                use crate::rack::rko;
+                let o = self.settings.rack_opts;
+                for (bit, label) in [(rko::FULL_PREVIEW, "Show complete piano roll preview"), (rko::PREVIEW_MUTE, "Show a mute button on the piano roll preview")] {
+                    if tick(ui, o & bit != 0, label, "").clicked() {
+                        self.rack_flip(bit);
+                        ui.close_menu();
+                    }
+                }
                 if tick(ui, self.detached[1], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
                     self.detached[1] = !self.detached[1];
                     ui.close_menu();
                 }
                 sect(ui, "Switch");
+                if mi(ui, "Switch smart disable for all plugins", "").hint("Plug-ins rest while they have nothing to play").clicked() {
+                    self.status = "Idle plug-ins already rest here".into();
+                    ui.close_menu();
+                }
                 self.audio_clip_switch(ui, "Switch all audio clip channels to", false);
                 self.audio_clip_switch(ui, "Switch selected audio clip channels to", true);
+                ui.menu_button("Switch all plugin editors to", |ui| {
+                    for label in ["Attached", "Detached"] {
+                        if ui.button(label).clicked() {
+                            self.status = "Plug-in windows stay inside the main window".into();
+                            ui.close_menu();
+                        }
+                    }
+                });
             });
         });
         if let Some((m, k)) = press {

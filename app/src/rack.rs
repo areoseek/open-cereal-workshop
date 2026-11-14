@@ -29,6 +29,34 @@ pub struct State {
     keys: bool,
 }
 
+/// The rack's option switches as kept in the settings.
+pub(crate) mod rko {
+    pub const LOOP_STARTER: u64 = 1;
+    pub const AUTO_FILTER: u64 = 1 << 1;
+    pub const COLORFUL: u64 = 1 << 2;
+    pub const FOCUS_PLAY: u64 = 1 << 3;
+    pub const MUTE_REMOVED: u64 = 1 << 4;
+    pub const FULL_PREVIEW: u64 = 1 << 5;
+    pub const PREVIEW_MUTE: u64 = 1 << 6;
+    pub const LS_GROUP: u64 = 1 << 7;
+    pub const LS_ALWAYS: u64 = 1 << 8;
+    pub const NAME_CENTER: u64 = 1 << 9;
+    /// Two bits: off, minimum height, maximum height.
+    pub const RESIZE_SHIFT: u32 = 12;
+    /// Three bits: 100, 200, 300, 400 %, own width.
+    pub const WIDTH_SHIFT: u32 = 14;
+    /// Twelve bits: the own width in points.
+    pub const PX_SHIFT: u32 = 20;
+    pub const DEFAULT: u64 = LOOP_STARTER | AUTO_FILTER | FULL_PREVIEW | PREVIEW_MUTE | LS_GROUP | NAME_CENTER | (1 << RESIZE_SHIFT) | (120 << PX_SHIFT);
+    /// The width of a channel's name button.
+    pub fn name_w(o: u64) -> f32 {
+        match (o >> WIDTH_SHIFT) & 7 {
+            m @ 0..=3 => 120.0 * (m + 1) as f32,
+            _ => (((o >> PX_SHIFT) & 0xfff) as f32).clamp(60.0, 900.0),
+        }
+    }
+}
+
 const GRAPH: [&str; 8] = ["Note pitch", "Velocity", "Release", "Fine pitch", "Pan", "Mod X", "Mod Y", "Shift"];
 const GRAPH_H: f32 = 64.0;
 /// The keyboard editor: the height of one key's row, and of the part of the keyboard in view.
@@ -287,7 +315,7 @@ impl App {
                 }
                 if self.song.channels[ci].zipped {
                     // a zipped channel is a thin strip in its colour; a click opens it out again
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(220.0 + nsteps as f32 * (STEP_W + 3.0), 5.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(100.0 + rko::name_w(self.settings.rack_opts) + nsteps as f32 * (STEP_W + 3.0), 5.0), Sense::click());
                     let picked = self.sel_chan == ci || self.rack.sel.contains(&ci);
                     ui.painter().rect_filled(rect, 1.0, rgb(self.song.channels[ci].color).gamma_multiply(if picked { 1.0 } else { 0.7 }));
                     if resp.hint(self.song.channels[ci].name.clone()).clicked() {
@@ -327,7 +355,7 @@ impl App {
                     }
 
                     // name button
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(120.0, STEP_H), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(rko::name_w(self.settings.rack_opts), STEP_H), Sense::click());
                     let selected = self.sel_chan == ci || self.rack.sel.contains(&ci);
                     let c = &self.song.channels[ci];
                     let base = rgb(c.color);
@@ -336,7 +364,8 @@ impl App {
                     let font = egui::FontId::proportional(12.0);
                     let label = fit(ui, &c.name, rect.width() - 10.0, &font);
                     let missing = matches!(c.kind, ChannelKind::Sampler | ChannelKind::AudioClip) && c.sample.is_none() && !c.sample_path.is_empty();
-                    ui.painter().text(rect.left_center() + Vec2::new(6.0, 0.0), egui::Align2::LEFT_CENTER, label, font, if missing { Color32::from_rgb(255, 120, 110) } else { Color32::from_gray(235) });
+                    let (at, align) = if self.settings.rack_opts & rko::NAME_CENTER != 0 { (rect.center(), egui::Align2::CENTER_CENTER) } else { (rect.left_center() + Vec2::new(6.0, 0.0), egui::Align2::LEFT_CENTER) };
+                    ui.painter().text(at, align, label, font, if missing { Color32::from_rgb(255, 120, 110) } else { Color32::from_gray(235) });
                     // the selector beside the name: click for this one alone, Shift+click to add or drop it, right-click for all on show
                     let sel_rect = Rect::from_min_size(rect.right_top() + Vec2::new(1.0, 3.0), Vec2::new(6.0, STEP_H - 6.0));
                     let sel_resp = ui.interact(sel_rect, ui.id().with(("rack_sel", ci)), Sense::click());
