@@ -998,13 +998,13 @@ impl App {
                             ui.label("Chord");
                             let chords = &cereal_engine::song::ARP_CHORDS;
                             let face = |c: i16| match c {
-                                -2 => "Auto (sustain)".to_string(),
-                                -1 => "Auto".to_string(),
-                                0 => "None".to_string(),
+                                -2 => "Auto".to_string(),
+                                -1 => "Auto (sustain)".to_string(),
+                                0 => "(none)".to_string(),
                                 n => chords[(n as usize - 1).min(chords.len() - 1)].0.to_string(),
                             };
                             egui::ComboBox::from_id_salt(("arp chord", ci)).selected_text(face(f.arp_chord)).show_ui(ui, |ui| {
-                                for c in [0i16, -1, -2].into_iter().chain(1..=chords.len() as i16) {
+                                for c in [-2i16, -1, 0].into_iter().chain(1..=chords.len() as i16) {
                                     changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
                                 }
                             });

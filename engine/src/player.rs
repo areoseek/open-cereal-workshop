@@ -706,6 +706,7 @@ impl Handle {
             key_glides: Vec::new(),
             board_sent: Vec::new(),
             arps: Vec::new(),
+            arp_note: false,
             scripts: Vec::new(),
             script_emit: None,
             script_serial: 0,
@@ -1740,6 +1741,8 @@ pub struct Player {
     board_sent: Vec<f32>,
     /// Arpeggiators at work: the notes each holds and where it is in its run.
     arps: Vec<ArpRun>,
+    /// Set while the arpeggiator starts a note: its end is kept, so a sample is cut there even with no envelope.
+    arp_note: bool,
     /// Note scripts at work.
     scripts: Vec<ScriptRun>,
     /// Set while a script's own note is being started: the instrument it is for, the first note unit after the script, the voice's tag.
@@ -1836,7 +1839,7 @@ fn own_arp(ch: &crate::song::Chan) -> crate::song::Sampler {
         if let Some((way, range, steps)) = ch.gen.as_ref().filter(|g| g.kind == crate::synth::Kind::Poly).and_then(|g| crate::analog::poly_arp(&g.p)) {
             f.arp_dir = way;
             f.arp_range = range;
-            f.arp_chord = -1;
+            f.arp_chord = -2;
             f.arp_steps = steps;
             f.arp_gate = 0.6;
             f.arp_repeat = 1;
@@ -2127,8 +2130,9 @@ impl Player {
                 continue;
             }
             let period = (f.arp_steps as f64 * step).max(self.sr as f64 * 0.004);
-            while r.wait < n as f64 {
-                let t = r.wait as i64;
+            while r.wait.round() < n as f64 {
+                // (measured) steps fall on the nearest frame
+                let t = r.wait.round() as i64;
                 let on = |h: &ArpHeld| h.from <= t && h.to.map_or(true, |e| t < e);
                 if !r.held.iter().any(on) {
                     // nothing held right now: wait for the next note, and start the run over with it
@@ -2151,12 +2155,14 @@ impl Player {
                     keys.sort_unstable();
                     keys.dedup();
                 }
-                if f.arp_chord == -2 && keys.len() == 1 && f.arp_range <= 1 {
-                    // a lone note is left to sound as written
+                if f.arp_chord == -1 && keys.len() == 1 && f.arp_range <= 1 {
+                    // (measured) under the holding choice a lone note is left to sound as written, cut at its end
                     for h in r.held.iter_mut().filter(|h| !h.sus && h.from <= t && h.to.map_or(true, |e| t < e)) {
                         h.sus = true;
                         let len = h.to.map(|e| (e - t).max(1) as u64);
+                        self.arp_note = true;
                         self.note_on_plain(song, &h.note, t.max(0) as u32, len, h.live);
+                        self.arp_note = false;
                     }
                     r.wait += period;
                     continue;
@@ -2190,8 +2196,17 @@ impl Player {
                 // how hard, where and in which colour comes from the newest held note
                 let Some(tpl) = r.held.iter().filter(|h| on(h)).last().map(|h| h.note.clone()) else { break };
                 let note = Note { key: seq[at as usize], porta: tpl.porta || (f.arp_slide && r.i > 0), slide: false, ..tpl };
-                let hold = ((period * f.arp_gate.clamp(0.02, 1.0) as f64) as u64).max(1);
+                let mut hold = ((period * f.arp_gate.clamp(0.02, 1.0) as f64).round() as u64).max(1);
+                if r.own {
+                    // (measured) with a set chord the last step stops one tick short of the note's end
+                    if let Some(end) = r.held.iter().filter(|h| on(h)).filter_map(|h| h.to).max() {
+                        hold = hold.min((end - t - (step / song.step().max(1) as f64).round() as i64).max(1) as u64);
+                    }
+                }
+                // (measured) each step is cut where its gate ends, over the sampler's usual 10 ms, envelope or not
+                self.arp_note = true;
                 self.note_on_plain(song, &note, t.max(0) as u32, Some(hold), false);
+                self.arp_note = false;
                 r.i = r.i.wrapping_add(1);
                 r.wait += period;
             }
@@ -2482,7 +2497,7 @@ impl Player {
                 // without a volume envelope a sampler plays its sample out whatever the note length
                 // a sample set to play its stored loop goes round it until the note ends
                 let loop_pts = if f.use_loop { smp.loop_pts.map(|l| (l.0 as f64, l.1 as f64)) } else { None };
-                let remaining = if ch.env_on || live || loop_pts.is_some() { len_frames } else { None };
+                let remaining = if ch.env_on || live || loop_pts.is_some() || self.arp_note { len_frames } else { None };
                 // a note in a cut group, or on a one-voice channel, stops what it replaces at the moment it starts
                 let fade = ms(4.0);
                 let mut glided = false;
@@ -5078,7 +5093,7 @@ mod tests {
         let mut s = click_song();
         s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 60, ..Default::default() });
         s.channels[0].smp.arp_dir = 3;
-        s.channels[0].smp.arp_chord = -2;
+        s.channels[0].smp.arp_chord = -1;
         assert_eq!(onsets(&run(s.clone(), 40_000), 200).len(), 1);
         s.patterns[0].notes.push(Note { pos: 0, len: 96, chan: 0, key: 72, ..Default::default() });
         assert_eq!(onsets(&run(s, 40_000), 200).len(), 4);
@@ -5719,6 +5734,7 @@ mod tests {
         let plain = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&plain, 0.0, 0.04) > 0.1 && loud(&plain, 0.2, 0.9) < 1e-6, "one short hit {} {}", loud(&plain, 0.0, 0.04), loud(&plain, 0.2, 0.9));
         s.channels[0].smp.arp_dir = 1;
+        s.channels[0].smp.arp_chord = -2;
         s.channels[0].smp.arp_steps = 1.0;
         let arp = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&arp, 0.2, 0.9) > 0.1, "the child repeats the note while the layer's note is held");
