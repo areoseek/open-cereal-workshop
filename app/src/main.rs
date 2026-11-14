@@ -3387,13 +3387,13 @@ impl App {
             2 => {
                 let pat = tr.pattern();
                 self.song.ensure_pattern(pat);
-                let picker = egui::ComboBox::from_id_salt("pattern").width(150.0).selected_text(self.song.pattern_name(pat)).show_ui(ui, |ui| {
-                    for i in 0..self.song.patterns.len() {
-                        if ui.selectable_label(i == pat, self.song.pattern_name(i)).clicked() {
-                            tr.set_pattern(i);
-                        }
-                    }
+                let name = self.song.pattern_name(pat);
+                let picker = ui.scope(|ui| {
+                    ui.spacing_mut().button_padding.x = 10.0;
+                    ui.menu_button(format!("\u{23F7}  {name}"), |ui| self.menu_patterns(ui))
                 });
+                let picker = picker.inner;
+                picker.response.clone().hint("Pattern selector: the patterns and what can be done with this one");
                 if picker.response.hovered() {
                     // the wheel over the picker steps through the patterns
                     let turn = ui.input(|i| i.raw_scroll_delta.y);

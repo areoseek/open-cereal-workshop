@@ -525,7 +525,7 @@ impl App {
         });
     }
 
-    fn menu_patterns(&mut self, ui: &mut Ui) {
+    pub(crate) fn menu_patterns(&mut self, ui: &mut Ui) {
         let cur = self.handle.transport.pattern();
         ui.horizontal_top(|ui| {
             col(ui, 150.0, |ui| {
@@ -582,6 +582,12 @@ impl App {
                 }
                 if mi(ui, "Open in project browser", "Shift+Ctrl+P").clicked() {
                     self.browser_show_project();
+                    ui.close_menu();
+                }
+                if mi(ui, "Set time signature...", "").hint("The pattern gets a time signature of its own; the piano roll counts its bars by it").clicked() {
+                    self.song.ensure_pattern(cur);
+                    let now = self.song.patterns[cur].markers.iter().find(|m| m.kind == 8 && m.pos == 0).map(|m| m.sig).unwrap_or(self.song.time_sig);
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("patsig-ask"), Some(now)));
                     ui.close_menu();
                 }
                 if mi(ui, "Transpose...", "").hint("Move every note of the pattern up or down by a number of semitones").clicked() {
@@ -669,6 +675,36 @@ impl App {
                 });
             });
             ctx.data_mut(|d| d.insert_temp(id, if keep { Some(by) } else { None }));
+        }
+        let id = egui::Id::new("patsig-ask");
+        if let Some(mut sig) = ctx.data(|d| d.get_temp::<Option<(u8, u8)>>(id)).flatten() {
+            let mut keep = true;
+            egui::Window::new("Pattern time signature").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut sig.0).range(1..=16));
+                    ui.label("/");
+                    egui::ComboBox::from_id_salt("patsig_beat").width(40.0).selected_text(sig.1.to_string()).show_ui(ui, |ui| {
+                        for d in [2u8, 4, 8, 16] {
+                            ui.selectable_value(&mut sig.1, d, d.to_string());
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Accept").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let p = self.handle.transport.pattern();
+                        self.song.ensure_pattern(p);
+                        let ms = &mut self.song.patterns[p].markers;
+                        ms.retain(|m| !(m.kind == 8 && m.pos == 0));
+                        ms.insert(0, cereal_engine::song::TimeMarker { pos: 0, name: String::new(), kind: 8, sig });
+                        self.dirty = true;
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        keep = false;
+                    }
+                });
+            });
+            ctx.data_mut(|d| d.insert_temp(id, if keep { Some(sig) } else { None }));
         }
         if self.show_tapper {
             let mut open = true;
@@ -1570,6 +1606,11 @@ impl App {
                 });
                 key(ui, "Open audio editor", "Ctrl+E", C, Key::E);
                 ui.separator();
+                if tick(ui, self.song.inserts[i].fx_on, "Enable effect slots", "").clicked() {
+                    self.song.inserts[i].fx_on = !self.song.inserts[i].fx_on;
+                    self.dirty = true;
+                    ui.close_menu();
+                }
                 if mi(ui, "Reset selected track(s) to default", "").hint("Name, colour, level, panning, stereo and equaliser back to how an empty track has them; the effects stay").clicked() {
                     let d = cereal_engine::song::Insert::default();
                     for &k in targets.iter().filter(|k| **k > 0) {
@@ -1607,6 +1648,10 @@ impl App {
                         self.song.inserts[k].levels.clear();
                     }
                     self.dirty = true;
+                    ui.close_menu();
+                }
+                if mi(ui, "Create submix from the selected track(s)", "").hint("The selected tracks play into the first empty track and nowhere else").clicked() {
+                    self.create_submix();
                     ui.close_menu();
                 }
                 if mi(ui, "Unroute tracks routed to the selected track(s)", "").clicked() {

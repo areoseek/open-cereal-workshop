@@ -320,7 +320,7 @@ impl App {
     /// play position is in.
     fn pr_add_marker(&mut self) {
         let pat = self.pr_pat();
-        let bar = self.song.bar().max(1);
+        let bar = self.pr_bar().max(1);
         let tr = &self.handle.transport;
         let pos = match self.piano.time_sel {
             Some((a, _)) => a,
@@ -342,6 +342,15 @@ impl App {
         pat
     }
 
+    /// Ticks in a bar of the pattern on show: its own time signature when it has one, else the project's.
+    pub(crate) fn pr_bar(&self) -> u32 {
+        let own = self.song.patterns.get(self.handle.transport.pattern()).and_then(|p| p.markers.iter().find(|m| m.kind == 8 && m.pos == 0 && m.sig.0 > 0 && m.sig.1 > 0));
+        match own {
+            Some(m) => (self.song.ppq * 4 * m.sig.0 as u32 / m.sig.1 as u32).max(1),
+            None => self.song.bar(),
+        }
+    }
+
     /// The snap grid in ticks.
     pub(crate) fn pr_snap(&self) -> u32 {
         let pick = if self.piano.snap == SNAP_MAIN { self.main_snap } else { self.piano.snap };
@@ -351,7 +360,7 @@ impl App {
             1 => 1,
             2 => self.song.step(),
             3 => self.song.ppq,
-            _ => self.song.bar(),
+            _ => self.pr_bar(),
         };
         (base / div).max(1)
     }
@@ -467,7 +476,7 @@ impl App {
     fn pr_space(&mut self, add: bool) {
         let pat = self.pr_pat();
         let chan = self.sel_chan as u16;
-        let bar = self.song.bar();
+        let bar = self.pr_bar();
         let (from, to) = self.pr_span().unwrap_or_else(|| {
             let a = self.piano.left_tick.div_ceil(bar) * bar;
             (a, a + bar)
@@ -582,7 +591,7 @@ impl App {
     /// The zoom keys: Shift and a digit.
     fn pr_zoom_key(&mut self, d: usize) {
         let pat = self.pr_pat();
-        let bar = self.song.bar();
+        let bar = self.pr_bar();
         let left = self.piano.left_tick;
         match d {
             0 => {
@@ -717,7 +726,7 @@ impl App {
             }
         };
         let pat = self.pr_pat();
-        let bar = self.song.bar();
+        let bar = self.pr_bar();
         let chan = self.sel_chan as u16;
         let first = parts.iter().flat_map(|p| p.notes.iter()).map(|n| n.pos).min().unwrap_or(0) / bar * bar;
         let to = self.piano.left_tick.div_ceil(bar) * bar;
@@ -740,7 +749,7 @@ impl App {
             return;
         }
         let pat = self.pr_pat();
-        let bar = self.song.bar();
+        let bar = self.pr_bar();
         let chan = self.sel_chan as u16;
         let first = self.piano.clip.iter().map(|n| n.pos).min().unwrap_or(0) / bar * bar;
         let to = self.piano.left_tick.div_ceil(bar) * bar;
@@ -906,7 +915,7 @@ impl App {
             10 => Helper::Levels { prop: Prop::Vel, offset: 0.0, mul: 1.0, tension: 0.0 },
             11 => Helper::Lfo { prop: Prop::Vel, base: 0.6, depth: 0.5, period: ppq * 4, shape: 0, phase: 0.0 },
             12 => Helper::Articulate { mul: 1.0, gap: 0, vary: 0.0, seed: 1 },
-            _ => Helper::Chords { root, scale: if scale == 0 { 1 } else { scale }, count: 4, each: self.song.bar().max(1), notes: 3, octave: 4, close: true, bass: false, gate: 1.0, seed: 1 },
+            _ => Helper::Chords { root, scale: if scale == 0 { 1 } else { scale }, count: 4, each: self.pr_bar().max(1), notes: 3, octave: 4, close: true, bass: false, gate: 1.0, seed: 1 },
         };
         // the riff machine writes its own notes, so with nothing selected it replaces nothing
         let targets = if (which == 0 || which == 13) && self.piano.sel.is_empty() { vec![] } else { self.pr_targets(pat) };
@@ -920,7 +929,7 @@ impl App {
         if run.pat >= self.song.patterns.len() {
             return;
         }
-        let (ppq, step, bar) = (self.song.ppq, self.song.step().max(1), self.song.bar().max(1));
+        let (ppq, step, bar) = (self.song.ppq, self.song.step().max(1), self.pr_bar().max(1));
         let before = run.h.clone();
         let (mut accept, mut cancel) = (false, false);
         let mut open = true;
@@ -1657,7 +1666,7 @@ impl App {
         let chan = self.sel_chan as u16;
         let ppq = self.song.ppq as f32;
         let step = self.song.step();
-        let bar = self.song.bar();
+        let bar = self.pr_bar();
         if self.piano.last_len == 0 {
             self.piano.last_len = step;
         }

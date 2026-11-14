@@ -387,146 +387,12 @@ impl App {
                 if resp.hovered() {
                     self.wheel_over = Some(crate::keys::WheelMove::Insert(i, false));
                 }
-                resp.context_menu(|ui| {
-                if i > 0 && ui.button("Rename, colour and icon...   F2").clicked() {
-                    self.rename_insert = Some((i, self.song.inserts[i].name.clone()));
-                    ui.close_menu();
+                // the right button picks the track and opens the mixer's menu for it
+                if resp.secondary_clicked() && !self.mixer_sel.contains(&i) {
+                    self.mixer_sel.clear();
+                    self.sel_insert = i;
                 }
-                if ui.button("Open audio editor").clicked() {
-                    self.audio_editor_on(i);
-                    ui.close_menu();
-                }
-                if i > 0 && ui.button("Solo   S").clicked() {
-                    self.solo_insert(i, false);
-                    ui.close_menu();
-                }
-                ui.menu_button("Dock to", |ui| {
-                    for (d, t) in [(0u8, "Left"), (1, "Middle"), (2, "Right")] {
-                        if ui.radio(self.song.inserts[i].dock.min(2) == d, t).clicked() {
-                            let all: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
-                            for k in all {
-                                if let Some(x) = self.song.inserts.get_mut(k) {
-                                    x.dock = d;
-                                }
-                            }
-                            self.dirty = true;
-                            ui.close_menu();
-                        }
-                    }
-                });
-                let n_ins = self.song.inserts.len();
-                ui.menu_button("Channel routing", |ui| {
-                    let last = n_ins.saturating_sub(2).max(1);
-                    if ui.button("Route selected channels to this track   Ctrl+L").clicked() {
-                        for c in self.rack_targets() {
-                            self.link_channel(c, i);
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Route selected channels starting from this track   Shift+Ctrl+L").clicked() {
-                        for (k, c) in self.rack_targets().into_iter().enumerate() {
-                            self.link_channel(c, (i + k).min(last));
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Select linked channels   Alt+L").clicked() {
-                        if let Some(c) = self.song.channels.iter().position(|c| c.insert == i) {
-                            self.sel_chan = c;
-                        }
-                        ui.close_menu();
-                    }
-                });
-                if i > 1 && i + 1 < n_ins && ui.button("Move left   Alt+Left").clicked() {
-                    self.song.swap_inserts(i, i - 1);
-                    self.sel_insert = i - 1;
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-                if i > 0 && i + 2 < n_ins && ui.button("Move right   Alt+Right").clicked() {
-                    self.song.swap_inserts(i, i + 1);
-                    self.sel_insert = i + 1;
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-                if i > 0 && ui.button("Reset to default").hint("Name, colour, level, panning, stereo and equaliser back to how an empty track has them; the effects stay").clicked() {
-                    let d = cereal_engine::song::Insert::default();
-                    let ins = &mut self.song.inserts[i];
-                    ins.name.clear();
-                    ins.color = None;
-                    (ins.volume, ins.pan, ins.sep, ins.eq, ins.invert, ins.swap, ins.enabled) = (d.volume, d.pan, d.sep, d.eq, d.invert, d.swap, true);
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-                let mut gap = self.song.inserts[i].separator;
-                if ui.checkbox(&mut gap, "Separator").clicked() {
-                    self.song.inserts[i].separator = gap;
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-                let mut fx = self.song.inserts[i].fx_on;
-                if ui.checkbox(&mut fx, "Enable effect slots").clicked() {
-                    self.song.inserts[i].fx_on = fx;
-                    self.dirty = true;
-                    ui.close_menu();
-                }
-                if i > 0 {
-                    ui.menu_button("Routing", |ui| {
-                        let src = self.sel_insert;
-                        if src != i && src != 0 && ui.button("Route the selected track to this track only").clicked() {
-                            *route = Some((src, i, true));
-                            self.route_only = true;
-                            ui.close_menu();
-                        }
-                        if src != i && src != 0 && ui.button("Sidechain the selected track to this track").clicked() {
-                            *route = Some((src, i, true));
-                            self.route_side = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("Create submix from the selected tracks").hint("The selected tracks play into the first empty track and nowhere else").clicked() {
-                            let mut from: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
-                            from.retain(|&k| k > 0 && k < n_ins);
-                            from.sort_unstable();
-                            let fed = |d: usize| self.song.inserts.iter().enumerate().any(|(k, x)| k != d && x.sends.contains(&d));
-                            let empty = |d: usize| {
-                                let x = &self.song.inserts[d];
-                                !from.contains(&d) && x.slots.is_empty() && x.name.is_empty() && self.song.channels.iter().all(|c| c.insert != d) && !fed(d)
-                            };
-                            let after = from.last().copied().unwrap_or(i);
-                            let last = n_ins.saturating_sub(1);
-                            match (after + 1..last).chain(1..after).find(|&d| empty(d)) {
-                                Some(d) => {
-                                    for &k in &from {
-                                        self.song.inserts[k].sends = vec![d];
-                                        self.song.inserts[k].levels.clear();
-                                    }
-                                    self.song.inserts[d].name = "Submix".into();
-                                    self.song.inserts[d].color = self.song.inserts[from[0]].color;
-                                    self.sel_insert = d;
-                                    self.mixer_sel.clear();
-                                    self.dirty = true;
-                                }
-                                None => self.status = "No empty mixer track for the submix".into(),
-                            }
-                            ui.close_menu();
-                        }
-                        if ui.button("Reset routing (to the master only)").clicked() {
-                            self.song.inserts[i].sends = vec![0];
-                            self.song.inserts[i].levels.clear();
-                            self.dirty = true;
-                            ui.close_menu();
-                        }
-                    });
-                }
-                ui.separator();
-                    if ui.button("Open mixer track state...").clicked() {
-                        self.state_ask = Some(crate::StateAsk::OpenTrack(i));
-                        ui.close_menu();
-                    }
-                    if ui.button("Save mixer track state as...").clicked() {
-                        self.state_ask = Some(crate::StateAsk::SaveTrack(i));
-                        ui.close_menu();
-                    }
-                });
+                resp.context_menu(|ui| self.mixer_menu(ui));
                 let ins = &mut self.song.inserts[i];
                 let before = (ins.volume, ins.pan, ins.enabled);
                 if led(ui, ins.enabled, 14.0).hint("Mute").clicked() {
@@ -592,9 +458,22 @@ impl App {
                     let c = rect.center();
                     let col = if routed { ACCENT } else if resp.hovered() { TEXT } else { TEXT_DIM.gamma_multiply(0.5) };
                     ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, 4.0), c + Vec2::new(5.0, 4.0), c + Vec2::new(0.0, -4.0)], col, Stroke::NONE));
-                    if resp.hint(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" }).clicked() {
+                    let resp = resp.hint(if routed { "Routed from the selected track (click to remove)" } else { "Route the selected track here" });
+                    if resp.clicked() {
                         *route = Some((src, i, !routed));
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Route to this track only").clicked() {
+                            *route = Some((src, i, true));
+                            self.route_only = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Sidechain to this track").clicked() {
+                            *route = Some((src, i, true));
+                            self.route_side = true;
+                            ui.close_menu();
+                        }
+                    });
                     if routed {
                         let mut lv = self.song.inserts[src].send_level(i);
                         if knob(ui, &mut lv, 0.0, 1.25, 1.0, 16.0).hint(format!("Send level {:.0} %", lv * 100.0)).changed() {
@@ -644,3 +523,35 @@ impl App {
     }
 }
 
+
+impl App {
+    /// The selected tracks play into the first empty track and nowhere else.
+    pub(crate) fn create_submix(&mut self) {
+        let n_ins = self.song.inserts.len();
+        let i = self.sel_insert;
+        let mut from: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
+        from.retain(|&k| k > 0 && k < n_ins);
+        from.sort_unstable();
+        let fed = |d: usize| self.song.inserts.iter().enumerate().any(|(k, x)| k != d && x.sends.contains(&d));
+        let empty = |d: usize| {
+            let x = &self.song.inserts[d];
+            !from.contains(&d) && x.slots.is_empty() && x.name.is_empty() && self.song.channels.iter().all(|c| c.insert != d) && !fed(d)
+        };
+        let after = from.last().copied().unwrap_or(i);
+        let last = n_ins.saturating_sub(1);
+        match (after + 1..last).chain(1..after).find(|&d| empty(d)) {
+            Some(d) => {
+                for &k in &from {
+                    self.song.inserts[k].sends = vec![d];
+                    self.song.inserts[k].levels.clear();
+                }
+                self.song.inserts[d].name = "Submix".into();
+                self.song.inserts[d].color = self.song.inserts[from[0]].color;
+                self.sel_insert = d;
+                self.mixer_sel.clear();
+                self.dirty = true;
+            }
+            None => self.status = "No empty mixer track for the submix".into(),
+        }
+    }
+}
