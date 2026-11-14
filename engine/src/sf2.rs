@@ -305,10 +305,10 @@ impl Bank {
                     track = false;
                 }
                 let sustain = if v[37] >= 1000 { 0.0 } else { 10f32.powf(-(v[37].max(0) as f32) / 200.0) };
-                let env = Env { on: true, delay: seconds(v[33]), attack: seconds(v[34]), hold: seconds(v[35]), decay: seconds(v[36]), sustain, release: seconds(v[38]).max(0.005), amount: 0.0, tension: [0.0, -1.0, -1.0] };
+                let env = Env { on: true, delay: seconds(v[33]), attack: seconds(v[34]), hold: seconds(v[35]), decay: seconds(v[36]), sustain, release: seconds(v[38]).max(0.005), amount: 0.0, tension: [0.0, -1.0, -1.0], tempo: false };
                 let hz = 8.176 * 2f32.powf(v[8].clamp(1500, 13500) as f32 / 1200.0);
                 let q = 10f32.powf(v[9].clamp(0, 960) as f32 / 200.0) * 0.707;
-                let menv = |amount: f32| Env { on: true, delay: seconds(v[25]), attack: seconds(v[26]), hold: seconds(v[27]), decay: seconds(v[28]), sustain: 1.0 - (v[29].clamp(0, 1000) as f32) / 1000.0, release: seconds(v[30]).max(0.005), amount, tension: [0.0; 3] };
+                let menv = |amount: f32| Env { on: true, delay: seconds(v[25]), attack: seconds(v[26]), hold: seconds(v[27]), decay: seconds(v[28]), sustain: 1.0 - (v[29].clamp(0, 1000) as f32) / 1000.0, release: seconds(v[30]).max(0.005), amount, tension: [0.0; 3], tempo: false };
                 const SPAN: f32 = 11958.9; // cents across the cutoff scale
                 let rate = |c: i32| 8.176 * 2f32.powf(c.clamp(-16000, 4500) as f32 / 1200.0);
                 let lfos = [[seconds(v[21]), rate(v[22]), v[5] as f32, v[10] as f32 / SPAN, v[13] as f32 / 10.0], [seconds(v[23]), rate(v[24]), v[6] as f32, 0.0, 0.0]];

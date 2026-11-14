@@ -799,7 +799,8 @@ impl Overrides {
     }
 
     fn chan_pan(&self, song: &Song, c: usize) -> f32 {
-        self.chan.get(c).and_then(|o| o.1).unwrap_or_else(|| song.channels[c].pan)
+        // the standing pan offset from the channel's levels box rides on top of the pan knob
+        (self.chan.get(c).and_then(|o| o.1).unwrap_or_else(|| song.channels[c].pan) + song.channels[c].smp.adjust_pan).clamp(-1.0, 1.0)
     }
 
     fn set(&mut self, t: Target, v: f32) {
@@ -1044,6 +1045,23 @@ struct Voice {
     venv: Env,
     penv: Env,
     cenv: Env,
+    renv: Env,
+    /// The channel's wobbles (pan, volume, filter knobs, pitch) with their times already set for the tempo,
+    /// the seconds one turn of each takes, whether any is on and the song time the note began at.
+    lfos: [crate::song::Lfo; 5],
+    lper: [f32; 5],
+    lfo_on: bool,
+    lfo_t0: f32,
+    /// What the volume and pan wobbles multiply each side by, less one. It is worked out once a tick of the
+    /// song (`ltick` frames) for the end of that tick and reached in a straight line: how much it moves a
+    /// frame, the frames left of that line and the frame the tick ends at.
+    lr: [f32; 2],
+    lr_inc: [f32; 2],
+    lr_left: u32,
+    lt_next: f32,
+    ltick: f32,
+    /// Where the voice sits between the speakers before the pan wobble.
+    pan0: f32,
     /// A zone's own wobbles (see `zones::Zone::lfos`).
     zl: [[f32; 5]; 2],
     env_now: f32,
@@ -1055,6 +1073,11 @@ struct Voice {
     fon: bool,
     fg: f32,
     fk: f32,
+    fgain: f32,
+    /// how far the doubled low-pass has been turned down so far
+    fdrop: f32,
+    finc: f32,
+    fleft: u32,
     fs: [[f32; 2]; 4],
     /// Time stretch: source frames used per output frame, while `step` stays the pitch.
     stretch: bool,
@@ -1116,6 +1139,55 @@ impl Voice {
             self.env_now = 1.0;
             self.env_inc = 0.0;
         }
+        let mut lf = [0.0f32; 5];
+        if self.lfo_on {
+            let (lfos, lper, t0) = (&self.lfos, &self.lper, self.lfo_t0);
+            let val = |k: usize, t: f32| {
+                let l = &lfos[k];
+                let tt = t - l.delay;
+                if l.amount == 0.0 || tt < 1e-4 {
+                    return 0.0;
+                }
+                let depth = if l.attack > 0.0 { (tt / l.attack).min(1.0) } else { 1.0 };
+                // (a pulse that flips right on a tick is still on its old side there)
+                let at = if l.global { t + t0 } else { tt } - if l.shape == 2 { 1e-4 } else { 0.0 };
+                l.amount * depth * l.wave(at.max(0.0) / lper[k])
+            };
+            // (measured) pitch and filter hold, through each tick of the song, what the wobble reads at that
+            // tick's end; the tick is picked from the middle of the stretch this setting covers
+            let tick = self.ltick.max(1.0);
+            let te = (((self.t as f32 + CTL as f32 * 0.5) / tick).floor() + 1.0) * tick / self.sr;
+            for k in 2..5 {
+                lf[k] = val(k, te);
+            }
+            // level and pan: (measured) set once a tick for the end of that tick, reached in a straight line, and
+            // never moving either side faster than `GAIN_SLEW`; the first tick of a note sits at its end value
+            if (lfos[0].amount != 0.0 || lfos[1].amount != 0.0) && (self.t == 0 || self.t as f32 >= self.lt_next) {
+                let tick = self.ltick.max(1.0);
+                let first = self.t == 0;
+                let end = if first { tick } else { self.lt_next + tick * (((self.t as f32 - self.lt_next) / tick).floor() + 1.0) };
+                let te = end / self.sr;
+                let base = law::pan(self.pan0.clamp(-1.0, 1.0));
+                let base = [base.0.max(1e-3), base.1.max(1e-3)];
+                let now = law::pan((self.pan0 + val(0, te)).clamp(-1.0, 1.0));
+                let level = (1.0 + val(1, te)).max(0.0);
+                let frames = (end - self.t as f32).max(1.0);
+                let most = GAIN_SLEW / self.sr * tick;
+                for (c, side) in [now.0, now.1].into_iter().enumerate() {
+                    let want = level * side;
+                    if first {
+                        self.lr[c] = want / base[c] - 1.0;
+                        self.lr_inc[c] = 0.0;
+                    } else {
+                        let cur = (1.0 + self.lr[c]) * base[c];
+                        let to = cur + (want - cur).clamp(-most, most);
+                        self.lr_inc[c] = (to - cur) / base[c] / frames;
+                    }
+                }
+                self.lr_left = frames as u32;
+                self.lt_next = end;
+            }
+        }
         if self.step_to != self.step {
             self.step += (self.step_to - self.step) * self.glide;
             if (self.step_to - self.step).abs() < self.step_to * 1e-4 {
@@ -1127,8 +1199,8 @@ impl Voice {
         } else {
             self.step
         };
-        if wob[0] != 0.0 {
-            self.step_now *= (wob[0] as f64 / 1200.0).exp2();
+        if wob[0] + lf[4] != 0.0 {
+            self.step_now *= ((wob[0] + lf[4]) as f64 / 1200.0).exp2();
         }
         if self.slide != self.slide_to {
             let d = self.slide_inc * CTL as f32;
@@ -1155,16 +1227,66 @@ impl Voice {
             if self.cenv.on {
                 x += self.cenv.amount * self.cenv.held(t);
             }
-            x += wob[1];
-            let hz = (20.0 * 1000f32.powf(x.clamp(0.0, 1.0))).min(self.sr * 0.45);
-            self.fg = (std::f32::consts::PI * hz / self.sr).tan();
-            self.fk = 1.0 / (0.707 + self.fres * 10.0);
+            x += wob[1] + lf[2];
+            let x = x.clamp(0.0, 1.0);
+            let mut y = self.fres + lf[3];
+            if self.renv.on {
+                y += self.renv.amount * self.renv.held(t);
+            }
+            let y = y.clamp(0.0, 1.0);
+            if self.ftype == 255 {
+                // a sample bank's own filter
+                let hz = (20.0 * 1000f32.powf(x)).min(self.sr * 0.45);
+                self.fg = (std::f32::consts::PI * hz / self.sr).tan();
+                self.fk = 1.0 / (0.707 + y * 10.0);
+            } else if self.ftype == 0 {
+                // (measured) the quick low-pass is a follower with momentum: one knob sets how hard it is pulled to
+                // the input, the other how much of its last move it keeps
+                self.fg = ((601f32.powf(x) - 1.0) / 600.0).clamp(0.0, 1.0);
+                self.fk = 1.00165 * (1.0 - (-4.0 * y).exp());
+            } else if matches!(self.ftype, 6 | 7) {
+                // (measured) the state-variable pair: a step size from one knob, the damping straight from the other
+                self.fg = ((26f32.powf(x) - 1.0) / 25.0).clamp(0.0, 1.0);
+                self.fk = y;
+            } else {
+                // the doubled low-pass is turned down as it gets sharper (measured)
+                self.fgain = if self.ftype == 5 { 1.0 - 0.5764 * y.powf(2.034) } else { 1.0 };
+                // (measured) where the two knobs put the corner and how sharp they make it
+                let hz = (415.43 * (3.9387 * x).exp() - 270.66).min(self.sr * 0.4777);
+                self.fg = (std::f32::consts::PI * hz / self.sr).tan();
+                self.fk = 1.0 / (0.1 + 0.4 * ((2.4572 * y).exp() - 1.0));
+            }
         }
     }
 
     #[inline]
     fn filter(&mut self, x: [f32; 2]) -> [f32; 2] {
         let (g, k) = (self.fg, self.fk);
+        if self.ftype == 0 {
+            let mut x = x;
+            for c in 0..2 {
+                let [y, vel] = self.fs[c];
+                let vel = k * vel + g * (x[c] - y);
+                self.fs[c] = [y + vel, vel];
+                x[c] = y + vel;
+            }
+            return x;
+        }
+        if matches!(self.ftype, 6 | 7) {
+            // one stage, or two at the same step with the second damped a little more (measured)
+            let stages: &[[f32; 2]] = if self.ftype == 6 { &[[g, 1.0 - 0.8 * k]] } else { &[[g, 1.0 - 0.8 * k], [g, 1.0 - 0.6 * k]] };
+            let mut x = x;
+            for (st, &[f, q]) in stages.iter().enumerate() {
+                for c in 0..2 {
+                    let [mut low, mut band] = self.fs[st * 2 + c];
+                    low += f * band;
+                    band += f * (x[c] - low - q * band);
+                    self.fs[st * 2 + c] = [low, band];
+                    x[c] = low;
+                }
+            }
+            return x;
+        }
         let a1 = 1.0 / (1.0 + g * (g + k));
         let a2 = g * a1;
         let a3 = g * a2;
@@ -1184,6 +1306,19 @@ impl Voice {
                     _ => v2,
                 };
             }
+        }
+        if self.ftype == 5 {
+            // (measured) the turn-down is not there at the note's first frame: like the level, it is aimed once a
+            // tick, reached in a straight line over that tick, and never moves faster than `GAIN_SLEW`
+            if self.fleft == 0 {
+                let tick = self.ltick.max(1.0);
+                let most = GAIN_SLEW / self.sr * tick;
+                self.finc = (1.0 - self.fgain - self.fdrop).clamp(-most, most) / tick;
+                self.fleft = tick.round() as u32;
+            }
+            self.fleft -= 1;
+            self.fdrop += self.finc;
+            x = [x[0] * (1.0 - self.fdrop), x[1] * (1.0 - self.fdrop)];
         }
         x
     }
@@ -1301,9 +1436,14 @@ impl Voice {
             };
             let g = level * self.env_now * (1.0 - self.mo[0]) * (1.0 + self.sc[1]);
             self.env_now += self.env_inc;
+            if self.lr_left > 0 {
+                self.lr_left -= 1;
+                self.lr[0] += self.lr_inc[0];
+                self.lr[1] += self.lr_inc[1];
+            }
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
             let lean = self.mo[2] + self.sc[2];
-            let (gl, gr) = (self.gl * g * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + lean).clamp(0.0, 1.0));
+            let (gl, gr) = (self.gl * g * (1.0 + self.lr[0]) * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + self.lr[1]) * (1.0 + lean).clamp(0.0, 1.0));
             out[0] += s[0] * gl;
             out[1] += s[1] * gr;
             if sends {
@@ -1667,6 +1807,19 @@ pub struct Player {
     clicks: [[Arc<Sample>; 2]; 5],
 }
 
+/// The fastest a channel's volume envelope lets a note go, in whole levels a second.
+const GAIN_SLEW: f32 = 112.9;
+
+struct VoiceMods {
+    env: [Env; 4],
+    lfos: [crate::song::Lfo; 5],
+    lper: [f32; 5],
+    on: bool,
+    t0: f32,
+    /// Frames to a tick of the song.
+    tick: f32,
+}
+
 /// How many keys a channel's root key moves the notes it is sent: none for channels that play a recording
 /// (their root key sets the pitch instead) and for layers, which hand the note on as it came.
 fn root_shift(ch: &crate::song::Chan) -> i32 {
@@ -1719,6 +1872,37 @@ impl Player {
             None => self.voices.iter().enumerate().min_by_key(|(_, x)| x.born).map(|(i, _)| i).unwrap_or(0),
         };
         self.voices[slot] = v;
+    }
+
+    /// A channel's envelopes (volume, cutoff, resonance, pitch) and wobbles as a note starting `delay` frames
+    /// from now gets them: those that follow the tempo are as set at 120 and scale with it.
+    fn voice_mods(&self, song: &Song, ch: &crate::song::Chan, delay: u32) -> VoiceMods {
+        let f = &ch.smp;
+        let tpf = self.now_tpf(song);
+        let tempo = (tpf * self.sr as f64 * 60.0 / song.ppq.max(1) as f64) as f32;
+        let k = 120.0 / tempo.max(1.0);
+        let fit = |e: Env| if e.tempo { Env { delay: e.delay * k, attack: e.attack * k, hold: e.hold * k, decay: e.decay * k, release: e.release * k, ..e } } else { e };
+        let mut lfos = f.lfos;
+        let mut lper = [1.0f32; 5];
+        // (measured: one turn of a wobble takes a whole number of song ticks)
+        let tick_s = if tpf > 0.0 { (1.0 / (tpf * self.sr as f64)) as f32 } else { 0.0 };
+        for (l, p) in lfos.iter_mut().zip(lper.iter_mut()) {
+            *p = l.period();
+            if l.tempo {
+                l.delay *= k;
+                l.attack *= k;
+                *p *= k;
+            }
+            if tick_s > 0.0 {
+                *p = (*p / tick_s).round().max(1.0) * tick_s;
+                l.delay = (l.delay / tick_s).round() * tick_s;
+                l.attack = (l.attack / tick_s).ceil() * tick_s;
+            }
+        }
+        let t0 = if self.was_playing && tpf > 0.0 { (self.pos / tpf / self.sr as f64) as f32 + delay as f32 / self.sr } else { 0.0 };
+        let mut venv = fit(Env { on: ch.env_on, ..f.vol_env });
+        venv.release = venv.release.max(1.0 / GAIN_SLEW);
+        VoiceMods { env: [venv, fit(f.cut_env), fit(f.res_env), fit(f.pitch_env)], lfos, lper, on: lfos.iter().any(|l| l.amount != 0.0), t0, tick: if tpf > 0.0 { (1.0 / tpf) as f32 } else { 256.0 } }
     }
 
     /// Start one note as the channel's time settings shape it: shifted late, cut at the gate, or handed to the
@@ -2292,7 +2476,6 @@ impl Player {
                 let Some(smp) = ch.sample.clone() else { return };
                 let cents = (n.key as f32 - ch.root_key as f32) * 100.0 - ch.root_fine + ch.pitch_cents + n.fine_cents + f.stretch_cents;
                 let step = smp.rate as f64 / sr as f64 * 2f64.powf(cents as f64 / 1200.0);
-                let venv = Env { on: ch.env_on, ..f.vol_env };
                 // without a volume envelope a sampler plays its sample out whatever the note length
                 // a sample set to play its stored loop goes round it until the note ends
                 let loop_pts = if f.use_loop { smp.loop_pts.map(|l| (l.0 as f64, l.1 as f64)) } else { None };
@@ -2319,9 +2502,23 @@ impl Player {
                 if glided {
                     return;
                 }
-                let filter_on = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
+                // a channel with a voice limit gives up its oldest notes to make room for this one
+                if f.max_poly > 0 && !f.mono {
+                    loop {
+                        let mine = |v: &&mut Voice| v.active && !v.preview && !v.kill && v.sample.is_some() && v.chan == n.chan;
+                        if self.voices.iter_mut().filter(mine).count() < f.max_poly as usize {
+                            break;
+                        }
+                        let Some(v) = self.voices.iter_mut().filter(mine).min_by_key(|v| v.born) else { break };
+                        v.kill = true;
+                        v.release = v.release.max(fade);
+                        v.remaining = Some(v.remaining.unwrap_or(u64::MAX).min(delay as u64));
+                    }
+                }
+                let filter_on = !f.filter_idle();
+                let mods = self.voice_mods(song, ch, delay);
                 {
-                    let note_gain = law::sampler_velocity(n.vel) * f.gain;
+                    let note_gain = law::sampler_velocity(n.vel) * law::adjust_gain(f.gain);
                     let note_pan = n.pan.clamp(-1.0, 1.0);
                     let (pl, pr) = law::pan((chan_pan + note_pan).clamp(-1.0, 1.0));
                     let gain = chan_vol * note_gain;
@@ -2338,12 +2535,19 @@ impl Player {
                         ease: true,
                         fade: f.declick.min(5) + 1,
                         remaining,
-                        venv,
-                        penv: f.pitch_env,
-                        cenv: f.cut_env,
+                        venv: mods.env[0],
+                        penv: mods.env[3],
+                        cenv: mods.env[1],
+                        renv: mods.env[2],
+                        lfos: mods.lfos,
+                        lper: mods.lper,
+                        lfo_on: mods.on,
+                        lfo_t0: mods.t0,
+                        ltick: mods.tick,
+                        pan0: chan_pan + note_pan,
                         ftype: f.filter,
-                        fcut: f.cutoff,
-                        fres: f.resonance,
+                        fcut: (f.cutoff + f.adjust_x).clamp(0.0, 1.0),
+                        fres: (f.resonance + f.adjust_y).clamp(0.0, 1.0),
                         fon: filter_on,
                         gl: gain * pl,
                         gr: gain * pr,
@@ -2412,6 +2616,7 @@ impl Player {
                         follow: z.track,
                         venv: z.env.unwrap_or_default(),
                         fon: z.filter.is_some(),
+                        ftype: 255,
                         fcut: z.filter.map_or(1.0, |f| f.0 + z.cut_links[0] * n.vel + z.cut_links[1] * (n.key as f32 - 60.0) / 120.0),
                         fres: z.filter.map_or(0.0, |f| f.1),
                         penv: z.penv.unwrap_or_default(),
@@ -2668,17 +2873,25 @@ impl Player {
                     v.step = 1.0;
                     v.step_to = 1.0;
                     v.step_now = 1.0;
-                    v.venv = Env { on: ch.env_on, ..f.vol_env };
+                    let mods = self.voice_mods(song, ch, delay);
+                    v.venv = mods.env[0];
                     if ch.env_on {
                         v.level = 1.0;
                         v.attack = 1.0;
                     }
-                    v.penv = f.pitch_env;
-                    v.cenv = f.cut_env;
+                    v.penv = mods.env[3];
+                    v.cenv = mods.env[1];
+                    v.renv = mods.env[2];
+                    v.lfos = mods.lfos;
+                    v.lper = mods.lper;
+                    v.lfo_on = mods.on;
+                    v.lfo_t0 = mods.t0;
+                    v.ltick = mods.tick;
+                    v.pan0 = self.ov.chan_pan(song, n.chan as usize) + v.note_pan;
                     v.ftype = f.filter;
-                    v.fcut = f.cutoff;
-                    v.fres = f.resonance;
-                    v.fon = !(matches!(f.filter, 0 | 1 | 5 | 6 | 7) && f.cutoff >= 0.995 && !f.cut_env.on);
+                    v.fcut = (f.cutoff + f.adjust_x).clamp(0.0, 1.0);
+                    v.fres = (f.resonance + f.adjust_y).clamp(0.0, 1.0);
+                    v.fon = !f.filter_idle();
                 }
                 self.start(v);
                 }
@@ -2786,7 +2999,7 @@ impl Player {
                 continue;
             }
             let raw = ch.gen.as_ref().map(|g| &g.raw[..]).unwrap_or(&[]);
-            let mix = [(ch.volume * 127.0).round() as i32, ((ch.pan * 0.5 + 0.5) * 127.0).round() as i32, ((self.wheel.get(i).copied().unwrap_or(0.0) + song.main_pitch as f32 / 1200.0) * 12.0 / 2.0 * 8192.0) as i32];
+            let mix = [(ch.volume * 127.0).round() as i32, ((ch.pan * 0.5 + 0.5) * 127.0).round() as i32, ((self.wheel.get(i).copied().unwrap_or(0.0) + if ch.smp.main_pitch { song.main_pitch as f32 / 1200.0 } else { 0.0 }) * 12.0 / 2.0 * 8192.0) as i32];
             let at = match self.midi_seen.iter().position(|s| s.chan == i as u16) {
                 Some(at) => at,
                 None => {
@@ -2988,7 +3201,7 @@ impl Player {
         let start = p.notes.partition_point(|n| n.pos < first);
         if late && a < b {
             // notes already running where playing picks up start here, from their beginning, for what is left of them
-            let delay = ((((a + shift) - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+            let delay = (((a + shift) - t0) / tpf).round().max(0.0) as u32;
             for n in &p.notes[..start] {
                 let end = match cut {
                     Some(c) => (n.pos + n.len).min(c),
@@ -3010,7 +3223,8 @@ impl Player {
                 let share = song.channels.get(n.chan as usize).map(|c| c.smp.swing).unwrap_or(1.0);
                 at += (song.swing * share) as f64 * song.step() as f64 / 3.0;
             }
-            let delay = ((((at + shift) - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
+            // (measured) a note starts on the frame nearest its place
+            let delay = (((at + shift) - t0) / tpf).round().max(0.0) as u32;
             let len = if n.len == 0 {
                 None
             } else {
@@ -3055,7 +3269,7 @@ impl Player {
                 let secs = into / song.beat_ticks() as f64 * 60.0 / tempo as f64;
                 let f = &ch.smp;
                 // an audio clip at the default channel volume plays the recording as it is
-                let clip_gain = f.gain * law::clip_gain(1.0);
+                let clip_gain = law::adjust_gain(f.gain) * law::clip_gain(1.0);
                 let gain = law::channel_gain(self.ov.chan_volume(song, chi)) * clip_gain;
                 let (pl, pr) = law::pan(self.ov.chan_pan(song, chi));
                 // the pitch the clip sounds at, and how fast the read point crosses the sample
@@ -3682,14 +3896,15 @@ impl Player {
                 }
             };
             if !v.preview {
-                v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0) + main;
+                v.hand = self.wheel.get(v.chan as usize).copied().unwrap_or(0.0) + if song.channels.get(v.chan as usize).is_none_or(|c| c.smp.main_pitch) { main } else { 0.0 };
             }
             if follow && v.follow {
                 if let Some(&(vol, pan)) = self.ov.chan.get(v.chan as usize) {
                     if vol.is_some() || pan.is_some() {
                         let c = v.chan as usize;
                         let g = law::channel_gain(self.ov.chan_volume(song, c)) * v.note_gain;
-                        let (pl, pr) = law::pan((self.ov.chan_pan(song, c) + v.note_pan).clamp(-1.0, 1.0));
+                        v.pan0 = self.ov.chan_pan(song, c) + v.note_pan;
+                        let (pl, pr) = law::pan(v.pan0.clamp(-1.0, 1.0));
                         v.gl = g * pl;
                         v.gr = g * pr;
                     }

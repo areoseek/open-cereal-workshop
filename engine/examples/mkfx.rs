@@ -8,6 +8,12 @@ fn main() {
     let mut lib = cereal_engine::Library::default();
     let smp = lib.load_path(std::path::Path::new(&a[1])).expect("sound");
     let mut song = Song::new();
+    if let Some(t) = std::env::var("MKFX_TEMPO").ok().and_then(|v| v.parse().ok()) {
+        song.tempo = t;
+    }
+    if let Some(t) = std::env::var("MKFX_MAIN").ok().and_then(|v| v.parse().ok()) {
+        song.main_pitch = t;
+    }
     let len = ((smp.seconds() * song.tempo / 60.0 * song.ppq as f32).ceil() as u32).max(1);
     let mut c = Chan::default();
     c.name = smp.name.clone();
@@ -31,6 +37,12 @@ fn main() {
             "start_offset" => f.start_offset = x,
             "declick" => f.declick = x as u8,
             "bend_range" => f.bend_range = x as u8,
+            "adjust_pan" => f.adjust_pan = x,
+            "adjust_x" => f.adjust_x = x,
+            "adjust_y" => f.adjust_y = x,
+            "gain" => f.gain = x,
+            "max_poly" => f.max_poly = x as u32,
+            "main" => f.main_pitch = x != 0.0,
             "mode" => {
                 f.stretch_mode = x as i8;
                 f.keep_pitch = x != 0.0;
@@ -39,6 +51,9 @@ fn main() {
             "reverse" => f.reverse = x != 0.0,
             "fade_in" => f.fade_in = x,
             "fade_out" => f.fade_out = x,
+            "cutoff" => f.cutoff = x,
+            "resonance" => f.resonance = x,
+            "filter" => f.filter = x as u8,
             _ => panic!("unknown treatment {k}"),
         }
     }
@@ -48,6 +63,13 @@ fn main() {
     song.song_mode = true;
     if !sampler {
         song.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Audio(ci), offset: 0, muted: false, group: 0 });
+    } else {
+        // MKFX_NOTE=ticks: how long the one note is held (default: the sample's length); MKFX_KEY its key
+        let hold = std::env::var("MKFX_NOTE").ok().and_then(|v| v.parse().ok()).unwrap_or(len);
+        let key = std::env::var("MKFX_KEY").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let pos = std::env::var("MKFX_POS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        song.patterns[0].notes.push(cereal_engine::song::Note { pos, len: hold, chan: ci as u16, key, ..Default::default() });
+        song.clips.push(Clip { pos: 0, len: len.max(hold) + pos, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
     }
     if let Some(ident) = a.get(4).filter(|s| s.as_str() != "-") {
         let def = cereal_engine::fx::DEFS.iter().find(|d| d.ident == ident).expect("no such effect");

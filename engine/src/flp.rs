@@ -399,6 +399,8 @@ pub struct Envelope {
     pub flags: i32,
     /// Bend of the attack, decay and release lines, -128..=128.
     pub tension: [i32; 3],
+    /// The wobble beside the envelope: delay, attack, amount, speed, shape (0 sine, 1 triangle, 2 pulse).
+    pub lfo: [i32; 5],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -455,6 +457,8 @@ pub struct FlpChannel {
     pub gate: u16,
     pub full_porta: bool,
     pub add_to_key: bool,
+    /// The project's main pitch moves this channel.
+    pub main_pitch: bool,
     /// Lowest and highest key the channel answers to.
     pub key_range: (u32, u32),
     /// How much of the project swing this channel takes, 0..=128.
@@ -1005,7 +1009,7 @@ impl Flp {
                 // ---- channels
                 (id::NEW_CHANNEL, Value::Word(v)) => {
                     scope = Scope::Channel;
-                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, key_range: (0, 256), bend_range: 2, smp_len: 1.0, ..Default::default() });
+                    flp.channels.push(FlpChannel { index: *v, enabled: true, insert: -1, pan: 6400, volume: 10000, root_key: 60, swing: 128, echo: [0, 6400, 0, 4, 144], filter: (256, 0, 0), adjust: [0, 12800, 0, 0, 0], arp: [0, 1, -1, 1024, 48, 1], gate: 1447, full_porta: true, add_to_key: false, main_pitch: true, key_range: (0, 256), bend_range: 2, smp_len: 1.0, ..Default::default() });
                 }
                 (id::NEW_ARRANGEMENT, Value::Word(v)) => {
                     in_pattern = false;
@@ -1237,6 +1241,7 @@ impl Flp {
                             }
                             c.echo_flags = d[10];
                             c.remove_dc = d[9] != 0;
+                            c.main_pitch = d[11] != 0;
                             if d.len() >= 66 {
                                 let i = |o: usize| u32at(d, o) as i32;
                                 c.arp = [i(40), i(44), i(48), i(52), i(56), c.arp[5]];
@@ -1281,7 +1286,7 @@ impl Flp {
                         }
                         (id::CHAN_ENVELOPE, Value::Data(d)) if d.len() >= 36 => {
                             let i = |o: usize| if d.len() >= o + 4 { u32at(d, o) as i32 } else { 0 };
-                            c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32), flags: i(0), tension: [i(56), i(60), i(64)] });
+                            c.envelopes.push(Envelope { enabled: i(4) != 0, predelay: i(8), attack: i(12), hold: i(16), decay: i(20), sustain: i(24), release: i(28), amount: i(32), flags: i(0), tension: [i(56), i(60), i(64)], lfo: [i(36), i(40), i(44), if d.len() >= 52 { i(48) } else { 32950 }, i(52)] });
                         }
                         (id::CHAN_FX_FLAGS, Value::Word(v)) => c.fx_flags = *v,
                         (id::CHAN_PREAMP, Value::Word(v)) => c.preamp = *v,

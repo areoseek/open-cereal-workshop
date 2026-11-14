@@ -25,11 +25,18 @@ impl State {
     }
 }
 
-#[derive(Default)]
 pub struct State {
     tab: Tab,
-    /// 0 volume, 1 filter cutoff, 2 pitch.
+    /// 0 panning, 1 volume, 2 mod x, 3 mod y, 4 pitch.
     env: usize,
+    /// 0 velocity tracking, 1 key tracking.
+    track: usize,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self { tab: Tab::default(), env: 1, track: 0 }
+    }
 }
 
 const KEY_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -147,14 +154,34 @@ fn secs(v: f32) -> String {
     }
 }
 
-/// Envelope times sit on a cubic knob so the short end has room.
+/// Envelope and wobble times sit on the knob the way the file stores them, so the short end has room.
 fn time_knob(ui: &mut Ui, label: &str, v: &mut f32) -> bool {
-    let mut x = (*v / 16.0).cbrt();
-    let hit = cap_knob(ui, label, &mut x, 0.0, 1.0, 0.0, |v: f32| secs(16.0 * v * v * v));
+    use cereal_engine::law::{knob_seconds, seconds_knob};
+    let mut x = if *v <= 0.0 { 0.0 } else { seconds_knob(*v) };
+    let hit = cap_knob(ui, label, &mut x, 0.0, 1.0, 0.0, |v: f32| secs(if v <= 0.0016 { 0.0 } else { knob_seconds(v) }));
     if hit {
-        *v = 16.0 * x * x * x;
+        *v = if x <= 0.0016 { 0.0 } else { knob_seconds(x) };
     }
     hit
+}
+
+/// The small picture of a wobble: its delay, its rise and two turns at full depth.
+fn draw_lfo(ui: &mut Ui, l: &cereal_engine::song::Lfo) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(76.0), 90.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, PANEL_DARK);
+    let period = l.period();
+    let total = (l.delay + l.attack + period * 2.0).max(0.01);
+    let n = rect.width() as usize;
+    let depth = (l.amount.abs() / if l.amount.abs() > 1.0 { 1200.0 } else { 1.0 }).clamp(0.15, 1.0) * l.amount.signum();
+    let pts: Vec<Pos2> = (0..n)
+        .map(|i| {
+            let t = i as f32 / n as f32 * total - l.delay;
+            let y = if t < 0.0 { 0.0 } else { depth * if l.attack > 0.0 { (t / l.attack).min(1.0) } else { 1.0 } * l.wave(t / period) };
+            Pos2::new(rect.left() + i as f32, rect.center().y - y * (rect.height() * 0.5 - 3.0))
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.2_f32, if l.amount != 0.0 { ACCENT } else { TEXT_DIM })));
 }
 
 /// The left half of the sample page: how the sample is held, declicking and playback.
@@ -239,6 +266,21 @@ fn sample_right(ui: &mut Ui, f: &mut cereal_engine::song::Sampler, changed: &mut
         *rebake |= cap_knob(ui, "CROSSFADE", &mut f.crossfade, 0.0, 1.0, 0.0, |v: f32| format!("Crossfade {:.0} %", v * 100.0));
         *rebake |= cap_knob(ui, "TRIM", &mut f.trim, 0.0, 1.0, 0.0, |v: f32| format!("Trim {:.0} %", v * 100.0));
     });
+}
+
+/// A lamp with its name beside it; a click on either flips it. True when it was flipped.
+fn switch(ui: &mut Ui, on: &mut bool, name: &str, tip: &str) -> bool {
+    let mut flipped = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let a = led(ui, *on, 16.0).hint(tip.to_string());
+        let b = ui.add(egui::Label::new(name).sense(Sense::click())).hint(tip.to_string());
+        if a.clicked() || b.clicked() {
+            *on = !*on;
+            flipped = true;
+        }
+    });
+    flipped
 }
 
 fn section(ui: &mut Ui, title: &str) {
@@ -697,198 +739,322 @@ impl App {
                 }
             }
             Tab::Envelope => {
+                const PAGES: [&str; 5] = ["Panning", "Volume", "Mod X", "Mod Y", "Pitch"];
                 ui.horizontal(|ui| {
-                    for (k, name) in ["Volume", "Cutoff", "Pitch"].into_iter().enumerate() {
+                    for (k, name) in PAGES.into_iter().enumerate() {
                         if ui.selectable_label(self.chanset.env == k, name).clicked() {
                             self.chanset.env = k;
                         }
                     }
                 });
-                let which = self.chanset.env;
+                let which = self.chanset.env.min(4);
                 let c = &mut self.song.channels[ci];
-                let mut on = if which == 0 { c.env_on } else if which == 1 { c.smp.cut_env.on } else { c.smp.pitch_env.on };
-                let e: &mut Env = match which {
-                    0 => &mut c.smp.vol_env,
-                    1 => &mut c.smp.cut_env,
-                    _ => &mut c.smp.pitch_env,
-                };
-                let shown = *e;
-                draw_env(ui, &shown, on);
-                ui.horizontal(|ui| {
-                    if led(ui, on, 18.0).hint("Envelope on / off").clicked() {
-                        on = !on;
-                        changed = true;
-                    }
-                    changed |= time_knob(ui, "DEL", &mut e.delay);
-                    changed |= time_knob(ui, "ATT", &mut e.attack);
-                    changed |= time_knob(ui, "HOLD", &mut e.hold);
-                    changed |= time_knob(ui, "DEC", &mut e.decay);
-                    changed |= cap_knob(ui, "SUS", &mut e.sustain, 0.0, 1.0, 0.5, |v: f32| format!("{:.0} %", v * 100.0));
-                    changed |= time_knob(ui, "REL", &mut e.release);
-                    match which {
-                        1 => changed |= cap_knob(ui, "AMT", &mut e.amount, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0)),
-                        2 => changed |= cap_knob(ui, "AMT", &mut e.amount, -4800.0, 4800.0, 0.0, |v: f32| format!("{:+.0} cents", v)),
-                        _ => {}
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(22.0);
-                    for (k, name) in ["ATT T", "DEC T", "REL T"].into_iter().enumerate() {
-                        changed |= cap_knob(ui, name, &mut e.tension[k], -1.0, 1.0, 0.0, |v: f32| format!("Tension {:+.0} %", v * 100.0));
-                    }
-                });
-                e.on = on;
-                if which == 0 {
-                    c.env_on = on;
-                }
-                let f = &mut c.smp;
-                section(ui, "FILTER");
-                ui.horizontal(|ui| {
-                    changed |= cap_knob(ui, "MOD X", &mut f.cutoff, 0.0, 1.0, 1.0, |v: f32| format!("Cutoff {:.0} %", v * 100.0));
-                    changed |= cap_knob(ui, "MOD Y", &mut f.resonance, 0.0, 1.0, 0.0, |v: f32| format!("Resonance {:.0} %", v * 100.0));
-                    const TYPES: [&str; 8] = ["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LPx2"];
+                // three boxes side by side, as on the usual page: envelope, wobble, filter
+                ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        egui::ComboBox::from_id_salt("filter-type").width(100.0).selected_text(TYPES[f.filter.min(7) as usize]).show_ui(ui, |ui| {
+                        ui.set_width(364.0);
+                        // the envelope (panning has none: its box stays empty)
+                        if which > 0 {
+                            let mut on = if which == 1 { c.env_on } else { [c.smp.cut_env.on, c.smp.res_env.on, c.smp.pitch_env.on][which - 2] };
+                            let e: &mut Env = match which {
+                                1 => &mut c.smp.vol_env,
+                                2 => &mut c.smp.cut_env,
+                                3 => &mut c.smp.res_env,
+                                _ => &mut c.smp.pitch_env,
+                            };
+                            ui.horizontal(|ui| {
+                                if led(ui, on, 16.0).hint("Envelope on / off").clicked() {
+                                    on = !on;
+                                    changed = true;
+                                }
+                                ui.label("Envelope");
+                            });
+                            let shown = *e;
+                            draw_env(ui, &shown, on);
+                            ui.horizontal(|ui| {
+                                changed |= time_knob(ui, "DELAY", &mut e.delay);
+                                changed |= time_knob(ui, "ATT", &mut e.attack);
+                                changed |= time_knob(ui, "HOLD", &mut e.hold);
+                                changed |= time_knob(ui, "DEC", &mut e.decay);
+                                changed |= cap_knob(ui, "SUS", &mut e.sustain, 0.0, 1.0, 0.5, |v: f32| format!("{:.0} %", v * 100.0));
+                                changed |= time_knob(ui, "REL", &mut e.release);
+                                match which {
+                                    2 | 3 => changed |= cap_knob(ui, "AMT", &mut e.amount, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0)),
+                                    4 => changed |= cap_knob(ui, "AMT", &mut e.amount, -4800.0, 4800.0, 0.0, |v: f32| format!("{:+.0} cents", v)),
+                                    _ => {}
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(26.0);
+                                for (k, what) in ["Attack", "Decay", "Release"].into_iter().enumerate() {
+                                    changed |= ui.push_id(("tension", k), |ui| cap_knob(ui, "TENSION", &mut e.tension[k], -1.0, 1.0, 0.0, |v: f32| format!("{what} tension {:+.0} %", v * 100.0))).inner;
+                                    if k == 1 {
+                                        ui.add_space(8.0);
+                                    }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.selectable_label(e.tempo, "Tempo").hint("Envelope times follow the tempo").clicked() {
+                                        e.tempo = !e.tempo;
+                                        changed = true;
+                                    }
+                                });
+                            });
+                            e.on = on;
+                            if which == 1 {
+                                c.env_on = on;
+                            }
+                        }
+                    });
+                    // the wobble
+                    ui.vertical(|ui| {
+                        ui.set_width(204.0);
+                        let l = &mut c.smp.lfos[which];
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (k, name) in ["Sine", "Triangle", "Pulse"].into_iter().enumerate() {
+                                let (r, resp) = ui.allocate_exact_size(Vec2::new(24.0, 18.0), Sense::click());
+                                let on = l.shape as usize == k;
+                                ui.painter().rect_filled(r, 2.0, if on { ACCENT } else { PANEL_DARK });
+                                let ink = if on { Color32::BLACK } else { TEXT_DIM };
+                                let pts: Vec<Pos2> = (0..=16)
+                                    .map(|i| {
+                                        let x = i as f32 / 16.0;
+                                        let y = match k {
+                                            0 => (x * std::f32::consts::TAU).sin(),
+                                            1 => if x < 0.25 { x * 4.0 } else if x < 0.75 { 2.0 - x * 4.0 } else { x * 4.0 - 4.0 },
+                                            _ => if x < 0.5 { 1.0 } else { -1.0 },
+                                        };
+                                        Pos2::new(r.left() + 4.0 + x * (r.width() - 8.0), r.center().y - y * 5.0)
+                                    })
+                                    .collect();
+                                ui.painter().add(egui::Shape::line(pts, Stroke::new(1.2_f32, ink)));
+                                if resp.hint(name).clicked() {
+                                    l.shape = k as u8;
+                                    changed = true;
+                                }
+                            }
+                            ui.add_space(6.0);
+                            ui.label("LFO");
+                        });
+                        draw_lfo(ui, l);
+                        ui.horizontal(|ui| {
+                            changed |= time_knob(ui, "DELAY", &mut l.delay);
+                            changed |= time_knob(ui, "ATT", &mut l.attack);
+                            match which {
+                                4 => changed |= cap_knob(ui, "AMT", &mut l.amount, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v)),
+                                _ => changed |= cap_knob(ui, "AMT", &mut l.amount, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0)),
+                            }
+                            changed |= cap_knob(ui, "SPEED", &mut l.speed, 0.0, 1.0, 32950.0 / 65536.0, |v: f32| {
+                                let p = cereal_engine::law::knob_seconds(v).max(1e-4);
+                                format!("{} ({:.2} Hz)", secs(p), 1.0 / p)
+                            });
+                        });
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(l.tempo, "Tempo").hint("LFO times follow the tempo").clicked() {
+                                l.tempo = !l.tempo;
+                                changed = true;
+                            }
+                            if ui.selectable_label(l.global, "Global").hint("One LFO for all notes, running with the song").clicked() {
+                                l.global = !l.global;
+                                changed = true;
+                            }
+                        });
+                    });
+                    ui.vertical(|ui| {
+                        let f = &mut c.smp;
+                        ui.label("Filter");
+                        changed |= cap_knob(ui, "MOD X", &mut f.cutoff, 0.0, 1.0, 1.0, |v: f32| format!("Cutoff {:.0} %", v * 100.0));
+                        changed |= cap_knob(ui, "MOD Y", &mut f.resonance, 0.0, 1.0, 0.0, |v: f32| format!("Resonance {:.0} %", v * 100.0));
+                        const TYPES: [&str; 8] = ["Fast LP", "LP", "BP", "HP", "BS", "LPx2", "SVF LP", "SVF LPx2"];
+                        egui::ComboBox::from_id_salt("filter-type").width(84.0).selected_text(TYPES[f.filter.min(7) as usize]).show_ui(ui, |ui| {
                             for (k, name) in TYPES.into_iter().enumerate() {
                                 changed |= ui.selectable_value(&mut f.filter, k as u8, name).changed();
                             }
                         });
-                        ui.label(RichText::new("TYPE").small().color(TEXT_DIM));
                     });
                 });
             }
             Tab::Misc => {
+                let track = &mut self.chanset.track;
                 let c = &mut self.song.channels[ci];
-                let mut key = c.root_key;
                 let f: &mut Sampler = &mut c.smp;
-                section(ui, "LEVELS ADJUSTMENT");
-                ui.horizontal(|ui| {
-                    changed |= cap_knob(ui, "VOL", &mut f.gain, 0.0, 4.0, 1.0, |v: f32| format!("x {:.2}", v));
+                let num = |ui: &mut Ui, v: &mut u32, max: u32, none: bool, tip: &str| -> bool {
+                    let mut x = *v;
+                    let r = ui.add(egui::DragValue::new(&mut x).range(0..=max).speed(0.1).custom_formatter(move |v, _| if none && v < 0.5 { "--".into() } else { format!("{v:.0}") })).hint(tip);
+                    let ch = x != *v;
+                    *v = x;
+                    ch || r.changed()
+                };
+                // two rows of boxes, placed as on the usual page
+                ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_width(60.0);
-                        changed |= ui.add(egui::DragValue::new(&mut key).range(0..=131).speed(0.1).custom_formatter(|v, _| key_name(v as u8))).hint("Root note").changed();
-                        ui.label(RichText::new("ROOT").small().color(TEXT_DIM));
-                    });
-                    changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
-                    ui.vertical(|ui| {
-                        changed |= ui.checkbox(&mut f.add_to_key, "Add to key").hint("The root note's shift is added to the key of each note instead of to its pitch").changed();
+                        ui.label("Levels adjustment");
                         ui.horizontal(|ui| {
-                            let (mut lo, mut hi) = (f.key_lo.min(131), f.key_hi.min(131));
-                            ui.label(RichText::new("KEY RANGE").small().color(TEXT_DIM));
-                            let a = ui.add(egui::DragValue::new(&mut lo).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).hint("The lowest key this channel answers to. Right-click for every key");
-                            let b = ui.add(egui::DragValue::new(&mut hi).range(0..=131).speed(0.15).custom_formatter(|v, _| key_name(v as u8))).hint("The highest key this channel answers to. Right-click for every key");
-                            if a.changed() || b.changed() {
-                                f.key_lo = lo.min(hi);
-                                f.key_hi = if hi >= 131 { 256 } else { hi.max(lo) };
-                                changed = true;
+                            changed |= cap_knob(ui, "PAN", &mut f.adjust_pan, -1.0, 1.0, 0.0, |v: f32| format!("Pan offset {:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "VOL", &mut f.gain, 0.0, 2.0, 1.0, |v: f32| format!("Volume multiplier {:.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD X", &mut f.adjust_x, -1.0, 1.0, 0.0, |v: f32| format!("Cutoff offset {:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD Y", &mut f.adjust_y, -1.0, 1.0, 0.0, |v: f32| format!("Resonance offset {:+.0} %", v * 100.0));
+                        });
+                    });
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        ui.label("Polyphony");
+                        ui.horizontal(|ui| {
+                            ui.label("Max");
+                            changed |= num(ui, &mut f.max_poly, 99, true, "Most notes that may sound at once");
+                            changed |= cap_knob(ui, "SLIDE", &mut f.slide, 0.0, 2.0, 0.1, |v: f32| secs(v));
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= switch(ui, &mut f.porta, "Porta", "Notes slide into one another");
+                            changed |= switch(ui, &mut f.mono, "Mono", "One note at a time");
+                        });
+                    });
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        ui.label("Time");
+                        ui.horizontal(|ui| {
+                            changed |= cap_knob(ui, "GATE", &mut f.gate_steps, 0.0, 2.0, 2.0, |v: f32| {
+                                if v >= cereal_engine::song::GATE_OFF { "Gate off".into() } else { format!("Gate {}:{:02}", v as u32, (v.fract() * 24.0) as u32) }
+                            });
+                            changed |= cap_knob(ui, "SHIFT", &mut f.shift, 0.0, 1.0, 0.0, |v: f32| format!("Shift 0:{:02}", (v * 24.0) as u32));
+                            changed |= cap_knob(ui, "SWING", &mut f.swing, 0.0, 1.0, 1.0, |v: f32| format!("Swing mix {:.0} %", v * 100.0));
+                        });
+                        changed |= switch(ui, &mut f.full_porta, "Full porta", "Portamento notes ignore the gate and play their whole length");
+                    });
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            for (k, name) in ["Vol", "Key"].into_iter().enumerate() {
+                                if ui.selectable_label(*track == k, name).clicked() {
+                                    *track = k;
+                                }
                             }
-                            if a.secondary_clicked() || b.secondary_clicked() {
-                                f.key_lo = 0;
-                                f.key_hi = 256;
-                                changed = true;
-                            }
+                            ui.label("Tracking");
+                        });
+                        let is_key = *track == 1;
+                        let t = if is_key { &mut f.track_key } else { &mut f.track_vel };
+                        ui.horizontal(|ui| {
+                            changed |= cap_knob(ui, "PAN", &mut t[1], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD X", &mut t[2], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "MOD Y", &mut t[3], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Mid");
+                            ui.spacing_mut().slider_width = 90.0;
+                            let face = if is_key { key_name(t[0] as u8) } else { format!("{:.0}", t[0]) };
+                            changed |= ui.add(egui::Slider::new(&mut t[0], 0.0..=127.0).step_by(1.0).show_value(false)).hint(format!("Middle value: {face}")).changed();
                         });
                     });
                 });
-                section(ui, "POLYPHONY");
-                ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut f.mono, "Mono").changed();
-                    changed |= ui.checkbox(&mut f.porta, "Porta").changed();
-                    changed |= cap_knob(ui, "SLIDE", &mut f.slide, 0.0, 2.0, 0.1, |v: f32| secs(v));
-                });
-                section(ui, "GROUP");
-                ui.horizontal(|ui| {
-                    ui.label("Cut");
-                    changed |= ui.add(egui::DragValue::new(&mut f.cut).range(0..=99).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "--".into() } else { format!("{v:.0}") })).changed();
-                    ui.label("Cut by");
-                    changed |= ui.add(egui::DragValue::new(&mut f.cut_by).range(0..=99).speed(0.1).custom_formatter(|v, _| if v < 0.5 { "--".into() } else { format!("{v:.0}") })).changed();
-                    if ui.button("Cut itself").clicked() {
-                        let g = ci as u16 + 1;
-                        f.cut = g;
-                        f.cut_by = g;
-                        changed = true;
-                    }
-                });
-                section(ui, "TIME");
-                ui.horizontal(|ui| {
-                    changed |= cap_knob(ui, "GATE", &mut f.gate_steps, 0.0, 2.0, 2.0, |v: f32| {
-                        if v >= cereal_engine::song::GATE_OFF { "Gate off".into() } else { format!("Gate {}:{:02}", v as u32, (v.fract() * 24.0) as u32) }
-                    });
-                    changed |= cap_knob(ui, "SHIFT", &mut f.shift, 0.0, 1.0, 0.0, |v: f32| format!("Shift 0:{:02}", (v * 24.0) as u32));
-                    changed |= ui.checkbox(&mut f.full_porta, "Full porta").hint("Portamento notes ignore the gate and play their whole length").changed();
-                });
-                section(ui, "ARPEGGIATOR");
-                ui.horizontal(|ui| {
-                    for (i, (face, tip)) in [("Off", "Off"), ("Up", "Up"), ("Down", "Down"), ("Up-Dn", "Up and down"), ("Up-Dn 2", "Up and down, lowest and highest twice"), ("Rnd", "Random")].iter().enumerate() {
-                        if ui.selectable_label(f.arp_dir == i as u8, *face).hint(*tip).clicked() {
-                            f.arp_dir = i as u8;
+                ui.separator();
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Group");
+                        let (mut cut, mut by) = (f.cut as u32, f.cut_by as u32);
+                        ui.horizontal(|ui| {
+                            ui.label("Cut");
+                            changed |= num(ui, &mut cut, 99, true, "Cut group: notes here stop every channel cut by this group");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("By ");
+                            changed |= num(ui, &mut by, 99, true, "Cut by group: notes of that group stop this channel");
+                        });
+                        f.cut = cut as u16;
+                        f.cut_by = by as u16;
+                        if ui.button("Cut self").hint("Each note of this channel stops the one before").clicked() {
+                            let g = ci as u16 + 1;
+                            f.cut = g;
+                            f.cut_by = g;
                             changed = true;
                         }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    changed |= cap_knob(ui, "TIME", &mut f.arp_steps, 0.01, 2.0, 1.0, |v: f32| format!("Time {}:{:02}", v as u32, (v.fract() * 24.0) as u32));
-                    changed |= cap_knob(ui, "GATE", &mut f.arp_gate, 0.0, 1.0, 1.0, |v: f32| format!("Gate {:.0} %", v * 100.0));
+                    });
+                    ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.set_width(50.0);
-                        changed |= ui.add(egui::DragValue::new(&mut f.arp_range).range(1..=10).speed(0.1)).hint("Range in octaves").changed();
-                        ui.label(RichText::new("RANGE").small().color(TEXT_DIM));
-                    });
-                    ui.vertical(|ui| {
-                        ui.set_width(50.0);
-                        changed |= ui.add(egui::DragValue::new(&mut f.arp_repeat).range(1..=16).speed(0.1)).hint("Times each octave plays before the next").changed();
-                        ui.label(RichText::new("REPEAT").small().color(TEXT_DIM));
-                    });
-                    changed |= ui.checkbox(&mut f.arp_slide, "Slide").changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Chord");
-                    let chords = &cereal_engine::song::ARP_CHORDS;
-                    let face = |c: i16| match c {
-                        -2 => "Auto (sustain)".to_string(),
-                        -1 => "Auto".to_string(),
-                        0 => "None".to_string(),
-                        n => chords[(n as usize - 1).min(chords.len() - 1)].0.to_string(),
-                    };
-                    egui::ComboBox::from_id_salt(("arp chord", ci)).selected_text(face(f.arp_chord)).show_ui(ui, |ui| {
-                        for c in [0i16, -1, -2].into_iter().chain(1..=chords.len() as i16) {
-                            changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
-                        }
-                    });
-                });
-                section(ui, "TRACKING");
-                for (name, t, tip) in [("Vol", &mut f.track_vel, "Hit strength where nothing moves"), ("Key", &mut f.track_key, "Key where nothing moves")] {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(name).color(TEXT_DIM));
-                        changed |= cap_knob(ui, "PAN", &mut t[1], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
-                        changed |= cap_knob(ui, "MOD X", &mut t[2], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
-                        changed |= cap_knob(ui, "MOD Y", &mut t[3], -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
-                        ui.vertical(|ui| {
-                            ui.set_width(50.0);
-                            let is_key = name == "Key";
-                            changed |= ui.add(egui::DragValue::new(&mut t[0]).range(0.0..=127.0).speed(0.2).custom_formatter(move |v, _| if is_key { key_name(v as u8) } else { format!("{v:.0}") })).hint(tip).changed();
-                            ui.label(RichText::new("MID").small().color(TEXT_DIM));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (i, (face, tip)) in [("x", "Off"), ("\u{2191}", "Up"), ("\u{2193}", "Down"), ("\u{2195}", "Up and down (bounce)"), ("\u{2195}\u{2195}", "Up and down (sticky)"), ("?", "Random")].iter().enumerate() {
+                                if ui.selectable_label(f.arp_dir == i as u8, *face).hint(*tip).clicked() {
+                                    f.arp_dir = i as u8;
+                                    changed = true;
+                                }
+                            }
+                            ui.add_space(6.0);
+                            ui.label("Arpeggiator");
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= cap_knob(ui, "TIME", &mut f.arp_steps, 0.01, 2.0, 1.0, |v: f32| format!("Time {}:{:02}", v as u32, (v.fract() * 24.0) as u32));
+                            changed |= cap_knob(ui, "GATE", &mut f.arp_gate, 0.0, 1.0, 1.0, |v: f32| format!("Gate {:.0} %", v * 100.0));
+                            let (mut range, mut repeat) = (f.arp_range as u32, f.arp_repeat as u32);
+                            ui.label("Range");
+                            changed |= num(ui, &mut range, 10, false, "Range in octaves");
+                            ui.label("Repeat");
+                            changed |= num(ui, &mut repeat, 16, false, "Times each octave plays before the next");
+                            f.arp_range = range.max(1) as u8;
+                            f.arp_repeat = repeat.max(1) as u8;
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= switch(ui, &mut f.arp_slide, "Slide", "Arpeggio notes slide into one another");
+                            ui.label("Chord");
+                            let chords = &cereal_engine::song::ARP_CHORDS;
+                            let face = |c: i16| match c {
+                                -2 => "Auto (sustain)".to_string(),
+                                -1 => "Auto".to_string(),
+                                0 => "None".to_string(),
+                                n => chords[(n as usize - 1).min(chords.len() - 1)].0.to_string(),
+                            };
+                            egui::ComboBox::from_id_salt(("arp chord", ci)).selected_text(face(f.arp_chord)).show_ui(ui, |ui| {
+                                for c in [0i16, -1, -2].into_iter().chain(1..=chords.len() as i16) {
+                                    changed |= ui.selectable_value(&mut f.arp_chord, c, face(c)).changed();
+                                }
+                            });
                         });
                     });
-                }
-                section(ui, "ECHO DELAY / FAT MODE");
-                ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut f.echo_ping, "Ping pong").hint("The echo pan turns round when it reaches a side").changed();
-                    changed |= ui.checkbox(&mut f.echo_fat, "Fat mode").hint("Echoes swap from side to side").changed();
-                });
-                ui.horizontal(|ui| {
-                    changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
-                    changed |= cap_knob(ui, "PAN", &mut f.echo_pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
-                    changed |= cap_knob(ui, "PITCH", &mut f.echo_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
-                    changed |= cap_knob(ui, "TIME", &mut f.echo_steps, 0.0, 8.0, 3.0, |v: f32| format!("{:.2} steps", v));
+                    ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.set_width(50.0);
-                        changed |= ui.add(egui::DragValue::new(&mut f.echoes).range(1..=10).speed(0.1)).changed();
-                        ui.label(RichText::new("ECHOES").small().color(TEXT_DIM));
+                        ui.label("Echo delay / fat mode");
+                        ui.horizontal(|ui| {
+                            changed |= cap_knob(ui, "FEED", &mut f.echo_feedback, 0.0, 1.0, 0.0, |v: f32| format!("Feedback {:.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "PAN", &mut f.echo_pan, -1.0, 1.0, 0.0, |v: f32| format!("{:+.0} %", v * 100.0));
+                            changed |= cap_knob(ui, "PITCH", &mut f.echo_cents, -1200.0, 1200.0, 0.0, |v: f32| format!("{:+.0} cents", v));
+                            changed |= cap_knob(ui, "TIME", &mut f.echo_steps, 0.0, 8.0, 3.0, |v: f32| format!("{:.2} steps", v));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Echoes");
+                            let mut n = f.echoes as u32;
+                            changed |= num(ui, &mut n, 10, false, "Number of echoes");
+                            f.echoes = n.max(1) as u8;
+                            ui.vertical(|ui| {
+                                changed |= switch(ui, &mut f.echo_ping, "Ping pong", "The echo pan turns round when it reaches a side");
+                                changed |= switch(ui, &mut f.echo_fat, "Fat mode", "Echoes swap from side to side");
+                            });
+                        });
                     });
                 });
-                c.root_key = key;
             }
+        }
+        // the root note row sits above the keys on every page
+        {
+            let c = &mut self.song.channels[ci];
+            ui.separator();
+            ui.label(format!("Root note: {}", key_name(c.root_key.min(131))));
+            ui.horizontal(|ui| {
+                if ui.button("Reset").hint("Root note back to C5, fine tune to none").clicked() && (c.root_key != 60 || c.root_fine != 0.0) {
+                    c.root_key = 60;
+                    c.root_fine = 0.0;
+                    changed = true;
+                }
+                changed |= switch(ui, &mut c.smp.main_pitch, "Enable main pitch", "The project's main pitch moves this channel");
+                changed |= switch(ui, &mut c.smp.add_to_key, "Add to key", "The root note's shift is added to the key of each note instead of to its pitch");
+                ui.label("Fine tune");
+                ui.spacing_mut().slider_width = 110.0;
+                let fine = c.root_fine;
+                let r = ui.add(egui::Slider::new(&mut c.root_fine, -100.0..=100.0).step_by(1.0).show_value(false)).hint(format!("Fine tune {fine:+.0} cents"));
+                if r.secondary_clicked() {
+                    c.root_fine = 0.0;
+                }
+                changed |= c.root_fine != fine;
+            });
         }
         changed |= self.key_strip(ui, ci);
         if rebake {

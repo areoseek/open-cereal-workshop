@@ -75,11 +75,90 @@ pub struct Env {
     pub amount: f32,
     /// Bend of the attack, decay and release lines, -1..=1.
     pub tension: [f32; 3],
+    /// Times follow the tempo: they are as set at 120 and stretch or shrink with it.
+    pub tempo: bool,
 }
 
 impl Default for Env {
     fn default() -> Self {
-        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3] }
+        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3], tempo: false }
+    }
+}
+
+/// The wobble that goes with one envelope of a channel: pan, volume, the two filter knobs or pitch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lfo {
+    /// Seconds before it starts, and seconds it takes to reach its full depth.
+    pub delay: f32,
+    pub attack: f32,
+    /// Depth: pan offset (1 = the whole way), share of the level, share of the knob for the filter, cents for pitch.
+    pub amount: f32,
+    /// The speed knob, 0 (fastest) to 1.
+    pub speed: f32,
+    /// 0 sine, 1 triangle, 2 pulse.
+    pub shape: u8,
+    /// Times and speed follow the tempo.
+    pub tempo: bool,
+    /// The wave runs from the start of the song instead of from each note.
+    pub global: bool,
+}
+
+impl Sampler {
+    /// The filter as it sits by default passes everything untouched; any other setting colours the sound.
+    pub fn filter_idle(&self) -> bool {
+        self.filter == 0 && self.cutoff + self.adjust_x >= 0.999 && self.resonance + self.adjust_y <= 0.0 && !self.cut_env.on && !self.res_env.on && self.lfos[2].amount == 0.0 && self.lfos[3].amount == 0.0
+    }
+}
+
+impl Default for Lfo {
+    fn default() -> Self {
+        Self { delay: 0.0, attack: crate::law::env_seconds(20000), amount: 0.0, speed: 32950.0 / 65536.0, shape: 0, tempo: false, global: false }
+    }
+}
+
+/// What the file's wobble amount counts in, per target.
+pub const LFO_SCALE: [f32; 5] = [64.0, 128.0, 128.0, 128.0, 1.0];
+
+impl Lfo {
+    fn from_flp(e: &flp::Envelope, scale: f32) -> Self {
+        Self {
+            delay: crate::law::env_seconds(e.lfo[0]),
+            attack: crate::law::env_seconds(e.lfo[1]),
+            amount: e.lfo[2] as f32 / scale,
+            speed: (e.lfo[3] as f32 / 65536.0).clamp(0.0, 1.0),
+            shape: e.lfo[4].clamp(0, 2) as u8,
+            tempo: e.flags & 2 != 0,
+            global: e.flags & 32 != 0,
+        }
+    }
+
+    /// Seconds one turn takes.
+    pub fn period(&self) -> f32 {
+        crate::law::knob_seconds(self.speed).max(1e-4)
+    }
+
+    /// The wave at a phase in turns: -1..=1, starting at 0 on the way up.
+    pub fn wave(&self, turns: f32) -> f32 {
+        let ph = turns - turns.floor();
+        match self.shape {
+            1 => {
+                if ph < 0.25 {
+                    ph * 4.0
+                } else if ph < 0.75 {
+                    2.0 - ph * 4.0
+                } else {
+                    ph * 4.0 - 4.0
+                }
+            }
+            2 => {
+                if ph < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            _ => (ph * std::f32::consts::TAU).sin(),
+        }
     }
 }
 
@@ -96,6 +175,7 @@ impl Env {
             release: crate::law::env_seconds(e.release),
             amount: e.amount as f32 * amount_scale,
             tension: [t(e.tension[0]), t(e.tension[1]), t(e.tension[2])],
+            tempo: e.flags & 1 != 0,
         }
     }
 
@@ -134,6 +214,10 @@ pub struct Sampler {
     pub vol_env: Env,
     pub cut_env: Env,
     pub pitch_env: Env,
+    /// The envelope on the second filter knob (resonance).
+    pub res_env: Env,
+    /// The wobbles: pan, volume, the two filter knobs, pitch.
+    pub lfos: [Lfo; 5],
     /// Filter cutoff and resonance, 0..=1 of the knobs, and the filter type (0 and 1 low pass, 2 band pass,
     /// 3 high pass, 4 band stop, 5 to 7 steeper low passes).
     pub cutoff: f32,
@@ -192,6 +276,14 @@ pub struct Sampler {
     pub full_porta: bool,
     /// The root key's shift is added to the note's key instead of to its pitch.
     pub add_to_key: bool,
+    /// The project's main pitch moves this channel.
+    pub main_pitch: bool,
+    /// Most notes that may sound at once (0 = no limit).
+    pub max_poly: u32,
+    /// Standing offsets from the levels box: pan (-1..=1) and the two filter knobs (-1..=1 of their travel).
+    pub adjust_pan: f32,
+    pub adjust_x: f32,
+    pub adjust_y: f32,
     /// Lowest and highest key the channel answers to (0 and 256 = every key).
     pub key_lo: u32,
     pub key_hi: u32,
@@ -285,6 +377,8 @@ impl Default for Sampler {
             vol_env: Env::default(),
             cut_env: Env::default(),
             pitch_env: Env::default(),
+            res_env: Env::default(),
+            lfos: [Lfo::default(); 5],
             cutoff: 1.0,
             resonance: 0.0,
             filter: 0,
@@ -337,6 +431,11 @@ impl Default for Sampler {
             shift: 0.0,
             full_porta: true,
             add_to_key: false,
+            main_pitch: true,
+            max_poly: 0,
+            adjust_pan: 0.0,
+            adjust_x: 0.0,
+            adjust_y: 0.0,
             key_lo: 0,
             key_hi: 256,
             echo_ping: false,
@@ -361,6 +460,8 @@ impl Sampler {
             vol_env: env(1, 1.0),
             cut_env: env(2, 1.0 / 128.0),
             pitch_env: env(4, 1.0),
+            res_env: env(3, 1.0 / 128.0),
+            lfos: std::array::from_fn(|k| c.envelopes.get(k).map(|e| Lfo::from_flp(e, LFO_SCALE[k])).unwrap_or_default()),
             cutoff: (c.filter.0 as f32 / 256.0).clamp(0.0, 1.0),
             resonance: (c.filter.1 as f32 / 256.0).clamp(0.0, 1.0),
             filter: c.filter.2.min(7) as u8,
@@ -413,6 +514,11 @@ impl Sampler {
             shift: (c.time_shift as f32 / 1024.0).clamp(0.0, 1.0),
             full_porta: c.full_porta,
             add_to_key: c.add_to_key,
+            main_pitch: c.main_pitch,
+            max_poly: c.poly.0.min(999),
+            adjust_pan: (c.adjust[0] as f32 / 6400.0).clamp(-1.0, 1.0),
+            adjust_x: (c.adjust[3] as f32 / 256.0).clamp(-1.0, 1.0),
+            adjust_y: (c.adjust[4] as f32 / 256.0).clamp(-1.0, 1.0),
             key_lo: c.key_range.0,
             key_hi: c.key_range.1,
             echo_ping: c.echo_flags & 2 != 0,

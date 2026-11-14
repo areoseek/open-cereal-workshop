@@ -28,6 +28,12 @@ pub fn sampler_velocity(v: f32) -> f32 {
     (11f32.powf(v) - 1.0) / 10.0 * std::f32::consts::FRAC_1_SQRT_2
 }
 
+/// The levels adjustment volume of a channel (`v` is file value / 12800, 1.0 leaves the level alone): the
+/// channel volume curve carried on past its top. Measured at 0.5 (0.2317 times).
+pub fn adjust_gain(v: f32) -> f32 {
+    (11f32.powf(v.clamp(0.0, 4.0)) - 1.0) / 10.0
+}
+
 /// Audio clip level from its channel volume: the default 78 % plays the recording as it is.
 pub fn clip_gain(v: f32) -> f32 {
     channel_gain(v) / channel_gain(10000.0 / 12800.0)
@@ -52,13 +58,23 @@ pub fn pan(p: f32) -> (f32, f32) {
     (a.cos() * std::f32::consts::SQRT_2, a.sin() * std::f32::consts::SQRT_2)
 }
 
-/// Envelope time knob to seconds. The file holds 100 (shortest) to 65536. (Approximate: see docs/PARITY.md.)
+/// Envelope time knob to seconds. The file holds 100 (shortest) to 65536. (Measured at nine settings of
+/// the attack knob; the same curve gives the period of the channel's wobbles.)
 pub fn env_seconds(raw: i32) -> f32 {
     if raw <= 100 {
         return 0.0;
     }
-    let x = (raw as f32 / 65536.0).min(1.0);
-    16.0 * x * x * x
+    knob_seconds((raw as f32 / 65536.0).min(1.0))
+}
+
+/// The time curve of the envelope and wobble knobs, from 0..=1 of the knob.
+pub fn knob_seconds(x: f32) -> f32 {
+    (0.063_57 * ((6.92 * x).exp() - 0.985)).max(0.0)
+}
+
+/// The knob position (0..=1) that gives a time.
+pub fn seconds_knob(s: f32) -> f32 {
+    ((s.max(0.0) / 0.063_57 + 0.985).ln() / 6.92).clamp(0.0, 1.0)
 }
 
 pub fn semitones(st: f32) -> f32 {

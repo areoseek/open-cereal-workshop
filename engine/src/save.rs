@@ -797,6 +797,16 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                 ev[i].value = Value::Int(now.root_key as u32);
             }
         }
+        if now.root_fine.round() != was.root_fine.round() {
+            let v = Value::Int(now.root_fine.round() as i32 as u32);
+            match find(ev, end, id::CHAN_FINE_TUNE) {
+                Some(i) => ev[i].value = v,
+                None => {
+                    ev.insert(end, Event { id: id::CHAN_FINE_TUNE, value: v });
+                    end += 1;
+                }
+            }
+        }
         if now.env_on != was.env_on {
             if let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(1) {
                 if let Value::Data(d) = &mut ev[i].value {
@@ -1027,7 +1037,7 @@ fn env_raw(seconds: f32) -> u32 {
     if seconds <= 0.0 {
         return 100;
     }
-    ((seconds / 16.0).cbrt() * 65536.0).round().clamp(100.0, 65536.0) as u32
+    (crate::law::seconds_knob(seconds) * 65536.0).round().clamp(100.0, 65536.0) as u32
 }
 
 /// Write the sampler settings that changed into the events of one channel (`start..end`).
@@ -1090,13 +1100,14 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
             put_u32(d, 20, t as u32);
         });
     }
-    let poly = |f: &Sampler| (q(f.slide, 5000.0), f.mono as u8 | (f.porta as u8) << 1);
+    let poly = |f: &Sampler| (f.max_poly, q(f.slide, 5000.0), f.mono as u8 | (f.porta as u8) << 1);
     if poly(now) != poly(was) {
-        let (slide, fl) = poly(now);
+        let (most, slide, fl) = poly(now);
         block(ev, start, &mut end, id::CHAN_POLY, "00000000f401000000", |d| {
             if d.len() < 9 {
                 d.resize(9, 0);
             }
+            put_u32(d, 0, most);
             put_u32(d, 4, slide as u32);
             d[8] = (d[8] & !3) | fl;
         });
@@ -1141,6 +1152,32 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
                         d[64..66].copy_from_slice(&(a.7 as u16).to_le_bytes());
                     }
                     d[62] = a.8 as u8;
+                }
+            }
+        }
+    }
+    let adjust = |f: &Sampler| (q(f.adjust_pan, 6400.0), q(f.gain, 12800.0), q(f.adjust_x, 256.0), q(f.adjust_y, 256.0));
+    if adjust(now) != adjust(was) {
+        let (mut pan, mut vol, x, y) = adjust(now);
+        if old_levels {
+            pan = (pan as f32 / 100.0).round() as i32;
+            vol = (vol as f32 / 100.0).round() as i32;
+        }
+        block(ev, start, &mut end, id::CHAN_ADJUST, "0000000000320000000000000000000000000000", |d| {
+            if d.len() < 20 {
+                d.resize(20, 0);
+            }
+            put_u32(d, 0, pan as u32);
+            put_u32(d, 4, vol as u32);
+            put_u32(d, 12, x as u32);
+            put_u32(d, 16, y as u32);
+        });
+    }
+    if now.main_pitch != was.main_pitch {
+        if let Some(i) = (start..end).find(|&i| ev[i].id == id::CHAN_PARAMS) {
+            if let Value::Data(d) = &mut ev[i].value {
+                if d.len() >= 12 {
+                    d[11] = now.main_pitch as u8;
                 }
             }
         }
@@ -1265,7 +1302,40 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
         }
     }
     // envelopes: volume is the second block, the filter one the third, pitch the fifth
-    let envs: [(usize, &Env, &Env, f32); 3] = [(1, &now.vol_env, &was.vol_env, 1.0), (2, &now.cut_env, &was.cut_env, 128.0), (4, &now.pitch_env, &was.pitch_env, 1.0)];
+    let envs: [(usize, &Env, &Env, f32); 4] =
+        [(1, &now.vol_env, &was.vol_env, 1.0), (2, &now.cut_env, &was.cut_env, 128.0), (3, &now.res_env, &was.res_env, 128.0), (4, &now.pitch_env, &was.pitch_env, 1.0)];
+    // the wobbles: one in each of the five blocks
+    for nth in 0..5 {
+        let (a, b) = (&now.lfos[nth], &was.lfos[nth]);
+        if a == b {
+            continue;
+        }
+        let Some(i) = (start..end).filter(|&i| ev[i].id == id::CHAN_ENVELOPE).nth(nth) else { continue };
+        let Value::Data(d) = &mut ev[i].value else { continue };
+        if d.len() < 56 {
+            continue;
+        }
+        for (o, x, y) in [(36, a.delay, b.delay), (40, a.attack, b.attack)] {
+            if env_raw(x) != env_raw(y) {
+                put_u32(d, o, env_raw(x));
+            }
+        }
+        let scale = crate::song::LFO_SCALE[nth];
+        if q(a.amount, scale) != q(b.amount, scale) {
+            put_u32(d, 44, q(a.amount, scale) as u32);
+        }
+        if q(a.speed, 65536.0) != q(b.speed, 65536.0) {
+            put_u32(d, 48, q(a.speed, 65536.0) as u32);
+        }
+        if a.shape != b.shape {
+            put_u32(d, 52, a.shape as u32);
+        }
+        for (bit, x, y) in [(2u8, a.tempo, b.tempo), (32, a.global, b.global)] {
+            if x != y {
+                d[0] = if x { d[0] | bit } else { d[0] & !bit };
+            }
+        }
+    }
     for (nth, a, b, amount) in envs {
         if a == b {
             continue;
@@ -1274,6 +1344,9 @@ fn patch_sampler(ev: &mut Vec<Event>, start: usize, mut end: usize, now: &Sample
         let Value::Data(d) = &mut ev[i].value else { continue };
         if d.len() < 36 {
             continue;
+        }
+        if a.tempo != b.tempo {
+            d[0] = if a.tempo { d[0] | 1 } else { d[0] & !1 };
         }
         // the volume envelope's switch is the channel's own `env_on`
         if nth != 1 && a.on != b.on {
@@ -2706,6 +2779,14 @@ mod tests {
             f.pitch_env.decay = 0.3;
             f.cut_env.on = true;
             f.cut_env.amount = -0.5;
+            f.cut_env.tempo = true;
+            f.res_env.on = true;
+            f.res_env.amount = 0.25;
+            f.res_env.hold = 0.2;
+            f.lfos[0] = crate::song::Lfo { delay: 0.25, attack: 0.5, amount: -0.5, speed: 0.25, shape: 2, tempo: true, global: false };
+            f.lfos[1] = crate::song::Lfo { amount: 0.75, shape: 1, global: true, ..f.lfos[1] };
+            f.lfos[3].amount = 0.5;
+            f.lfos[4] = crate::song::Lfo { amount: 300.0, speed: 0.75, ..f.lfos[4] };
             f.arp_dir = 3;
             f.arp_range = 2;
             f.arp_chord = 2;
@@ -2717,6 +2798,12 @@ mod tests {
             f.shift = 0.25;
             f.full_porta = false;
             f.add_to_key = true;
+            f.main_pitch = false;
+            f.max_poly = 4;
+            f.gain = 0.5;
+            f.adjust_pan = -0.25;
+            f.adjust_x = 0.5;
+            f.adjust_y = -0.5;
             f.key_lo = 48;
             f.key_hi = 72;
             f.echo_ping = true;
@@ -2725,15 +2812,18 @@ mod tests {
         }
         s.channels[1].env_on = true;
         s.prepare();
+        s.channels[1].root_fine = -37.0;
         let bytes = to_bytes(&s, None).unwrap();
         let (r, f) = reload(&bytes);
         let (a, b) = (&s.channels[1].smp, &r.channels[1].smp);
+        assert_eq!(r.channels[1].root_fine, -37.0);
         assert!(r.channels[1].env_on);
         assert_eq!((b.reverse, b.swap_stereo, b.normalize, b.mono, b.porta, b.keep_pitch), (true, true, true, true, true, true));
         assert_eq!((b.cut, b.cut_by, b.filter, b.echoes), (3, 3, 3, 6));
         assert_eq!((b.arp_dir, b.arp_range, b.arp_chord, b.arp_slide, b.arp_repeat, b.full_porta), (3, 2, 2, true, 3, false));
         assert!(b.echo_ping && !b.echo_fat);
         assert_eq!((b.add_to_key, b.key_lo, b.key_hi), (true, 48, 72));
+        assert_eq!((b.main_pitch, b.max_poly, b.gain, b.adjust_pan, b.adjust_x, b.adjust_y), (false, 4, 0.5, -0.25, 0.5, -0.5));
         assert_eq!((a.track_vel, a.track_key), (b.track_vel, b.track_key));
         assert!(b.remove_dc && b.fade_stereo && b.keep_on_disk && !b.resample && b.load_regions);
         assert_eq!((b.declick, b.bend_range), (3, 12));
@@ -2750,6 +2840,12 @@ mod tests {
             assert!(near(x, y), "{x} != {y}");
         }
         assert!(b.pitch_env.on && b.cut_env.on);
+        assert!(b.cut_env.tempo && !b.vol_env.tempo && b.res_env.on);
+        assert!(near(a.res_env.amount, b.res_env.amount) && near(a.res_env.hold, b.res_env.hold));
+        for (x, y) in a.lfos.iter().zip(&b.lfos) {
+            assert!(near(x.delay, y.delay) && near(x.attack, y.attack) && near(x.amount, y.amount) && near(x.speed, y.speed), "{x:?} != {y:?}");
+            assert_eq!((x.shape, x.tempo, x.global), (y.shape, y.tempo, y.global));
+        }
         // untouched channels keep their defaults, and a second save is the same file
         assert_eq!(r.channels[0].smp, Song::new().channels[0].smp);
         let mut r2 = r.clone();
