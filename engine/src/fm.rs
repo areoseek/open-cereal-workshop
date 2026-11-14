@@ -89,13 +89,23 @@ fn sine() -> &'static [f32] {
     T.get_or_init(|| (0..=TN).map(|i| (i as f32 / TN as f32 * TAU).sin()).collect())
 }
 
+/// One value of hiss. Measured: bell-shaped, even across the band, as strong as an even spread over -1..1,
+/// and the same run of values on every note (so a plucked operator fed by hiss rings the same each time).
+fn hiss(seed: &mut u32) -> f32 {
+    let mut sum = 0.0;
+    for _ in 0..12 {
+        sum += rnd(seed);
+    }
+    sum * 0.288_675
+}
+
 /// Points in the kept cycle of a plucked operator.
 const STR: usize = 1024;
 
 /// Wears a plucked operator's kept cycle down by `dt` seconds of going round at `hz`, with the damping
 /// setting at `d` (1 is the loosest). Measured on long notes over a spread of keys and settings: harmonic h
 /// falls by k * h * h dB a second, where k grows with the cube of the pitch (the same loss on every trip
-/// round) and steeply as the setting comes down. The setting as made slopes up with the key, which is why
+/// round) and as (1 - d) / d^2 with the setting. The setting as made slopes up with the key, which is why
 /// high notes do not die at once. The loss is made here by smoothing the cycle forwards and
 /// backwards, which leaves the phases alone.
 fn wear(tab: &mut [f32], hz: f32, dt: f32, d: f32) {
@@ -103,8 +113,9 @@ fn wear(tab: &mut [f32], hz: f32, dt: f32, d: f32) {
         return;
     }
     // the loss on one trip round, as a multiple of the squared angle a harmonic turns through per frame at 44.1 kHz
-    let d = d.clamp(0.0, 1.0);
-    let a = (3.338 - 10.002 * d + 3.111 * d * d).exp();
+    // (the measured loss is that of a one-pole smoother with the setting as its mix, met once a trip at twice 44.1 kHz)
+    let d = d.clamp(0.02, 1.0);
+    let a = 0.25 * (1.0 - d) / (d * d) * (0.91 + 0.07 * d);
     let stretch = STR as f32 * hz / 44100.0;
     let aq = 0.5 * a * hz * dt * stretch * stretch;
     if aq < 1e-7 {
@@ -1413,6 +1424,8 @@ struct Sub {
     ph: [f32; 6],
     out: [f32; 6],
     prev: [f32; 6],
+    /// Each operator's last value before its level was applied.
+    raw: [f32; 6],
     amp: [f32; 6],
     inc: [f32; 6],
     tab: [u8; 6],
@@ -1427,7 +1440,8 @@ struct Sub {
     fb: [f32; 3],
     fg: [f32; 3],
     fk: [f32; 3],
-    seed: u32,
+    /// Where the hiss stands in its run, which starts from the same place on every note.
+    hseed: u32,
     /// Plucked operators: the first cycle each one made, going round and wearing down (empty for the others).
     strings: [Vec<f32>; 6],
     /// How far through that first cycle the operator is, the last place written, and time not yet worn off.
@@ -1610,6 +1624,7 @@ impl Voice {
                 ph,
                 out: [0.0; 6],
                 prev: [0.0; 6],
+                raw: [0.0; 6],
                 amp: [0.0; 6],
                 inc: [0.0; 6],
                 tab,
@@ -1623,7 +1638,7 @@ impl Voice {
                 fb: [0.0; 3],
                 fg: [0.1; 3],
                 fk: [1.0; 3],
-                seed: seed.wrapping_add(s as u32 * 7919) | 1,
+                hseed: 3_099_528_473u32.wrapping_add(s as u32 * 15838),
             });
         }
         let mut v = Self { over, fsteps: if over == 1 { 2 } else { 1 }, halvers: [Halver::new(), Halver::new()], send_halvers: [Halver::new(), Halver::new()], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, subs, main_l: 1.0, main_r: 1.0 };
@@ -1930,7 +1945,7 @@ impl Voice {
                         let mut y = look(&o.tables[s.tab[i] as usize], ph);
                         if o.nx > 0.0 {
                             if fresh {
-                                s.hiss[i] = rnd(&mut s.seed);
+                                s.hiss[i] = hiss(&mut s.hseed);
                             }
                             y += (s.hiss[i] - y) * o.nx;
                         }
@@ -1945,6 +1960,11 @@ impl Voice {
                         tab[at] = y;
                         s.fill[i] = at as u32;
                         s.run[i] += s.inc[i].abs();
+                        if s.run[i] >= 1.0 {
+                            // the kept cycle holds no standing level (measured)
+                            let mean = tab.iter().sum::<f32>() / STR as f32;
+                            tab.iter_mut().for_each(|v| *v -= mean);
+                        }
                         y
                     } else {
                         let f = x - at as f32;
@@ -1954,7 +1974,7 @@ impl Voice {
                     let mut y = look(&o.tables[s.tab[i] as usize], ph + pm * s.val[b + 2] * DEPTH);
                     if o.nx > 0.0 {
                         if fresh {
-                            s.hiss[i] = rnd(&mut s.seed);
+                            s.hiss[i] = hiss(&mut s.hseed);
                         }
                         y += (s.hiss[i] - y) * o.nx;
                     }
@@ -1963,12 +1983,14 @@ impl Voice {
                 for j in 0..6 {
                     let a = p.rm[i][j];
                     if a != 0.0 {
-                        // ringing with itself goes by its own output one frame back (measured)
-                        y *= 1.0 - a.abs() + a * if j > i { s.out[j] } else { last[j] };
+                        // ringing with itself goes by its own value one frame back, taken before its level
+                        // and envelope (measured: a fading note keeps its self-ringing)
+                        y *= 1.0 - a.abs() + a * if j > i { s.out[j] } else if j == i { s.raw[i] } else { last[j] };
                     }
                 }
                 s.amp[i] += (s.val[b + 1] * o.vol - s.amp[i]) * 0.02;
                 s.prev[i] = last[i];
+                s.raw[i] = y;
                 s.out[i] = y * s.amp[i] * if o.declick { fade } else { 1.0 };
                 s.ph[i] += s.inc[i];
                 s.ph[i] -= s.ph[i].floor();
@@ -2155,8 +2177,11 @@ impl Voice {
             }
             mix[0] += l * s.gain * (1.0 - s.pan).min(1.0);
             mix[1] += r * s.gain * (1.0 + s.pan).min(1.0);
-            smix[0] += sl * s.gain * (1.0 - s.pan).min(1.0);
-            smix[1] += sr * s.gain * (1.0 + s.pan).min(1.0);
+            // what goes to the effects has its own pan and level settings (measured: the level one scales the
+            // effects path alone)
+            let (el, er) = pan_gains(s.val[60].clamp(-1.0, 1.0));
+            smix[0] += sl * s.gain * (1.0 - s.pan).min(1.0) * s.val[61] * el;
+            smix[1] += sr * s.gain * (1.0 + s.pan).min(1.0) * s.val[61] * er;
         }
         self.sent = [smix[0] * self.main_l, smix[1] * self.main_r];
         [mix[0] * self.main_l, mix[1] * self.main_r]

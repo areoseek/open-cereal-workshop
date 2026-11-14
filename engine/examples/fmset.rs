@@ -39,6 +39,7 @@ fn main() {
                 .map(|p| p.split('/').map(|v| v.parse::<f32>().unwrap()).collect::<Vec<_>>())
                 .map(|v| cereal_engine::fm::Pt { x: v[0], y: v[1], tension: v.get(2).copied().unwrap_or(0.0), ..Default::default() })
                 .collect();
+            c.live = true;
             lines.push(c);
             continue;
         }
