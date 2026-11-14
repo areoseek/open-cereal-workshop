@@ -1578,39 +1578,7 @@ pub(crate) fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec
             let (a, b) = (pts[seg - 1], pts[seg]);
             let w = b.0 - a.0;
             let t = if w > 1e-9 { ((at - a.0) / w).clamp(0.0, 1.0) } else { 1.0 };
-            let s = match b.3 {
-                1 | 8 | 12 => {
-                    if t < 0.5 {
-                        0.5 * crate::fm::bend(t * 2.0, b.2)
-                    } else {
-                        1.0 - 0.5 * crate::fm::bend(2.0 - t * 2.0, b.2)
-                    }
-                }
-                2 => {
-                    if t >= 1.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                // stairs: the tension sets how many equal steps the segment takes, the last one landing on
-                // the end value (measured points: 0.515 -> 16, 0.425 -> 32, 0.375 -> 48, 0.335 -> 64)
-                3 | 4 => {
-                    let steps = (5.0 + (0.42695 - b.2) / 0.091).exp2().round().clamp(2.0, 4096.0);
-                    let at = t * steps;
-                    let k = at.floor().min(steps - 1.0);
-                    let part = if b.3 == 4 {
-                        let u = (at - k).clamp(0.0, 1.0);
-                        u * u * (3.0 - 2.0 * u) - 1.0
-                    } else {
-                        0.0
-                    };
-                    ((k + part.max(-k)) / (steps - 1.0)).clamp(0.0, 1.0)
-                }
-                9 => 0.5 - 0.5 * (t * PI).cos(),
-                10 => t * t * (3.0 - 2.0 * t),
-                _ => crate::fm::bend(t, b.2),
-            };
+            let s = crate::song::line_shape(b.3, t, b.2);
             a.1 + (b.1 - a.1) * s
         };
         p.push(v);

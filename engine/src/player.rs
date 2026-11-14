@@ -762,6 +762,12 @@ struct Overrides {
     /// Per insert: volume (0..=1.25) and pan.
     ins: Vec<(Option<f32>, Option<f32>)>,
     any_chan: bool,
+    /// Per channel: the gain a driven volume has reached so far (it cannot move faster than a set rate).
+    gain: Vec<f32>,
+    /// The most a driven gain may move in the block being made.
+    limit: f32,
+    /// How much of the way to the next tick the block being made covers.
+    arrive: f32,
     /// Per channel: pitch knob in cents.
     pitch: Vec<Option<f32>>,
     /// Effect slot controls being driven: the target and its 0..=1 value.
@@ -782,6 +788,33 @@ impl Overrides {
         self.pitch.iter_mut().for_each(|c| *c = None);
         self.chan.iter_mut().for_each(|c| *c = (None, None));
         self.ins.iter_mut().for_each(|c| *c = (None, None));
+        self.gain.iter_mut().for_each(|g| *g = f32::NAN);
+    }
+
+    /// The gain of a channel's volume as it sounds now: a driven volume is followed at a limited rate.
+    fn chan_gain(&self, song: &Song, c: usize) -> f32 {
+        match self.gain.get(c) {
+            Some(g) if g.is_finite() => *g,
+            _ => law::channel_gain(self.chan_volume(song, c)),
+        }
+    }
+
+    /// Move each driven channel's gain towards where its volume now stands, by `limit` at most
+    /// (measured: a full jump of a driven channel volume takes about a thousand frames, in a straight line).
+    fn follow_gain(&mut self, song: &Song, limit: f32) {
+        self.limit = limit;
+        if self.gain.len() != self.chan.len() {
+            self.gain.resize(self.chan.len(), f32::NAN);
+        }
+        for c in 0..self.chan.len().min(song.channels.len()) {
+            let Some(v) = self.chan[c].0 else {
+                self.gain[c] = f32::NAN;
+                continue;
+            };
+            let want = law::channel_gain(v);
+            let g = self.gain[c];
+            self.gain[c] = if g.is_finite() && limit < f32::MAX { g + ((want - g) * self.arrive).clamp(-limit, limit) } else { want };
+        }
     }
 
     fn fit(&mut self, song: &Song) {
@@ -989,6 +1022,9 @@ struct Voice {
     tail: u32,
     gl: f32,
     gr: f32,
+    /// A gain on its way to a new value: the step per frame and the frames left.
+    g_inc: [f32; 2],
+    g_left: u32,
     insert: usize,
     /// Frames to wait before sounding (places the start inside a block).
     delay: u32,
@@ -1471,6 +1507,11 @@ impl Voice {
             }
             self.mo[0] = (self.mo[0] + self.mo_inc).clamp(0.0, 1.0);
             let lean = self.mo[2] + self.sc[2];
+            if self.g_left > 0 {
+                self.g_left -= 1;
+                self.gl += self.g_inc[0];
+                self.gr += self.g_inc[1];
+            }
             let (gl, gr) = (self.gl * g * (1.0 + self.lr[0]) * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + self.lr[1]) * (1.0 + lean).clamp(0.0, 1.0));
             out[0] += s[0] * gl;
             out[1] += s[1] * gr;
@@ -3766,6 +3807,20 @@ impl Player {
         let pat = tr.pattern();
         self.ov.fit(song);
         let zone = song.perf_start().filter(|_| song_mode && tr.range().is_none()).map(|p| p as f64);
+        // while automation plays, a block ends on the next tick (unless ticks are very short): the lines
+        // are read tick by tick, and what they drive moves in straight pieces between those readings
+        let n = if playing && song_mode && !song.auto_plan.is_empty() && self.tpf > 0.0 && self.tpf * 64.0 <= 1.0 {
+            let whole = (self.pos + 0.51 * self.tpf).floor();
+            n.min((((whole + 1.0 - self.pos) / self.tpf).round() as usize).max(1))
+        } else {
+            n
+        };
+        // a line is read at the first tick this block reaches or stops short of; what it drives heads
+        // there in a straight line, getting as far as the block's share of the way
+        let lead = if playing { n as f64 * self.tpf } else { 0.0 };
+        let next_tick = (self.pos + lead - 0.51 * self.tpf).ceil();
+        let left = next_tick - self.pos;
+        self.ov.arrive = if left > lead + 0.51 * self.tpf && lead > 0.0 { (lead / left) as f32 } else { 1.0 };
         if song_mode {
             for plan in &song.auto_plan {
                 let Some(auto) = song.channels.get(plan.chan).and_then(|c| c.auto.as_ref()) else { continue };
@@ -3779,8 +3834,8 @@ impl Player {
                     // a clip of the performance zone only moves things while it is played by hand
                     continue;
                 }
-                let local = (self.pos - pos as f64).min(len as f64) + offset as f64;
-                let v = auto.value_at(local);
+                let local = (next_tick - pos as f64).min(len as f64) + offset as f64;
+                let v = song.channels[plan.chan].auto_range(auto.value_at(local));
                 for &t in &auto.targets {
                     self.ov.set(t, song.mapped(t, v));
                 }
@@ -3792,12 +3847,14 @@ impl Player {
                 let Some(c) = Self::zone_clip(song, k, l.clip) else { continue };
                 let ClipSrc::Automation(chi) = c.src else { continue };
                 let Some(auto) = song.channels.get(chi).and_then(|c| c.auto.as_ref()) else { continue };
-                let v = auto.value_at((self.pos - l.start).clamp(0.0, c.len as f64) + l.offset + c.offset as f64);
+                let v = song.channels[chi].auto_range(auto.value_at((next_tick - l.start).clamp(0.0, c.len as f64) + l.offset + c.offset as f64));
                 for &t in &auto.targets {
                     self.ov.set(t, song.mapped(t, v));
                 }
             }
         }
+        let snap = self.chase || !playing;
+        self.ov.follow_gain(song, if snap { f32::MAX } else { 44.1 * n as f32 / self.sr });
         let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
         tr.tempo.store(tempo.to_bits(), Relaxed);
         crate::minis::set_tempo(tempo);
@@ -4025,6 +4082,7 @@ impl Player {
         }
         let mut live = 0;
         let follow = self.ov.any_chan;
+        let (gain_limit, arrive) = (self.ov.limit, self.ov.arrive);
         let main = song.main_pitch as f32 / 1200.0;
         let load = self.transport.load_on.load(Relaxed);
         if load {
@@ -4048,8 +4106,13 @@ impl Player {
                         let g = law::channel_gain(self.ov.chan_volume(song, c)) * v.note_gain;
                         v.pan0 = self.ov.chan_pan(song, c) + v.note_pan;
                         let (pl, pr) = law::pan(v.pan0.clamp(-1.0, 1.0));
-                        v.gl = g * pl;
-                        v.gr = g * pr;
+                        // the new gain is approached in a straight line over this block, and no faster
+                        // than a set rate (measured: a full jump takes about a thousand frames)
+                        let (dl, dr) = (g * pl - v.gl, g * pr - v.gr);
+                        let most = dl.abs().max(dr.abs());
+                        let k = if most * arrive > gain_limit { gain_limit / most } else { arrive };
+                        v.g_left = n as u32;
+                        v.g_inc = [dl * k / n as f32, dr * k / n as f32];
                     }
                 }
                 if let Some(Some(share)) = self.ov.pitch.get(v.chan as usize) {
@@ -4166,7 +4229,7 @@ impl Player {
             if !sounded {
                 buf.fill([0.0; 2]);
             }
-            let g = law::channel_gain(self.ov.chan_volume(song, c));
+            let g = self.ov.chan_gain(song, c);
             let (pl, pr) = law::pan(self.ov.chan_pan(song, c).clamp(-1.0, 1.0));
             // one whose own sound comes late is lined up apart from the rest of its track
             if self.comp.take(c, buf, [g * pl, g * pr], sounded) || !sounded {
@@ -5393,7 +5456,7 @@ mod tests {
         let ramp = |a: f32, b: f32, t: Target| {
             Some(Arc::new(Automation { points: vec![AutoPt { tick: 0.0, value: a, tension: 0.0, mode: 0 }, AutoPt { tick: 384.0, value: b, tension: 0.0, mode: 0 }], targets: vec![t] }))
         };
-        s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: ramp(1.0, 0.0, Target::ChanVolume(0)), ..Default::default() });
+        s.channels.push(Chan { auto: ramp(1.0, 0.0, Target::ChanVolume(0)), ..Chan::automation() });
         let ac = s.channels.len() - 1;
         s.clips.push(Clip { pos: 0, len: 384, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
         s.clips.push(Clip { pos: 0, len: 384, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
@@ -5920,7 +5983,7 @@ mod tests {
         for (value, want) in [(1.0f32, 2.0f32), (0.0, 0.0)] {
             let mut s = s.clone();
             let pts = vec![crate::song::AutoPt { tick: 0.0, value, tension: 0.0, mode: 0 }, crate::song::AutoPt { tick: len as f64, value, tension: 0.0, mode: 0 }];
-            s.channels.push(Chan { kind: ChannelKind::AutomationClip, auto: Some(Arc::new(crate::song::Automation { points: pts, targets: vec![Target::SlotParam(0, 0, 0)] })), ..Default::default() });
+            s.channels.push(Chan { auto: Some(Arc::new(crate::song::Automation { points: pts, targets: vec![Target::SlotParam(0, 0, 0)] })), ..Chan::automation() });
             let ac = s.channels.len() - 1;
             s.clips.push(Clip { pos: 0, len, track: 0, src: ClipSrc::Pattern(0), offset: 0, muted: false, group: 0 });
             s.clips.push(Clip { pos: 0, len, track: 1, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });

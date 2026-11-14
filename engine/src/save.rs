@@ -3150,7 +3150,7 @@ mod tests {
         let (mut r, f) = reload(&bytes);
         let pts = vec![AutoPt { tick: 0.0, value: 0.25, tension: 0.0, mode: 0 }, AutoPt { tick: 96.0, value: 1.0, tension: 0.5, mode: 0 }, AutoPt { tick: 384.0, value: 0.0, tension: -0.25, mode: 2 }];
         let ac = r.channels.len();
-        r.channels.push(Chan { name: "Kick - Volume".into(), kind: ChannelKind::AutomationClip, auto: Some(std::sync::Arc::new(Automation { points: pts.clone(), targets: vec![Target::ChanVolume(0), Target::InsertPan(2)] })), ..Default::default() });
+        r.channels.push(Chan { name: "Kick - Volume".into(), auto: Some(std::sync::Arc::new(Automation { points: pts.clone(), targets: vec![Target::ChanVolume(0), Target::InsertPan(2)] })), ..Chan::automation() });
         r.clips.push(Clip { pos: 0, len: 384, track: 3, src: ClipSrc::Automation(ac), offset: 0, muted: false, group: 0 });
         r.prepare();
         let (bytes2, f2) = save(&mut r, Some(&f)).unwrap();

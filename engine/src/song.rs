@@ -186,7 +186,7 @@ impl Env {
             return 0.0;
         }
         if t < self.attack {
-            return bend(t / self.attack, self.tension[0]);
+            return env_bend(t / self.attack, self.tension[0]);
         }
         t -= self.attack;
         if t < self.hold {
@@ -194,7 +194,7 @@ impl Env {
         }
         t -= self.hold;
         if t < self.decay {
-            return self.sustain + (1.0 - self.sustain) * bend(1.0 - t / self.decay, -self.tension[1]);
+            return self.sustain + (1.0 - self.sustain) * env_bend(1.0 - t / self.decay, -self.tension[1]);
         }
         self.sustain
     }
@@ -204,7 +204,7 @@ impl Env {
         if t >= self.release {
             return None;
         }
-        Some(from * bend(1.0 - t / self.release.max(1e-6), -self.tension[2]))
+        Some(from * env_bend(1.0 - t / self.release.max(1e-6), -self.tension[2]))
     }
 }
 
@@ -1021,12 +1021,149 @@ pub struct Automation {
     pub targets: Vec<Target>,
 }
 
-/// Bend a 0..=1 ramp. Positive tension starts slowly and finishes fast. (Approximate: see docs/PARITY.md.)
-fn bend(t: f32, tension: f32) -> f32 {
+/// The bend of a channel envelope's stage. Positive tension starts slowly and finishes fast.
+/// (Approximate: see docs/PARITY.md.)
+fn env_bend(t: f32, tension: f32) -> f32 {
     if tension.abs() < 1e-4 {
         t
     } else {
         t.powf((tension.clamp(-1.0, 1.0) * 3.0).exp2())
+    }
+}
+
+/// How far along a drawn line's piece has come at `t` (0..=1) of its width, for the piece's kind and
+/// tension. The same line editor draws automation clips and the lines inside units, so both read this.
+/// Measured against renders of automation clips and of drawn tables.
+/// How many levels a stepped line takes for a tension (measured at forty tensions: 0 -> 1002,
+/// 0.25 -> 128, 0.5 -> 18, 0.75 -> 4, 1 -> 2).
+fn step_count(k: f32) -> f32 {
+    (2.0 + 10f64.powf(3.0 - 3.6 * (k.abs().min(1.0) as f64))).round().max(2.0) as f32
+}
+
+/// Strength of the ratio curve for a tension: 1 is the straight line, smaller rises sooner.
+fn ratio_strength(k: f32) -> f32 {
+    const T: [f32; 9] = [0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0];
+    const L: [f32; 9] = [0.0, -0.4142, -1.109, -1.938, -2.594, -3.368, -4.878, -7.202, -9.97];
+    let x = k.abs().min(1.0);
+    let i = (0..8).rfind(|&i| x >= T[i]).unwrap_or(0);
+    let slope = |a: usize, b: usize| (L[b] - L[a]) / (T[b] - T[a]);
+    let m0 = if i == 0 { slope(0, 1) } else { 0.5 * (slope(i - 1, i) + slope(i, i + 1)) };
+    let m1 = if i == 7 { slope(7, 8) } else { 0.5 * (slope(i, i + 1) + slope(i + 1, i + 2)) };
+    let h = T[i + 1] - T[i];
+    let u = (x - T[i]) / h;
+    let (u2, u3) = (u * u, u * u * u);
+    let l = (2.0 * u3 - 3.0 * u2 + 1.0) * L[i]
+        + (u3 - 2.0 * u2 + u) * h * m0
+        + (-2.0 * u3 + 3.0 * u2) * L[i + 1]
+        + (u3 - u2) * h * m1;
+    if k >= 0.0 {
+        l.exp2()
+    } else {
+        (-l).exp2()
+    }
+}
+
+pub fn line_shape(mode: u8, t: f32, k: f32) -> f32 {
+    use crate::fm::bend;
+    match mode {
+        // hold: stay on the earlier value until this point
+        2 => {
+            if t >= 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        1 | 8 | 12 => {
+            let single = mode - 1;
+            if t < 0.5 {
+                0.5 * line_shape(single, 2.0 * t, k)
+            } else {
+                1.0 - 0.5 * line_shape(single, 2.0 - 2.0 * t, k)
+            }
+        }
+        // the second single curve: a sixth power, mixed with the straight line by the tension
+        7 => {
+            let w = k.abs().min(1.0);
+            let c = if k >= 0.0 { 1.0 - (1.0 - t).powi(6) } else { t.powi(6) };
+            t + (c - t) * w
+        }
+        // stairs: the tension sets how many levels the piece takes. A positive tension spends an equal time
+        // on each level and ends on the end value; a negative one leaves the start value at once and only
+        // reaches the end value at the point itself
+        3 => {
+            let n = step_count(k);
+            if t >= 1.0 {
+                1.0
+            } else if k >= 0.0 {
+                ((t * n + 1e-4).floor().min(n - 1.0) / (n - 1.0)).clamp(0.0, 1.0)
+            } else {
+                (((t * (n - 1.0) + 1e-4).floor() + 1.0) / n).clamp(0.0, 1.0)
+            }
+        }
+        // smooth stairs: one level fewer, joined by an S that takes the whole of each period
+        4 => {
+            // a negative tension starts and ends half way through a rise
+            let periods = step_count(k) - 1.0;
+            let half = if k >= 0.0 { 0.0 } else { 0.5 };
+            let at = t.clamp(0.0, 1.0) * periods + half;
+            let j = at.floor();
+            let u = at - j;
+            let sm = if u < 0.5 { 4.0 * u * u * u } else { 1.0 - 4.0 * (1.0 - u).powi(3) };
+            ((j + sm - half) / periods).clamp(0.0, 1.0)
+        }
+        // pulse: flips between the two values, a positive tension starting low
+        5 => {
+            if t >= 1.0 {
+                return 1.0;
+            }
+            let at = t.max(0.0) * (step_count(k) - 1.0) + 1e-4;
+            let late = at - at.floor() >= 0.5;
+            if late == (k >= 0.0) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        // wave: a triangle for a positive tension, a sine for a negative one, ending on the end value
+        6 => {
+            let halves = 2.0 * (step_count(k) - 1.0) - 1.0;
+            let at = t.clamp(0.0, 1.0) * halves;
+            if k >= 0.0 {
+                let j = at.floor().min(halves - 1.0);
+                let u = at - j;
+                if j as i64 % 2 == 0 {
+                    u
+                } else {
+                    1.0 - u
+                }
+            } else {
+                0.5 - 0.5 * (std::f32::consts::PI * at).cos()
+            }
+        }
+        // the third single curve: a ratio curve whose strength follows a measured table
+        11 => {
+            let c = ratio_strength(k);
+            let d = t + c * (1.0 - t);
+            if d.abs() < 1e-12 {
+                t
+            } else {
+                (t / d).clamp(0.0, 1.0)
+            }
+        }
+        // a quarter of a sine, mixed with the straight line by the tension; negative tension turns it over
+        9 => {
+            let w = k.abs().min(1.0);
+            let x = std::f32::consts::FRAC_PI_2 * t;
+            let c = if k >= 0.0 { x.sin() } else { 1.0 - x.cos() };
+            t + (c - t) * w
+        }
+        // smooth: an S at no tension, straightening as the tension grows either way
+        10 => {
+            let c = t * t * (3.0 - 2.0 * t);
+            c + (t - c) * k.abs().min(1.0)
+        }
+        _ => bend(t, k),
     }
 }
 
@@ -1047,27 +1184,28 @@ impl Automation {
             return b.value;
         }
         let t = ((tick - a.tick) / span) as f32;
-        let k = b.tension;
-        let shaped = match b.mode {
-            2 => 0.0, // hold: stay on the earlier value until this point
-            1 | 8 | 11 => {
-                if t < 0.5 {
-                    0.5 * bend(2.0 * t, k)
-                } else {
-                    1.0 - 0.5 * bend(2.0 - 2.0 * t, k)
-                }
-            }
-            3 => (t * 4.0).floor() / 4.0,
-            4 | 10 => t * t * (3.0 - 2.0 * t),
-            9 => 0.5 - 0.5 * (std::f32::consts::PI * t).cos(),
-            _ => bend(t, k),
-        };
+        let shaped = line_shape(b.mode, t, b.tension);
         a.value + (b.value - a.value) * shaped
     }
 
     /// Ticks from the first point to the last.
     pub fn length(&self) -> f64 {
         self.points.last().map(|p| p.tick).unwrap_or(0.0)
+    }
+}
+
+impl Chan {
+    /// An automation clip's curve fitted between its lowest and highest setting. The channel's
+    /// pan slot holds the lowest and its volume slot the highest (measured against renders).
+    pub fn auto_range(&self, v: f32) -> f32 {
+        let lo = ((self.pan + 1.0) * 0.5).clamp(0.0, 1.0);
+        let hi = self.volume.clamp(0.0, 1.0);
+        lo + (hi - lo) * v
+    }
+
+    /// A fresh automation clip channel: full range.
+    pub fn automation() -> Self {
+        Self { kind: ChannelKind::AutomationClip, volume: 1.0, pan: -1.0, ..Default::default() }
     }
 }
 

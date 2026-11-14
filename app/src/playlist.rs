@@ -66,7 +66,21 @@ enum Drag {
 }
 
 /// The shapes a line between two automation points can take, with the number the file gives each.
-const AUTO_MODES: [(u8, &str); 6] = [(0, "Single curve"), (1, "Double curve"), (2, "Hold"), (3, "Stairs"), (4, "Smooth stairs"), (9, "Half sine")];
+const AUTO_MODES: [(u8, &str); 13] = [
+    (0, "Single curve"),
+    (1, "Double curve"),
+    (2, "Hold"),
+    (3, "Stairs"),
+    (4, "Smooth stairs"),
+    (5, "Pulse"),
+    (6, "Wave"),
+    (7, "Single curve 2"),
+    (8, "Double curve 2"),
+    (9, "Half sine"),
+    (10, "Smooth"),
+    (11, "Single curve 3"),
+    (12, "Double curve 3"),
+];
 
 pub struct State {
     scroll_x: f32,
@@ -1060,9 +1074,8 @@ impl App {
 
     /// A new automation clip with these points, on the first track with room for it.
     pub(crate) fn add_auto_clip(&mut self, t: Target, pos: u32, len: u32, points: Vec<cereal_engine::song::AutoPt>) {
-        let mut c = cereal_engine::song::Chan::default();
+        let mut c = cereal_engine::song::Chan::automation();
         c.name = self.song.target_name(t);
-        c.kind = cereal_engine::flp::ChannelKind::AutomationClip;
         c.auto = Some(std::sync::Arc::new(cereal_engine::song::Automation { points, targets: vec![t] }));
         self.song.channels.push(c);
         let ci = self.song.channels.len() - 1;

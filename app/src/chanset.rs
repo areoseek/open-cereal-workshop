@@ -452,6 +452,18 @@ impl App {
                 }
                 ChannelKind::AutomationClip => {
                     ui.label("Automation clip. Its curve is drawn in the playlist.");
+                    let (mut lo, mut hi) = ((c.pan + 1.0) * 0.5, c.volume);
+                    let mut moved = false;
+                    ui.horizontal(|ui| {
+                        moved |= cap_knob(ui, "MIN", &mut lo, 0.0, 1.0, 0.0, |v| format!("Lowest setting: {:.0} %", v * 100.0));
+                        moved |= cap_knob(ui, "MAX", &mut hi, 0.0, 1.0, 1.0, |v| format!("Highest setting: {:.0} %", v * 100.0));
+                    });
+                    if moved {
+                        let c = &mut self.song.channels[ci];
+                        c.pan = lo * 2.0 - 1.0;
+                        c.volume = hi;
+                        self.dirty = true;
+                    }
                 }
                 _ if c.zones.as_ref().is_some_and(|z| z.bank.is_some()) => {
                     // a sound bank player: the file, and the preset picked from it
