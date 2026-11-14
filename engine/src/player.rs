@@ -1881,6 +1881,16 @@ fn own_arp(ch: &crate::song::Chan) -> crate::song::Sampler {
     f
 }
 
+/// A note's mod value at its k-th echo (measured on the resonance): each echo takes the step's share of
+/// the way that is left to the end it moves toward, so it never passes it.
+fn echo_mod(start: f32, step: f32, k: u32) -> f32 {
+    let mut m = start.clamp(-1.0, 1.0);
+    for _ in 0..k {
+        m += step * if step > 0.0 { 1.0 - m } else { 1.0 + m };
+    }
+    m.clamp(-1.0, 1.0)
+}
+
 impl Player {
     pub fn sample_rate(&self) -> f32 {
         self.sr
@@ -2328,8 +2338,8 @@ impl Player {
                         vel: law::scale_velocity(n.vel, each / 2.0),
                         pan: side(n.pan + sign * f.echo_pan * k as f32),
                         fine_cents: n.fine_cents + sign * f.echo_cents * k as f32,
-                        mod_x: (n.mod_x + f.echo_mod_x * k as f32).clamp(-1.0, 1.0),
-                        mod_y: (n.mod_y + f.echo_mod_y * k as f32).clamp(-1.0, 1.0),
+                        mod_x: echo_mod(n.mod_x, f.echo_mod_x, k),
+                        mod_y: echo_mod(n.mod_y, f.echo_mod_y, k),
                         porta: false,
                         ..n.clone()
                     };
@@ -2342,8 +2352,8 @@ impl Player {
                 vel: law::scale_velocity(n.vel, f.echo_feedback.powi(k as i32)),
                 pan: side(n.pan + f.echo_pan * k as f32),
                 fine_cents: n.fine_cents + f.echo_cents * k as f32,
-                mod_x: (n.mod_x + f.echo_mod_x * k as f32).clamp(-1.0, 1.0),
-                mod_y: (n.mod_y + f.echo_mod_y * k as f32).clamp(-1.0, 1.0),
+                mod_x: echo_mod(n.mod_x, f.echo_mod_x, k),
+                mod_y: echo_mod(n.mod_y, f.echo_mod_y, k),
                 porta: n.porta && k == 0,
                 ..n.clone()
             };
