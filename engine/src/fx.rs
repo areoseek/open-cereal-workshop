@@ -426,35 +426,36 @@ pub static DEFS: &[Def] = &[
         ident: "Fruity Multiband Compressor",
         title: "Three Band Compressor",
         size: 124,
-        fixed: &[(8, 1), (120, 50)],
+        fixed: &[(120, 50)],
         params: &[
             p("Gain", 4, 0, 65536, 32768),
-            p("Limiter", 12, 0, 1, 0),
+            p("Linear phase", 12, 0, 1, 0),
             p("High state", 16, 0, 2, 0),
             p("High from", 20, 20, 20000, 17000),
-            p("High threshold", 24, 0, 65536, 21845),
-            p("High ratio", 28, 0, 65536, 45875),
-            p("High knee", 32, 0, 65536, 32768),
+            p("High gain", 24, 0, 65536, 21845),
+            p("High threshold", 28, 0, 65536, 45875),
+            p("High ratio", 32, 0, 65536, 32768),
             p("High attack", 36, 1, 1000, 100),
             p("High release", 40, 100, 10000, 1000),
-            p("High gain", 44, 0, 65536, 52429),
+            p("High knee", 44, 0, 65536, 52429),
             p("Mid state", 48, 0, 2, 0),
             p("Mid to", 52, 20, 20000, 17000),
             p("Mid from", 56, 20, 20000, 6500),
-            p("Mid threshold", 60, 0, 65536, 21845),
-            p("Mid ratio", 64, 0, 65536, 45875),
-            p("Mid knee", 68, 0, 65536, 32768),
+            p("Mid gain", 60, 0, 65536, 21845),
+            p("Mid threshold", 64, 0, 65536, 45875),
+            p("Mid ratio", 68, 0, 65536, 32768),
             p("Mid attack", 72, 1, 1000, 100),
             p("Mid release", 76, 100, 10000, 1000),
-            p("Mid gain", 80, 0, 65536, 52429),
+            p("Mid knee", 80, 0, 65536, 52429),
             p("Low state", 84, 0, 2, 0),
             p("Low to", 88, 20, 20000, 6500),
-            p("Low threshold", 92, 0, 65536, 21845),
-            p("Low ratio", 96, 0, 65536, 45875),
-            p("Low knee", 100, 0, 65536, 32768),
+            p("Low gain", 92, 0, 65536, 21845),
+            p("Low threshold", 96, 0, 65536, 45875),
+            p("Low ratio", 100, 0, 65536, 32768),
             p("Low attack", 104, 1, 1000, 100),
             p("Low release", 108, 100, 10000, 1000),
-            p("Low gain", 112, 0, 65536, 52429),
+            p("Low knee", 112, 0, 65536, 52429),
+            p("Limiter", 8, 0, 1, 1),
         ],
     },
     Def {
@@ -1973,6 +1974,7 @@ impl Fx {
     pub fn latency(&self, sr: f32) -> usize {
         match self.kind {
             Kind::Comp => 64,
+            Kind::MultiComp if self.p.get(1).copied().unwrap_or(0.0) >= 0.5 => 52,
             Kind::Maxi => crate::fxmaxi::latency(&self.p, sr),
             Kind::Loud => match loud_settings() {
                 Some(set) => crate::fxmaxi::latency(&set[(self.p[0] as usize).min(3)], sr),
@@ -3036,6 +3038,21 @@ fn shift_delay(p: &[f32], cx: &Ctx) -> f32 {
     }
 }
 
+/// Cutoff in Hz of a band edge of the three band compressor for its stored value (20 to 20000), read off
+/// renders of single clicks through one band.
+fn band_edge_hz(v: f32) -> f32 {
+    const T: [(f32, f32); 24] = [
+        (20.0, 20.0), (500.0, 23.64), (1000.0, 27.88), (1500.0, 33.77), (2000.0, 41.5), (3000.0, 64.89), (4000.0, 102.11), (5000.0, 159.3),
+        (6500.0, 300.5), (7000.0, 367.12), (8000.0, 541.09), (9000.0, 782.9), (10000.0, 1114.2), (11000.0, 1561.36), (12000.0, 2157.76),
+        (13000.0, 2945.19), (14000.0, 3975.71), (15000.0, 5319.1), (16000.0, 7035.13), (17000.0, 9236.5), (18000.0, 12032.69),
+        (19000.0, 15564.36), (19500.0, 17657.46), (20000.0, 20010.0),
+    ];
+    let v = v.clamp(20.0, 20000.0);
+    let i = T.iter().position(|e| e.0 >= v).unwrap_or(23).max(1);
+    let (a, b) = (T[i - 1], T[i]);
+    a.1 * (b.1 / a.1).powf((v - a.0) / (b.0 - a.0))
+}
+
 /// Echo time of one bank of the echo bank in frames. Tempo mode counts in parts of a step (480 to a step in
 /// the newer layout, 48 in the older one), the free mode in milliseconds.
 fn bank_time(q: &[f32], layout: f32, cx: &Ctx) -> f32 {
@@ -3043,7 +3060,8 @@ fn bank_time(q: &[f32], layout: f32, cx: &Ctx) -> f32 {
     if (q[19] as i32 >> 24) & 1 != 0 {
         q[8] / (48.0 * fine) * cx.step
     } else {
-        q[8] / fine * 0.001 * cx.sr
+        // 3840 is one second in the newer layout
+        q[8] / (0.384 * fine) * 0.001 * cx.sr
     }
 }
 
@@ -3271,7 +3289,7 @@ impl Unit {
             }
             Kind::EchoBank => {
                 for _ in 0..8 {
-                    u.lines.push(vec![0.0; ((sr * 2.0) as usize + 8) * 2]);
+                    u.lines.push(vec![0.0; ((sr * 2.4) as usize + 8) * 2]);
                     u.lpos.push(0);
                 }
                 // filter memories: per bank two filters, three stages, two sides; then the grain clocks
@@ -3337,11 +3355,11 @@ impl Unit {
                     if (q[19] as i32 >> 8) & 1 == 0 {
                         continue;
                     }
-                    let fb = (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995);
+                    let fb = (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.97);
                     let n = if fb > 0.001 { (0.001f32.ln() / fb.ln()).ceil().min(200.0) } else { 1.0 };
                     most = most.max((bank_time(q, p[164], cx) * (n + 1.0)) as usize);
                 }
-                most.min((cx.sr * 60.0) as usize) + 4096
+                most.min((cx.sr * 60.0) as usize) + (cx.sr * 0.33) as usize + 4096
             }
             Kind::GrainShift => {
                 let fb = (p[9] / 100.0).clamp(0.0, 0.97);
@@ -5528,77 +5546,140 @@ impl Unit {
                 }
                 let (rings, mem) = self.lines.split_at_mut(8);
                 let mem = &mut mem[0];
-                let (dry, wet, input) = (p[0] / 128.0, p[1] / 128.0, p[2] / 128.0);
+                // every level knob follows the shared curve (measured on single clicks)
+                let (dry, wet, input) = (knob_gain(p[0] / 128.0), knob_gain(p[1] / 128.0), knob_gain(p[2] / 128.0));
                 let len = rings[0].len() / 2;
+                // the furthest a side can be held back before the line
+                let ahead = ((sr * 0.33) as usize).min(len / 4);
                 struct Bank {
                     on: bool,
-                    pan_in: (f32, f32),
-                    filt: (i32, f32, f32, bool),
-                    echo_filt: (i32, f32, f32),
-                    // stages, and the level a shelf or bell lifts or cuts to
-                    shape: [(usize, f32); 2],
-                    // how far the sides are pulled together (above nought) or pushed apart
-                    sep: f32,
+                    pan_in: [f32; 4],
+                    // kind, the five numbers of one stage, and whether it sits after the line
+                    filt: (i32, [f32; 5], bool),
+                    echo_filt: (i32, [f32; 5]),
+                    // stages of each
+                    shape: [usize; 2],
+                    // what one trip round the line does to the two sides: [left from left, left from right,
+                    // right from left, right from right]
+                    turn: [f32; 4],
                     // grain length in frames (0 = whole) and the bend of its envelope
                     grain: (usize, f32),
+                    // level lost on every trip, and whether the first echo skips that loss
                     fb: f32,
+                    whole_first: bool,
                     mode: i32,
-                    pan_fb: (f32, f32),
                     time: usize,
                     // how much later each side goes into the line
                     lead: [usize; 2],
-                    pan_out: (f32, f32),
+                    pan_out: [f32; 4],
                     next: f32,
                 }
-                let hz = |v: f32| 20.0 * 1000f32.powf((v / 65536.0).clamp(0.0, 1.0));
-                let damp = |v: f32| std::f32::consts::SQRT_2 / 20f32.powf(((v - 17500.0) / 48036.0).clamp(-0.3, 1.0));
+                // every filter is a plain two-pole section; the knob laws were read off noise run through each
+                // kind (1 to 7: low, band, notch, high, low shelf, bell, high shelf). The low pass has its own
+                // cutoff scale, bands and notches are set by width in octaves, shelves by steepness
+                let section = |kind: i32, cut: f32, res: f32, level: f32, stages: usize| -> [f32; 5] {
+                    // more stages share the work: each takes its root of the level and of the sharpness, and a
+                    // band is made that many times wider
+                    let n = stages as f32;
+                    let (x, r) = ((cut / 65536.0).clamp(0.0, 1.0), (res / 65536.0).clamp(0.0, 1.0));
+                    let turn = 1501.2f32.powf(x);
+                    let hz = if kind == 1 { 29.31 * turn + 103.01 } else { 17.636 * turn - 13.217 };
+                    let w = std::f32::consts::TAU * hz.min(20000.0).min(sr * 0.4535) / sr;
+                    let (sn, cs) = w.sin_cos();
+                    let a = (0.1 + 0.006_663 * level.clamp(0.0, 200.0) + 2.9e-6 * level.clamp(0.0, 200.0).powi(2)).powf(1.0 / n);
+                    let (b, d): ([f32; 3], [f32; 3]) = match kind {
+                        1 | 4 => {
+                            let al = sn / (2.0 * (0.075 + 0.025 * 1997f32.powf(r)).powf(1.0 / n));
+                            let b = if kind == 1 { [(1.0 - cs) * 0.5, 1.0 - cs, (1.0 - cs) * 0.5] } else { [(1.0 + cs) * 0.5, -1.0 - cs, (1.0 + cs) * 0.5] };
+                            (b, [1.0 + al, -2.0 * cs, 1.0 - al])
+                        }
+                        2 | 3 => {
+                            let wide = (0.02885 + 0.345 * (101.6f32.powf(r) - 1.0)) * n;
+                            let al = sn * (std::f32::consts::LN_2 * 0.5 * wide * w / sn).min(30.0).sinh();
+                            (if kind == 2 { [al, 0.0, -al] } else { [1.0, -2.0 * cs, 1.0] }, [1.0 + al, -2.0 * cs, 1.0 - al])
+                        }
+                        6 => {
+                            let al = sn / (2.0 * (0.05 + 99.95 * 1999f32.powf(-r)));
+                            ([1.0 + al * a, -2.0 * cs, 1.0 - al * a], [1.0 + al / a, -2.0 * cs, 1.0 - al / a])
+                        }
+                        _ => {
+                            let steep = 1.35 * 3f32.powf(-r) - 0.35;
+                            let al = sn * 0.5 * ((a + 1.0 / a) * (1.0 / steep - 1.0) + 2.0).sqrt();
+                            let t = 2.0 * a.sqrt() * al;
+                            // the high shelf is the low one with the cosine turned over
+                            let c = if kind == 5 { cs } else { -cs };
+                            let f = if kind == 5 { 1.0 } else { -1.0 };
+                            (
+                                [a * ((a + 1.0) - (a - 1.0) * c + t), f * 2.0 * a * ((a - 1.0) - (a + 1.0) * c), a * ((a + 1.0) - (a - 1.0) * c - t)],
+                                [(a + 1.0) + (a - 1.0) * c + t, f * -2.0 * ((a - 1.0) + (a + 1.0) * c), (a + 1.0) + (a - 1.0) * c - t],
+                            )
+                        }
+                    };
+                    [b[0] / d[0], b[1] / d[0], b[2] / d[0], d[1] / d[0], d[2] / d[0]]
+                };
+                // a pan knob (in, out and separation alike): the side turned away from fades out, and what it
+                // carried moves over to the other side, so that at the end one side holds both at 0.707.
+                // Rows: [left from left, left from right, right from left, right from right]
+                let pan = |v: f32, level: f32| {
+                    let a = (1.0 + v.abs().min(1.0)) * std::f32::consts::FRAC_PI_4;
+                    let (gl, gr) = (std::f32::consts::SQRT_2 * a.cos(), std::f32::consts::SQRT_2 * a.sin());
+                    let (keep, moved) = (gr * (1.0 + gl) * 0.5 * level, gr * (1.0 - gl) * 0.5 * level);
+                    if v >= 0.0 {
+                        [gl * level, 0.0, moved, keep]
+                    } else {
+                        [keep, moved, 0.0, gl * level]
+                    }
+                };
+                let signed = |v: f32| knob_gain(v.abs()) * v.signum();
                 let banks: [Bank; 8] = std::array::from_fn(|b| {
                     let q = &p[4 + b * 20..24 + b * 20];
                     let (modes, sw) = (q[18] as i32, q[19] as i32);
+                    let fine = if p[164] >= 16.0 { 10.0 } else { 1.0 };
                     let t = bank_time(q, p[164], cx);
-                    // the side offset is short: one setting measured at 116 frames for 136 units (interim, as a line)
-                    let ofs = q[9] * 0.8566 * sr / 44100.0;
-                    const AHEAD: usize = 1024;
-                    let frames = |d: f32| ((d + 0.5).max(1.0) as usize).min(len - AHEAD - 2);
-                    let lead = |d: f32| ((d.max(0.0) + 0.5) as usize).min(AHEAD - 1);
-                    let (il, ir) = balance(q[0] / 128.0);
-                    let (ol, or) = balance(q[13] / 128.0);
+                    // measured: the held-back side lags by half a millisecond times (650^x - 1)
+                    let lag = 0.0005 * sr * (650f32.powf((q[9].abs() / (48.0 * fine)).min(1.0)) - 1.0);
+                    let lead = |on: bool| if on { ((lag + 0.5) as usize).min(ahead - 1) } else { 0 };
+                    // the echo pan knob bleeds each side into the other: towards the right the two sides
+                    // merge, towards the left the other side comes in turned over
+                    let ep = (q[7] / 128.0).clamp(-1.0, 1.0);
+                    let (same, cross) = if ep >= 0.0 {
+                        let c = (5f32.powf(ep) - 1.0) / 8.0;
+                        (1.0 - c, c)
+                    } else {
+                        let h = -ep * 0.5;
+                        (1.0 - h * h, -h * (1.0 - h))
+                    };
+                    // one trip: the bleed first, then separation (with both knobs turned the side that receives
+                    // comes out a little differently in the original; either knob alone is exact)
+                    let sp = pan(q[5] / 128.0, 1.0);
+                    let turn = [sp[0] * same + sp[1] * cross, sp[0] * cross + sp[1] * same, sp[2] * same + sp[3] * cross, sp[2] * cross + sp[3] * same];
                     Bank {
                         on: (sw >> 8) & 1 != 0,
-                        // interim: one measured setting (118 gives 0.8121) drawn as a power law
-                        pan_in: (il * (q[1] / 128.0).max(0.0).powf(2.5585), ir * (q[1] / 128.0).max(0.0).powf(2.5585)),
-                        filt: (q[16] as i32, svf_g(hz(q[2]), sr), damp(q[3]), modes & 1 != 0),
-                        echo_filt: (q[17] as i32, svf_g(hz(q[10]), sr), damp(q[11])),
-                        shape: [(1 + (p[165 + b * 4] as usize).min(2), 0.1 + q[4].clamp(0.0, 200.0) / 200.0 * 1.9), (1 + (p[166 + b * 4] as usize).min(2), 0.1 + q[12].clamp(0.0, 200.0) / 200.0 * 1.9)],
-                        sep: (q[5] / 128.0).clamp(-1.0, 1.0),
+                        pan_in: pan(q[0] / 128.0, knob_gain(q[1] / 128.0)),
+                        filt: (q[16] as i32, section(q[16] as i32, q[2], q[3], q[4], 1 + (p[165 + b * 4] as usize).min(2)), modes & 1 != 0),
+                        echo_filt: (q[17] as i32, section(q[17] as i32, q[10], q[11], q[12], 1 + (p[166 + b * 4] as usize).min(2))),
+                        shape: [1 + (p[165 + b * 4] as usize).min(2), 1 + (p[166 + b * 4] as usize).min(2)],
+                        turn,
                         grain: {
                             let div = (p[167 + b * 4] / 256.0).round();
                             (if div >= 1.0 { ((t / div) as usize).max(8) } else { 0 }, (p[168 + b * 4] / 32768.0).clamp(-1.0, 1.0))
                         },
-                        fb: (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 0.995),
+                        fb: (q[6] / 128.0 * p[3] / 128.0).clamp(0.0, 1.0),
+                        whole_first: (sw >> 16) & 1 != 0,
                         mode: (modes >> 8) & 0xff,
-                        pan_fb: balance(q[7] / 128.0),
-                        time: frames(t),
-                        lead: [lead(-ofs), lead(ofs)],
-                        pan_out: (ol * q[14] / 128.0, or * q[14] / 128.0),
-                        next: if b < 7 { q[15] / 128.0 } else { 0.0 },
+                        time: (t.round_ties_even().max(1.0) as usize).min(len - ahead - 2),
+                        lead: [lead(q[9] < 0.0), lead(q[9] > 0.0)],
+                        pan_out: pan(q[13] / 128.0, signed(q[14] / 128.0)),
+                        next: if b < 7 { signed(q[15] / 128.0) } else { 0.0 },
                     }
                 });
-                // filter kinds 1 to 7: low, band, notch, high, low shelf, bell, high shelf
-                let pick = |kind: i32, (lp, bp, hp): (f32, f32, f32), x: f32, k: f32, lift: f32| match kind {
-                    1 => lp,
-                    2 => bp * k,
-                    3 => lp + hp,
-                    4 => hp,
-                    5 => x + (lift - 1.0) * lp,
-                    6 => x + (lift - 1.0) * bp * k,
-                    7 => x + (lift - 1.0) * hp,
-                    _ => x,
-                };
-                let run = |m: &mut [f32], kind: i32, g: f32, k: f32, (stages, lift): (usize, f32), x: f32| {
+                let run = |m: &mut [f32], k: &[f32; 5], stages: usize, x: f32| {
                     let mut x = x;
                     for st in 0..stages {
-                        x = pick(kind, svf(&mut m[st * 2..], x, g, k), x, k, lift);
+                        let y = k[0] * x + m[st * 2];
+                        m[st * 2] = k[1] * x - k[3] * y + m[st * 2 + 1];
+                        m[st * 2 + 1] = k[2] * x - k[4] * y;
+                        x = y;
                     }
                     x
                 };
@@ -5614,15 +5695,12 @@ impl Unit {
                         let z = &mut mem[b * 24..b * 24 + 24];
                         let line = &mut rings[b];
                         let pos = self.lpos[b];
-                        let mut s = [x[0] * k.pan_in.0 + carry[0], x[1] * k.pan_in.1 + carry[1]];
-                        if (1..=7).contains(&k.filt.0) && !k.filt.3 {
+                        let i = &k.pan_in;
+                        let mut s = [x[0] * i[0] + x[1] * i[1] + carry[0], x[0] * i[2] + x[1] * i[3] + carry[1]];
+                        if (1..=7).contains(&k.filt.0) && !k.filt.2 {
                             for c in 0..2 {
-                                s[c] = run(&mut z[c * 6..], k.filt.0, k.filt.1, k.filt.2, k.shape[0], s[c]);
+                                s[c] = run(&mut z[c * 6..], &k.filt.1, k.shape[0], s[c]);
                             }
-                        }
-                        if k.sep != 0.0 {
-                            let (mid, side) = ((s[0] + s[1]) * 0.5, (s[0] - s[1]) * 0.5 * (1.0 - k.sep));
-                            s = [mid + side, mid - side];
                         }
                         if k.grain.0 > 0 {
                             // each echo is cut into equal pieces, every piece under its own rise and fall
@@ -5632,111 +5710,233 @@ impl Unit {
                             let env = (1.0 - (2.0 * ph - 1.0).abs()).powf(4f32.powf(k.grain.1));
                             s = [s[0] * env, s[1] * env];
                         }
-                        // measured: one echo time for both sides; the side offset holds one side's input back
-                        // before the line, so with crossed feedback the echoes swap that lag from side to side
-                        let rd = (pos + len - k.time) % len;
-                        let e = [line[rd * 2].clamp(-16.0, 16.0), line[rd * 2 + 1].clamp(-16.0, 16.0)];
-                        let clear = (pos + 1024) % len;
-                        line[clear * 2] = 0.0;
-                        line[clear * 2 + 1] = 0.0;
-                        let mut back = match k.mode {
-                            0 => [0.0; 2],
-                            2 | 3 => [e[1] * k.fb, e[0] * k.fb],
-                            _ => [e[0] * k.fb, e[1] * k.fb],
+                        let mut o = if k.mode == 0 {
+                            // no line at all: the bank passes its input straight on
+                            s
+                        } else {
+                            // measured: one echo time for both sides; the side offset holds one side's input
+                            // back before the line, so with crossed echoes that lag changes sides every trip
+                            let rd = (pos + len - k.time) % len;
+                            let mut e = [line[rd * 2].clamp(-16.0, 16.0), line[rd * 2 + 1].clamp(-16.0, 16.0)];
+                            // the echo filter is part of the trip: read here, the first echo has been through it
+                            // once and every later one once more; a whole first echo skips it along with the trip
+                            if (1..=7).contains(&k.echo_filt.0) && !k.whole_first {
+                                for c in 0..2 {
+                                    e[c] = run(&mut z[12 + c * 6..], &k.echo_filt.1, k.shape[1], e[c]);
+                                }
+                            }
+                            let clear = (pos + ahead) % len;
+                            line[clear * 2] = 0.0;
+                            line[clear * 2 + 1] = 0.0;
+                            // one trip: separation, bleed and loss, then the sides change places in the bouncing mode
+                            let t = &k.turn;
+                            let trip = |v: [f32; 2]| {
+                                let w = [(t[0] * v[0] + t[1] * v[1]) * k.fb, (t[2] * v[0] + t[3] * v[1]) * k.fb];
+                                if k.mode == 3 { [w[1], w[0]] } else { w }
+                            };
+                            let mut back = trip(e);
+                            if (1..=7).contains(&k.echo_filt.0) && k.whole_first {
+                                for c in 0..2 {
+                                    back[c] = run(&mut z[12 + c * 6..], &k.echo_filt.1, k.shape[1], back[c]);
+                                }
+                            }
+                            // mode 2 swaps the sides once on the way in; a whole first echo skips the trip
+                            for c in 0..2 {
+                                let mut one = [0f32; 2];
+                                one[if k.mode == 2 { 1 - c } else { c }] = s[c];
+                                let w = if k.whole_first { one } else { trip(one) };
+                                let at = (pos + k.lead[c]) % len;
+                                line[at * 2] += w[0];
+                                line[at * 2 + 1] += w[1];
+                            }
+                            line[pos * 2] += back[0];
+                            line[pos * 2 + 1] += back[1];
+                            self.lpos[b] = (pos + 1) % len;
+                            e
                         };
-                        if (1..=7).contains(&k.echo_filt.0) {
+                        if (1..=7).contains(&k.filt.0) && k.filt.2 {
                             for c in 0..2 {
-                                back[c] = run(&mut z[12 + c * 6..], k.echo_filt.0, k.echo_filt.1, k.echo_filt.2, k.shape[1], back[c]);
+                                o[c] = run(&mut z[c * 6..], &k.filt.1, k.shape[0], o[c]);
                             }
                         }
-                        line[((pos + k.lead[0]) % len) * 2] += s[0];
-                        line[((pos + k.lead[1]) % len) * 2 + 1] += s[1];
-                        line[pos * 2] += back[0] * k.pan_fb.0;
-                        line[pos * 2 + 1] += back[1] * k.pan_fb.1;
-                        self.lpos[b] = (pos + 1) % len;
-                        let mut o = e;
-                        if (1..=7).contains(&k.filt.0) && k.filt.3 {
-                            for c in 0..2 {
-                                o[c] = run(&mut z[c * 6..], k.filt.0, k.filt.1, k.filt.2, k.shape[0], o[c]);
-                            }
-                        }
-                        sum[0] += o[0] * k.pan_out.0;
-                        sum[1] += o[1] * k.pan_out.1;
+                        let u = &k.pan_out;
+                        sum[0] += o[0] * u[0] + o[1] * u[1];
+                        sum[1] += o[0] * u[2] + o[1] * u[3];
                         carry = [o[0] * k.next, o[1] * k.next];
                     }
                     *f = [f[0] * dry + sum[0] * wet, f[1] * dry + sum[1] * wet];
                 }
             }
             Kind::MultiComp => {
-                // stored cutoffs run on a logarithmic knob scale
-                let hz = |v: f32| 34.7 * 740f32.powf((v / 20000.0).clamp(0.0, 1.0));
-                let g_lo = svf_g(hz(p[20]), sr);
-                let g_hi = svf_g(hz(p[3]), sr);
-                // per band: state, threshold dB, slope, knee dB, attack, release, gain
-                // (threshold and slope laws are fitted to one reference render at the default settings; the band
-                // gain knob is a squared law, 0.8 of its travel giving +8.2 dB)
+                // every band has its own edges; the stored cutoff follows a measured curve
+                let (g_lo, g_m0, g_m1, g_hi) = (svf_g(band_edge_hz(p[20]), sr), svf_g(band_edge_hz(p[12]), sr), svf_g(band_edge_hz(p[11]), sr), svf_g(band_edge_hz(p[3]), sr));
+                // per band: state, gain, threshold, ratio, knee width, attack, release. Measured on level ramps:
+                // the threshold spans 60 dB, the part of the level over it is divided down in plain amplitude
+                // (ratio 1 holds the output at the threshold), and the corner is a parabola of fixed least width
+                // that widens with the threshold as the knee knob comes down.
                 let band = |b: usize| {
                     let o = [4usize, 13, 21][b];
-                    let x = 1.0 - (1.0 - (p[o + 1] / 65536.0).clamp(0.0, 1.0)).powf(1.5);
+                    let u = |i: usize| (p[o + i] / 65536.0).clamp(0.0, 1.0);
+                    let thr = 0.001f32.powf(1.0 - u(1));
                     (
                         p[[2usize, 10, 19][b]] as i32,
-                        -73.0 * (p[o] / 65536.0).clamp(0.0, 1.0) - 5.0,
-                        x * 0.8125,
-                        (p[o + 2] / 65536.0).clamp(0.0, 1.0) * 24.0,
-                        (-1.0 / ((p[o + 3] / 10.0).max(0.05) * 0.0000095 * sr)).exp(),
-                        (-1.0 / ((p[o + 4] / 10.0).max(1.0) * 0.00055 * sr)).exp(),
-                        (p[o + 5] / 32768.0).powi(2),
+                        2f32.powf(3.0 * u(0)) - 1.0,
+                        thr,
+                        u(2),
+                        (0.005 + thr * (1.0 - u(5) * u(5))).min(1.0),
+                        1.0 - (-1.0 / (p[o + 3].max(0.1) * 0.0001 * sr / std::f32::consts::TAU)).exp(),
+                        (-1.0 / (p[o + 4].max(1.0) * 0.0001 * sr)).exp(),
                     )
                 };
                 let bands = [band(0), band(1), band(2)];
-                let main = p[0] / 32768.0;
-                let limit = p[1] >= 0.5;
-                // each split is a four-stage flat-topped pair (measured from the turn each harmonic takes)
-                let split = |z: &mut [f32], x: f32, g: f32| -> (f32, f32) {
-                    let (l, _, h) = svf(z, x, g, 1.847_759);
-                    (svf(&mut z[2..], l, g, 0.765_367).0, svf(&mut z[4..], h, g, 0.765_367).2)
+                let main = 2f32.powf(2.0 * (p[0] / 65536.0).clamp(0.0, 1.0)) - 1.0;
+                let limit = p[27] >= 0.5;
+                // the limiter's level drops straight back to the peak and then falls away over about 15 ms
+                let hold = (-1.0 / (0.014_955 * sr)).exp();
+                // every edge is a four-stage flat-topped filter (measured from single clicks through one band)
+                let low4 = |z: &mut [f32], x: f32, g: f32| -> f32 {
+                    let l = svf(z, x, g, 1.847_759).0;
+                    svf(&mut z[2..], l, g, 0.765_367).0
                 };
+                let high4 = |z: &mut [f32], x: f32, g: f32| -> f32 {
+                    let h = svf(z, x, g, 1.847_759).2;
+                    svf(&mut z[2..], h, g, 0.765_367).2
+                };
+                // the linear phase choice splits with four short symmetric low passes instead (measured tap by
+                // tap): the edge is a straight ramp from 17% under to 17% over the cutoff, 105 taps under a
+                // smooth window, 52 frames late; mid and high are differences against the delayed input
+                const TAPS: usize = 105;
+                let fir = p[1] >= 0.5;
+                if fir {
+                    let edges = [p[20], p[12], p[11], p[3]];
+                    if self.lines.len() != 2 || self.lines[0].len() != 4 * TAPS + 5 {
+                        self.lines = vec![vec![-1.0; 4 * TAPS + 5], vec![0.0; 2 * 128]];
+                        self.lpos = vec![0];
+                    }
+                    let t = &mut self.lines[0];
+                    if t[4 * TAPS..4 * TAPS + 4] != edges || t[4 * TAPS + 4] != sr {
+                        for (e, &v) in edges.iter().enumerate() {
+                            let hz = band_edge_hz(v);
+                            let (lo, hi) = (hz * 0.8299, (hz * 1.1701).min(sr * 0.5));
+                            let (mid, wide) = ((lo + hi) / sr, (hi - lo) / sr);
+                            let sinc = |x: f32| if x.abs() < 1e-6 { 1.0 } else { (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x) };
+                            for i in 0..TAPS {
+                                let k = i as f32 - 52.0;
+                                let q = std::f32::consts::PI * k.abs() / 58.2537;
+                                let win = 0.483_98 + 0.493_52 * q.cos() + 0.022_38 * (2.0 * q).cos();
+                                t[e * TAPS + i] = win * mid * sinc(mid * k) * sinc(wide * k);
+                            }
+                            t[4 * TAPS + e] = v;
+                        }
+                        t[4 * TAPS + 4] = sr;
+                    }
+                }
                 for f in io.iter_mut() {
                     let mut part = [[0f32; 2]; 3];
-                    for c in 0..2 {
-                        let x = f[c];
-                        let (low, rest) = split(&mut z[c * 18..], x, g_lo);
-                        let (mid, high) = split(&mut z[c * 18 + 6..], rest, g_hi);
-                        part[0][c] = high;
-                        part[2][c] = low;
-                        part[1][c] = mid;
+                    if fir {
+                        let (t, past) = self.lines.split_at_mut(1);
+                        let (t, past) = (&t[0], &mut past[0]);
+                        let at = self.lpos[0];
+                        self.lpos[0] = (at + 1) & 127;
+                        for c in 0..2 {
+                            past[c * 128 + at] = f[c];
+                            let mut sum = [0f32; 4];
+                            for i in 0..TAPS {
+                                let x = past[c * 128 + ((at + 128 - i) & 127)];
+                                for (e, v) in sum.iter_mut().enumerate() {
+                                    *v += t[e * TAPS + i] * x;
+                                }
+                            }
+                            part[0][c] = past[c * 128 + ((at + 128 - 52) & 127)] - sum[3];
+                            // a mid band whose lower edge sits above its upper edge is empty (measured)
+                            part[1][c] = if p[12] >= p[11] { 0.0 } else { sum[2] - sum[1] };
+                            part[2][c] = sum[0];
+                        }
+                    } else {
+                        for c in 0..2 {
+                            let x = f[c];
+                            let m = &mut z[c * 18..c * 18 + 16];
+                            part[0][c] = high4(m, x, g_hi);
+                            let mid = high4(&mut m[4..], x, g_m0);
+                            part[1][c] = low4(&mut m[8..], mid, g_m1);
+                            part[2][c] = low4(&mut m[12..], x, g_lo);
+                        }
                     }
                     let mut out = [0f32; 2];
-                    for (b, &(state, thr, slope, knee, att, rel, gain)) in bands.iter().enumerate() {
+                    for (b, &(state, gain, thr, ratio, width, att, rel)) in bands.iter().enumerate() {
                         let s = part[b];
                         match state {
                             1 => continue,
                             2 => {
-                                out[0] += s[0];
-                                out[1] += s[1];
+                                // a passed band still takes its gain knob
+                                out[0] += s[0] * gain;
+                                out[1] += s[1] * gain;
                                 continue;
                             }
                             _ => {}
                         }
-                        let peak = s[0].abs().max(s[1].abs()).max(1e-9);
-                        let over = 20.0 * peak.log10() - thr;
-                        let want = if knee > 0.0 && over.abs() < knee / 2.0 {
-                            -slope * (over + knee / 2.0).powi(2) / (2.0 * knee)
-                        } else if over > 0.0 {
-                            -slope * over
-                        } else {
+                        // the peak falls away at the release rate, and the level then trails it at the attack rate
+                        // once a band has died away past the smallest whole number the follower starts afresh
+                        // (measured: a click after some 680 frames of silence comes through at full level,
+                        // however slow the release; after 650 it does not)
+                        if s[0].abs() < f32::MIN_POSITIVE && s[1].abs() < f32::MIN_POSITIVE {
+                            z[43 + b] = 0.0;
+                            z[40 + b] = 0.0;
+                        }
+                        let peak = s[0].abs().max(s[1].abs()).max(z[43 + b] * rel);
+                        z[43 + b] = peak;
+                        // the gain reads the level midway between this frame and the last
+                        let was = z[40 + b];
+                        let now = was + (peak - was) * att;
+                        z[40 + b] = now;
+                        let d = (was + now) * 0.5 - thr;
+                        let over = if d <= -width {
                             0.0
+                        } else if d >= width {
+                            d
+                        } else {
+                            (d + width) * (d + width) / (4.0 * width)
                         };
-                        let e = &mut z[40 + b];
-                        let k = if want < *e { att } else { rel };
-                        *e = want + (*e - want) * k;
-                        let g = db(*e) * gain;
+                        let g = gain / (1.0 + ratio * over / thr);
                         out[0] += s[0] * g;
                         out[1] += s[1] * g;
                     }
                     for c in 0..2 {
                         let v = out[c] * main;
-                        f[c] = if limit { v.clamp(-1.0, 1.0) } else { v };
+                        f[c] = if limit {
+                            // each side on its own: the same divided-down law as the bands, fixed at -1.2 dB and
+                            // three quarters. The level chases the held peak with an overshooting step and the
+                            // gain reads midway between this frame and the last, so a lone sample slips through
+                            const T: f32 = 0.870_96;
+                            const W: f32 = 0.1698;
+                            // a new peak is held for one more frame before it starts to let go, so a steady
+                            // level ripples slightly every third frame
+                            let was = z[48 + c];
+                            if v.abs() > z[46 + c] {
+                                z[46 + c] = v.abs();
+                                z[50 + c] = 0.0;
+                            } else {
+                                z[50 + c] += 1.0;
+                                if z[50 + c] >= 2.0 {
+                                    z[50 + c] = 2.0;
+                                    z[46 + c] *= hold;
+                                }
+                            }
+                            let peak = z[46 + c];
+                            let now = was + (peak - was) * 1.385;
+                            z[48 + c] = now;
+                            let d = (was + now) * 0.5 - T;
+                            let over = if d <= -W {
+                                0.0
+                            } else if d >= W {
+                                d
+                            } else {
+                                (d + W) * (d + W) / (4.0 * W)
+                            };
+                            (v / (1.0 + 0.75 * over / T)).clamp(-1.0, 1.0)
+                        } else {
+                            v
+                        };
                     }
                 }
             }
@@ -6424,8 +6624,10 @@ impl Unit {
                 }
             }
         }
+        // the three band compressor has to ring all the way down: its followers start afresh only then
+        let floor = if self.fx.kind == Kind::MultiComp { f32::MIN_POSITIVE } else { 1e-20 };
         for v in self.z.iter_mut() {
-            if !v.is_finite() || v.abs() < 1e-20 {
+            if !v.is_finite() || v.abs() < floor {
                 *v = 0.0;
             }
         }
@@ -6869,7 +7071,7 @@ mod tests {
         let fx = Fx::new(Kind::EchoBank);
         assert_eq!(Fx::decode("Fruity Delay Bank", &fx.encode(None)).unwrap(), fx);
         let out = run(fx, |i| if i == 0 { [1.0, 1.0] } else { [0.0, 0.0] }, 44100);
-        let at = out.iter().skip(1).position(|f| f[0].abs() > 0.5).map(|i| i + 1);
+        let at = out.iter().skip(1).position(|f| f[0].abs() > 0.4).map(|i| i + 1);
         assert!(at.is_some_and(|i| i > 1000), "{at:?}");
         // a low shelf turned right down in front of the echoes thins a low tone, and a steeper low-pass far below
         // the tone removes more of it than a gentle one
