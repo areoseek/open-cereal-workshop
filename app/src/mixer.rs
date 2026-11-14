@@ -17,6 +17,32 @@ enum SlotAct {
     Host(u16),
 }
 
+/// The mixer's option switches as kept in the settings.
+pub(crate) mod mxo {
+    pub const AUTO_UNARM: u64 = 1;
+    pub const AUTO_CLIP: u64 = 1 << 1;
+    pub const LAT_COMP: u64 = 1 << 2;
+    pub const AUTO_NAME: u64 = 1 << 3;
+    pub const GROUP_TAKES: u64 = 1 << 4;
+    /// Two bits: 16 bit, 24 bit, 32 bit float.
+    pub const FORMAT_SHIFT: u32 = 5;
+    pub const PDC_AUTOM: u64 = 1 << 7;
+    pub const NAMES_TOP: u64 = 1 << 8;
+    pub const CABLES: u64 = 1 << 9;
+    pub const COMPACT_LIST: u64 = 1 << 10;
+    pub const SMALL_TEXT: u64 = 1 << 11;
+    pub const INSPECTOR_LEFT: u64 = 1 << 12;
+    /// Two bits: off, low, medium, high.
+    pub const COLOR_SHIFT: u32 = 13;
+    pub const ALT_HL: u64 = 1 << 15;
+    pub const LINES: u64 = 1 << 16;
+    pub const EXT_LEVELS: u64 = 1 << 17;
+    pub const MASTER_LAT: u64 = 1 << 18;
+    pub const THREADED: u64 = 1 << 19;
+    pub const AUTO_COLOR: u64 = 1 << 20;
+    pub const DEFAULT: u64 = AUTO_CLIP | LAT_COMP | AUTO_NAME | GROUP_TAKES | PDC_AUTOM | CABLES | COMPACT_LIST | (1 << COLOR_SHIFT) | LINES | EXT_LEVELS | MASTER_LAT | THREADED;
+}
+
 impl App {
     pub(crate) fn mixer_ui(&mut self, ui: &mut Ui) {
         let n = self.song.inserts.len();
@@ -55,6 +81,22 @@ impl App {
         let sw = self.strip_w();
         ui.horizontal(|ui| {
             ui.menu_button("\u{23F7}", |ui| self.mixer_menu(ui)).response.hint("Mixer menu");
+            if ui.selectable_label(self.mixer_wave, "Waves").hint("Waveforms in the meters (Alt+W)").clicked() {
+                self.mixer_wave = !self.mixer_wave;
+            }
+            if ui.selectable_label(self.settings.mixer_big, "Meter").hint("A tall meter for the selected track at the left of the mixer").clicked() {
+                self.settings.mixer_big = !self.settings.mixer_big;
+                let _ = self.settings.save();
+            }
+            let names = ["Wide", "Compact", "Extra large"];
+            egui::ComboBox::from_id_salt("mixer-layout").width(86.0).selected_text(names[(self.settings.mixer_view as usize).min(2)]).show_ui(ui, |ui| {
+                for k in [1u8, 0, 2] {
+                    if ui.selectable_label(self.settings.mixer_view == k, names[k as usize]).clicked() {
+                        self.settings.mixer_view = k;
+                        let _ = self.settings.save();
+                    }
+                }
+            });
         });
         ui.horizontal_top(|ui| {
             if self.settings.mixer_big {

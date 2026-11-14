@@ -1975,6 +1975,10 @@ impl App {
                 ui.close_menu();
             }
         };
+        use crate::mixer::mxo;
+        let o = self.settings.mixer_opts;
+        let mut flip = 0u64;
+        let mut set: Option<(u32, u64)> = None;
         ui.horizontal_top(|ui| {
             col(ui, 270.0, |ui| {
                 sect(ui, "Options");
@@ -1982,12 +1986,34 @@ impl App {
                     ui.set_min_width(300.0);
                     key(ui, "Render armed tracks to wave file(s)...", "Alt+R", A, Key::R);
                     key(ui, "Render selected tracks to wave file(s)...", "Shift+Alt+R", Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false }, Key::R);
+                    sect(ui, "Options");
+                    for (bit, label) in [(mxo::AUTO_UNARM, "Auto-unarm"), (mxo::AUTO_CLIP, "Auto-create audio clip"), (mxo::LAT_COMP, "Latency compensation"), (mxo::AUTO_NAME, "Auto name playlist tracks"), (mxo::GROUP_TAKES, "Group loop recorded takes")] {
+                        if tick(ui, o & bit != 0, label, "").clicked() {
+                            flip = bit;
+                            ui.close_menu();
+                        }
+                    }
+                    sect(ui, "Format");
+                    for (k, label) in ["16Bit int", "24Bit int", "32Bit float"].into_iter().enumerate() {
+                        if ui.radio((o >> mxo::FORMAT_SHIFT) & 3 == k as u64, label).clicked() {
+                            set = Some((mxo::FORMAT_SHIFT, k as u64));
+                            ui.close_menu();
+                        }
+                    }
                 });
                 ui.menu_button("Plugin delay compensation", |ui| {
+                    if mi(ui, "Reset manual latency on all tracks", "").clicked() {
+                        self.status = "Tracks carry no hand-set latency here".into();
+                        ui.close_menu();
+                    }
                     if tick(ui, !self.settings.pdc_off, "Automatic", "").hint("Plug-ins that answer late are lined up with everything else").clicked() {
                         self.settings.pdc_off = !self.settings.pdc_off;
                         cereal_engine::player::set_delay_compensation(!self.settings.pdc_off);
                         let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                    if tick(ui, o & mxo::PDC_AUTOM != 0, "Compensate automations", "").clicked() {
+                        flip = mxo::PDC_AUTOM;
                         ui.close_menu();
                     }
                 });
@@ -2000,22 +2026,29 @@ impl App {
                     ui.close_menu();
                 }
                 ui.menu_button("View", |ui| {
-                    for (k, name) in [(1u8, "Compact"), (0, "Wide"), (2, "Extra large")] {
-                        if ui.radio(self.settings.mixer_view == k, name).clicked() {
-                            self.settings.mixer_view = k;
-                            let _ = self.settings.save();
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
                     if tick(ui, self.mixer_wave, "Waveforms", "Alt+W").clicked() {
                         self.mixer_wave = !self.mixer_wave;
                         ui.close_menu();
                     }
-                    if tick(ui, self.settings.mixer_big, "Big meter", "").hint("A tall meter for the selected track at the left of the mixer").clicked() {
-                        self.settings.mixer_big = !self.settings.mixer_big;
-                        let _ = self.settings.save();
-                        ui.close_menu();
+                    for (bit, label) in [(mxo::NAMES_TOP, "Names at top"), (mxo::CABLES, "Routing cables"), (mxo::COMPACT_LIST, "Compact plugin list"), (mxo::SMALL_TEXT, "Small text in plugin list"), (mxo::INSPECTOR_LEFT, "Track inspector on left side")] {
+                        if tick(ui, o & bit != 0, label, "").clicked() {
+                            flip = bit;
+                            ui.close_menu();
+                        }
+                    }
+                    ui.menu_button("Colorful mixer", |ui| {
+                        for (k, label) in ["Off", "Low", "Medium", "High"].into_iter().enumerate() {
+                            if ui.radio((o >> mxo::COLOR_SHIFT) & 3 == k as u64, label).clicked() {
+                                set = Some((mxo::COLOR_SHIFT, k as u64));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    for (bit, label) in [(mxo::ALT_HL, "Alternative mixer highlighting"), (mxo::LINES, "Lines between tracks"), (mxo::EXT_LEVELS, "Always show external input levels")] {
+                        if tick(ui, o & bit != 0, label, "").clicked() {
+                            flip = bit;
+                            ui.close_menu();
+                        }
                     }
                 });
                 if tick(ui, self.detached[3], "Detached", "").hint("The window leaves the main one, to sit on another screen").clicked() {
@@ -2035,6 +2068,10 @@ impl App {
                     }
                     self.dirty |= done > 0;
                     self.status = format!("{done} unused mixer tracks reset");
+                    ui.close_menu();
+                }
+                if mi(ui, "Switch smart disable for all plugins", "").hint("Plug-ins rest while they have nothing to play").clicked() {
+                    self.status = "Idle plug-ins already rest here".into();
                     ui.close_menu();
                 }
                 if mi(ui, "Remove all audio editor instances", "").hint("Take every Wave Recorder out of the mixer").clicked() {
@@ -2083,6 +2120,24 @@ impl App {
                     self.dirty = true;
                     ui.close_menu();
                 }
+                if mi(ui, "Change icon...", "").clicked() {
+                    self.status = "Mixer tracks carry no icons here".into();
+                    ui.close_menu();
+                }
+                if mi(ui, "Assign to new Audio track(s)", "").hint("A playlist track named after each selected mixer track, to record its sound onto").clicked() {
+                    for &k in &targets {
+                        let name = if self.song.inserts[k].name.is_empty() { format!("Insert {k}") } else { self.song.inserts[k].name.clone() };
+                        if let Some(t) = self.song.tracks.iter_mut().find(|t| t.name.is_empty()) {
+                            t.name = name;
+                            if let Some(c) = self.song.inserts[k].color {
+                                t.color = c;
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                    ui.close_menu();
+                }
+                ui.add_enabled(false, egui::Button::new("Unassign from Audio track(s)"));
                 ui.separator();
                 ui.menu_button("File", |ui| {
                     ui.set_min_width(280.0);
@@ -2091,15 +2146,14 @@ impl App {
                         ui.close_menu();
                     }
                     key(ui, "Save mixer track state as...", "Shift+Ctrl+S", CS, Key::S);
+                    if mi(ui, "Browse states", "").hint("Saved mixer track states show in the browser; drop one on a track").clicked() {
+                        self.show_browser = true;
+                        ui.close_menu();
+                    }
                 });
                 key(ui, "Open audio editor", "Ctrl+E", C, Key::E);
                 key(ui, "Open audio editor and record", "Shift+E", Modifiers::SHIFT, Key::E);
                 ui.separator();
-                if tick(ui, self.song.inserts[i].fx_on, "Enable effect slots", "").clicked() {
-                    self.song.inserts[i].fx_on = !self.song.inserts[i].fx_on;
-                    self.dirty = true;
-                    ui.close_menu();
-                }
                 if mi(ui, "Reset selected track(s) to default", "").hint("Name, colour, level, panning, stereo and equaliser back to how an empty track has them; the effects stay").clicked() {
                     let d = cereal_engine::song::Insert::default();
                     for &k in targets.iter().filter(|k| **k > 0) {
@@ -2117,18 +2171,33 @@ impl App {
                     key(ui, "Route selected channels to this track", "Ctrl+L", C, Key::L);
                     key(ui, "Route selected channels starting from this track", "Shift+Ctrl+L", CS, Key::L);
                 });
+                ui.menu_button("Track routing", |ui| {
+                    ui.set_min_width(300.0);
+                    if mi(ui, "Create submix from the selected track(s)", "").hint("The selected tracks play into the first empty track and nowhere else").clicked() {
+                        self.create_submix();
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("Select", |ui| {
-                    ui.set_min_width(280.0);
+                    ui.set_min_width(320.0);
                     key(ui, "Channels routed to this track", "Alt+L", A, Key::L);
+                    key(ui, "Channels and playlist tracks routed to this track", "", A, Key::L);
+                    ui.separator();
                     if mi(ui, "Tracks this one is routed to", "").clicked() {
                         self.mixer_sel = self.song.inserts[i].sends.iter().copied().collect();
                         ui.close_menu();
                     }
-                    if mi(ui, "Tracks routed to this one", "").clicked() {
+                    if mi(ui, "Tracks routed to this one", "Ctrl+Alt+L").clicked() {
                         self.mixer_sel = (0..n).filter(|&k| self.song.inserts[k].sends.contains(&i)).collect();
                         ui.close_menu();
                     }
                     ui.separator();
+                    if mi(ui, "Group", "").hint("Every track up to the separators either side of this one").clicked() {
+                        let a = (1..=i).rev().find(|&k| k > 1 && self.song.inserts[k - 1].separator).unwrap_or(1.min(i));
+                        let b = (i..n).find(|&k| self.song.inserts[k].separator).unwrap_or(n - 1);
+                        self.mixer_sel = (a..=b).collect();
+                        ui.close_menu();
+                    }
                     key(ui, "All", "Ctrl+A", C, Key::A);
                 });
                 if mi(ui, "Reset selected track(s) routing", "").hint("Each plays into the master and nowhere else").clicked() {
@@ -2137,10 +2206,6 @@ impl App {
                         self.song.inserts[k].levels.clear();
                     }
                     self.dirty = true;
-                    ui.close_menu();
-                }
-                if mi(ui, "Create submix from the selected track(s)", "").hint("The selected tracks play into the first empty track and nowhere else").clicked() {
-                    self.create_submix();
                     ui.close_menu();
                 }
                 if mi(ui, "Unroute tracks routed to the selected track(s)", "").clicked() {
@@ -2165,6 +2230,8 @@ impl App {
                     }
                     ui.close_menu();
                 }
+                ui.separator();
+                ui.add_enabled_ui(false, |ui| tick(ui, o & mxo::MASTER_LAT != 0, "Compensate for master latency", ""));
                 sect(ui, "Group");
                 if tick(ui, self.song.inserts[i].separator, "Separator", "").hint("A gap after the track").clicked() {
                     let on = !self.song.inserts[i].separator;
@@ -2174,9 +2241,27 @@ impl App {
                     self.dirty = true;
                     ui.close_menu();
                 }
+                if mi(ui, "Create group...", "").hint("A separator either side of the selected tracks, which then share one colour").clicked() {
+                    if let (Some(&a), Some(&b)) = (targets.first(), targets.last()) {
+                        if a > 1 {
+                            self.song.inserts[a - 1].separator = true;
+                        }
+                        self.song.inserts[b].separator = true;
+                        let c = self.song.inserts[a].color;
+                        for &k in &targets {
+                            self.song.inserts[k].color = c;
+                        }
+                        self.dirty = true;
+                    }
+                    ui.close_menu();
+                }
             });
             ui.separator();
             col(ui, 190.0, |ui| {
+                if tick(ui, o & mxo::AUTO_COLOR != 0, "Auto color group", "").clicked() {
+                    flip = mxo::AUTO_COLOR;
+                    ui.close_menu();
+                }
                 sect(ui, "Layout");
                 ui.menu_button("Dock to", |ui| {
                     for (d, t) in [(0u8, "Left"), (1, "Middle"), (2, "Right")] {
@@ -2206,8 +2291,21 @@ impl App {
                     self.state_ask = Some(crate::StateAsk::OpenTrack(self.sel_insert));
                     ui.close_menu();
                 }
+                sect(ui, "CPU");
+                if tick(ui, o & mxo::THREADED != 0, "Allow threaded processing", "").clicked() {
+                    flip = mxo::THREADED;
+                    ui.close_menu();
+                }
             });
         });
+        if flip != 0 {
+            self.settings.mixer_opts ^= flip;
+            let _ = self.settings.save();
+        }
+        if let Some((shift, v)) = set {
+            self.settings.mixer_opts = (self.settings.mixer_opts & !(3 << shift)) | (v << shift);
+            let _ = self.settings.save();
+        }
         if let Some((m, k)) = press {
             self.mixer_key(k, m, false);
         }

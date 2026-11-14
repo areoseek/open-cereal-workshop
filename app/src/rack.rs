@@ -423,12 +423,21 @@ impl App {
                             self.rack.rename = Some((ci, self.song.channels[ci].name.clone()));
                             ui.close_menu();
                         }
+                        ui.menu_button("Change color...", |ui| {
+                            if ui.color_edit_button_srgb(&mut self.song.channels[ci].color).changed() {
+                                self.dirty = true;
+                            }
+                        });
                         if mi(ui, "Random color", "").clicked() {
                             let keep = std::mem::replace(&mut self.rack.sel, [ci].into_iter().collect());
                             let was = std::mem::replace(&mut self.sel_chan, ci);
                             self.color_channels(true);
                             self.rack.sel = keep;
                             self.sel_chan = was;
+                            ui.close_menu();
+                        }
+                        if mi(ui, "Change icon...", "").clicked() {
+                            self.status = "Channels carry no icons here".into();
                             ui.close_menu();
                         }
                         ui.separator();
@@ -446,6 +455,7 @@ impl App {
                             self.dirty = true;
                             ui.close_menu();
                         }
+                        ui.add_enabled(false, egui::Button::new("Show waveform preview"));
                         ui.separator();
                         ui.menu_button("Insert", |ui| {
                             let before = self.song.channels.len();
@@ -473,12 +483,20 @@ impl App {
                                 self.sel_chan = ci;
                             }
                         });
+                        ui.add_enabled(false, egui::Button::new("Patcherize"));
                         if mi(ui, "Clone", "").clicked() {
                             clone = Some(ci);
                             ui.close_menu();
                         }
                         if mi(ui, "Delete...", "").clicked() {
                             delete = Some(ci);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if mi(ui, "Assign to new instrument track", "").hint("A free mixer track for this channel").clicked() {
+                            self.sel_chan = ci;
+                            self.rack.sel.clear();
+                            self.rack_key(egui::Key::L, egui::Modifiers::COMMAND, false);
                             ui.close_menu();
                         }
                         });
@@ -533,6 +551,7 @@ impl App {
                                 ui.close_menu();
                             }
                         });
+                        ui.add_enabled(false, egui::Button::new("Auto fill"));
                         ui.separator();
                         for (name, keys, right) in [("Rotate left", "Shift+Ctrl+Left", false), ("Rotate right", "Shift+Ctrl+Right", true)] {
                             if mi(ui, name, keys).clicked() {
@@ -541,16 +560,12 @@ impl App {
                                 ui.close_menu();
                             }
                         }
-                        if ui.button("Send to piano roll").hint("Turn the steps into notes one step long").clicked() {
-                            for n in self.song.patterns[pat].notes.iter_mut().filter(|n| n.chan == ci as u16 && n.len == 0) {
-                                n.len = step;
-                            }
-                            self.dirty = true;
-                            self.sel_chan = ci;
-                            self.show_piano = true;
+                        ui.separator();
+                        let through = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new(("midi-through", ci)))).unwrap_or(true);
+                        if tick(ui, through, "MIDI channel through", "").hint("Notes played into this channel go on to the MIDI output").clicked() {
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("midi-through", ci)), !through));
                             ui.close_menu();
                         }
-                        ui.separator();
                         ui.menu_button("Receive notes from", |ui| {
                             ui.label(RichText::new("A device ticked here plays this channel whichever channel is selected").color(TEXT_DIM).small());
                             let mut names = vec![String::new()];
@@ -569,6 +584,7 @@ impl App {
                             }
                         });
                         ui.separator();
+                        ui.add_enabled(false, egui::Button::new("Create multisample instrument..."));
                         ui.menu_button("Burn MIDI to", |ui| {
                             ui.label(RichText::new("The notes this channel really plays in the pattern, arpeggio steps and echoes written out").color(TEXT_DIM).small());
                             let names: Vec<String> = self.song.channels.iter().map(|c| c.name.clone()).collect();

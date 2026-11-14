@@ -103,6 +103,8 @@ pub struct Settings {
     pub pr_opts: u64,
     /// The channel rack's option switches, one bit or small field each (see `rack::rko`).
     pub rack_opts: u64,
+    /// The mixer's option switches (see `mixer::mxo`).
+    pub mixer_opts: u64,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
     /// The mixer track browser previews and the metronome play through.
@@ -253,7 +255,7 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        let mut s = Self { pl_opts: crate::playlist::plo::DEFAULT, pr_opts: crate::pianoroll::pro::DEFAULT, rack_opts: crate::rack::rko::DEFAULT, ..Self::default() };
+        let mut s = Self { pl_opts: crate::playlist::plo::DEFAULT, pr_opts: crate::pianoroll::pro::DEFAULT, rack_opts: crate::rack::rko::DEFAULT, mixer_opts: crate::mixer::mxo::DEFAULT, ..Self::default() };
         let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
         for line in text.lines() {
             match line.split_once('=') {
@@ -273,6 +275,7 @@ impl Settings {
                 Some(("pl_edit_in", v)) => s.pl_edit_in = v.trim().parse().unwrap_or(0),
                 Some(("pl_jump_q", v)) => s.pl_jump_q = v.trim().parse().unwrap_or(0),
                 Some(("rack_opts", v)) => s.rack_opts = v.trim().parse().unwrap_or(crate::rack::rko::DEFAULT),
+                Some(("mixer_opts", v)) => s.mixer_opts = v.trim().parse().unwrap_or(crate::mixer::mxo::DEFAULT),
                 Some(("pr_opts", v)) => s.pr_opts = v.trim().parse().unwrap_or(crate::pianoroll::pro::DEFAULT),
                 Some(("toolbar_flags", v)) => s.toolbar_flags = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
@@ -400,7 +403,7 @@ impl Settings {
         if !self.toolbar.is_empty() {
             out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
         }
-        out += &format!("pl_opts={}\npl_edit_in={}\npl_jump_q={}\npr_opts={}\nrack_opts={}\n", self.pl_opts, self.pl_edit_in, self.pl_jump_q, self.pr_opts, self.rack_opts);
+        out += &format!("pl_opts={}\npl_edit_in={}\npl_jump_q={}\npr_opts={}\nrack_opts={}\nmixer_opts={}\n", self.pl_opts, self.pl_edit_in, self.pl_jump_q, self.pr_opts, self.rack_opts, self.mixer_opts);
         if self.pdc_off {
             out += "pdc_off=1\n";
         }
