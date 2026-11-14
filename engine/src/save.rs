@@ -170,6 +170,7 @@ fn skeleton(song: &Song) -> Flp {
         Event::byte(id::TIMESIG_NUM, 4),
         Event::byte(id::TIMESIG_BEAT, 4),
         Event::byte(id::PAN_LAW, 0),
+        Event::byte(id::AUTO_PDC, song.auto_pdc as u8),
         Event::text(id::TITLE, ""),
         Event::text(id::GENRE, ""),
         Event::text(id::ARTIST, ""),
@@ -194,6 +195,7 @@ fn skeleton(song: &Song) -> Flp {
     for i in 0..n_ins {
         let flags: u32 = insert_look(song.inserts.get(i).unwrap_or(&crate::song::Insert::default()), 0x08);
         let mut d = vec![0u8; 12];
+        d[..4].copy_from_slice(&song.inserts.get(i).filter(|x| !x.latency_real).map_or(0.0, |x| x.latency_ms).to_le_bytes());
         put_u32(&mut d, 4, flags);
         ev.push(Event::data(id::INSERT_FLAGS, d));
         for s in 0..10 {
@@ -472,6 +474,9 @@ fn patch_head(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool) {
     }
     if song.pan_law != base.pan_law {
         set_or_insert(ev, 0..head_end, Event::byte(id::PAN_LAW, song.pan_law), after_version);
+    }
+    if song.auto_pdc != base.auto_pdc {
+        set_or_insert(ev, 0..head_end, Event::byte(id::AUTO_PDC, song.auto_pdc as u8), after_version);
     }
     if song.truncated != base.truncated {
         set_or_insert(ev, 0..head_end, Event::byte(id::TRUNCATED, song.truncated as u8), after_version);
@@ -2135,6 +2140,13 @@ fn patch_mixer(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, mix
             let last = ev.len();
             if let Some(e) = ev[open..(close + 1).min(last)].iter_mut().find(|e| e.id == id::INSERT_INPUT) {
                 e.value = Value::Int(now.audio_in as u32);
+            }
+        }
+        if !old && now.latency_ms != was.latency_ms {
+            if let Value::Data(d) = &mut ev[open].value {
+                if d.len() >= 4 {
+                    d[..4].copy_from_slice(&now.latency_ms.to_le_bytes());
+                }
             }
         }
         if !old && (now.dock, now.separator, now.fx_on) != (was.dock, was.separator, was.fx_on) {

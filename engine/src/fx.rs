@@ -2710,6 +2710,74 @@ pub(crate) fn svf_g(hz: f32, sr: f32) -> f32 {
     (PI * (hz / sr).clamp(0.0002, 0.49)).tan()
 }
 
+/// The level knob curve several of the small units share (measured): nothing at 0, unity at 1, and
+/// (11^v - 1) / 10 between and beyond.
+pub(crate) fn knob_gain(v: f32) -> f32 {
+    (11f32.powf(v.max(0.0)) - 1.0) / 10.0
+}
+
+/// The balance unit's pan, measured every sixteenth of the way out from the centre: what the side
+/// panned toward gets, and what the other side keeps.
+const BALANCE_NEAR: [f32; 17] = [
+    1.0, 1.08978, 1.16345, 1.22186, 1.26636, 1.29846, 1.32001, 1.33295, 1.33936, 1.34143, 1.34149, 1.34167, 1.34412, 1.35089, 1.36377,
+    1.38440, 1.41421,
+];
+const BALANCE_FAR: [f32; 17] = [
+    1.0, 0.90314, 0.80963, 0.72015, 0.63531, 0.55566, 0.48145, 0.41284, 0.34985, 0.29230, 0.23987, 0.19208, 0.14844, 0.10822, 0.07062,
+    0.03485, 0.0,
+];
+
+/// Levels that travel toward where their knobs sit instead of jumping there (measured on two of the
+/// small units): once a tick each level takes a straight line toward its goal, covering no more than a
+/// thousandth a frame at 44.1 kHz. `z` holds the levels, then their per-frame moves, then the frames
+/// left in the tick; a new unit starts with every level at nothing.
+fn glide(z: &mut [f32], want: &[f32], tick: f32, sr: f32) {
+    let n = want.len();
+    if z[2 * n] < 0.5 {
+        let tick = tick.max(1.0);
+        z[2 * n] += tick;
+        let frames = z[2 * n].round().max(1.0);
+        let most = tick * 44.1 / sr;
+        for k in 0..n {
+            z[n + k] = (want[k] - z[k]).clamp(-most, most) / frames;
+        }
+    }
+    for k in 0..n {
+        z[k] += z[n + k];
+    }
+    z[2 * n] -= 1.0;
+}
+
+/// The auto pan wave rate in Hz for its stored speed: measured every 2500 from 27500 (3/64 Hz) to 55000
+/// (19.2 Hz), read smoothly on a log scale.
+fn auto_pan_hz(v: f32) -> f32 {
+    const HZ: [f32; 12] = [0.046_875, 0.075_796, 0.123_536, 0.202_337, 0.334_116, 0.557_092, 0.940_329, 1.612_364, 2.824_501, 5.094_101, 9.581_756, 19.2];
+    let mut ln = [0f32; 12];
+    for (a, b) in ln.iter_mut().zip(HZ) {
+        *a = b.ln();
+    }
+    curve_at(&ln, (v - 27500.0) / 27500.0).exp()
+}
+
+/// A smooth read (Catmull-Rom) of a curve tabled at even steps over 0..=1.
+fn curve_at(t: &[f32], x: f32) -> f32 {
+    let n = t.len() - 1;
+    let f = x.clamp(0.0, 1.0) * n as f32;
+    let i = (f as usize).min(n - 1);
+    let u = f - i as f32;
+    let at = |k: isize| {
+        if k < 0 {
+            2.0 * t[0] - t[1]
+        } else if k as usize > n {
+            2.0 * t[n] - t[n - 1]
+        } else {
+            t[k as usize]
+        }
+    };
+    let (a, b, c, d) = (at(i as isize - 1), t[i], t[i + 1], at(i as isize + 2));
+    b + 0.5 * u * (c - a + u * (2.0 * a - 5.0 * b + 4.0 * c - d + u * (3.0 * (b - c) + d - a)))
+}
+
 /// Balance-style pan: the far side is turned down, the near side stays at unity.
 fn balance(p: f32) -> (f32, f32) {
     let p = p.clamp(-1.0, 1.0);
@@ -3351,11 +3419,12 @@ impl Unit {
         let z = &mut self.z;
         match self.fx.kind {
             Kind::Balance => {
-                // one render (pan -53, level 206) gave 0.7823 on the near side and 0.2578 on the far one, so
-                // neither law is a straight line; the curves through that point are a guess until both are swept
-                let (l, r) = balance(p[0] / 128.0);
-                let (l, r) = (l.powf(2.08), r.powf(2.08));
-                let g = (p[1] / 256.0).max(0.0).powf(1.13);
+                // both knobs swept: the level is the usual knob curve, and the pan lifts the near side to
+                // +3 dB while it takes the far side down to nothing, along the two measured curves
+                let x = (p[0] / 128.0).clamp(-1.0, 1.0);
+                let (near, far) = (curve_at(&BALANCE_NEAR, x.abs()), curve_at(&BALANCE_FAR, x.abs()));
+                let (l, r) = if x < 0.0 { (near, far) } else { (far, near) };
+                let g = knob_gain(p[1] / 256.0);
                 for f in io.iter_mut() {
                     f[0] *= l * g;
                     f[1] *= r * g;
@@ -3481,11 +3550,13 @@ impl Unit {
                 }
             }
             Kind::FastLp => {
-                // measured: two one-pole stages with feedback around them and no zeros (the response at one
-                // setting fits to five digits). The two knob laws are interim, drawn through that setting.
-                let fc = ((p[0] / 1024.0).clamp(0.0, 1.0).powf(2.3875) as f64).min(0.9999);
-                let q = ((p[1] / 1024.0).clamp(0.0, 1.0).powf(0.794) as f64).min(0.99);
-                let fb = q + q / (1.0 - fc);
+                // measured: two one-pole stages with feedback around them and no zeros. With the resonance
+                // down the pair falls to a single pole; the cutoff sweep gives the square of the stage
+                // coefficient as an exponential of the knob, and the resonance sets the pole radius.
+                let x = (p[0] / 1024.0).clamp(0.0, 1.0) as f64;
+                let fc = (0.001_823_36 * (6.310_77 * x).exp() - 0.001_595_9).clamp(1e-6, 0.9998).sqrt();
+                let rad = 1.001_63 * (1.0 - (-4.0 * (p[1] / 1024.0).clamp(0.0, 1.0) as f64).exp());
+                let fb = (rad / (1.0 - fc) - 1.0 + fc) / fc;
                 let open = p[0] >= 1024.0 && p[1] <= 0.0;
                 for f in io.iter_mut() {
                     for ch in 0..2 {
@@ -3501,11 +3572,12 @@ impl Unit {
                 }
             }
             Kind::Filter => {
-                // measured: the plain two-integrator loop (low-pass updated first), damping 1 - 0.8 x resonance.
-                // The cutoff and level laws are interim, drawn through the one measured setting.
-                let fc = (p[0] / 1024.0).clamp(0.0, 1.0).powf(2.556);
+                // measured over sweeps of each knob: the plain two-integrator loop (low-pass updated first),
+                // damping 1 - 0.8 x resonance, the cutoff on an exponential knob curve and the three levels on
+                // the usual level knob curve.
+                let fc = (26f32.powf((p[0] / 1024.0).clamp(0.0, 1.0)) - 1.0) / 25.0;
                 let q = 1.0 - 0.8 * (p[1] / 1024.0).clamp(0.0, 1.0);
-                let lv = |v: f32| (v / 1024.0).clamp(0.0, 1.0).powf(2.37);
+                let lv = |v: f32| knob_gain(v / 1024.0);
                 let (l, b, h) = (lv(p[2]), lv(p[3]), lv(p[4]));
                 let twice = p[5] >= 0.5;
                 // fully open low-pass is a plain wire
@@ -3513,9 +3585,8 @@ impl Unit {
                 let run = |z: &mut [f32], x: f32| {
                     z[0] += fc * z[1];
                     let hp = x - z[0] - q * z[1];
-                    let bp = z[1];
                     z[1] += fc * hp;
-                    z[0] * l + bp * b + hp * h
+                    z[0] * l + z[1] * b + hp * h
                 };
                 for f in io.iter_mut() {
                     for ch in 0..2 {
@@ -3558,44 +3629,46 @@ impl Unit {
                 }
             }
             Kind::AutoPan => {
-                // measured: the depth is the plain fraction, the wave runs 0.25 to 4 Hz and has already run
-                // 1024 frames when the first sound arrives, and target 1 is the pan
-                // 64 is no movement; one render at 100 showed a depth of 0.78125
-                let amount = ((p[4] - 64.0) / 64.0 * 25.0 / 18.0).clamp(-1.0, 1.0);
-                let hz = 0.25 * ((p[5] - 27500.0) / 27500.0 * 4.0).exp2();
-                let step = hz / sr;
-                if z[0] == 0.0 {
-                    z[0] = 1.0;
-                    self.ph = (self.ph + 1024.0 * step).fract();
-                }
+                // measured against renders: the panned-from side also feeds the other one, the four mix
+                // levels travel in straight lines tick by tick from nothing, and the wave (when it has a
+                // target: 1 the pan, 2 the volume) starts at rest
+                let amount = (p[4] / 128.0).clamp(0.0, 1.0);
+                let step = auto_pan_hz(p[5]) / sr;
                 let shape = p[2] as i32;
                 let target = p[3] as i32;
-                let vol = p[1] / 256.0;
+                let vol = knob_gain(p[1] / 256.0);
                 let pan = (p[0] - 128.0) / 128.0;
+                let tick = (cx.step / 24.0).max(1.0);
+                let mut want = [0f32; 4];
                 for f in io.iter_mut() {
-                    let lfo = match shape {
-                        1 => 1.0 - 4.0 * (self.ph - 0.5).abs(),
-                        2 => {
-                            if self.ph < 0.5 {
-                                1.0
-                            } else {
-                                -1.0
+                    if z[8] < 0.5 {
+                        let ph = (self.ph + step * tick).fract();
+                        let lfo = match shape {
+                            1 => 1.0 - 4.0 * ((ph + 0.25).fract() - 0.5).abs(),
+                            2 => {
+                                if ph < 0.5 {
+                                    1.0
+                                } else {
+                                    -1.0
+                                }
                             }
+                            _ => (ph * TAU).sin(),
+                        } * amount;
+                        let (mut pn, mut v) = (pan, vol);
+                        match target {
+                            1 => pn = (pn + lfo).clamp(-1.0, 1.0),
+                            2 => v = (v + 0.5 * lfo).max(0.0),
+                            _ => {}
                         }
-                        _ => (self.ph * TAU).sin(),
-                    } * amount;
-                    self.ph = (self.ph + step).fract();
-                    let (mut pn, mut v) = (pan, vol);
-                    if amount != 0.0 {
-                        if target == 0 {
-                            v *= (1.0 + lfo).clamp(0.0, 2.0) * 0.5 + 0.5 * (1.0 - amount.abs());
-                        } else {
-                            pn = (pn + lfo).clamp(-1.0, 1.0);
-                        }
+                        let a = pn.abs();
+                        let (near, cross, far) = ((1.0 - 0.5 * a) * v, 0.5 * a * v, (1.0 - a) * v);
+                        want = if pn <= 0.0 { [near, cross, 0.0, far] } else { [far, 0.0, cross, near] };
                     }
-                    let (l, r) = (1.0 - pn.max(0.0), 1.0 + pn.min(0.0));
-                    f[0] *= l * v;
-                    f[1] *= r * v;
+                    glide(&mut z[..9], &want, tick, sr);
+                    self.ph = (self.ph + step).fract();
+                    let x = *f;
+                    f[0] = x[0] * z[0] + x[1] * z[1];
+                    f[1] = x[0] * z[2] + x[1] * z[3];
                 }
             }
             Kind::Delay => {
@@ -3754,13 +3827,31 @@ impl Unit {
                 }
             }
             Kind::Shaper => {
-                let (rl, ll, rr, lr) = (p[0] / 12800.0, p[1] / 12800.0, p[2] / 12800.0, p[3] / 12800.0);
+                // measured: each of the four levels follows (3^x - 1) / 2 with its sign kept, and the delay
+                // knob runs to half a second along (1000^x - 1) / 999
+                let lv = |v: f32| (3f32.powf((v / 12800.0).abs()) - 1.0) / 2.0 * v.signum();
+                let want = [lv(p[0]), lv(p[1]), lv(p[2]), lv(p[3])];
+                let tick = cx.step / 24.0;
                 let n = self.buf.len();
-                // full travel measured as 2352 frames at 44.1 kHz
-                let off = ((p[4].abs() / 4096.0) * 2352.0 / 44100.0 * sr).min(n as f32 - 2.0) as usize;
+                let travel = (1000f32.powf((p[4].abs() / 4096.0).min(1.0)) - 1.0) / 999.0;
+                let off = ((travel * 0.5 * sr).round()).min(n as f32 - 2.0) as usize;
                 let left_late = p[4] < 0.0;
+                // the phase knob: two equal first-order all-pass stages on one side (the right for values above
+                // nothing), whose corner falls from the top of the band along a straight line in the logarithm
+                // towards a floor of a few hertz (measured at ten points)
+                let turn = (p[5].abs() / 4096.0).min(1.0);
+                let ap = if turn > 0.0 {
+                    let fc = 5.5 + 21_836.0 * (-8.488 * turn).exp();
+                    let t = (std::f32::consts::PI * fc.min(sr * 0.49) / sr).tan();
+                    Some(((1.0 - t) / (1.0 + t), if p[5] > 0.0 { 1 } else { 0 }))
+                } else {
+                    None
+                };
                 for f in io.iter_mut() {
                     let x = *f;
+                    // the four levels start from nothing and travel in straight lines, tick by tick (measured)
+                    glide(&mut z[..9], &want, tick, sr);
+                    let (rl, ll, rr, lr) = (z[0], z[1], z[2], z[3]);
                     let mut y = [x[0] * ll + x[1] * rl, x[1] * rr + x[0] * lr];
                     self.buf[self.pos] = y;
                     if off > 0 {
@@ -3772,6 +3863,16 @@ impl Unit {
                         }
                     }
                     self.pos = (self.pos + 1) % n;
+                    if let Some((a, side)) = ap {
+                        let mut v = y[side];
+                        for k in [10, 12] {
+                            let o = -a * v + z[k] + a * z[k + 1];
+                            z[k] = v;
+                            z[k + 1] = o;
+                            v = o;
+                        }
+                        y[side] = v;
+                    }
                     *f = y;
                 }
             }

@@ -29,6 +29,8 @@ pub mod id {
     pub const PERFORMANCE: u8 = 31;
     /// 1 when clips that start part-way into a pattern still sound the notes they cut into.
     pub const TRUNCATED: u8 = 30;
+    /// Late plug-ins are lined up with everything else (absent means not).
+    pub const AUTO_PDC: u8 = 29;
     pub const TIMESIG_BEAT: u8 = 18;
     pub const CHAN_ZIPPED: u8 = 15;
     /// The sample's loop goes back and forth.
@@ -709,6 +711,10 @@ pub struct FlpInsert {
     pub name: String,
     pub color: Option<u32>,
     pub flags: u32,
+    /// How late the track is said to be by hand, in milliseconds (the record opens with it).
+    pub latency_ms: f32,
+    /// The short record of earlier versions: the figure is a hold the track really has.
+    pub latency_real: bool,
     /// 12800 = 100 % (0 dB), 16000 = maximum.
     pub volume: i32,
     /// -6400..=6400.
@@ -727,7 +733,7 @@ pub struct FlpInsert {
 
 impl Default for FlpInsert {
     fn default() -> Self {
-        Self { index: 0, name: String::new(), color: None, flags: 0, volume: 12800, pan: 0, stereo_separation: 0, eq: EQ_DEFAULT, route_levels: vec![], routes: vec![], slots: vec![], input: -1, output: -1 }
+        Self { index: 0, name: String::new(), color: None, flags: 0, latency_ms: 0.0, latency_real: false, volume: 12800, pan: 0, stereo_separation: 0, eq: EQ_DEFAULT, route_levels: vec![], routes: vec![], slots: vec![], input: -1, output: -1 }
     }
 }
 
@@ -753,6 +759,7 @@ pub struct Flp {
     pub time_sig: (u8, u8),
     pub performance: bool,
     pub truncated: bool,
+    pub auto_pdc: bool,
     pub pan_law: u8,
     /// The channel rack's named groups, and the one on show (-1 for all).
     pub groups: Vec<String>,
@@ -971,6 +978,7 @@ impl Flp {
                 (id::TIMESIG_NUM, Value::Byte(v)) => flp.time_sig.0 = *v,
                 (id::PERFORMANCE, Value::Byte(v)) => flp.performance = *v != 0,
                 (id::TRUNCATED, Value::Byte(v)) => flp.truncated = *v != 0,
+                (id::AUTO_PDC, Value::Byte(v)) => flp.auto_pdc = *v != 0,
                 (id::PAN_LAW, Value::Byte(v)) => flp.pan_law = *v,
                 (id::TIMESIG_BEAT, Value::Byte(v)) => flp.time_sig.1 = *v,
                 (id::MAIN_PITCH, Value::Word(v)) => flp.main_pitch = *v as i16,
@@ -1135,7 +1143,7 @@ impl Flp {
                     slot = FlpSlot::default();
                     slot_hint = None;
                     let index = flp.inserts.len();
-                    flp.inserts.push(FlpInsert { index, flags: u32at(d, 4), name: next_insert_name.take().unwrap_or_default(), color: next_insert_color.take(), ..Default::default() });
+                    flp.inserts.push(FlpInsert { index, flags: u32at(d, 4), latency_ms: Some(f32at(d, 0)).filter(|v| v.is_finite() && v.abs() < 10_000.0).unwrap_or(0.0), latency_real: d.len() < 12, name: next_insert_name.take().unwrap_or_default(), color: next_insert_color.take(), ..Default::default() });
                 }
                 (id::INSERT_OUTPUT, Value::Int(v)) => {
                     if let (true, Some(i)) = (insert_open, flp.inserts.last_mut()) {

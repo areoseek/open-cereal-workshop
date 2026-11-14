@@ -1359,6 +1359,11 @@ pub struct Insert {
     pub separator: bool,
     /// The effect slots as a whole, on or off.
     pub fx_on: bool,
+    /// How late the track is said to be by hand, in milliseconds, on top of what its plug-ins report.
+    pub latency_ms: f32,
+    /// Projects of earlier versions: the figure is a hold the track really has (heard when the lining-up is off,
+    /// made up for when it is on), not a statement about its plug-ins.
+    pub latency_real: bool,
 }
 
 /// One band of an insert's equaliser.
@@ -1402,7 +1407,7 @@ impl Insert {
 
 impl Default for Insert {
     fn default() -> Self {
-        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false, audio_in: -1, dock: 1, separator: false, fx_on: true }
+        Self { name: String::new(), color: None, volume: 1.0, pan: 0.0, enabled: true, sends: vec![], slots: vec![], sep: 0.0, eq: EQ_DEFAULT, levels: vec![], invert: false, swap: false, audio_in: -1, dock: 1, separator: false, fx_on: true, latency_ms: 0.0, latency_real: false }
     }
 }
 
@@ -1441,6 +1446,8 @@ pub struct Song {
     pub performance: bool,
     /// Clips that start part-way into their pattern sound the notes already running at that point.
     pub truncated: bool,
+    /// Late plug-ins are lined up with everything else; a project that does not say so plays them as they come.
+    pub auto_pdc: bool,
     /// The panning law: 0 circular, 2 triangular.
     pub pan_law: u8,
     /// Main pitch: every instrument is moved by this many cents.
@@ -1571,6 +1578,7 @@ impl Song {
             time_sig: (4, 4),
             performance: false,
             truncated: true,
+            auto_pdc: true,
             pan_law: 0,
             main_pitch: 0,
             song_mode: false,
@@ -2598,6 +2606,8 @@ impl Song {
                         dock: if ins.flags == 0 { (i != 0) as u8 } else if ins.flags & flp::INSERT_FLAG_DOCK_RIGHT != 0 { 2 } else if ins.flags & flp::INSERT_FLAG_DOCK_MIDDLE != 0 { 1 } else { 0 },
                         separator: ins.flags & flp::INSERT_FLAG_SEPARATOR != 0,
                         fx_on: ins.flags & flp::INSERT_FLAG_FX != 0 || ins.flags == 0,
+                        latency_ms: ins.latency_ms,
+                        latency_real: ins.latency_real,
                     }
                 })
                 .collect()
@@ -2613,6 +2623,7 @@ impl Song {
             time_sig: (f.time_sig.0.max(1), f.time_sig.1.max(1)),
             performance: f.performance,
             truncated: f.truncated,
+            auto_pdc: f.auto_pdc,
             pan_law: f.pan_law,
             main_pitch: f.main_pitch,
             song_mode: f.song_mode,

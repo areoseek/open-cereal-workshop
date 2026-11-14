@@ -302,6 +302,37 @@ impl App {
                         self.dirty = true;
                     }
                     ui.add_space(4.0);
+                    {
+                        let ms = self.song.inserts[i].latency_ms;
+                        let title = if ms == 0.0 { "Latency: none".to_string() } else { format!("Latency: {ms:.2} ms") };
+                        let mut set = None;
+                        ui.menu_button(RichText::new(title).small(), |ui| {
+                            if ui.radio(ms == 0.0, "None").clicked() {
+                                set = Some(0.0);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            let mut v = ms;
+                            ui.horizontal(|ui| {
+                                ui.label("Type in value");
+                                if ui.add(egui::DragValue::new(&mut v).range(0.0..=2000.0).speed(0.1).suffix(" ms")).changed() {
+                                    set = Some(v);
+                                }
+                            });
+                            let block = (if self.settings.buffer == 0 { 512 } else { self.settings.buffer }) as f32 / (if self.settings.rate == 0 { 44100 } else { self.settings.rate }) as f32 * 1000.0;
+                            if ui.button("Set from mixing buffer").clicked() {
+                                set = Some(block);
+                                ui.close_menu();
+                            }
+                        })
+                        .response
+                        .hint("How late this track's plug-ins answer, set by hand; the other tracks wait for it");
+                        if let Some(v) = set {
+                            self.song.inserts[i].latency_ms = v;
+                            self.song.inserts[i].latency_real = false;
+                            self.dirty = true;
+                        }
+                    }
                     let ins = &self.song.inserts[i];
                     if i != 0 {
                         let to: Vec<String> = ins.sends.iter().map(|&d| self.song.insert_name(d)).collect();

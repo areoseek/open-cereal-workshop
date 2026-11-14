@@ -2011,13 +2011,18 @@ impl App {
                 });
                 ui.menu_button("Plugin delay compensation", |ui| {
                     if mi(ui, "Reset manual latency on all tracks", "").clicked() {
-                        self.status = "Tracks carry no hand-set latency here".into();
+                        let mut done = 0;
+                        for x in self.song.inserts.iter_mut().filter(|x| x.latency_ms != 0.0) {
+                            x.latency_ms = 0.0;
+                            done += 1;
+                        }
+                        self.dirty |= done > 0;
+                        self.status = format!("Hand-set latency cleared on {done} tracks");
                         ui.close_menu();
                     }
-                    if tick(ui, !self.settings.pdc_off, "Automatic", "").hint("Plug-ins that answer late are lined up with everything else").clicked() {
-                        self.settings.pdc_off = !self.settings.pdc_off;
-                        cereal_engine::player::set_delay_compensation(!self.settings.pdc_off);
-                        let _ = self.settings.save();
+                    if tick(ui, self.song.auto_pdc, "Automatic", "").hint("Plug-ins that answer late are lined up with everything else; kept with the project").clicked() {
+                        self.song.auto_pdc = !self.song.auto_pdc;
+                        self.dirty = true;
                         ui.close_menu();
                     }
                     if tick(ui, o & mxo::PDC_AUTOM != 0, "Compensate automations", "").clicked() {

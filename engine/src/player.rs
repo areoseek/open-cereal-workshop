@@ -1631,6 +1631,10 @@ impl Comp {
             {
                 own += self.fake.iter().filter(|f| f.0 == i).map(|f| f.1).sum::<usize>();
             }
+            // what the track is said to be late by hand counts on top
+            if !ins.latency_real {
+                own += (ins.latency_ms.max(0.0) * 0.001 * rate).round() as usize;
+            }
             any |= own > 0;
             out[i] = (into[i] + own).min(cap);
             if ins.enabled && i != 0 {
@@ -1639,8 +1643,34 @@ impl Comp {
                 }
             }
         }
-        if PDC_OFF.load(Relaxed) {
+        if PDC_OFF.load(Relaxed) || !song.auto_pdc {
             any = false;
+            // nothing is lined up; what remains is the real hold some tracks of earlier projects carry, on
+            // everything that enters them
+            let real: Vec<usize> = song.inserts.iter().map(|x| if x.latency_real { ((x.latency_ms.max(0.0) * 0.001 * rate).round() as usize).min(cap) } else { 0 }).collect();
+            if real.iter().any(|d| *d > 0) {
+                self.on = true;
+                self.total = 0;
+                self.inst.clear();
+                self.after.clear();
+                self.direct.resize_with(ni, Hold::default);
+                self.sends.resize_with(ni, Vec::new);
+                for i in 0..ni {
+                    self.direct[i].set(real[i]);
+                    let ins = &song.inserts[i];
+                    let list = &mut self.sends[i];
+                    list.retain(|l| ins.sends.contains(&l.0));
+                    for &d in ins.sends.iter().filter(|d| **d < ni) {
+                        if !list.iter().any(|l| l.0 == d) {
+                            list.push((d, Hold::default()));
+                        }
+                    }
+                    for l in list.iter_mut() {
+                        l.1.set(real[l.0]);
+                    }
+                }
+                return;
+            }
         }
         self.on = any;
         self.total = if any { out.first().copied().unwrap_or(0) } else { 0 };
