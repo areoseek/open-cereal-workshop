@@ -1389,6 +1389,14 @@ impl App {
         }
     }
 
+    /// One of the playlist's option switches as a ticked menu line.
+    fn pl_opt(&mut self, ui: &mut Ui, bit: u64, label: &str, keys: &str, hint: &str) {
+        if tick(ui, self.settings.pl_opts & bit != 0, label, keys).hint(hint).clicked() {
+            self.settings.pl_opts ^= bit;
+            let _ = self.settings.save();
+        }
+    }
+
     /// The playlist's own menu, behind the arrow at the left of its toolbar.
     pub(crate) fn playlist_menu(&mut self, ui: &mut Ui) {
         use egui::{Key, Modifiers};
@@ -1401,6 +1409,7 @@ impl App {
         const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
         const CSA: Modifiers = Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: true };
         type Item = (&'static str, &'static str, Modifiers, Key);
+        use crate::playlist::plo;
         // every entry presses its own key, so the menu and the keyboard can never drift apart
         let mut press: Option<(Modifiers, Key)> = None;
         let list = |ui: &mut Ui, items: &[Item], press: &mut Option<(Modifiers, Key)>| {
@@ -1437,15 +1446,51 @@ impl App {
                     ("Shift up", "Shift+Up", S, Key::ArrowUp),
                     ("Shift down", "Shift+Down", S, Key::ArrowDown),
                     ("Make unique", "Shift+Ctrl+V", CS, Key::V),
+                ],
+                &mut press,
+            );
+            if mi(ui, "Make unique as sample", "").hint("The selected audio clips get a copy of their sound in a file of its own").clicked() {
+                self.pl_unique_sample();
+                ui.close_menu();
+            }
+            ui.separator();
+            self.pl_opt(ui, plo::RESIZE_LEFT, "Allow resizing from left", "Ctrl+Alt+Home", "Clips can be dragged longer or shorter by their left edge");
+            self.pl_opt(ui, plo::WHEEL_NUDGE, "Nudge clips with mouse wheel", "", "Shift and the wheel over a clip moves it; when off, Shift+Alt and the wheel does");
+            self.pl_opt(ui, plo::HEAD_LOCK, "Dropping on track header locks to content", "", "A clip source dropped on a track name locks the track to it");
+            ui.menu_button("Drop audio on track headers", |ui| {
+                let now = (self.settings.pl_opts >> plo::DROP_SHIFT) & 3;
+                for (k, label) in ["Create audio clips", "Create audio tracks", "Create instrument tracks", "Always ask"].into_iter().enumerate() {
+                    if ui.radio(now == k as u64, label).clicked() {
+                        self.settings.pl_opts = self.settings.pl_opts & !(3 << plo::DROP_SHIFT) | ((k as u64) << plo::DROP_SHIFT);
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                }
+            });
+            list(
+                ui,
+                &[
                     ("", "", N, Key::F35),
                     ("Mute", "Alt+M", A, Key::M),
                     ("Unmute", "Shift+Alt+M", SA, Key::M),
                     ("", "", N, Key::F35),
                     ("Insert space", "Ctrl+Ins", C, Key::Insert),
+                    ("Slice & insert space", "Ctrl+Alt+Ins", CA, Key::Insert),
                     ("Delete space", "Ctrl+Del", C, Key::Delete),
+                ],
+                &mut press,
+            );
+            if mi(ui, "Trim selection", "").hint("The selected clips are cut down to the picked stretch of time").clicked() {
+                self.pl_trim();
+                ui.close_menu();
+            }
+            list(
+                ui,
+                &[
                     ("", "", N, Key::F35),
                     ("Merge selected clips", "Ctrl+G", C, Key::G),
                     ("Merge similar pattern clips", "Shift+Ctrl+G", CS, Key::G),
+                    ("Merge automation clips", "Ctrl+Alt+G", CA, Key::G),
                 ],
                 &mut press,
             );
@@ -1464,19 +1509,99 @@ impl App {
                 ],
                 &mut press,
             );
+            ui.separator();
+            self.pl_opt(ui, plo::AUTO_XFADE, "Automatic crossfades (current project)", "", "Audio clips that overlap on a track fade into each other");
+            self.pl_opt(ui, plo::MANUAL_FADES, "Create new clips with manual fades", "", "New audio clips start with fades set by hand");
+            self.pl_opt(ui, plo::SNAP_FADES, "Snap fade handles", "", "Fade handles keep to the snap grid");
+            self.pl_opt(ui, plo::STRETCH_VARIANT, "Create variants when stretching audio clips", "", "Stretching one audio clip leaves the other clips of the same sound alone");
+            self.pl_opt(ui, plo::SELECT_ON_DROP, "Select tracks when samples are dropped", "", "The track a sound is dropped on becomes the selected one");
         });
         ui.menu_button("Tools", |ui| {
+            ui.set_min_width(280.0);
             list(ui, &[("Quick quantize start times", "Shift+Q", S, Key::Q), ("", "", N, Key::F35)], &mut press);
             ui.menu_button("Consolidate playlist selection", |ui| {
                 list(ui, &[("From track start", "Ctrl+Alt+C", CA, Key::C), ("From song start", "Shift+Ctrl+Alt+C", CSA, Key::C)], &mut press);
             });
+            for (groups, label) in [(false, "Export all playlist tracks"), (true, "Export all playlist track groups")] {
+                ui.menu_button(label, |ui| {
+                    for (from, label) in ["From song start", "From track start", "Time selection"].into_iter().enumerate() {
+                        if ui.button(label).clicked() {
+                            self.pl_export_tracks(groups, from as u8);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+            list(ui, &[("Clone selected playlist track(s)", "Shift+Ctrl+B", CS, Key::B)], &mut press);
         });
         ui.menu_button("View", |ui| {
-            sect(ui, "Grid");
-            if mi(ui, "Grid color...", "").clicked() {
-                self.grid_win = !self.grid_win;
-                ui.close_menu();
-            }
+            ui.horizontal_top(|ui| {
+                col(ui, 190.0, |ui| {
+                    sect(ui, "Grid");
+                    if mi(ui, "Grid color...", "").clicked() {
+                        self.grid_win = !self.grid_win;
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Grid contrast", |ui| {
+                        for (k, label) in ["Low", "Normal", "High"].into_iter().enumerate() {
+                            if ui.radio((self.settings.pl_opts >> plo::CONTRAST_SHIFT) & 3 == k as u64, label).clicked() {
+                                self.settings.pl_opts = self.settings.pl_opts & !(3 << plo::CONTRAST_SHIFT) | ((k as u64) << plo::CONTRAST_SHIFT);
+                                let _ = self.settings.save();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    self.pl_opt(ui, plo::INVERT_GRID, "Invert grid", "", "The light and the dark stretches of the grid change places");
+                    self.pl_opt(ui, plo::TRACK_SEP, "Track separators", "", "A line between one track and the next");
+                    self.pl_opt(ui, plo::TIME_SEG, "Time segments", "", "Every other group of four bars is shaded");
+                });
+                col(ui, 230.0, |ui| {
+                    sect(ui, "Content");
+                    self.pl_opt(ui, plo::KEEP_LABELS, "Keep labels on screen", "", "A clip's name slides along the clip so it stays in view");
+                    self.pl_opt(ui, plo::TITLE_CONTENT, "Content in titlebars", "", "The picture of a clip's content runs up under its name");
+                    ui.menu_button("Behind clips", |ui| {
+                        let now = (self.settings.pl_opts >> plo::BEHIND_SHIFT) & 7;
+                        for (k, label) in ["Nothing", "Plain", "Cel", "Glass", "Aqua", "Solid"].into_iter().enumerate() {
+                            if ui.radio(now == k as u64, label).clicked() {
+                                self.settings.pl_opts = self.settings.pl_opts & !(7 << plo::BEHIND_SHIFT) | ((k as u64) << plo::BEHIND_SHIFT);
+                                let _ = self.settings.save();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    self.pl_opt(ui, plo::SHADOW, "Shadow", "", "A shadow under each clip");
+                    ui.menu_button("Resize all tracks", |ui| {
+                        for pc in [33, 50, 75, 100, 125, 150, 200] {
+                            if ui.button(format!("{pc}%")).clicked() {
+                                for t in &mut self.song.tracks {
+                                    t.size = pc as f32 / 100.0;
+                                }
+                                self.dirty = true;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    self.pl_opt(ui, plo::HIDE_COLLAPSED, "Hide collapsed grouped tracks", "", "Folded groups take no room at all");
+                    self.pl_opt(ui, plo::FADE_PREVIEW, "Show fade previews", "", "");
+                    self.pl_opt(ui, plo::GAIN_VALUE, "Show gain value", "", "");
+                    self.pl_opt(ui, plo::GAIN_SCALE, "Show gain scale", "", "");
+                });
+                col(ui, 220.0, |ui| {
+                    sect(ui, "Time");
+                    self.pl_opt(ui, plo::INCR_SCROLL, "Incremental scrolling", "", "While playing, the view glides with the play position, not page by page");
+                    self.pl_opt(ui, plo::PRECISE_TIME, "Precise time indicator", "", "A line down the tracks at the play position");
+                    self.pl_opt(ui, plo::PERF_CLIP, "Performance clip progress", "", "Clips played by hand fill up as they play");
+                    self.pl_opt(ui, plo::PERF_TRACK, "Performance track progress", "", "");
+                });
+                col(ui, 250.0, |ui| {
+                    sect(ui, "Track headers");
+                    self.pl_opt(ui, plo::AUDIO_CTRL, "Show controls on audio tracks", "", "");
+                    self.pl_opt(ui, plo::AUDIO_LEVELS, "Show levels on audio tracks", "", "");
+                    self.pl_opt(ui, plo::INST_LEVELS, "Show levels on instrument tracks", "", "");
+                    ui.separator();
+                    ui.add_enabled(false, egui::Button::new("Remove background picture")).on_disabled_hover_text("The playlist has no background picture");
+                });
+            });
         });
         ui.menu_button("Snap", |ui| {
             if ui.radio(self.playlist.snap == crate::pianoroll::SNAP_MAIN, "Main").clicked() {
@@ -1497,9 +1622,12 @@ impl App {
                 self.playlist.sel = (0..self.song.clips.len()).filter(|&i| self.song.clips[i].muted).collect();
                 ui.close_menu();
             }
-            if mi(ui, "Select overlapping clips", "").hint("Clips that share a stretch of their track with another clip").clicked() {
-                let c = &self.song.clips;
-                self.playlist.sel = (0..c.len()).filter(|&i| (0..c.len()).any(|j| j != i && c[j].track == c[i].track && c[j].pos < c[i].pos + c[i].len && c[i].pos < c[j].pos + c[j].len)).collect();
+            if mi(ui, "Select overlapping clips", "").hint("Clips that share a stretch of their track with a clip under them").clicked() {
+                self.pl_select_piled(false);
+                ui.close_menu();
+            }
+            if mi(ui, "Select stacked clips", "").hint("Clips that lie wholly over another clip of their track").clicked() {
+                self.pl_select_piled(true);
                 ui.close_menu();
             }
             list(
@@ -1513,6 +1641,8 @@ impl App {
                 ],
                 &mut press,
             );
+            ui.separator();
+            self.pl_opt(ui, plo::LASSO, "Magic lasso", "", "Drawing a loop around clips selects them without a click");
         });
         ui.menu_button("Group", |ui| list(ui, &[("Group", "Shift+G", S, Key::G), ("Ungroup", "Alt+G", A, Key::G)], &mut press));
         ui.menu_button("Zoom", |ui| {
@@ -1537,14 +1667,98 @@ impl App {
         });
         ui.menu_button("Time markers", |ui| {
             ui.set_min_width(260.0);
-            list(ui, &[("Add one...", "Alt+T", A, Key::T), ("Add time signature change...", "Shift+Alt+T", SA, Key::T), ("", "", N, Key::F35), ("Jump to the previous", "Alt+/", A, Key::Slash)], &mut press);
+            list(ui, &[("Add one...", "Alt+T", A, Key::T), ("Add auto", "Ctrl+T", C, Key::T)], &mut press);
+            if mi(ui, "Add two...", "").hint("One at each end of the picked time").clicked() {
+                self.pl_marker_tool(1, 0);
+                ui.close_menu();
+            }
+            ui.menu_button("Add one every", |ui| {
+                for (n, label) in [(1, "Bar"), (2, "2 bars"), (4, "4 bars"), (8, "8 bars")] {
+                    if ui.button(label).clicked() {
+                        self.pl_marker_tool(2, n);
+                        ui.close_menu();
+                    }
+                }
+            });
+            if mi(ui, "Add jump to next bar", "").hint("A marker that skips ahead to the marker after it").clicked() {
+                self.pl_marker_tool(3, 0);
+                ui.close_menu();
+            }
+            list(ui, &[("Add time signature change...", "Shift+Alt+T", SA, Key::T)], &mut press);
+            ui.menu_button("Add key marker", |ui| {
+                for (k, label) in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].into_iter().enumerate() {
+                    if ui.button(label).clicked() {
+                        self.pl_marker_tool(5, k as u32);
+                        ui.close_menu();
+                    }
+                }
+            });
+            list(ui, &[("Place loop", "Shift+T", S, Key::T), ("", "", N, Key::F35)], &mut press);
+            if mi(ui, "Delete", "").hint("The markers inside the picked time, or the one at the play position").clicked() {
+                self.pl_marker_tool(6, 0);
+                ui.close_menu();
+            }
+            if mi(ui, "Change to marker loop", "").clicked() {
+                self.pl_marker_tool(7, 0);
+                ui.close_menu();
+            }
+            list(ui, &[("", "", N, Key::F35), ("Jump to the previous", "Alt+/", A, Key::Slash)], &mut press);
         });
         ui.menu_button("Picker panel", |ui| {
+            ui.set_min_width(240.0);
             if tick(ui, self.playlist.picker, "Enable", "Alt+P").clicked() {
                 self.playlist.picker = !self.playlist.picker;
                 ui.close_menu();
             }
+            self.pl_opt(ui, plo::PICKER_RIGHT, "Show on right side", "", "");
+            sect(ui, "Selection");
+            self.pl_opt(ui, plo::PICKER_LINKED, "Select linked channels", "", "Picking a clip source selects its channels in the channel rack");
+            self.pl_opt(ui, plo::PICKER_FOLLOW, "Select from playlist/channel rack", "", "Clicking a clip picks its source in the panel");
+            sect(ui, "Misc. options");
+            self.pl_opt(ui, plo::PICKER_EMPTY, "Show empty patterns", "", "");
+            self.pl_opt(ui, plo::PICKER_DRAG, "Drag to rearrange", "", "");
+            self.pl_opt(ui, plo::PICKER_GROUP, "Auto group patterns/channels", "", "");
+            sect(ui, "Tools");
+            if mi(ui, "Select unused", "").hint("Marks the patterns and clip channels with no clip on the playlist").clicked() {
+                self.pl_mark_unused();
+                ui.close_menu();
+            }
+            self.pl_opt(ui, plo::PICKER_SORT, "Sort by name", "", "");
         });
+        ui.menu_button("Current clip source", |ui| {
+            sect(ui, "Pattern clip sources");
+            let now = self.handle.transport.pattern();
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for p in 0..self.song.patterns.len() {
+                    let name = if self.song.patterns[p].name.is_empty() { format!("Pattern {}", p + 1) } else { self.song.patterns[p].name.clone() };
+                    if ui.radio(p == now, name).clicked() {
+                        self.handle.transport.set_pattern(p);
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+        ui.menu_button("Edit patterns in", |ui| {
+            for (k, label) in ["Automatic", "Channel rack", "Piano roll", "Piano roll or event editor"].into_iter().enumerate() {
+                if ui.radio(self.settings.pl_edit_in == k as u8, label).hint("What a double click on a pattern clip opens").clicked() {
+                    self.settings.pl_edit_in = k as u8;
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            self.pl_opt(ui, plo::SCROLL_TO_POS, "Scroll to position", "", "The editor opens at the clip's place in the pattern");
+        });
+        ui.menu_button("Quantize song jumps", |ui| {
+            for (k, label) in ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 bars"].into_iter().enumerate() {
+                if ui.radio(self.settings.pl_jump_q == k as u8, label).hint("While playing, a click on the ruler waits for this line before the play position moves").clicked() {
+                    self.settings.pl_jump_q = k as u8;
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+            }
+        });
+        self.pl_opt(ui, plo::RESET_REMOTE, "Automation clips reset remote controls", "", "A control moved by hand goes back to its automation at the next automation clip");
         ui.separator();
         if mi(ui, "Prepare for performance mode", "").clicked() {
             self.prepare_performance();
@@ -1558,6 +1772,12 @@ impl App {
         self.audio_clip_switch(ui, "Switch all audio clip channels to", false);
         self.audio_clip_switch(ui, "Switch selected audio clip channels to", true);
         self.track_macros(ui);
+        for (fold, label) in [(true, "Collapse all grouped tracks"), (false, "Expand all grouped tracks")] {
+            if mi(ui, label, "").clicked() {
+                self.pl_collapse_groups(fold);
+                ui.close_menu();
+            }
+        }
         ui.separator();
         if mi(ui, "Center", "Shift+0").hint("Bring the play position to the middle").clicked() {
             press = Some((S, Key::Num0));

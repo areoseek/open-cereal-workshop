@@ -93,6 +93,12 @@ pub struct Settings {
     pub toolbar_flags: u8,
     /// Late plug-ins are not lined up with the rest.
     pub pdc_off: bool,
+    /// The playlist's option switches (the bits are named in `playlist::plo`).
+    pub pl_opts: u64,
+    /// What a double click on a pattern clip opens: 0 automatic, 1 channel rack, 2 piano roll, 3 piano roll or event editor.
+    pub pl_edit_in: u8,
+    /// Song jumps wait for: 0 nothing, 1 the beat, 2 the bar, 3 two bars, 4 four bars, 5 eight bars.
+    pub pl_jump_q: u8,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
     /// The mixer track browser previews and the metronome play through.
@@ -243,7 +249,7 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        let mut s = Self::default();
+        let mut s = Self { pl_opts: crate::playlist::plo::DEFAULT, ..Self::default() };
         let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
         for line in text.lines() {
             match line.split_once('=') {
@@ -259,6 +265,9 @@ impl Settings {
                 Some(("toolbar", v)) => s.toolbar = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 Some(("toolbar_hidden", v)) => s.toolbar_hidden = v.trim().parse().unwrap_or(0),
                 Some(("pdc_off", v)) => s.pdc_off = v.trim() == "1",
+                Some(("pl_opts", v)) => s.pl_opts = v.trim().parse().unwrap_or(crate::playlist::plo::DEFAULT),
+                Some(("pl_edit_in", v)) => s.pl_edit_in = v.trim().parse().unwrap_or(0),
+                Some(("pl_jump_q", v)) => s.pl_jump_q = v.trim().parse().unwrap_or(0),
                 Some(("toolbar_flags", v)) => s.toolbar_flags = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
                 Some(("preview_track", v)) => s.preview_track = v.trim().parse().unwrap_or(0),
@@ -385,6 +394,7 @@ impl Settings {
         if !self.toolbar.is_empty() {
             out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
         }
+        out += &format!("pl_opts={}\npl_edit_in={}\npl_jump_q={}\n", self.pl_opts, self.pl_edit_in, self.pl_jump_q);
         if self.pdc_off {
             out += "pdc_off=1\n";
         }

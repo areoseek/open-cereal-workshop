@@ -65,6 +65,11 @@ keyboard off and outside the channel rack.
 ### Windows
 | Binding | Action | Done |
 |---|---|---|
+| Ctrl+F11 | Hide and show the toolbars | yes |
+| Shift+F12 | Align all channel editors | yes |
+| Shift+E (mixer) | Open the audio editor on the track, armed to record | yes |
+| Del (mixer) | Delete the selected mixer tracks | yes |
+| Alt+R / Shift+Alt+R (mixer) | Render the armed / the selected tracks to wave files | yes |
 | F5 / F6 / F7 / F9 | Playlist / channel rack / piano roll / mixer | yes |
 | F8 | Plug-in picker | yes |
 | Alt+F8 | Browser | yes |
@@ -219,6 +224,12 @@ keyboard off and outside the channel rack.
 | Ctrl+drag, Shift+drag a clip, clip edges | Rectangle select, drag a copy, resize | yes |
 | Right-click a clip | Delete | yes |
 | Wheel, Shift+wheel, Ctrl+wheel, middle drag | Scroll, sideways, zoom, pan | yes |
+| Ctrl+Alt+Ins | Slice the clips at the start of the selection and open a gap there | yes |
+| Ctrl+Alt+G | Merge the selected automation clips | yes |
+| Ctrl+Alt+Home | Allow resizing clips from their left edge, on and off | yes |
+| Shift+Ctrl+B | Clone the tracks of the selected clips | yes |
+| Ctrl+T / Shift+T (playlist focused) | Add an "Auto" marker / place a loop marker | yes |
+| Double click on a clip | Open it the way "Edit patterns in" says | yes |
 | Ctrl+P (playlist focused), Shift+6 | Performance mode on and off, fit the performance zone | yes |
 | Click a zone clip; right-click it or click the track name | Start the clip on its grid; stop the track | yes |
 | Alt+click, Shift+click, Ctrl+click a zone clip | Start at once, queue after the playing clip, start the whole column | yes |

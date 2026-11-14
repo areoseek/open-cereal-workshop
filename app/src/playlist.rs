@@ -103,6 +103,12 @@ pub struct State {
     track_menu: Option<(usize, Pos2)>,
     /// The clip whose menu is open (its top left corner was clicked), and where.
     clip_menu: Option<(usize, Pos2)>,
+    /// Group heads whose tracks are folded away.
+    pub(crate) collapsed: BTreeSet<usize>,
+    /// A move of the play position that waits for its grid line: (when, where to).
+    pub(crate) jump: Option<(u32, u32)>,
+    /// What the picker panel's tools marked.
+    pub(crate) marked: Vec<ClipSrc>,
     /// Performance mode: the tracks whose clips the mouse button is holding, and the keys holding tracks.
     perf_press: Vec<u16>,
     pub(crate) perf_held: std::collections::HashMap<Key, u16>,
@@ -112,11 +118,57 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, size_drag: None, drag: None, tool: Tool::Draw, snap: SNAP_MAIN, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
+        Self { scroll_x: 0.0, scroll_y: 0.0, zoom: 0.09, track_h: 30.0, size_drag: None, drag: None, tool: Tool::Draw, snap: SNAP_MAIN, time_sel: None, sel: BTreeSet::new(), hover: None, clip: vec![], brush: None, stretch: false, picker: false, stretch_from: None, brush_pat: usize::MAX, grid_line: 96, left_tick: 0, auto_menu: None, track_menu: None, clip_menu: None, collapsed: BTreeSet::new(), jump: None, marked: vec![], perf_press: vec![], perf_held: Default::default(), view_w: 800.0, snap_back: 0 }
     }
 }
 
 const HEAD_W: f32 = 112.0;
+
+/// The playlist's option switches, kept in the settings as one number.
+pub(crate) mod plo {
+    pub const RESIZE_LEFT: u64 = 1;
+    pub const WHEEL_NUDGE: u64 = 1 << 1;
+    pub const HEAD_LOCK: u64 = 1 << 2;
+    pub const AUTO_XFADE: u64 = 1 << 4;
+    pub const MANUAL_FADES: u64 = 1 << 5;
+    pub const SNAP_FADES: u64 = 1 << 6;
+    pub const STRETCH_VARIANT: u64 = 1 << 7;
+    pub const SELECT_ON_DROP: u64 = 1 << 8;
+    pub const INVERT_GRID: u64 = 1 << 9;
+    pub const TRACK_SEP: u64 = 1 << 10;
+    pub const TIME_SEG: u64 = 1 << 11;
+    pub const KEEP_LABELS: u64 = 1 << 12;
+    pub const TITLE_CONTENT: u64 = 1 << 13;
+    pub const SHADOW: u64 = 1 << 15;
+    pub const HIDE_COLLAPSED: u64 = 1 << 16;
+    pub const FADE_PREVIEW: u64 = 1 << 17;
+    pub const GAIN_VALUE: u64 = 1 << 18;
+    pub const GAIN_SCALE: u64 = 1 << 19;
+    pub const INCR_SCROLL: u64 = 1 << 20;
+    pub const PRECISE_TIME: u64 = 1 << 21;
+    pub const PERF_CLIP: u64 = 1 << 22;
+    pub const PERF_TRACK: u64 = 1 << 23;
+    pub const AUDIO_CTRL: u64 = 1 << 24;
+    pub const AUDIO_LEVELS: u64 = 1 << 25;
+    pub const INST_LEVELS: u64 = 1 << 26;
+    pub const LASSO: u64 = 1 << 27;
+    pub const RESET_REMOTE: u64 = 1 << 28;
+    pub const PICKER_RIGHT: u64 = 1 << 29;
+    pub const PICKER_EMPTY: u64 = 1 << 30;
+    pub const PICKER_DRAG: u64 = 1 << 31;
+    pub const PICKER_GROUP: u64 = 1 << 32;
+    pub const SCROLL_TO_POS: u64 = 1 << 33;
+    pub const PICKER_LINKED: u64 = 1 << 34;
+    pub const PICKER_FOLLOW: u64 = 1 << 35;
+    pub const PICKER_SORT: u64 = 1 << 36;
+    /// Two bits: what audio dropped on a track name becomes (0 audio clip, 1 audio track, 2 instrument track, 3 ask).
+    pub const DROP_SHIFT: u32 = 40;
+    /// Three bits: what lies behind the clips (0 nothing .. 5 solid).
+    pub const BEHIND_SHIFT: u32 = 44;
+    /// Two bits: grid contrast (0 low, 1 normal, 2 high).
+    pub const CONTRAST_SHIFT: u32 = 48;
+    pub const DEFAULT: u64 = (1 << CONTRAST_SHIFT) | RESIZE_LEFT | SNAP_FADES | STRETCH_VARIANT | TRACK_SEP | TIME_SEG | KEEP_LABELS | PERF_CLIP | PRECISE_TIME | RESET_REMOTE | PICKER_EMPTY | PICKER_FOLLOW | SCROLL_TO_POS | (1 << BEHIND_SHIFT);
+}
 const RULER_H: f32 = 18.0;
 
 impl App {
@@ -1040,8 +1092,16 @@ impl App {
         let mut picked = false;
             let brush = self.playlist.brush.map(|b| b.0).unwrap_or(ClipSrc::Pattern(pat));
             ui.label(RichText::new("Patterns").small().color(TEXT_DIM));
-            for p in 0..self.song.patterns.len() {
+            let mut order: Vec<usize> = (0..self.song.patterns.len()).collect();
+            if self.settings.pl_opts & plo::PICKER_SORT != 0 {
+                order.sort_by_key(|&p| (self.song.patterns[p].name.is_empty(), self.song.patterns[p].name.to_lowercase(), p));
+            }
+            for p in order {
+                if self.settings.pl_opts & plo::PICKER_EMPTY == 0 && p != pat && self.song.patterns[p].notes.is_empty() && !self.song.clips.iter().any(|c| c.src == ClipSrc::Pattern(p)) {
+                    continue;
+                }
                 let name = if self.song.patterns[p].name.is_empty() { format!("Pattern {}", p + 1) } else { self.song.patterns[p].name.clone() };
+                let name = if self.playlist.marked.contains(&ClipSrc::Pattern(p)) { RichText::new(name).color(Color32::from_rgb(236, 150, 60)) } else { RichText::new(name) };
                 if ui.selectable_label(brush == ClipSrc::Pattern(p), name).clicked() {
                     self.handle.transport.set_pattern(p);
                     self.playlist.brush = None;
@@ -1058,7 +1118,9 @@ impl App {
                 ui.label(RichText::new(title).small().color(TEXT_DIM));
                 for c in list {
                     let src = if audio { ClipSrc::Audio(c) } else { ClipSrc::Automation(c) };
-                    if ui.selectable_label(brush == src, self.song.channels[c].name.clone()).clicked() {
+                    let name = RichText::new(self.song.channels[c].name.clone());
+                    let name = if self.playlist.marked.contains(&src) { name.color(Color32::from_rgb(236, 150, 60)) } else { name };
+                    if ui.selectable_label(brush == src, name).clicked() {
                         // as long as a clip of it that is already there, else the sound's own length, else four bars
                         let ch = &self.song.channels[c];
                         let own = ch.sample.as_ref().filter(|_| audio).map(|s| {
@@ -1091,7 +1153,8 @@ impl App {
         }
         self.playlist_header(ui, pat);
         if self.playlist.picker {
-            egui::SidePanel::left("pl_picker").resizable(true).default_width(150.0).frame(egui::Frame::NONE.inner_margin(4.0)).show_inside(ui, |ui| {
+            let side = if self.settings.pl_opts & plo::PICKER_RIGHT != 0 { egui::panel::Side::Right } else { egui::panel::Side::Left };
+            egui::SidePanel::new(side, "pl_picker").resizable(true).default_width(150.0).frame(egui::Frame::NONE.inner_margin(4.0)).show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("pl_picker_scroll").auto_shrink([false, false]).show(ui, |ui| {
                     self.project_list(ui);
                 });
@@ -1106,8 +1169,19 @@ impl App {
         // where each track starts, counted from the first: tracks may each have their own height
         let mut tops: Vec<f32> = Vec::with_capacity(ntracks + 1);
         tops.push(0.0);
-        for t in &self.song.tracks {
-            tops.push(tops[tops.len() - 1] + (t.size.clamp(0.01, 8.0) * th).max(6.0).round());
+        let mut folded = false;
+        for (i, t) in self.song.tracks.iter().enumerate() {
+            folded = if t.grouped { folded } else { self.playlist.collapsed.contains(&i) };
+            let h = if folded && t.grouped { if self.settings.pl_opts & plo::HIDE_COLLAPSED != 0 { 0.0 } else { 2.0 } } else { (t.size.clamp(0.01, 8.0) * th).max(6.0).round() };
+            tops.push(tops[tops.len() - 1] + h);
+        }
+        let opts = self.settings.pl_opts;
+        // a move of the play position that was waiting for its grid line
+        if let Some((when, to)) = self.playlist.jump {
+            if !self.handle.transport.playing() || self.handle.transport.tick() >= when as f64 {
+                self.handle.transport.seek(to);
+                self.playlist.jump = None;
+            }
         }
         let all_h = tops[ntracks];
         let row_at = |off: f32| tops.partition_point(|&t| t <= off).saturating_sub(1).min(ntracks.saturating_sub(1));
@@ -1152,7 +1226,10 @@ impl App {
         if self.auto_scroll && self.handle.transport.playing() && self.handle.transport.song_mode() {
             // auto scrolling: the view turns the page when the play position leaves it
             let x = self.handle.transport.tick() as f32 * px;
-            if x < self.playlist.scroll_x || x > self.playlist.scroll_x + grid.width() {
+            if self.settings.pl_opts & plo::INCR_SCROLL != 0 {
+                // gliding: the play position stays in the middle once it gets there
+                self.playlist.scroll_x = (x - grid.width() * 0.5).max(0.0);
+            } else if x < self.playlist.scroll_x || x > self.playlist.scroll_x + grid.width() {
                 self.playlist.scroll_x = x;
             }
         }
@@ -1179,14 +1256,19 @@ impl App {
         let lines = self.song.bar_lines(tick_of(grid.left()) as u32, last_tick);
         for &(t, n, len) in &lines {
             let x = x_of(t as f32);
-            if (n / 4) % 2 == 1 {
+            if opts & plo::TIME_SEG != 0 && ((n / 4) % 2 == 1) != (opts & plo::INVERT_GRID != 0) {
                 p.rect_filled(Rect::from_min_max(Pos2::new(x.max(grid.left()), grid.top()), Pos2::new((x + len as f32 * px).max(grid.left()), grid.bottom())), 0.0, grid_light);
             }
             if n % every == 0 && x >= grid.left() {
-                p.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
+                let line = match (opts >> plo::CONTRAST_SHIFT) & 3 {
+                    0 => LINE_SOFT.gamma_multiply(0.5),
+                    1 => LINE_SOFT,
+                    _ => LINE,
+                };
+                p.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, line));
             }
         }
-        for tr in first_track..=last_track {
+        for tr in (first_track..=last_track).filter(|_| opts & plo::TRACK_SEP != 0) {
             let y = y_of(tr);
             p.line_segment([Pos2::new(grid.left(), y), Pos2::new(grid.right(), y)], Stroke::new(1.0_f32, LINE_SOFT));
         }
@@ -1210,7 +1292,7 @@ impl App {
         let font = FontId::proportional(10.5);
         for (i, c) in self.song.clips.iter().enumerate() {
             let tr = c.track as usize;
-            if tr < first_track || tr > last_track {
+            if tr < first_track || tr > last_track || h_of(tr) < 3.0 {
                 continue;
             }
             let r = Rect::from_min_max(Pos2::new(x_of(c.pos as f32), y_of(tr) + 1.0), Pos2::new(x_of((c.pos + c.len) as f32) - 1.0, y_of(tr) + h_of(tr)));
@@ -1220,7 +1302,13 @@ impl App {
             let (name, col) = self.clip_look(c);
             let enabled = (!c.muted || zone.is_some_and(|z| c.pos < z)) && self.song.tracks.get(tr).map(|t| t.enabled).unwrap_or(true);
             let col = if enabled { col } else { col.gamma_multiply(0.35) };
-            gp.rect_filled(r, 2.0, col.gamma_multiply(0.55));
+            if opts & plo::SHADOW != 0 {
+                gp.rect_filled(r.translate(Vec2::new(2.0, 2.0)), 2.0, Color32::from_black_alpha(90));
+            }
+            let behind = [0.0, 0.55, 0.45, 0.35, 0.65, 1.0][((opts >> plo::BEHIND_SHIFT) & 7).min(5) as usize];
+            if behind > 0.0 {
+                gp.rect_filled(r, 2.0, col.gamma_multiply(behind));
+            }
             let title = Rect::from_min_max(r.min, Pos2::new(r.right(), (r.top() + 12.0).min(r.bottom())));
             gp.rect_filled(title, 2.0, col);
             let selected = self.playlist.sel.contains(&i);
@@ -1228,7 +1316,7 @@ impl App {
             if zone.is_some_and(|z| c.pos < z) {
                 // what the track is playing by hand, and what waits for its grid line
                 let (live, next) = self.handle.transport.perf_state(tr);
-                if let Some((_, from)) = live.filter(|l| l.0 == c.pos) {
+                if let Some((_, from)) = live.filter(|l| l.0 == c.pos && opts & plo::PERF_CLIP != 0) {
                     let part = ((now_tick - from) / c.len.max(1) as f32).clamp(0.0, 1.0);
                     let done = Rect::from_min_max(r.min, Pos2::new(r.left() + r.width() * part, r.bottom()));
                     gp.rect_filled(done, 2.0, Color32::from_white_alpha(46));
@@ -1243,7 +1331,9 @@ impl App {
                 }
             }
             if r.width() > 16.0 {
-                gp.with_clip_rect(r.intersect(grid)).text(title.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, &name, font.clone(), Color32::from_gray(245));
+                // the name slides along a clip that starts off the left of the view
+                let lx = if opts & plo::KEEP_LABELS != 0 { title.left().max(grid.left()) } else { title.left() };
+                gp.with_clip_rect(r.intersect(grid)).text(Pos2::new(lx + 3.0, title.center().y), Align2::LEFT_CENTER, &name, font.clone(), Color32::from_gray(245));
             }
             // a picture of what is inside
             let body = Rect::from_min_max(Pos2::new(r.left(), title.bottom()), r.max);
@@ -1331,7 +1421,7 @@ impl App {
             }
             if let Some(pp) = pointer {
                 if r.contains(pp) && grid.contains(pp) {
-                    let edge = if r.width() < 12.0 { 0 } else if pp.x > r.right() - 5.0 { 1 } else if pp.x < r.left() + 4.0 { -1 } else { 0 };
+                    let edge = if r.width() < 12.0 { 0 } else if pp.x > r.right() - 5.0 { 1 } else if pp.x < r.left() + 4.0 && opts & plo::RESIZE_LEFT != 0 { -1 } else { 0 };
                     hit = Some((i, edge));
                     hit_corner = r.width() >= 24.0 && pp.x >= r.left() + 1.0 && pp.x < r.left() + 16.0 && pp.y < r.top() + 12.0;
                 }
@@ -1342,7 +1432,8 @@ impl App {
         if self.handle.transport.song_mode() {
             let x = x_of(self.handle.transport.tick() as f32);
             if x >= grid.left() && x <= grid.right() {
-                p.line_segment([Pos2::new(x, ruler.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, GREEN));
+                let foot = if opts & plo::PRECISE_TIME != 0 { grid.bottom() } else { ruler.bottom() };
+                p.line_segment([Pos2::new(x, ruler.top()), Pos2::new(x, foot)], Stroke::new(1.0_f32, GREEN));
             }
         }
 
@@ -1387,6 +1478,9 @@ impl App {
         let clicked = resp.clicked();
         for tr in first_track..=last_track {
             let y = y_of(tr);
+            if h_of(tr) < 3.0 {
+                continue;
+            }
             let r = Rect::from_min_max(Pos2::new(heads.left(), y + 1.0), Pos2::new(heads.right() - 1.0, y + h_of(tr)));
             // the lower edge of a name drags the track taller or shorter
             if let Some(pp) = pointer.filter(|pp| self.playlist.size_drag.is_none() && resp.hovered() && heads.contains(*pp) && (pp.y - r.bottom()).abs() <= 3.0) {
@@ -1398,6 +1492,7 @@ impl App {
             let t = &self.song.tracks[tr];
             hp.rect_filled(r, 2.0, rgb(t.color).gamma_multiply(if t.enabled { 1.0 } else { 0.5 }));
             let name = if t.name.is_empty() { format!("Track {}", tr + 1) } else { t.name.clone() };
+            let name = if self.playlist.collapsed.contains(&tr) { format!("\u{25b8} {name}") } else { name };
             hp.text(r.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, fit(ui, &name, r.width() - 24.0, &font), font.clone(), TEXT);
             let dot = Pos2::new(r.right() - 9.0, r.center().y);
             hp.circle_filled(dot, 4.0, if t.enabled { GREEN } else { PANEL_DARK });
@@ -1545,6 +1640,10 @@ impl App {
                     match tool {
                         Tool::Draw | Tool::Paint | Tool::Slip if mods.command => self.playlist.drag = Some(Drag::Rect { from: pp, add: mods.shift, zoom: false }),
                         Tool::Draw | Tool::Paint | Tool::Slip => match hit {
+                            Some((i, _)) if !hit_corner && ui.input(|x| x.pointer.button_double_clicked(egui::PointerButton::Primary)) => {
+                                self.pl_open_clip(i);
+                                self.playlist.drag = Some(Drag::Spent);
+                            }
                             Some((i, _)) if hit_corner => {
                                 self.playlist.clip_menu = Some((i, pp));
                                 self.playlist.drag = Some(Drag::Spent);
@@ -1843,7 +1942,14 @@ impl App {
                         if !self.handle.transport.song_mode() {
                             self.handle.transport.set_song_mode(true);
                         }
-                        self.handle.transport.seek(snap(tick_of(pp.x)));
+                        let to = snap(tick_of(pp.x));
+                        let q = [0, beat, bar, bar * 2, bar * 4, bar * 8][self.settings.pl_jump_q.min(5) as usize];
+                        if q > 0 && self.handle.transport.playing() {
+                            let now = self.handle.transport.tick().max(0.0) as u32;
+                            self.playlist.jump = Some(((now / q + 1) * q, to));
+                        } else {
+                            self.handle.transport.seek(to);
+                        }
                     } else {
                         done = true;
                     }
@@ -1948,6 +2054,340 @@ impl App {
         let a = sel.iter().map(|&i| clips[i].pos).min()? / bar * bar;
         let b = sel.iter().map(|&i| clips[i].pos + clips[i].len.max(1)).max()?.div_ceil(bar) * bar;
         Some((a, b.max(a + bar)))
+    }
+
+    /// Open what a clip plays in its editor, the way the "Edit patterns in" choice asks.
+    pub(crate) fn pl_open_clip(&mut self, i: usize) {
+        let Some(c) = self.song.clips.get(i).cloned() else { return };
+        match c.src {
+            ClipSrc::Pattern(p) => {
+                self.handle.transport.set_pattern(p);
+                self.playlist.brush_pat = p;
+                let mut chans: Vec<u16> = self.song.patterns.get(p).map(|p| p.notes.iter().map(|n| n.chan).collect()).unwrap_or_default();
+                chans.sort_unstable();
+                chans.dedup();
+                let roll = match self.settings.pl_edit_in {
+                    1 => false,
+                    2 | 3 => true,
+                    _ => chans.len() == 1,
+                };
+                if roll {
+                    if let Some(&ch) = chans.first() {
+                        self.sel_chan = ch as usize;
+                    }
+                    self.show_piano = true;
+                    self.focus = Win::Piano;
+                } else {
+                    self.show_rack = true;
+                    self.focus = Win::Rack;
+                }
+            }
+            ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => {
+                self.sel_chan = ch;
+                self.rack.sel.clear();
+                self.rack.sel.insert(ch);
+                self.show_chanset = true;
+            }
+        }
+    }
+
+    /// Cut every clip that crosses the start of the selection, then open the gap there.
+    pub(crate) fn pl_slice_space(&mut self) {
+        let Some((from, _)) = self.pl_span() else { return };
+        for i in 0..self.song.clips.len() {
+            self.pl_slice_clip(i, from);
+        }
+        self.pl_space(true);
+    }
+
+    /// Cut the selected clips down to the picked stretch of time.
+    pub(crate) fn pl_trim(&mut self) {
+        let Some((a, b)) = self.playlist.time_sel else {
+            self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into();
+            return;
+        };
+        let mut gone = BTreeSet::new();
+        for i in self.pl_targets() {
+            let c = &mut self.song.clips[i];
+            let (lo, hi) = (c.pos.max(a), (c.pos + c.len).min(b));
+            if hi <= lo {
+                gone.insert(i);
+            } else {
+                c.offset += lo - c.pos;
+                c.pos = lo;
+                c.len = hi - lo;
+            }
+        }
+        self.pl_remove(&gone);
+        self.dirty = true;
+    }
+
+    /// The selected automation clips of one track become a single clip with one curve.
+    pub(crate) fn pl_merge_auto(&mut self) {
+        let mut picked: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| matches!(self.song.clips.get(i).map(|c| c.src), Some(ClipSrc::Automation(_)))).collect();
+        picked.sort_by_key(|&i| self.song.clips[i].pos);
+        if picked.len() < 2 {
+            self.status = "Select two or more automation clips to merge".into();
+            return;
+        }
+        let start = self.song.clips[picked[0]].pos;
+        let end = picked.iter().map(|&i| self.song.clips[i].pos + self.song.clips[i].len).max().unwrap_or(start);
+        let track = self.song.clips[picked[0]].track;
+        let ClipSrc::Automation(first) = self.song.clips[picked[0]].src else { return };
+        let mut points = Vec::new();
+        for &i in &picked {
+            let c = self.song.clips[i].clone();
+            let ClipSrc::Automation(ch) = c.src else { continue };
+            let Some(a) = self.song.channels.get(ch).and_then(|c| c.auto.clone()) else { continue };
+            let (lo, hi) = (c.offset as f64, (c.offset + c.len) as f64);
+            let at = |t: f64| (c.pos - start) as f64 + (t - lo);
+            // the clip's own ends are kept as points, so the joined curve sounds as the parts did
+            let mut part = vec![cereal_engine::song::AutoPt { tick: at(lo), value: a.value_at(lo), tension: 0.0, mode: 2 }];
+            part.extend(a.points.iter().filter(|p| p.tick > lo && p.tick < hi).map(|p| cereal_engine::song::AutoPt { tick: at(p.tick), ..p.clone() }));
+            if let Some(next) = a.points.iter().find(|p| p.tick >= hi) {
+                part.push(cereal_engine::song::AutoPt { tick: at(hi), value: a.value_at(hi), ..next.clone() });
+            }
+            points.extend(part);
+        }
+        let Some(mut made) = self.song.channels.get(first).cloned() else { return };
+        let targets = made.auto.as_ref().map(|a| a.targets.clone()).unwrap_or_default();
+        made.auto = Some(std::sync::Arc::new(cereal_engine::song::Automation { points, targets }));
+        made.name = format!("{} (merged)", made.name);
+        self.song.channels.push(made);
+        let n = self.song.channels.len() - 1;
+        let gone: BTreeSet<usize> = picked.into_iter().collect();
+        self.pl_remove(&gone);
+        self.song.clips.push(Clip { pos: start, len: end - start, track, src: ClipSrc::Automation(n), offset: 0, muted: false, group: 0 });
+        self.playlist.sel = [self.song.clips.len() - 1].into_iter().collect();
+        self.dirty = true;
+    }
+
+    /// A copy of each selected audio clip's sound in a file of its own, for editing without touching the first.
+    pub(crate) fn pl_unique_sample(&mut self) {
+        let picked: Vec<usize> = self.playlist.sel.iter().copied().filter(|&i| matches!(self.song.clips.get(i).map(|c| c.src), Some(ClipSrc::Audio(_)))).collect();
+        let mut made = 0;
+        for i in picked {
+            let ClipSrc::Audio(ch) = self.song.clips[i].src else { continue };
+            let Some(mut copy) = self.song.channels.get(ch).cloned() else { continue };
+            let old = std::path::PathBuf::from(&copy.sample_path);
+            if old.is_file() {
+                let stem = old.file_stem().and_then(|s| s.to_str()).unwrap_or("sample").to_string();
+                let ext = old.extension().and_then(|s| s.to_str()).unwrap_or("wav").to_string();
+                let new = (2..1000).map(|k| old.with_file_name(format!("{stem} ({k}).{ext}"))).find(|p| !p.exists());
+                if let Some(new) = new.filter(|new| std::fs::copy(&old, new).is_ok()) {
+                    copy.sample_path = new.to_string_lossy().into_owned();
+                    copy.name = new.file_stem().and_then(|s| s.to_str()).unwrap_or(&copy.name).to_string();
+                }
+            }
+            self.song.channels.push(copy);
+            self.song.clips[i].src = ClipSrc::Audio(self.song.channels.len() - 1);
+            made += 1;
+        }
+        self.dirty |= made > 0;
+        self.status = if made > 0 { format!("{made} audio clips made unique with their own sample files") } else { "Select audio clips first".into() };
+    }
+
+    /// Clips that lie wholly under another clip on their track (`whole`), or that share any time with one.
+    /// The lowest clip of each pile is left out, so deleting the selection clears the pile.
+    pub(crate) fn pl_select_piled(&mut self, whole: bool) {
+        let c = &self.song.clips;
+        self.playlist.sel = (0..c.len())
+            .filter(|&i| {
+                (0..i).any(|j| c[j].track == c[i].track && if whole { c[j].pos <= c[i].pos && c[j].pos + c[j].len >= c[i].pos + c[i].len } else { c[j].pos < c[i].pos + c[i].len && c[i].pos < c[j].pos + c[j].len })
+            })
+            .collect();
+    }
+
+    /// Fold every group of tracks away under its first track, or open them all again.
+    pub(crate) fn pl_collapse_groups(&mut self, fold: bool) {
+        self.playlist.collapsed.clear();
+        if fold {
+            let t = &self.song.tracks;
+            self.playlist.collapsed = (0..t.len()).filter(|&i| !t[i].grouped && t.get(i + 1).is_some_and(|n| n.grouped)).collect();
+        }
+    }
+
+    /// The markers the time marker menu works on: those inside the picked time, else the one at or before
+    /// the play position.
+    fn pl_markers_picked(&self) -> Vec<usize> {
+        let m = &self.song.markers;
+        match self.playlist.time_sel {
+            Some((a, b)) => (0..m.len()).filter(|&i| m[i].pos >= a && m[i].pos < b).collect(),
+            None => {
+                let now = self.handle.transport.tick().max(0.0) as u32;
+                (0..m.len()).filter(|&i| m[i].pos <= now).max_by_key(|&i| m[i].pos).into_iter().collect()
+            }
+        }
+    }
+
+    /// The extra entries of the time marker menu.
+    pub(crate) fn pl_marker_tool(&mut self, what: u8, every: u32) {
+        use cereal_engine::song::TimeMarker;
+        let bar = self.song.bar().max(1);
+        let now = if self.handle.transport.song_mode() { self.handle.transport.tick().max(0.0) as u32 / bar * bar } else { 0 };
+        let put = |song: &mut cereal_engine::song::Song, pos: u32, name: String, kind: u8| {
+            if !song.markers.iter().any(|m| m.pos == pos && m.kind == kind) {
+                song.markers.push(TimeMarker { pos, name, kind, sig: (4, 4) });
+            }
+        };
+        match what {
+            // auto
+            0 => put(&mut self.song, now, "Auto".into(), 0),
+            // two, at the ends of the picked time
+            1 => match self.playlist.time_sel {
+                Some((a, b)) => {
+                    put(&mut self.song, a, "Start".into(), 0);
+                    put(&mut self.song, b, "End".into(), 0);
+                }
+                None => self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into(),
+            },
+            // one every so many bars across the picked time
+            2 => match self.playlist.time_sel {
+                Some((a, b)) => {
+                    let mut t = a;
+                    while t < b {
+                        let name = format!("Marker #{}", self.song.markers.len() + 1);
+                        put(&mut self.song, t, name, 0);
+                        t += bar * every.max(1);
+                    }
+                }
+                None => self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into(),
+            },
+            // skip ahead, loop return, key
+            3 => put(&mut self.song, self.playlist.time_sel.map(|t| t.0).unwrap_or(now), "Jump".into(), 2),
+            4 => put(&mut self.song, self.playlist.time_sel.map(|t| t.0).unwrap_or(now), "Loop".into(), 4),
+            5 => {
+                const KEYS: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+                put(&mut self.song, self.playlist.time_sel.map(|t| t.0).unwrap_or(now), format!("{} Major", KEYS[every as usize % 12]), 0);
+            }
+            6 => {
+                let gone = self.pl_markers_picked();
+                let mut i = 0;
+                self.song.markers.retain(|_| {
+                    i += 1;
+                    !gone.contains(&(i - 1))
+                });
+            }
+            _ => {
+                for i in self.pl_markers_picked() {
+                    self.song.markers[i].kind = 1;
+                }
+            }
+        }
+        self.song.markers.sort_by_key(|m| m.pos);
+        self.dirty = true;
+    }
+
+    /// A copy of each track that holds a selected clip, with its clips, just below it.
+    pub(crate) fn pl_clone_tracks(&mut self) {
+        let mut picked: Vec<usize> = self.playlist.sel.iter().filter_map(|&i| self.song.clips.get(i)).map(|c| c.track as usize).collect();
+        picked.sort_unstable();
+        picked.dedup();
+        if picked.is_empty() {
+            self.status = "Select a clip on each track to clone first".into();
+            return;
+        }
+        let mut made = 0;
+        // from the bottom up, so the tracks above keep their numbers
+        for &tr in picked.iter().rev() {
+            let n = self.song.tracks.len();
+            if tr + 1 >= n || self.song.clips.iter().any(|c| c.track as usize == n - 1) {
+                continue;
+            }
+            self.song.tracks.pop();
+            let copy = self.song.tracks[tr].clone();
+            self.song.tracks.insert(tr + 1, copy);
+            for c in self.song.clips.iter_mut().filter(|c| c.track as usize > tr) {
+                c.track += 1;
+            }
+            let twins: Vec<Clip> = self.song.clips.iter().filter(|c| c.track as usize == tr).cloned().map(|mut c| {
+                c.track += 1;
+                c
+            }).collect();
+            self.song.clips.extend(twins);
+            made += 1;
+        }
+        self.playlist.sel.clear();
+        self.dirty |= made > 0;
+        self.status = format!("{made} tracks cloned");
+    }
+
+    /// Every track with clips on it (or every group of tracks) rendered to a file of its own.
+    /// `from`: 0 the song start, 1 each track's first clip, 2 the picked time.
+    pub(crate) fn pl_export_tracks(&mut self, groups: bool, from: u8) {
+        let nt = self.song.tracks.len();
+        // which set each track belongs to: itself, or the head of its group
+        let mut head = vec![0usize; nt];
+        for t in 0..nt {
+            head[t] = if groups && self.song.tracks[t].grouped && t > 0 { head[t - 1] } else { t };
+        }
+        let span = self.playlist.time_sel.filter(|_| from == 2);
+        if from == 2 && span.is_none() {
+            self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into();
+            return;
+        }
+        let dir = crate::record::folder(self.path.as_deref()).join("Tracks");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.status = format!("Could not make {}: {e}", dir.display());
+            return;
+        }
+        let rate = 44_100u32;
+        let mut made = 0;
+        for h in 0..nt {
+            let own: Vec<Clip> = self.song.clips.iter().filter(|c| head.get(c.track as usize) == Some(&h) && !c.muted).cloned().collect();
+            if own.is_empty() || (groups && head[h] != h) {
+                continue;
+            }
+            let a = match (from, span) {
+                (2, Some((a, _))) => a,
+                (1, _) => own.iter().map(|c| c.pos).min().unwrap_or(0),
+                _ => 0,
+            };
+            let b = span.map(|s| s.1).unwrap_or(u32::MAX);
+            let mut part = self.song.clone();
+            part.clips = own.into_iter().filter(|c| c.pos + c.len > a && c.pos < b).map(|mut c| {
+                // cut to the stretch that is wanted, then slid to its start
+                let lo = c.pos.max(a);
+                let hi = (c.pos + c.len).min(b);
+                c.offset += lo - c.pos;
+                c.len = hi - lo;
+                c.pos = lo - a;
+                c
+            }).collect();
+            if part.clips.is_empty() {
+                continue;
+            }
+            part.markers.retain(|m| m.kind == 8);
+            for m in &mut part.markers {
+                m.pos = m.pos.saturating_sub(a);
+            }
+            part.prepare();
+            let buf = cereal_engine::render_song(&part, rate as f32, true, 0, 2.0);
+            let t = &self.song.tracks[h];
+            let name: String = if t.name.is_empty() { format!("Track {}", h + 1) } else { t.name.clone() }.chars().map(|c| if c.is_alphanumeric() || " -_#()".contains(c) { c } else { '_' }).collect();
+            let path = dir.join(format!("{:02} {name}.wav", h + 1));
+            let wrote = std::fs::File::create(&path).and_then(|f| crate::wav::write(std::io::BufWriter::new(f), &buf, rate, 2, 24));
+            if wrote.is_ok() {
+                made += 1;
+            }
+        }
+        self.status = format!("{made} tracks written to {}", dir.display());
+    }
+
+    /// Patterns and clip channels with no clip on the playlist get marked in the picker panel.
+    pub(crate) fn pl_mark_unused(&mut self) {
+        use cereal_engine::flp::ChannelKind as K;
+        let used = |s: ClipSrc| self.song.clips.iter().any(|c| c.src == s);
+        let mut m: Vec<ClipSrc> = (0..self.song.patterns.len()).map(ClipSrc::Pattern).filter(|s| !used(*s)).collect();
+        for (c, ch) in self.song.channels.iter().enumerate() {
+            let s = if ch.kind == K::AudioClip { ClipSrc::Audio(c) } else if ch.auto.is_some() { ClipSrc::Automation(c) } else { continue };
+            if !used(s) {
+                m.push(s);
+            }
+        }
+        self.status = format!("{} unused sources marked in the picker panel", m.len());
+        self.playlist.marked = m;
+        self.playlist.picker = true;
     }
 
     /// Open a gap as long as the selection where it starts, or close the selection's time up.
@@ -2424,6 +2864,12 @@ impl App {
         if m.command && m.alt {
             match key {
                 Key::C if !repeat => self.pl_consolidate(m.shift),
+                Key::Insert if !repeat => self.pl_slice_space(),
+                Key::G if !repeat => self.pl_merge_auto(),
+                Key::Home if !repeat => {
+                    self.settings.pl_opts ^= plo::RESIZE_LEFT;
+                    let _ = self.settings.save();
+                }
                 _ => return false,
             }
             return true;
@@ -2436,8 +2882,14 @@ impl App {
                     self.playlist.time_sel = None;
                 }
                 Key::Enter if !repeat => self.playlist.time_sel = self.pl_clip_span(),
+                Key::B if m.shift => {
+                    if !repeat {
+                        self.pl_clone_tracks();
+                    }
+                }
                 Key::B => self.pl_duplicate(),
                 Key::G if !repeat => self.pl_merge(m.shift),
+                Key::T if !m.shift && !repeat => self.pl_marker_tool(0, 0),
                 Key::V if m.shift && !repeat => self.pl_make_unique(),
                 Key::Insert if !m.shift => self.pl_space(true),
                 Key::Delete => self.pl_space(false),
@@ -2475,6 +2927,10 @@ impl App {
                 }
                 Key::Q => {
                     self.pl_quantise();
+                    return true;
+                }
+                Key::T if !repeat => {
+                    self.pl_marker_tool(4, 0);
                     return true;
                 }
                 Key::G if !repeat => {

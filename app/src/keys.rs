@@ -21,7 +21,8 @@ impl App {
     /// Shift and the wheel over something that can be moved: the turn is taken before anything scrolls with it.
     pub(crate) fn take_wheel(&mut self, raw: &mut egui::RawInput) {
         let Some(over) = self.wheel_over else { return };
-        let wanted = raw.modifiers.shift && (raw.modifiers.alt == matches!(over, WheelMove::Clip(..)));
+        let nudge = self.settings.pl_opts & crate::playlist::plo::WHEEL_NUDGE != 0;
+        let wanted = raw.modifiers.shift && if matches!(over, WheelMove::Clip(..)) { raw.modifiers.alt || nudge } else { !raw.modifiers.alt };
         if !wanted {
             return;
         }
