@@ -119,6 +119,11 @@ fn write_wav(path: &Path, frames: &[[f32; 2]], rate: u32, marks: &[ops::Mark]) -
 }
 
 impl WaveEd {
+    /// The next take starts when the song does.
+    pub(crate) fn arm(&mut self) {
+        self.on_play = true;
+    }
+
     /// The stretch the tools work on: what is marked, or everything.
     fn range(&self) -> (usize, usize) {
         if self.sel.1 > self.sel.0 { (self.sel.0, self.sel.1.min(self.frames.len())) } else { (0, self.frames.len()) }

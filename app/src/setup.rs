@@ -88,7 +88,11 @@ pub struct Settings {
     pub count_bars: u8,
     /// The toolbar panels in the order they are laid out (empty = the usual order), and the hidden ones (one bit each).
     pub toolbar: Vec<u8>,
-    pub toolbar_hidden: u8,
+    pub toolbar_hidden: u16,
+    /// Toolbar switches: 1 no separators, 2 flat buttons, 4 no hint bar, 8 toolbars hidden, 16 one line.
+    pub toolbar_flags: u8,
+    /// Late plug-ins are not lined up with the rest.
+    pub pdc_off: bool,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
     /// The mixer track browser previews and the metronome play through.
@@ -113,6 +117,8 @@ pub struct Settings {
     pub layouts: Vec<(String, [f32; 16], [bool; 5])>,
     /// A picture behind the windows.
     pub backdrop: Option<PathBuf>,
+    /// The colour behind the windows when no picture is set.
+    pub back_color: Option<[u8; 3]>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -252,6 +258,8 @@ impl Settings {
                 Some(("count_bars", v)) => s.count_bars = v.trim().parse().unwrap_or(0),
                 Some(("toolbar", v)) => s.toolbar = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
                 Some(("toolbar_hidden", v)) => s.toolbar_hidden = v.trim().parse().unwrap_or(0),
+                Some(("pdc_off", v)) => s.pdc_off = v.trim() == "1",
+                Some(("toolbar_flags", v)) => s.toolbar_flags = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
                 Some(("preview_track", v)) => s.preview_track = v.trim().parse().unwrap_or(0),
                 Some(("options", v)) => {
@@ -286,6 +294,10 @@ impl Settings {
                             s.layouts.push((name.to_string(), n, f));
                         }
                     }
+                }
+                Some(("back_color", v)) => {
+                    let c: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    s.back_color = (c.len() == 3).then(|| [c[0], c[1], c[2]]);
                 }
                 Some(("backdrop", v)) => s.backdrop = Some(PathBuf::from(v.trim())).filter(|p| !p.as_os_str().is_empty()),
                 Some(("content_prompt", v)) => s.never_ask = v.trim() == "never",
@@ -373,6 +385,12 @@ impl Settings {
         if !self.toolbar.is_empty() {
             out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
         }
+        if self.pdc_off {
+            out += "pdc_off=1\n";
+        }
+        if self.toolbar_flags != 0 {
+            out += &format!("toolbar_flags={}\n", self.toolbar_flags);
+        }
         if self.toolbar_hidden != 0 {
             out += &format!("toolbar_hidden={}\n", self.toolbar_hidden);
         }
@@ -395,6 +413,9 @@ impl Settings {
             let nums: Vec<String> = n.iter().map(|x| format!("{x:.0}")).collect();
             let flags: String = f.iter().map(|b| if *b { '1' } else { '0' }).collect();
             out += &format!("layout={}\t{}\t{flags}\n", name.replace(['\t', '\n'], " "), nums.join(","));
+        }
+        if let Some(c) = self.back_color {
+            out += &format!("back_color={},{},{}\n", c[0], c[1], c[2]);
         }
         if let Some(p) = &self.backdrop {
             out += &format!("backdrop={}\n", p.display());

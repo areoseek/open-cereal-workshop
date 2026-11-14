@@ -201,10 +201,14 @@ impl App {
 
     /// A key press while the channel rack has the focus. True when it was ours.
     /// Write each selected mixer track's sound over the whole song (or pattern) to its own file.
-    fn render_tracks(&mut self) {
-        let mut tracks: Vec<usize> = self.mixer_sel.iter().copied().collect();
-        if !tracks.contains(&self.sel_insert) {
+    pub(crate) fn render_tracks(&mut self, armed: bool) {
+        let mut tracks: Vec<usize> = if armed { self.mixer_armed.iter().copied().collect() } else { self.mixer_sel.iter().copied().collect() };
+        if !armed && !tracks.contains(&self.sel_insert) {
             tracks.push(self.sel_insert);
+        }
+        if tracks.is_empty() {
+            self.status = "No mixer track is armed".into();
+            return;
         }
         tracks.retain(|i| *i < self.song.inserts.len());
         let tr = self.handle.transport.clone();
@@ -483,7 +487,7 @@ impl App {
             match key {
                 Key::S if !repeat => self.solo_insert(i, true),
                 Key::W if !repeat => self.mixer_wave = !self.mixer_wave,
-                Key::R if !repeat => self.render_tracks(),
+                Key::R if !repeat => self.render_tracks(!m.shift),
                 Key::ArrowLeft if i > 1 => {
                     self.song.swap_inserts(i, i - 1);
                     self.sel_insert = i - 1;
@@ -506,9 +510,17 @@ impl App {
             return true;
         }
         if m.shift {
+            if key == Key::E && !repeat {
+                // the audio editor of the track, set to take what plays
+                if let Some(slot) = self.audio_editor_on(i) {
+                    self.wave_eds.entry((i, slot)).or_default().arm();
+                }
+                return true;
+            }
             return false;
         }
         match key {
+            Key::Delete if !repeat && i > 0 => self.mixer_delete_tracks(),
             Key::ArrowLeft | Key::ArrowRight => {
                 let to = if key == Key::ArrowLeft { i.saturating_sub(1) } else { (i + 1).min(n - 1) };
                 if m.shift {

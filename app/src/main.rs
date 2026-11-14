@@ -223,6 +223,8 @@ pub(crate) struct App {
     scope_bars: bool,
     /// The wave view's switches: 1 stereo, 2 long.
     scope_opts: u8,
+    /// The CPU panel: when its numbers were last refreshed, and the load and frame rate shown.
+    cpu_shown: (f64, f32, f32),
     /// Toolbar parts taken off by the VIEW menu: the window buttons, the output monitor.
     /// The toolbar panels show their move and hide buttons.
     bar_edit: bool,
@@ -293,6 +295,10 @@ pub(crate) struct App {
     sel_chan_was: usize,
     /// Mixer tracks selected besides the one that has the keys; faders, pans and mutes move together.
     mixer_sel: std::collections::BTreeSet<usize>,
+    /// Mixer tracks armed for rendering to wave files.
+    mixer_armed: std::collections::BTreeSet<usize>,
+    /// The "Insert multiple" question: how many tracks.
+    mixer_ins_ask: Option<String>,
     rack: rack::State,
     piano: pianoroll::State,
     playlist: playlist::State,
@@ -477,6 +483,7 @@ impl App {
         handle.transport.set_late_notes(settings.late_notes.unwrap_or(true));
         handle.transport.set_reset_fx(settings.opt(setup::OPT_RESET_FX));
         cereal_engine::song::set_stand_in_missing(settings.opt(setup::OPT_STAND_IN));
+        cereal_engine::player::set_delay_compensation(!settings.pdc_off);
         handle.transport.set_preview_insert(settings.preview_track as usize);
         if settings.gm_bank.is_some() {
             cereal_engine::gm::set_bank(settings.gm_bank.clone());
@@ -500,6 +507,7 @@ impl App {
             show_browser: true,
             scope_bars: false,
             scope_opts: 0,
+            cpu_shown: (-1.0, 0.0, 0.0),
             bar_edit: false,
             score_minutes: 2,
             scope_buf: Vec::new(),
@@ -544,6 +552,8 @@ impl App {
             sel_insert: 0,
             sel_chan_was: 0,
             mixer_sel: Default::default(),
+            mixer_armed: Default::default(),
+            mixer_ins_ask: None,
             rack: Default::default(),
             piano: Default::default(),
             playlist: Default::default(),
@@ -3046,6 +3056,10 @@ impl App {
                     Key::R => self.export_as(0),
                     Key::F4 => self.next_empty_after(),
                     Key::F5 => self.show_tapper = !self.show_tapper,
+                    Key::F11 => {
+                        self.settings.toolbar_flags ^= 8;
+                        let _ = self.settings.save();
+                    }
                     Key::F12 => self.close_unfocused(),
                     Key::Delete if modifiers.shift => self.delete_pattern(),
                     Key::P if modifiers.shift => self.browser_show_project(),
@@ -3192,6 +3206,7 @@ impl App {
                 Key::F2 if !repeat => self.start_rename_pattern(),
                 Key::F10 if !repeat => self.prefs_win.open = !self.prefs_win.open,
                 Key::F11 if !repeat => self.show_info = !self.show_info,
+                Key::F12 if !repeat && modifiers.shift => self.realign(ctx),
                 Key::F12 if !repeat => self.close_all(),
                 Key::Plus | Key::Equals => self.step_pattern(1),
                 Key::Minus => self.step_pattern(-1),
@@ -3222,6 +3237,7 @@ impl App {
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
             let order = self.settings.toolbar_order();
+            let flags = self.settings.toolbar_flags;
             // first row: the menus, then transport, time, recording switches and the monitor
             egui::menu::bar(ui, |ui| {
                 self.main_menus(ui, ctx);
@@ -3229,13 +3245,24 @@ impl App {
                 let style = ctx.style();
                 ui.scope(|ui| {
                     ui.set_style(style);
-                    self.tb_row(ui, &order, false);
+                    if flags & 2 != 0 {
+                        ui.visuals_mut().button_frame = false;
+                    }
+                    if flags & 8 == 0 {
+                        self.tb_row(ui, &order, false);
+                        if flags & 16 != 0 {
+                            self.tb_row(ui, &order, true);
+                        }
+                    }
                 });
                 let rest = ui.available_rect_before_wrap();
                 if rest.width() > 4.0 {
                     ui.allocate_rect(rest, egui::Sense::click()).context_menu(|ui| self.toolbar_menu(ui));
                 }
             });
+            if flags & 8 != 0 || (flags & 16 != 0 && flags & 4 != 0 && !self.bar_edit) {
+                return;
+            }
             ui.add_space(2.0);
             // only the row below the menu bar: over the whole panel it would take the menu titles' clicks
             let mut below = ui.max_rect();
@@ -3246,13 +3273,20 @@ impl App {
             ui.horizontal(|ui| {
                 // the hint panel: what the pointer rests on, or else the last thing that happened
                 let hint = widgets::take_hint();
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 26.0), egui::Sense::hover());
-                let paint = ui.painter_at(rect);
-                paint.rect_filled(rect, 2.0, egui::Color32::from_rgb(22, 26, 30));
-                let (text, color) = if hint.is_empty() { (self.status.as_str(), TEXT_DIM) } else { (hint.as_str(), TEXT) };
-                paint.text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), color);
-                ui.separator();
-                self.tb_row(ui, &order, true);
+                if flags & 4 == 0 {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 26.0), egui::Sense::hover());
+                    let paint = ui.painter_at(rect);
+                    paint.rect_filled(rect, 2.0, egui::Color32::from_rgb(22, 26, 30));
+                    let (text, color) = if hint.is_empty() { (self.status.as_str(), TEXT_DIM) } else { (hint.as_str(), TEXT) };
+                    paint.text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), color);
+                    ui.separator();
+                }
+                if flags & 2 != 0 {
+                    ui.visuals_mut().button_frame = false;
+                }
+                if flags & 16 == 0 {
+                    self.tb_row(ui, &order, true);
+                }
                 if self.bar_edit {
                     if ui.button("Done").hint("Leave the toolbar as it is now").clicked() {
                         self.bar_edit = false;
@@ -3260,6 +3294,7 @@ impl App {
                     if ui.button("Reset").hint("The usual order, everything shown").clicked() {
                         self.settings.toolbar.clear();
                         self.settings.toolbar_hidden = 0;
+                        self.settings.toolbar_flags = 0;
                         let _ = self.settings.save();
                     }
                 }
@@ -3295,7 +3330,11 @@ impl App {
                 continue;
             }
             self.tb_panel(ui, k);
-            ui.separator();
+            if self.settings.toolbar_flags & 1 == 0 {
+                ui.separator();
+            } else {
+                ui.add_space(6.0);
+            }
         }
         if let Some((i, what)) = act {
             let mut o = order.to_vec();
@@ -3321,17 +3360,51 @@ impl App {
 
     /// The toolbar's own menu: which panels show, and the switch that lets them be moved.
     fn toolbar_menu(&mut self, ui: &mut egui::Ui) {
-        for (k, label) in setup::TOOLBAR_PANELS.iter().enumerate() {
-            let mut on = self.settings.toolbar_hidden & (1 << k) == 0;
-            if ui.checkbox(&mut on, *label).changed() {
-                self.settings.toolbar_hidden ^= 1 << k;
-                let _ = self.settings.save();
-            }
-        }
-        ui.separator();
-        if ui.checkbox(&mut self.bar_edit, "Edit toolbars").hint("Move the panels left and right, hide and show them").changed() {
-            ui.close_menu();
-        }
+        use crate::menus::{col, mi, sect, tick};
+        ui.horizontal_top(|ui| {
+            col(ui, 170.0, |ui| {
+                sect(ui, "Toolbars");
+                if tick(ui, self.bar_edit, "Edit", "").hint("Move the panels left and right, hide and show them").clicked() {
+                    self.bar_edit = !self.bar_edit;
+                    ui.close_menu();
+                }
+                for (bit, label, inverse) in [(1u8, "Separators", true), (2, "Flat buttons", false)] {
+                    if tick(ui, (self.settings.toolbar_flags & bit != 0) != inverse, label, "").clicked() {
+                        self.settings.toolbar_flags ^= bit;
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if tick(ui, self.settings.toolbar_flags & 4 == 0, "Hint bar", "").clicked() {
+                    self.settings.toolbar_flags ^= 4;
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+                if mi(ui, "      Hide", "Ctrl+F11").clicked() {
+                    self.settings.toolbar_flags ^= 8;
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+            });
+            col(ui, 130.0, |ui| {
+                sect(ui, "Presets");
+                let s = &self.settings;
+                let plain = s.toolbar.is_empty() && s.toolbar_hidden == 0;
+                // name, hidden panels, switches
+                for (label, hidden, flags) in [("Compact", (1u16 << 5) | (1 << 7), 0u8), ("Default", 0, 0), ("Single line", 0, 16 | 4)] {
+                    let on = plain_or(plain, s.toolbar_hidden, hidden) && s.toolbar_flags & (16 | 4) == flags;
+                    if tick(ui, on, label, "").clicked() {
+                        self.settings.toolbar.clear();
+                        self.settings.toolbar_hidden = hidden;
+                        self.settings.toolbar_flags = (self.settings.toolbar_flags & 3) | flags;
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                        break;
+                    }
+                }
+            });
+        });
     }
 
     /// One panel of the toolbar row; the settings hold their order and which are hidden.
@@ -3626,7 +3699,13 @@ impl App {
                 }
             }
             7 => {
-                    let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+                    let now = ui.input(|i| i.time);
+                    let every = match self.scope_opts & 48 { 16 => 1.0, 32 => 0.1, _ => 0.35 };
+                    if now - self.cpu_shown.0 >= every || now < self.cpu_shown.0 {
+                        let dt = ui.input(|i| i.stable_dt).max(1e-4);
+                        self.cpu_shown = (now, CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0, 1.0 / dt);
+                    }
+                    let load = self.cpu_shown.1;
                     // what is going out: the wave, or after a click the level of each frequency
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 20.0), egui::Sense::click());
                     if resp.clone().hint("Output monitor panel: click to switch between the wave and the frequencies").clicked() {
@@ -3682,8 +3761,28 @@ impl App {
                             .collect();
                         paint.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, line)));
                     }
+                    let cpu = ui.scope(|ui| {
                     ui.label(RichText::new(format!("CPU {load:.0}%")).color(if load > 85.0 { egui::Color32::from_rgb(235, 70, 60) } else { TEXT_DIM }).small()).hint("Share of each block's time the sound engine needs");
-                    ui.label(RichText::new(format!("{} voices", tr.voices())).color(TEXT_DIM).small());
+                        let more = if self.scope_opts & 4 != 0 { format!("{:.0} FPS", self.cpu_shown.2) } else { format!("{} voices", tr.voices()) };
+                        ui.label(RichText::new(more).color(TEXT_DIM).small());
+                    });
+                    ui.interact(cpu.response.rect, ui.id().with("cpu_panel"), egui::Sense::click()).context_menu(|ui| {
+                        ui.set_width(130.0);
+                        crate::menus::sect(ui, "Refresh");
+                        for (bits, label) in [(16u8, "Slow"), (0, "Medium"), (32, "Fast")] {
+                            if ui.radio(self.scope_opts & 48 == bits, label).clicked() {
+                                self.scope_opts = (self.scope_opts & !48) | bits;
+                                ui.close_menu();
+                            }
+                        }
+                        crate::menus::sect(ui, "Misc");
+                        for (bits, label) in [(0u8, "View voice count"), (4, "View FPS")] {
+                            if ui.radio(self.scope_opts & 4 == bits, label).clicked() {
+                                self.scope_opts = (self.scope_opts & !4) | bits;
+                                ui.close_menu();
+                            }
+                        }
+                    });
             }
             8 => {
                 ui.label(RichText::new("Snap").color(TEXT_DIM));
@@ -4163,7 +4262,8 @@ impl eframe::App for App {
                 (p, tex)
             });
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |ui| {
+        let back = self.settings.back_color.map_or(BG, |c| egui::Color32::from_rgb(c[0], c[1], c[2]));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(back)).show(ctx, |ui| {
             if let Some(tex) = self.backdrop_tex.as_ref().and_then(|t| t.1.as_ref()) {
                 // fills the space, cut at the sides or top and bottom rather than squeezed
                 let area = ui.max_rect();
@@ -4525,4 +4625,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(App::new(open)))
         }),
     )
+}
+
+fn plain_or(plain: bool, have: u16, want: u16) -> bool {
+    (plain && want == 0) || (have == want && want != 0)
 }

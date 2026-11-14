@@ -676,6 +676,29 @@ impl App {
             });
             ctx.data_mut(|d| d.insert_temp(id, if keep { Some(by) } else { None }));
         }
+        if let Some(mut text) = self.mixer_ins_ask.take() {
+            let mut keep = true;
+            egui::Window::new("Insert mixer tracks").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("How many");
+                    ui.add(egui::TextEdit::singleline(&mut text).desired_width(50.0));
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Accept").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if let Ok(count) = text.trim().parse::<usize>() {
+                            self.mixer_insert_tracks(count);
+                        }
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        keep = false;
+                    }
+                });
+            });
+            if keep {
+                self.mixer_ins_ask = Some(text);
+            }
+        }
         let id = egui::Id::new("patsig-ask");
         if let Some(mut sig) = ctx.data(|d| d.get_temp::<Option<(u8, u8)>>(id)).flatten() {
             let mut keep = true;
@@ -799,16 +822,36 @@ impl App {
             self.close_unfocused();
             ui.close_menu();
         }
+        if mi(ui, "      Align all channel editors", "Shift+F12").clicked() {
+            self.realign(ui.ctx());
+            ui.close_menu();
+        }
         ui.menu_button("      Arrange windows", |ui| {
             if mi(ui, "Realign", "Shift+Ctrl+H").clicked() {
                 self.realign(ui.ctx());
                 ui.close_menu();
             }
-            sect(ui, "Layouts");
-            if mi(ui, "Desktop (default)", "").clicked() {
+            if mi(ui, "Into workspace", "").hint("Bring every window back inside the work area").clicked() {
                 self.realign(ui.ctx());
-                (self.show_playlist, self.show_rack, self.show_mixer, self.show_browser) = (true, true, true, true);
                 ui.close_menu();
+            }
+            sect(ui, "Layouts");
+            // name, then playlist, rack, piano roll, mixer, browser, and whether the playlist fills the space
+            for (label, f, max) in [
+                ("Desktop (default)", [true, true, false, true, true], false),
+                ("Desktop (alternate)", [true, false, true, true, true], false),
+                ("Tablet (default)", [true, false, false, false, false], true),
+                ("Tablet (alternate)", [false, true, false, true, false], false),
+            ] {
+                if mi(ui, label, "").clicked() {
+                    self.realign(ui.ctx());
+                    [self.show_playlist, self.show_rack, self.show_piano, self.show_mixer, self.show_browser] = f;
+                    self.pl_max = max;
+                    ui.close_menu();
+                }
+            }
+            if self.settings.layouts.is_empty() {
+                ui.add_enabled(false, egui::Button::new("Custom"));
             }
             let mut gone = None;
             for k in 0..self.settings.layouts.len() {
@@ -844,7 +887,19 @@ impl App {
                 }
                 ui.close_menu();
             }
-            if ui.add_enabled(self.settings.backdrop.is_some(), egui::Button::new("None")).clicked() {
+            ui.menu_button("Set background color...", |ui| {
+                let mut c = self.settings.back_color.unwrap_or([crate::BG.r(), crate::BG.g(), crate::BG.b()]);
+                if ui.color_edit_button_srgb(&mut c).changed() {
+                    self.settings.back_color = Some(c);
+                    self.settings.backdrop = None;
+                }
+                if ui.button("Keep").clicked() {
+                    let _ = self.settings.save();
+                    ui.close_menu();
+                }
+            });
+            if ui.add_enabled(self.settings.backdrop.is_some() || self.settings.back_color.is_some(), egui::Button::new("None")).clicked() {
+                self.settings.back_color = None;
                 self.settings.backdrop = None;
                 let _ = self.settings.save();
                 ui.close_menu();
@@ -1544,7 +1599,24 @@ impl App {
                 ui.menu_button("Disk recording", |ui| {
                     ui.set_min_width(300.0);
                     key(ui, "Render armed tracks to wave file(s)...", "Alt+R", A, Key::R);
+                    key(ui, "Render selected tracks to wave file(s)...", "Shift+Alt+R", Modifiers { alt: true, ctrl: false, shift: true, mac_cmd: false, command: false }, Key::R);
                 });
+                ui.menu_button("Plugin delay compensation", |ui| {
+                    if tick(ui, !self.settings.pdc_off, "Automatic", "").hint("Plug-ins that answer late are lined up with everything else").clicked() {
+                        self.settings.pdc_off = !self.settings.pdc_off;
+                        cereal_engine::player::set_delay_compensation(!self.settings.pdc_off);
+                        let _ = self.settings.save();
+                        ui.close_menu();
+                    }
+                });
+                if mi(ui, "Link all parameters...", "").hint("Turn the knobs of the MIDI device one after another: level, panning, then each effect's mix").clicked() {
+                    use cereal_engine::song::Target;
+                    self.multilink = true;
+                    self.multi_seen.clear();
+                    self.multi_queue = [Target::InsertVolume(i), Target::InsertPan(i)].into_iter().chain(self.song.inserts[i].slots.iter().map(|s| Target::SlotMix(i, s.index))).collect();
+                    self.status = format!("Linking {} parameters: turn the knobs of the MIDI device one after another", self.multi_queue.len());
+                    ui.close_menu();
+                }
                 ui.menu_button("View", |ui| {
                     for (k, name) in [(1u8, "Compact"), (0, "Wide"), (2, "Extra large")] {
                         if ui.radio(self.settings.mixer_view == k, name).clicked() {
@@ -1568,9 +1640,43 @@ impl App {
                     self.detached[3] = !self.detached[3];
                     ui.close_menu();
                 }
+                ui.separator();
+                if mi(ui, "Trim unused tracks", "").hint("Empty tracks nothing plays into go back to how a new track is").clicked() {
+                    let mut done = 0;
+                    for k in 1..n.saturating_sub(1) {
+                        let x = &self.song.inserts[k];
+                        let fed = self.song.channels.iter().any(|c| c.insert == k) || self.song.inserts.iter().any(|o| o.sends.contains(&k));
+                        if !fed && x.slots.is_empty() && (!x.name.is_empty() || x.color.is_some() || x.sends != [0]) {
+                            self.song.inserts[k] = cereal_engine::song::Insert { sends: vec![0], ..Default::default() };
+                            done += 1;
+                        }
+                    }
+                    self.dirty |= done > 0;
+                    self.status = format!("{done} unused mixer tracks reset");
+                    ui.close_menu();
+                }
+                if mi(ui, "Remove all audio editor instances", "").hint("Take every Wave Recorder out of the mixer").clicked() {
+                    for ins in &mut self.song.inserts {
+                        ins.slots.retain(|s| !s.plugin.eq_ignore_ascii_case("Edison"));
+                    }
+                    self.wave_eds.clear();
+                    self.fx_open = None;
+                    self.dirty = true;
+                    self.handle.publish(self.song.clone());
+                    ui.close_menu();
+                }
                 let name = if i == 0 { "Master".to_string() } else if self.song.inserts[i].name.is_empty() { format!("Insert {i}") } else { self.song.inserts[i].name.clone() };
                 sect(ui, &format!("Mixer track ({name})"));
                 key(ui, "Rename, color and icon...", "F2", Modifiers::NONE, Key::F2);
+                ui.menu_button("Change color...", |ui| {
+                    let mut c = self.song.inserts[i].color.unwrap_or([92, 100, 106]);
+                    if ui.color_edit_button_srgb(&mut c).changed() {
+                        for &k in &targets {
+                            self.song.inserts[k].color = Some(c);
+                        }
+                        self.dirty = true;
+                    }
+                });
                 if mi(ui, "Random color", "").clicked() {
                     let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
                     for &k in &targets {
@@ -1605,6 +1711,7 @@ impl App {
                     key(ui, "Save mixer track state as...", "Shift+Ctrl+S", CS, Key::S);
                 });
                 key(ui, "Open audio editor", "Ctrl+E", C, Key::E);
+                key(ui, "Open audio editor and record", "Shift+E", Modifiers::SHIFT, Key::E);
                 ui.separator();
                 if tick(ui, self.song.inserts[i].fx_on, "Enable effect slots", "").clicked() {
                     self.song.inserts[i].fx_on = !self.song.inserts[i].fx_on;
@@ -1666,6 +1773,16 @@ impl App {
                 ui.separator();
                 key(ui, "Solo selected track(s)", "S", Modifiers::NONE, Key::S);
                 key(ui, "Alt solo selected track(s)", "Alt+S", A, Key::S);
+                if mi(ui, "Arm selected track(s)", "").hint("Armed tracks are the ones rendered to wave files with Alt+R").clicked() {
+                    self.mixer_armed.extend(targets.iter().copied());
+                    ui.close_menu();
+                }
+                if mi(ui, "Disarm selected track(s)", "").clicked() {
+                    for k in &targets {
+                        self.mixer_armed.remove(k);
+                    }
+                    ui.close_menu();
+                }
                 sect(ui, "Group");
                 if tick(ui, self.song.inserts[i].separator, "Separator", "").hint("A gap after the track").clicked() {
                     let on = !self.song.inserts[i].separator;
@@ -1692,6 +1809,21 @@ impl App {
                 });
                 key(ui, "Move left", "Alt+Left", A, Key::ArrowLeft);
                 key(ui, "Move right", "Alt+Right", A, Key::ArrowRight);
+                ui.separator();
+                key(ui, "Delete", "Del", Modifiers::NONE, Key::Delete);
+                if mi(ui, "Insert one", "").hint("An empty track before this one; the last track drops off the end").clicked() {
+                    self.mixer_insert_tracks(1);
+                    ui.close_menu();
+                }
+                if mi(ui, "Insert multiple...", "").clicked() {
+                    self.mixer_ins_ask = Some("2".into());
+                    ui.close_menu();
+                }
+                if mi(ui, "Insert from state...", "").hint("An empty track before this one, filled from a saved mixer track state").clicked() {
+                    self.mixer_insert_tracks(1);
+                    self.state_ask = Some(crate::StateAsk::OpenTrack(self.sel_insert));
+                    ui.close_menu();
+                }
             });
         });
         if let Some((m, k)) = press {

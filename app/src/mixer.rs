@@ -366,6 +366,9 @@ impl App {
                 ui.painter().rect_filled(rect, 2.0, col);
                 ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
                 ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, &name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
+                if self.mixer_armed.contains(&i) {
+                    ui.painter().circle_filled(rect.right_top() + Vec2::new(-5.0, 5.0), 3.0, Color32::from_rgb(235, 70, 60));
+                }
                 if resp.clicked() {
                     let m = ui.input(|x| x.modifiers);
                     if m.command {
@@ -526,6 +529,74 @@ impl App {
 
 impl App {
     /// The selected tracks play into the first empty track and nowhere else.
+    /// The regular tracks: all but the master (first) and the one that follows the selection (last).
+    fn last_regular(&self) -> usize {
+        self.song.inserts.len().saturating_sub(2)
+    }
+
+    /// Empty mixer track `k`: nothing plays into it, it holds nothing and plays into the master.
+    fn clear_track(&mut self, k: usize) {
+        for c in &mut self.song.channels {
+            if c.insert == k {
+                c.insert = 0;
+            }
+        }
+        for ins in &mut self.song.inserts {
+            ins.sends.retain(|d| *d != k);
+        }
+        self.song.inserts[k] = cereal_engine::song::Insert { sends: vec![0], ..Default::default() };
+        self.mixer_armed.remove(&k);
+    }
+
+    /// Take the selected tracks out; the ones after them move up and empty ones come in at the end.
+    pub(crate) fn mixer_delete_tracks(&mut self) {
+        let last = self.last_regular();
+        let i = self.sel_insert;
+        let mut gone: Vec<usize> = if self.mixer_sel.contains(&i) { self.mixer_sel.iter().copied().collect() } else { vec![i] };
+        gone.retain(|&k| k > 0 && k <= last);
+        gone.sort_unstable();
+        if gone.is_empty() {
+            return;
+        }
+        for &k in gone.iter().rev() {
+            self.clear_track(k);
+            for j in k..last {
+                self.song.swap_inserts(j, j + 1);
+            }
+        }
+        self.mixer_sel.clear();
+        self.wave_eds.clear();
+        self.dirty = true;
+        self.status = if gone.len() == 1 { "Mixer track deleted".into() } else { format!("{} mixer tracks deleted", gone.len()) };
+    }
+
+    /// Put `count` empty tracks in before the selected one; as many drop off the end, which have to be unused.
+    pub(crate) fn mixer_insert_tracks(&mut self, count: usize) {
+        let last = self.last_regular();
+        let at = self.sel_insert;
+        if at == 0 || at > last || count == 0 {
+            return;
+        }
+        let count = count.min(last + 1 - at);
+        let busy = (last + 1 - count..=last).any(|k| {
+            let x = &self.song.inserts[k];
+            !x.slots.is_empty() || self.song.channels.iter().any(|c| c.insert == k) || self.song.inserts.iter().any(|o| o.sends.contains(&k))
+        });
+        if busy {
+            self.status = "The last mixer tracks are in use: there is no room to insert".into();
+            return;
+        }
+        for _ in 0..count {
+            self.clear_track(last);
+            for j in (at + 1..=last).rev() {
+                self.song.swap_inserts(j, j - 1);
+            }
+        }
+        self.wave_eds.clear();
+        self.dirty = true;
+        self.status = if count == 1 { "Mixer track inserted".into() } else { format!("{count} mixer tracks inserted") };
+    }
+
     pub(crate) fn create_submix(&mut self) {
         let n_ins = self.song.inserts.len();
         let i = self.sel_insert;

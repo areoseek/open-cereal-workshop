@@ -1385,6 +1385,13 @@ struct Comp {
     fake_inst: Vec<(usize, usize)>,
 }
 
+static PDC_OFF: AtomicBool = AtomicBool::new(false);
+
+/// Whether late plug-ins are lined up with the rest (the usual), or everything plays as it comes.
+pub fn set_delay_compensation(on: bool) {
+    PDC_OFF.store(!on, Relaxed);
+}
+
 impl Comp {
     fn fit(&mut self, song: &Song, at: u64, rate: f32) {
         let key = song as *const Song as usize;
@@ -1430,6 +1437,9 @@ impl Comp {
                     into[d] = into[d].max(out[i]);
                 }
             }
+        }
+        if PDC_OFF.load(Relaxed) {
+            any = false;
         }
         self.on = any;
         self.total = if any { out.first().copied().unwrap_or(0) } else { 0 };

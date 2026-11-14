@@ -224,6 +224,22 @@ impl App {
         slot
     }
 
+    /// Colour the pattern or channel a clip plays.
+    fn clip_color(&mut self, src: ClipSrc, c: [u8; 3]) {
+        match src {
+            ClipSrc::Pattern(p) => {
+                self.song.ensure_pattern(p);
+                self.song.patterns[p].color = Some(c);
+            }
+            ClipSrc::Audio(ch) | ClipSrc::Automation(ch) => {
+                if let Some(ch) = self.song.channels.get_mut(ch) {
+                    ch.color = c;
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
     fn clip_menu(&mut self, ctx: &egui::Context) {
         let Some((i, at)) = self.playlist.clip_menu else { return };
         let Some(clip) = self.song.clips.get(i).cloned() else {
@@ -234,18 +250,192 @@ impl App {
         let mut close = false;
         let area = egui::Area::new(egui::Id::new("pl_clip_menu")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(190.0);
-                if let Some(ch) = audio {
-                    if ui.button("Preview").hint("Hear the sound of this clip").clicked() {
-                        if let Some(sm) = self.song.channels[ch].sample.clone() {
-                            self.handle.send(cereal_engine::Cmd::Preview(sm));
+                ui.set_width(240.0);
+                let v = ui.visuals_mut();
+                v.button_frame = false;
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                crate::menus::sect(ui, match clip.src {
+                    ClipSrc::Pattern(_) => "Pattern clip",
+                    ClipSrc::Audio(_) => "Audio clip",
+                    ClipSrc::Automation(_) => "Automation clip",
+                });
+                if ui.button("Preview").hint("Hear this clip").clicked() {
+                    match (audio, clip.src) {
+                        (Some(ch), _) => {
+                            if let Some(sm) = self.song.channels[ch].sample.clone() {
+                                self.handle.send(cereal_engine::Cmd::Preview(sm));
+                            }
                         }
-                        close = true;
+                        (None, ClipSrc::Pattern(p)) => {
+                            let tr = self.handle.transport.clone();
+                            tr.set_pattern(p);
+                            tr.set_song_mode(false);
+                            if !tr.playing() {
+                                self.play();
+                            }
+                        }
+                        _ => {}
                     }
-                    if ui.button("Edit sample").hint("Open the sound in a Wave Recorder on the mixer track of its channel").clicked() {
-                        self.edit_clip_sample(ch);
-                        close = true;
+                    close = true;
+                }
+                ui.separator();
+                if crate::menus::tick(ui, clip.muted, "Muted", "").clicked() {
+                    self.song.clips[i].muted = !clip.muted;
+                    self.dirty = true;
+                    close = true;
+                }
+                ui.separator();
+                if ui.button("Rename and color...").clicked() {
+                    match clip.src {
+                        ClipSrc::Pattern(p) => {
+                            self.song.ensure_pattern(p);
+                            self.rename_pattern = Some((p, self.song.patterns[p].name.clone()));
+                        }
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                            if let Some(ch) = self.song.channels.get(c) {
+                                self.rack.rename = Some((c, ch.name.clone()));
+                                self.show_rack = true;
+                            }
+                        }
                     }
+                    close = true;
+                }
+                ui.menu_button("Change color...", |ui| {
+                    let mut c = match clip.src {
+                        ClipSrc::Pattern(p) => self.song.patterns.get(p).and_then(|p| p.color).unwrap_or([86, 110, 130]),
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => self.song.channels.get(c).map_or([86, 110, 130], |c| c.color),
+                    };
+                    if ui.color_edit_button_srgb(&mut c).changed() {
+                        self.clip_color(clip.src, c);
+                    }
+                });
+                if ui.button("Random color").clicked() {
+                    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1) | 1;
+                    let c = std::array::from_fn(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        70 + (seed % 150) as u8
+                    });
+                    self.clip_color(clip.src, c);
+                    close = true;
+                }
+                ui.separator();
+                if let Some(ch) = audio {
+                    ui.menu_button("Automate", |ui| {
+                        for (name, t) in [("Panning", Target::ChanPan(ch)), ("Volume", Target::ChanVolume(ch)), ("Pitch", Target::ChanPitch(ch))] {
+                            if ui.button(name).clicked() {
+                                self.make_auto_clip_at(t, Some((clip.pos, clip.len)));
+                                close = true;
+                            }
+                        }
+                    });
+                }
+                match clip.src {
+                    ClipSrc::Pattern(now) => {
+                        ui.menu_button("Select source pattern", |ui| {
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for p in 0..self.song.patterns.len().max(1) {
+                                    if ui.radio(p == now, self.song.pattern_name(p)).clicked() {
+                                        self.song.clips[i].src = ClipSrc::Pattern(p);
+                                        self.handle.transport.set_pattern(p);
+                                        self.dirty = true;
+                                        close = true;
+                                    }
+                                }
+                            });
+                        });
+                        if ui.button("Edit pattern").hint("Open the pattern in the piano roll").clicked() {
+                            self.handle.transport.set_pattern(now);
+                            self.show_piano = true;
+                            self.focus = Win::Piano;
+                            close = true;
+                        }
+                    }
+                    ClipSrc::Audio(now) | ClipSrc::Automation(now) => {
+                        let is_audio = matches!(clip.src, ClipSrc::Audio(_));
+                        ui.menu_button("Select source channel", |ui| {
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for c in 0..self.song.channels.len() {
+                                    use cereal_engine::flp::ChannelKind as K;
+                                    let fits = if is_audio { matches!(self.song.channels[c].kind, K::AudioClip) } else { matches!(self.song.channels[c].kind, K::AutomationClip) };
+                                    if fits && ui.radio(c == now, self.song.channels[c].name.clone()).clicked() {
+                                        self.song.clips[i].src = if is_audio { ClipSrc::Audio(c) } else { ClipSrc::Automation(c) };
+                                        self.dirty = true;
+                                        close = true;
+                                    }
+                                }
+                            });
+                        });
+                        let label = if is_audio { "Edit sample" } else { "Channel settings" };
+                        if ui.button(label).clicked() {
+                            match audio {
+                                Some(ch) if is_audio => self.edit_clip_sample(ch),
+                                _ => {
+                                    self.sel_chan = now;
+                                    self.rack.sel.clear();
+                                    self.rack.sel.insert(now);
+                                    self.show_chanset = true;
+                                }
+                            }
+                            close = true;
+                        }
+                    }
+                }
+                let shared = self.song.clips.iter().filter(|c| c.src == clip.src).count() > 1;
+                if ui.add_enabled(shared, egui::Button::new("Make unique")).hint("Give this clip a copy of its own to change").clicked() {
+                    match clip.src {
+                        ClipSrc::Pattern(p) => {
+                            let n = self.song.clone_pattern(p);
+                            self.song.clips[i].src = ClipSrc::Pattern(n);
+                            self.handle.transport.set_pattern(n);
+                        }
+                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
+                            if let Some(copy) = self.song.channels.get(c).cloned() {
+                                self.song.channels.push(copy);
+                                let n = self.song.channels.len() - 1;
+                                self.song.clips[i].src = if matches!(clip.src, ClipSrc::Audio(_)) { ClipSrc::Audio(n) } else { ClipSrc::Automation(n) };
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                    close = true;
+                }
+                if ui.button("Select all similar clips").clicked() {
+                    self.playlist.sel = (0..self.song.clips.len()).filter(|&k| self.song.clips[k].src == clip.src).collect();
+                    close = true;
+                }
+                if ui.button("Delete").clicked() {
+                    self.song.clips.remove(i);
+                    self.playlist.sel.clear();
+                    self.dirty = true;
+                    close = true;
+                }
+                if let ClipSrc::Pattern(p) = clip.src {
+                    ui.separator();
+                    ui.menu_button("Use current time signature from", |ui| {
+                        if ui.button("Playlist to pattern").hint("The pattern takes the time signature the playlist has here").clicked() {
+                            let sig = self.song.sig_at(clip.pos).2;
+                            self.song.ensure_pattern(p);
+                            let ms = &mut self.song.patterns[p].markers;
+                            ms.retain(|m| !(m.kind == 8 && m.pos == 0));
+                            ms.insert(0, cereal_engine::song::TimeMarker { pos: 0, name: String::new(), kind: 8, sig });
+                            self.dirty = true;
+                            close = true;
+                        }
+                        if ui.button("Pattern to playlist").hint("The playlist takes the pattern's time signature from here on").clicked() {
+                            let own = self.song.patterns.get(p).and_then(|p| p.markers.iter().find(|m| m.kind == 8 && m.pos == 0)).map(|m| m.sig);
+                            let sig = own.unwrap_or(self.song.time_sig);
+                            self.song.markers.retain(|m| !(m.kind == 8 && m.pos == clip.pos));
+                            self.song.markers.push(cereal_engine::song::TimeMarker { pos: clip.pos, name: String::new(), kind: 8, sig });
+                            self.song.markers.sort_by_key(|m| m.pos);
+                            self.dirty = true;
+                            close = true;
+                        }
+                    });
+                }
+                if let Some(ch) = audio {
+                    crate::menus::sect(ui, "Tools");
                     if ui.button("Fit to tempo").hint("Stretch the sound to the nearest whole number of beats at the tempo of the song").clicked() {
                         if let Some(sm) = self.song.channels[ch].sample.clone() {
                             let beats = (sm.seconds() * self.song.tempo / 60.0).round().max(1.0);
@@ -271,28 +461,54 @@ impl App {
                         close = true;
                     }
                 }
-                if ui.button("Rename and color").clicked() {
-                    match clip.src {
-                        ClipSrc::Pattern(p) => {
-                            self.song.ensure_pattern(p);
-                            self.rename_pattern = Some((p, self.song.patterns[p].name.clone()));
-                        }
-                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
-                            if let Some(ch) = self.song.channels.get(c) {
-                                self.rack.rename = Some((c, ch.name.clone()));
-                                self.show_rack = true;
-                            }
-                        }
-                    }
-                    close = true;
-                }
                 if let Some(ch) = audio {
-                    ui.menu_button("Automate", |ui| {
-                        for (name, t) in [("Panning", Target::ChanPan(ch)), ("Volume", Target::ChanVolume(ch)), ("Pitch", Target::ChanPitch(ch))] {
-                            if ui.button(name).clicked() {
-                                self.make_auto_clip_at(t, Some((clip.pos, clip.len)));
-                                close = true;
-                            }
+                    if ui.button("Extract stems from sample").hint("Split the sound into drums, bass, instruments and vocals on new tracks").clicked() {
+                        self.ask_stems(ch);
+                        close = true;
+                    }
+                }
+                crate::menus::sect(ui, "Region");
+                if let Some(ch) = audio {
+                    if self.regions.as_ref().is_none_or(|r| r.0 != ch || r.1 != self.song.channels[ch].sample_path) {
+                        let c = &self.song.channels[ch];
+                        let frames = c.sample.as_ref().map_or(0, |s| s.frames.len());
+                        let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                        let found = self.lib.resolve(&c.sample_path, dir.as_deref()).and_then(|f| std::fs::read(f).ok()).map(|b| cereal_engine::slicer::regions(&b, frames)).unwrap_or_default();
+                        self.regions = Some((ch, c.sample_path.clone(), found));
+                    }
+                    let list = self.regions.as_ref().map(|r| r.2.clone()).unwrap_or_default();
+                    ui.add_enabled_ui(true, |ui| {
+                        ui.menu_button("Select region", |ui| {
+                            let Some(sm) = self.song.channels[ch].sample.clone() else { return };
+                            let per_tick = sm.rate as f64 * 60.0 / (self.song.tempo as f64 * self.song.ppq as f64);
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for r in &list {
+                                    if ui.button(&r.name).hint("Play only this part of the sound").clicked() {
+                                        if let Some(c) = self.song.clips.get_mut(i) {
+                                            c.offset = (r.start as f64 / per_tick).round() as u32;
+                                            c.len = (((r.end - r.start) as f64 / per_tick).round() as u32).max(1);
+                                            self.dirty = true;
+                                        }
+                                        close = true;
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Full").clicked() {
+                                    if let Some(c) = self.song.clips.get_mut(i) {
+                                        c.offset = 0;
+                                        c.len = ((sm.frames.len() as f64 / per_tick).round() as u32).max(1);
+                                        self.dirty = true;
+                                    }
+                                    close = true;
+                                }
+                            });
+                        });
+                    });
+                }
+                if audio.is_none() {
+                    ui.menu_button("Select region", |ui| {
+                        if ui.radio(true, "Full").clicked() {
+                            close = true;
                         }
                     });
                 }
@@ -325,101 +541,7 @@ impl App {
                         }
                     }
                 });
-                if let Some(ch) = audio {
-                    if self.regions.as_ref().is_none_or(|r| r.0 != ch || r.1 != self.song.channels[ch].sample_path) {
-                        let c = &self.song.channels[ch];
-                        let frames = c.sample.as_ref().map_or(0, |s| s.frames.len());
-                        let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-                        let found = self.lib.resolve(&c.sample_path, dir.as_deref()).and_then(|f| std::fs::read(f).ok()).map(|b| cereal_engine::slicer::regions(&b, frames)).unwrap_or_default();
-                        self.regions = Some((ch, c.sample_path.clone(), found));
-                    }
-                    let list = self.regions.as_ref().map(|r| r.2.clone()).unwrap_or_default();
-                    ui.add_enabled_ui(!list.is_empty(), |ui| {
-                        ui.menu_button("Region", |ui| {
-                            let Some(sm) = self.song.channels[ch].sample.clone() else { return };
-                            let per_tick = sm.rate as f64 * 60.0 / (self.song.tempo as f64 * self.song.ppq as f64);
-                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                                for r in &list {
-                                    if ui.button(&r.name).hint("Play only this part of the sound").clicked() {
-                                        if let Some(c) = self.song.clips.get_mut(i) {
-                                            c.offset = (r.start as f64 / per_tick).round() as u32;
-                                            c.len = (((r.end - r.start) as f64 / per_tick).round() as u32).max(1);
-                                            self.dirty = true;
-                                        }
-                                        close = true;
-                                    }
-                                }
-                                ui.separator();
-                                if ui.button("Whole sound").clicked() {
-                                    if let Some(c) = self.song.clips.get_mut(i) {
-                                        c.offset = 0;
-                                        c.len = ((sm.frames.len() as f64 / per_tick).round() as u32).max(1);
-                                        self.dirty = true;
-                                    }
-                                    close = true;
-                                }
-                            });
-                        });
-                    });
-                }
-                match clip.src {
-                    ClipSrc::Pattern(p) => {
-                        if ui.button("Select source pattern").clicked() {
-                            self.handle.transport.set_pattern(p);
-                            close = true;
-                        }
-                    }
-                    ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
-                        if ui.button("Select source channel").clicked() {
-                            self.sel_chan = c;
-                            self.rack.sel.clear();
-                            self.rack.sel.insert(c);
-                            self.show_chanset = true;
-                            close = true;
-                        }
-                    }
-                }
-                ui.separator();
-                if ui.button("Select all similar clips").clicked() {
-                    self.playlist.sel = (0..self.song.clips.len()).filter(|&k| self.song.clips[k].src == clip.src).collect();
-                    close = true;
-                }
-                if ui.button(if clip.muted { "Unmute" } else { "Mute" }).clicked() {
-                    self.song.clips[i].muted = !clip.muted;
-                    self.dirty = true;
-                    close = true;
-                }
-                if ui.button("Make unique").hint("Give this clip a copy of its own to change").clicked() {
-                    match clip.src {
-                        ClipSrc::Pattern(p) => {
-                            let n = self.song.clone_pattern(p);
-                            self.song.clips[i].src = ClipSrc::Pattern(n);
-                            self.handle.transport.set_pattern(n);
-                        }
-                        ClipSrc::Audio(c) | ClipSrc::Automation(c) => {
-                            if let Some(copy) = self.song.channels.get(c).cloned() {
-                                self.song.channels.push(copy);
-                                let n = self.song.channels.len() - 1;
-                                self.song.clips[i].src = if matches!(clip.src, ClipSrc::Audio(_)) { ClipSrc::Audio(n) } else { ClipSrc::Automation(n) };
-                            }
-                        }
-                    }
-                    self.dirty = true;
-                    close = true;
-                }
-                if ui.button("Delete").clicked() {
-                    self.song.clips.remove(i);
-                    self.playlist.sel.clear();
-                    self.dirty = true;
-                    close = true;
-                }
-                if let Some(ch) = audio {
-                    ui.separator();
-                    if ui.button("Extract stems from sample").hint("Split the sound into drums, bass, instruments and vocals on new tracks").clicked() {
-                        self.ask_stems(ch);
-                        close = true;
-                    }
-                }
+                });
             });
         });
         // the sub-menus are layers of their own in front: a press on one of them is not a press outside
@@ -1211,7 +1333,7 @@ impl App {
                 if r.contains(pp) && grid.contains(pp) {
                     let edge = if r.width() < 12.0 { 0 } else if pp.x > r.right() - 5.0 { 1 } else if pp.x < r.left() + 4.0 { -1 } else { 0 };
                     hit = Some((i, edge));
-                    hit_corner = r.width() >= 24.0 && pp.x >= r.left() + 4.0 && pp.x < r.left() + 16.0 && pp.y < r.top() + 12.0;
+                    hit_corner = r.width() >= 24.0 && pp.x >= r.left() + 1.0 && pp.x < r.left() + 16.0 && pp.y < r.top() + 12.0;
                 }
             }
         }
