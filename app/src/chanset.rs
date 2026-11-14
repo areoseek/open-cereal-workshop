@@ -2672,19 +2672,31 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                     for c in 0..cols {
                         let o = base + r * 36 + c * 4;
                         let mut v = (int(o).clamp(-256, 256) as f32 / 2.56).round();
+                        // every knob of the main grid has a mute switch of its own, kept beside the grid
+                        let mute_at = (!ring).then_some(800 + r * 9 + c);
+                        let muted = mute_at.is_some_and(|m| d.get(m).copied().unwrap_or(0) != 0);
                         let shown = egui::DragValue::new(&mut v).range(-100.0..=100.0).speed(0.5).custom_formatter(|v, _| if v == 0.0 { "·".to_string() } else { format!("{v:.0}") });
-                        let resp = ui.add(shown);
+                        let resp = ui.add_enabled_ui(true, |ui| {
+                            if muted {
+                                ui.visuals_mut().override_text_color = Some(TEXT_DIM.gamma_multiply(0.5));
+                            }
+                            ui.add(shown)
+                        })
+                        .inner;
                         if resp.changed() {
                             sets.push((o, (v * 2.56).round() as i32));
                         }
                         if resp.secondary_clicked() {
-                            sets.push((o, 0));
+                            match mute_at {
+                                Some(m) => bytes.push((m, !muted as u8)),
+                                None => sets.push((o, 0)),
+                            }
                         }
                     }
                     ui.end_row();
                 }
             });
-            ui.label(RichText::new("Drag a cell to set it, right-click to clear it. A row's own column is its feedback.").small().color(TEXT_DIM));
+            ui.label(RichText::new("Drag a cell to set it, right-click to mute it or bring it back. A row's own column is its feedback.").small().color(TEXT_DIM));
         }
         k @ 1..=6 => {
             let at = p.op_at[k - 1];

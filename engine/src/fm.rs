@@ -1148,11 +1148,17 @@ impl Patch {
         p.pitch = at(d, 8).clamp(-48, 48) as f32;
         // every knob of the grid follows one curve (measured on renders at a dozen settings): half way up
         // gives 0.23 of the full amount
+        // each knob of the main grid has a mute switch, one byte per knob in the same nine by nine order
+        // (measured: a muted knob plays as if it stood at zero, whatever it shows)
+        let muted = |base: usize, r: usize, c: usize| base == 12 && d[800 + r * 9 + c] != 0;
         let cell = |base: usize, r: usize, c: usize| {
+            if muted(base, r, c) {
+                return 0.0;
+            }
             grid(at(d, base + r * 36 + c * 4).clamp(-256, 256) as f32 / 256.0)
         };
         for r in 0..9 {
-            p.pan[r] = at(d, 12 + r * 36 + 24).clamp(-256, 256) as f32 / 256.0;
+            p.pan[r] = if muted(12, r, 6) { 0.0 } else { at(d, 12 + r * 36 + 24).clamp(-256, 256) as f32 / 256.0 };
             let (send, out) = (cell(12, r, 7), cell(12, r, 8));
             sent += send.abs();
             plain += out.abs();
@@ -2284,6 +2290,19 @@ pub(crate) mod tests {
         let o = run(&p, 96, 20000, 30000);
         assert!(o.iter().all(|f| f[0].is_finite() && f[0].abs() < 20.0));
         assert!(o[2000..9000].iter().any(|f| (f[0] - f[1]).abs() > 1e-4), "unison voices sit apart");
+    }
+
+    /// A muted knob of the grid plays as zero, and only that knob.
+    #[test]
+    fn a_muted_grid_knob_is_silent() {
+        let mut d = plain_block();
+        let p = Patch::from_plain(&d, 25).unwrap();
+        assert!(p.out[0] > 0.0 && p.out[6] > 0.0 && p.feed[0][0] > 0.0);
+        d[800 + 8] = 1;
+        d[800 + 6 * 9] = 1;
+        let p = Patch::from_plain(&d, 25).unwrap();
+        assert_eq!((p.out[0], p.feed[0][0]), (0.0, 0.0));
+        assert!(p.out[6] > 0.0 && p.fm[0][1] > 0.0);
     }
 
     /// Nothing sent to the effects leaves them out; a send brings in the echo, chorus and room that are switched on.
