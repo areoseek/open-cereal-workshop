@@ -893,7 +893,7 @@ struct SlotNow {
 }
 
 /// The metronome's sounds by name, all made here.
-pub const CLICK_KINDS: [&str; 4] = ["Beep", "Tick", "Hi-hat", "Cowbell"];
+pub const CLICK_KINDS: [&str; 5] = ["Beep", "Tick", "Hi-hat", "Cowbell", "Pulse"];
 
 /// A short sound for the metronome: one of `CLICK_KINDS`, the bar's first beat marked out from the others.
 fn click(rate: f32, kind: usize, first: bool) -> Arc<Sample> {
@@ -936,6 +936,12 @@ fn click(rate: f32, kind: usize, first: bool) -> Arc<Sample> {
                 let sq = |hz: f32| if (t * hz).fract() < 0.5 { 1.0 } else { -1.0 };
                 (sq(540.0 * up) + sq(800.0 * up)) * 0.5 * (-(t * 30.0)).exp() * 0.4
             }).collect()
+        }
+        4 => {
+            // a short square pulse
+            let n = (rate * 0.02) as usize;
+            let hz = if first { 2000.0 } else { 1000.0 };
+            (0..n).map(|i| if (i as f32 / rate * hz).fract() < 0.5 { 0.45 } else { -0.45 } * (1.0 - i as f32 / n as f32)).collect()
         }
         _ => {
             let n = (rate * 0.03) as usize;
@@ -1615,7 +1621,7 @@ pub struct Player {
     /// Ticks per frame at the tempo of the block being played.
     tpf: f64,
     /// Metronome sounds: bar, beat.
-    clicks: [[Arc<Sample>; 2]; 4],
+    clicks: [[Arc<Sample>; 2]; 5],
 }
 
 /// How many keys a channel's root key moves the notes it is sent: none for channels that play a recording
@@ -3331,7 +3337,7 @@ impl Player {
             let t0 = bar - self.count_in;
             let t1 = t0 + n as f64 * tpf;
             let mut b = (t0 / beat - 1e-9).ceil().max(0.0) * beat;
-            let kind = tr.click_kind() as usize % 4;
+            let kind = tr.click_kind() as usize % 5;
             while b < t1 && b < bar - 0.5 {
                 let delay = (((b - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
                 let smp = self.clicks[kind][if b % one < 0.5 { 0 } else { 1 }].clone();
@@ -3463,7 +3469,7 @@ impl Player {
             let mut b = from + ((t0 - from) / beat).ceil() * beat;
             let click = |me: &mut Self, at: f64, first: bool| {
                 let delay = (((at - t0) / tpf) - 1e-6).ceil().max(0.0) as u32;
-                let smp = me.clicks[me.transport.click_kind() as usize % 4][if first { 0 } else { 1 }].clone();
+                let smp = me.clicks[me.transport.click_kind() as usize % 5][if first { 0 } else { 1 }].clone();
                 me.start(Voice { sample: Some(smp), step: 1.0, level: 1.0, attack: 1.0, release: 1.0, gl: 1.0, gr: 1.0, insert: me.preview_to(), delay, preview: true, ..Default::default() });
             };
             while b < t1 && b < until - 0.5 {

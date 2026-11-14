@@ -221,6 +221,8 @@ pub(crate) struct App {
     show_browser: bool,
     /// The toolbar's output picture: the wave, or the level of each frequency.
     scope_bars: bool,
+    /// The wave view's switches: 1 stereo, 2 long.
+    scope_opts: u8,
     /// Toolbar parts taken off by the VIEW menu: the window buttons, the output monitor.
     /// The toolbar panels show their move and hide buttons.
     bar_edit: bool,
@@ -259,7 +261,10 @@ pub(crate) struct App {
     /// Keep the notes already there when recording over them.
     rec_blend: bool,
     /// The time display counts minutes and seconds, not bars.
-    time_secs: bool,
+    /// What the time panel counts: 0 bars, 1 minutes and seconds, 2 and up a film frame rate of `TIME_RATES`.
+    time_mode: u8,
+    /// The middle number of the bar count is the beat, not the step.
+    time_beat: bool,
     /// When the tempo was last tapped.
     taps: Vec<std::time::Instant>,
     /// When unsaved work was last put in the backup folder (or there was none to put).
@@ -299,7 +304,11 @@ pub(crate) struct App {
     peak_top: Vec<f32>,
     route_only: bool,
     route_side: bool,
-    held: HashMap<Key, (u16, u8)>,
+    held: HashMap<Key, Vec<(u16, u8)>>,
+    /// The typing keyboard: root note 0..11, octave, and which of `TYPE_LAYOUTS` the keys follow.
+    type_root: u8,
+    type_oct: u8,
+    type_layout: u8,
     actions: Vec<Action>,
     /// Undo history: snapshots of the song, oldest first; `hist_at` is the one on screen.
     history: Vec<Song>,
@@ -490,6 +499,7 @@ impl App {
             show_mixer: false,
             show_browser: true,
             scope_bars: false,
+            scope_opts: 0,
             bar_edit: false,
             score_minutes: 2,
             scope_buf: Vec::new(),
@@ -513,7 +523,8 @@ impl App {
             wheel_move: None,
             wheel_over: None,
             rec_blend: true,
-            time_secs: false,
+            time_mode: 0,
+            time_beat: false,
             taps: Vec::new(),
             auto_at: std::time::Instant::now(),
             ask_leave: None,
@@ -544,6 +555,9 @@ impl App {
             route_only: false,
             route_side: false,
             held: HashMap::new(),
+            type_root: 0,
+            type_oct: 4,
+            type_layout: 3,
             actions: vec![],
             history: vec![],
             hist_at: 0,
@@ -2962,7 +2976,7 @@ impl App {
                 if let Some(track) = self.playlist.perf_held.remove(&key) {
                     self.handle.send(Cmd::PerfRelease { track });
                 }
-                if let Some((chan, k)) = self.held.remove(&key) {
+                for (chan, k) in self.held.remove(&key).unwrap_or_default() {
                     self.handle.send(Cmd::NoteOff { chan, key: k });
                 }
                 continue;
@@ -3191,11 +3205,13 @@ impl App {
                 }
                 _ => {
                     if self.typing_keys && !repeat {
-                        if let Some((_, semi)) = TYPING.iter().find(|(k, _)| *k == key) {
+                        let notes = self.typed_notes(key);
+                        if !notes.is_empty() {
                             let chan = self.recv.iter().find(|r| r.0.is_empty() && r.1 < self.song.channels.len()).map_or(self.sel_chan, |r| r.1) as u16;
-                            let k = 60 + semi;
-                            self.handle.send(Cmd::NoteOn { chan, key: k, vel: 1.0 });
-                            self.held.insert(key, (chan, k));
+                            for &k in &notes {
+                                self.handle.send(Cmd::NoteOn { chan, key: k, vel: 1.0 });
+                            }
+                            self.held.insert(key, notes.into_iter().map(|k| (chan, k)).collect());
                         }
                     }
                 }
@@ -3456,14 +3472,44 @@ impl App {
                 }
             }
             3 => {
-                ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T)");
+                let r = ui.toggle_value(&mut self.typing_keys, "Keys").hint("Typing keyboard to piano (Ctrl+T); right-click picks the root, the octave and the layout");
+                r.context_menu(|ui| {
+                    use crate::menus::{col, sect};
+                    ui.horizontal_top(|ui| {
+                        col(ui, 70.0, |ui| {
+                            sect(ui, "Root Note");
+                            for (k, name) in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].iter().enumerate() {
+                                ui.radio_value(&mut self.type_root, k as u8, *name);
+                            }
+                            sect(ui, "Octave");
+                            for o in 2u8..=6 {
+                                ui.radio_value(&mut self.type_oct, o, o.to_string());
+                            }
+                            sect(ui, "Options");
+                            if ui.button("Reset").clicked() {
+                                (self.type_root, self.type_oct, self.type_layout) = (0, 4, 3);
+                                ui.close_menu();
+                            }
+                        });
+                        col(ui, 190.0, |ui| {
+                            sect(ui, "Layout");
+                            let tall = (ui.ctx().screen_rect().height() - 120.0).min(TYPE_LAYOUTS.len() as f32 * 22.0);
+                            egui::ScrollArea::vertical().max_height(tall).min_scrolled_height(tall).show(ui, |ui| {
+                                for (k, (name, _, _)) in TYPE_LAYOUTS.iter().enumerate() {
+                                    ui.radio_value(&mut self.type_layout, k as u8, *name);
+                                }
+                            });
+                        });
+                    });
+                });
                 let mut count = tr.countdown();
                 let r = ui.toggle_value(&mut count, "3 2 1").hint("Count in before recording (Ctrl+P); right-click picks how many bars");
                 if r.changed() {
                     tr.set_countdown(count);
                 }
                 r.context_menu(|ui| {
-                    for n in [1u8, 2, 4] {
+                    crate::menus::sect(ui, "Precount duration");
+                    for n in [1u8, 2] {
                         if ui.radio(tr.count_bars() == n, if n == 1 { "1 bar".to_string() } else { format!("{n} bars") }).clicked() {
                             tr.set_count_bars(n);
                             self.settings.count_bars = n;
@@ -3479,8 +3525,10 @@ impl App {
                     tr.set_metronome(met);
                 }
                 r.context_menu(|ui| {
-                    for (k, name) in cereal_engine::player::CLICK_KINDS.iter().enumerate() {
-                        if ui.radio(tr.click_kind() as usize == k, *name).clicked() {
+                    crate::menus::sect(ui, "Metronome sound");
+                    for k in [2usize, 1, 0, 3, 4] {
+                        let name = cereal_engine::player::CLICK_KINDS[k];
+                        if ui.radio(tr.click_kind() as usize == k, name).clicked() {
                             tr.set_click_kind(k as u8);
                             self.settings.click_kind = k as u8;
                             let _ = self.settings.save();
@@ -3505,16 +3553,40 @@ impl App {
                 let (from, first, sig) = if tr.song_mode() { self.song.sig_at(tick) } else { (0, 0, self.song.time_sig) };
                 let bar = (self.song.ppq * 4 * sig.0.max(1) as u32 / sig.1.max(1) as u32).max(1);
                 let tick = tick - from;
-                let shown = if self.time_secs {
+                let shown = if self.time_mode > 0 {
                     let secs = tr.tick() * 60.0 / (self.song.tempo.max(1.0) as f64 * self.song.ppq as f64);
-                    format!("{:03}:{:02}:{:02}", (secs / 60.0) as u32, secs as u32 % 60, (secs.fract() * 100.0) as u32)
+                    let rate = TIME_RATES.get(self.time_mode as usize - 1).map(|r| r.1).unwrap_or(100.0);
+                    format!("{:03}:{:02}:{:02}", (secs / 60.0) as u32, secs as u32 % 60, (secs.fract() * rate) as u32)
+                } else if self.time_beat {
+                    let beat = self.song.ppq.max(1);
+                    format!("{:03}:{:02}:{:03}", first + tick / bar + 1, (tick % bar) / beat + 1, tick % beat)
                 } else {
                     format!("{:03}:{:02}:{:02}", first + tick / bar + 1, (tick % bar) / step + 1, tick % step)
                 };
                 let clock = ui.add(egui::Label::new(RichText::new(shown).monospace().size(18.0).color(GREEN)).sense(egui::Sense::click()));
-                if clock.hint(if self.time_secs { "Minutes : seconds : hundredths (click for bars)" } else { "Bar : step : tick (click for minutes and seconds)" }).clicked() {
-                    self.time_secs = !self.time_secs;
+                if clock.clone().hint("Time panel (click to switch between bars and time, right-click for more)").clicked() {
+                    self.time_mode = if self.time_mode == 0 { 1 } else { 0 };
                 }
+                clock.context_menu(|ui| {
+                    crate::menus::sect(ui, "Mode");
+                    if ui.radio(self.time_mode == 0, "Bar : Beat/Step : Tick").clicked() {
+                        self.time_mode = 0;
+                        ui.close_menu();
+                    }
+                    for (k, (name, _)) in TIME_RATES.iter().enumerate() {
+                        if ui.radio(self.time_mode as usize == k + 1, *name).clicked() {
+                            self.time_mode = k as u8 + 1;
+                            ui.close_menu();
+                        }
+                    }
+                    crate::menus::sect(ui, "Middle unit");
+                    for (beat, name) in [(false, "Step"), (true, "Beat")] {
+                        if ui.radio(self.time_beat == beat, name).clicked() {
+                            self.time_beat = beat;
+                            ui.close_menu();
+                        }
+                    }
+                });
                 // where the song stands, as a slider to drag
                 let total = if tr.song_mode() { self.song.length() } else { self.song.patterns.get(pat).map(|p| p.length(self.song.ppq * 4)).unwrap_or(0) }.max(1);
                 let mut at = (tr.tick() as f32 / total as f32).clamp(0.0, 1.0);
@@ -3557,9 +3629,29 @@ impl App {
                     let load = CPU_LOAD.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                     // what is going out: the wave, or after a click the level of each frequency
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 20.0), egui::Sense::click());
-                    if resp.hint("Output: click to switch between the wave and the frequencies").clicked() {
+                    if resp.clone().hint("Output monitor panel: click to switch between the wave and the frequencies").clicked() {
                         self.scope_bars = !self.scope_bars;
                     }
+                    resp.context_menu(|ui| {
+                        crate::menus::sect(ui, "Mode");
+                        if ui.radio(!self.scope_bars, "Oscilloscope").clicked() {
+                            self.scope_bars = false;
+                            ui.close_menu();
+                        }
+                        if ui.radio(self.scope_bars, "Spectrogram").clicked() {
+                            self.scope_bars = true;
+                            ui.close_menu();
+                        }
+                        crate::menus::sect(ui, "Oscilloscope");
+                        if crate::menus::tick(ui, self.scope_opts & 1 != 0, "Stereo", "").clicked() {
+                            self.scope_opts ^= 1;
+                            ui.close_menu();
+                        }
+                        if crate::menus::tick(ui, self.scope_opts & 2 != 0, "Long", "").hint("A longer stretch of the wave").clicked() {
+                            self.scope_opts ^= 2;
+                            ui.close_menu();
+                        }
+                    });
                     let paint = ui.painter_at(rect);
                     paint.rect_filled(rect, 2.0, egui::Color32::from_rgb(22, 26, 30));
                     tr.output_scope(&mut self.scope_buf);
@@ -3581,7 +3673,7 @@ impl App {
                         }
                     } else {
                         let n = self.scope_buf.len();
-                        let take = 1024.min(n);
+                        let take = if self.scope_opts & 2 != 0 { 4096 } else { 1024 }.min(n);
                         let pts: Vec<egui::Pos2> = (0..rect.width() as usize)
                             .map(|x| {
                                 let v = self.scope_buf[n - take + (x * take / rect.width() as usize).min(take - 1)];
@@ -3607,6 +3699,23 @@ impl App {
     }
 }
 
+/// What the time panel can count besides bars: the name and the parts in a second.
+const TIME_RATES: [(&str, f64); 14] = [
+    ("Minute : Second : Centisecond", 100.0),
+    ("SMPTE 23.976 fps", 23.976),
+    ("SMPTE 24 fps", 24.0),
+    ("SMPTE 25 fps", 25.0),
+    ("SMPTE 29.97 fps (drop)", 29.97),
+    ("SMPTE 29.97 (non-drop)", 29.97),
+    ("SMPTE 30 fps", 30.0),
+    ("SMPTE 48 fps", 48.0),
+    ("SMPTE 50 fps", 50.0),
+    ("SMPTE 59.94 fps (drop)", 59.94),
+    ("SMPTE 59.94 (non-drop)", 59.94),
+    ("SMPTE 60 fps", 60.0),
+    ("SMPTE 72 fps", 72.0),
+    ("SMPTE 120 fps", 120.0),
+];
 const REC_CLIPS: u16 = 1;
 const REC_STARTS: u16 = 2;
 const REC_DISARM: u16 = 4;
@@ -3617,7 +3726,87 @@ const REC_Q_LEAVE: u16 = 64;
 const REC_Q_STEPS: u16 = 128;
 const REC_Q_AUTO: u16 = 256;
 
+/// The typing keyboard's four rows, bottom to top.
+const TYPE_ROWS: [[Key; 10]; 4] = [
+    [Key::Z, Key::X, Key::C, Key::V, Key::B, Key::N, Key::M, Key::Comma, Key::Period, Key::Slash],
+    [Key::A, Key::S, Key::D, Key::F, Key::G, Key::H, Key::J, Key::K, Key::L, Key::Semicolon],
+    [Key::Q, Key::W, Key::E, Key::R, Key::T, Key::Y, Key::U, Key::I, Key::O, Key::P],
+    [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0],
+];
+
+/// The typing keyboard's layouts: the name, how the rows are read (0 pads, 1 whole-tone rows, 2 clips of a
+/// performance, 3 piano, 4 slices, 5 scale, 6 scale with chords on the upper rows, 7 chords on the lower rows),
+/// and the scale.
+const TYPE_LAYOUTS: [(&str, u8, &[u8]); 31] = [
+    ("Layout FPC (C4)", 0, &[]),
+    ("Layout Janko", 1, &[]),
+    ("Layout Performance mode", 2, &[]),
+    ("Layout Piano", 3, &[]),
+    ("Layout Slicex (C4)", 4, &[]),
+    ("Major", 5, &[0, 2, 4, 5, 7, 9, 11]),
+    ("Major + Chords", 6, &[0, 2, 4, 5, 7, 9, 11]),
+    ("Major Bebop", 5, &[0, 2, 4, 5, 7, 8, 9, 11]),
+    ("Major Chordmap", 7, &[0, 2, 4, 5, 7, 9, 11]),
+    ("Major Pentatonic", 5, &[0, 2, 4, 7, 9]),
+    ("Minor Harmonic", 5, &[0, 2, 3, 5, 7, 8, 11]),
+    ("Minor Hungarian", 5, &[0, 2, 3, 6, 7, 8, 11]),
+    ("Minor Melodic", 5, &[0, 2, 3, 5, 7, 9, 11]),
+    ("Minor Natural (Aeolian)", 5, &[0, 2, 3, 5, 7, 8, 10]),
+    ("Minor Natural + Chords", 6, &[0, 2, 3, 5, 7, 8, 10]),
+    ("Minor Natural Chordmap", 7, &[0, 2, 3, 5, 7, 8, 10]),
+    ("Minor Neopolitan", 5, &[0, 1, 3, 5, 7, 8, 11]),
+    ("Minor Pentatonic", 5, &[0, 3, 5, 7, 10]),
+    ("Other Arabic", 5, &[0, 2, 4, 5, 6, 8, 10]),
+    ("Other Blues", 5, &[0, 3, 5, 6, 7, 10]),
+    ("Other Diminished", 5, &[0, 2, 3, 5, 6, 8, 9, 11]),
+    ("Other Dominant Bebop", 5, &[0, 2, 4, 5, 7, 9, 10, 11]),
+    ("Other Dorian", 5, &[0, 2, 3, 5, 7, 9, 10]),
+    ("Other Enigmatic", 5, &[0, 1, 4, 6, 8, 10, 11]),
+    ("Other Japanese Insen", 5, &[0, 1, 5, 7, 10]),
+    ("Other Locrian", 5, &[0, 1, 3, 5, 6, 8, 10]),
+    ("Other Lydian", 5, &[0, 2, 4, 6, 7, 9, 11]),
+    ("Other Mixolydian", 5, &[0, 2, 4, 5, 7, 9, 10]),
+    ("Other Neopolitan", 5, &[0, 1, 3, 5, 7, 9, 11]),
+    ("Other Phrygian", 5, &[0, 1, 3, 5, 7, 8, 10]),
+    ("Other Whole Tone", 5, &[0, 2, 4, 6, 8, 10]),
+];
+
 impl App {
+    /// The notes a typing key plays under the layout, root and octave picked on the toolbar; none when the
+    /// key is not a note there.
+    fn typed_notes(&self, key: Key) -> Vec<u8> {
+        let (_, kind, scale) = TYPE_LAYOUTS[(self.type_layout as usize).min(TYPE_LAYOUTS.len() - 1)];
+        let base = 12 * (self.type_oct as i32 + 1) + self.type_root as i32;
+        let fit = |n: i32| -> Vec<u8> { if (0..=131).contains(&n) { vec![n as u8] } else { vec![] } };
+        if kind == 3 {
+            return TYPING.iter().find(|(k, _)| *k == key).map(|(_, semi)| fit(base + *semi as i32)).unwrap_or_default();
+        }
+        let Some((row, at)) = TYPE_ROWS.iter().enumerate().find_map(|(r, keys)| keys.iter().position(|k| *k == key).map(|c| (r as i32, c as i32))) else { return vec![] };
+        // a step of the scale, counted from the root, octaves following on
+        let degree = |d: i32| -> i32 {
+            let n = scale.len().max(1) as i32;
+            12 * d.div_euclid(n) + scale.get(d.rem_euclid(n) as usize).copied().unwrap_or(0) as i32
+        };
+        match kind {
+            // pads four wide, from C4 up
+            0 => fit(48 + (at / 4) * 16 + row * 4 + at % 4),
+            // every row climbs in whole tones, each a semitone above the one below it
+            1 => fit(base + at * 2 + row % 2 + 12 * (row / 2)),
+            4 => fit(48 + row * 10 + at),
+            5 => fit(base + 12 * row + degree(at)),
+            6 | 7 => {
+                let chord_row = if kind == 6 { row >= 2 } else { row < 2 };
+                let up = 12 * if kind == 6 { row % 2 } else { row % 2 };
+                if chord_row {
+                    [0, 2, 4].into_iter().flat_map(|k| fit(base + up + degree(at + k))).collect()
+                } else {
+                    fit(base + up + degree(at))
+                }
+            }
+            _ => vec![],
+        }
+    }
+
     /// Project info, the pattern rename box and the about box.
     fn small_windows(&mut self, ctx: &egui::Context) {
         // hosted plug-ins get their turn on this thread: timers, callbacks, and word of settings changed in their own windows
