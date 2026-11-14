@@ -335,13 +335,23 @@ impl App {
                     if r.secondary_clicked() {
                         self.solo_channel(ci);
                     }
+                    let colorful = self.settings.rack_opts & rko::COLORFUL != 0;
                     let c = &mut self.song.channels[ci];
+                    // with colourful controls the two knobs wear the channel's colour
+                    let tint = rgb(c.color);
+                    let ring = |ui: &Ui, r: &egui::Response| {
+                        if colorful {
+                            ui.painter().circle_stroke(r.rect.center(), r.rect.width() * 0.5 - 0.5, Stroke::new(1.5_f32, tint));
+                        }
+                    };
                     let r = knob(ui, &mut c.pan, -1.0, 1.0, 0.0, 18.0).hint("Channel panning");
+                    ring(ui, &r);
                     control_menu(&r, cereal_engine::song::Target::ChanPan(ci));
                     if r.changed() {
                         self.dirty = true;
                     }
                     let r = knob(ui, &mut c.volume, 0.0, 1.0, 10000.0 / 12800.0, 18.0).hint("Channel volume");
+                    ring(ui, &r);
                     control_menu(&r, cereal_engine::song::Target::ChanVolume(ci));
                     if r.changed() {
                         self.dirty = true;
@@ -627,9 +637,19 @@ impl App {
                         let lo = notes.iter().map(|n| n.2).min().unwrap_or(60) as f32;
                         let hi = notes.iter().map(|n| n.2).max().unwrap_or(60) as f32;
                         let span = (hi - lo).max(1.0);
-                        let total = (nsteps as u32 * step) as f32;
+                        // the whole of the pattern's notes squeezed into the picture, or only what the steps span
+                        let shown = (nsteps as u32 * step).max(1);
+                        let total = if self.settings.rack_opts & rko::FULL_PREVIEW != 0 {
+                            let end = notes.iter().map(|n| n.0 + n.1).max().unwrap_or(0);
+                            (end.div_ceil(shown).max(1) * shown) as f32
+                        } else {
+                            shown as f32
+                        };
                         for (pos, len, key) in &notes {
                             let x0 = rect.left() + *pos as f32 / total * rect.width();
+                            if x0 >= rect.right() {
+                                continue;
+                            }
                             let x1 = rect.left() + (*pos + (*len).max(step / 2)) as f32 / total * rect.width();
                             let y = rect.bottom() - 3.0 - (*key as f32 - lo) / span * (rect.height() - 6.0);
                             p.line_segment([Pos2::new(x0, y), Pos2::new(x1.min(rect.right()), y)], Stroke::new(2.0_f32, NOTE));

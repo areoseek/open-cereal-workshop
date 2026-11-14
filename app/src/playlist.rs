@@ -1139,6 +1139,12 @@ impl App {
                     self.handle.transport.set_pattern(p);
                     self.playlist.brush = None;
                     self.playlist.brush_pat = p;
+                    if self.settings.pl_opts & plo::PICKER_LINKED != 0 {
+                        // the first channel the pattern plays becomes the selected one
+                        if let Some(c) = self.song.patterns[p].notes.iter().map(|n| n.chan as usize).min() {
+                            self.sel_chan = c;
+                        }
+                    }
                 picked = true;
                 }
             }
@@ -1162,6 +1168,9 @@ impl App {
                         });
                         let len = self.song.clips.iter().find(|k| k.src == src).map(|k| k.len).or(own).unwrap_or(bar * 4).max(1);
                         self.playlist.brush = Some((src, len, 0));
+                        if self.settings.pl_opts & plo::PICKER_LINKED != 0 {
+                            self.sel_chan = c;
+                        }
                     picked = true;
                     }
                 }

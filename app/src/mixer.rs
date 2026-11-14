@@ -40,6 +40,8 @@ pub(crate) mod mxo {
     pub const MASTER_LAT: u64 = 1 << 18;
     pub const THREADED: u64 = 1 << 19;
     pub const AUTO_COLOR: u64 = 1 << 20;
+    /// The panel of the selected track (its slots and settings) is put away.
+    pub const HIDE_PANEL: u64 = 1 << 21;
     pub const DEFAULT: u64 = AUTO_CLIP | LAT_COMP | AUTO_NAME | GROUP_TAKES | PDC_AUTOM | CABLES | COMPACT_LIST | (1 << COLOR_SHIFT) | LINES | EXT_LEVELS | MASTER_LAT | THREADED;
 }
 
@@ -88,6 +90,11 @@ impl App {
                 self.settings.mixer_big = !self.settings.mixer_big;
                 let _ = self.settings.save();
             }
+            let shown = self.settings.mixer_opts & mxo::HIDE_PANEL == 0;
+            if ui.selectable_label(shown, "FX panel").hint("Track inspector & FX panel: shows or hides the selected track's slots and settings").clicked() {
+                self.settings.mixer_opts ^= mxo::HIDE_PANEL;
+                let _ = self.settings.save();
+            }
             let names = ["Wide", "Compact", "Extra large"];
             egui::ComboBox::from_id_salt("mixer-layout").width(86.0).selected_text(names[(self.settings.mixer_view as usize).min(2)]).show_ui(ui, |ui| {
                 for k in [1u8, 0, 2] {
@@ -102,10 +109,11 @@ impl App {
             if self.settings.mixer_big {
                 self.big_meter(ui);
             }
+            let panel = self.settings.mixer_opts & mxo::HIDE_PANEL == 0;
             let side = 190.0;
             let insp_left = self.settings.mixer_opts & mxo::INSPECTOR_LEFT != 0;
             ui.data_mut(|d| d.insert_temp(egui::Id::new("mixer-strip-feet"), Vec::<(usize, egui::Pos2)>::new()));
-            if insp_left {
+            if insp_left && panel {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 self.inspector(ui, n, side, &font);
                 ui.separator();
@@ -121,7 +129,7 @@ impl App {
             if !left.is_empty() {
                 ui.separator();
             }
-            let strips_w = (ui.available_width() - if insp_left { 0.0 } else { side } - rw - 38.0).max(120.0);
+            let strips_w = (ui.available_width() - if insp_left || !panel { 0.0 } else { side + 18.0 } - rw - 20.0).max(120.0);
             let _ = lw;
             ui.allocate_ui(Vec2::new(strips_w, ui.available_height()), |ui| {
                 // the bar gets room of its own, so it never lies over the foot of the strips
@@ -153,7 +161,7 @@ impl App {
             }
             ui.spacing_mut().item_spacing.x = 8.0;
 
-            if !insp_left {
+            if !insp_left && panel {
                 // a line of its own, so the last strip in view does not run into the panel
                 ui.separator();
                 self.inspector(ui, n, side, &font);
@@ -438,7 +446,7 @@ impl App {
                 let col = self.song.inserts[i].color.map(rgb).unwrap_or(if i == 0 { Color32::from_rgb(110, 96, 70) } else { STEP_A });
                 ui.painter().rect_filled(rect, 2.0, col);
                 ui.painter().text(rect.center_top() + Vec2::new(0.0, 2.0), Align2::CENTER_TOP, if i == 0 { "M".to_string() } else { i.to_string() }, font.clone(), TEXT_DIM);
-                ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, name, rect.width() - 8.0, &font), font.clone(), Color32::from_gray(240));
+                ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 2.0), Align2::CENTER_BOTTOM, fit(ui, name, rect.width() - 2.0, &font), font.clone(), Color32::from_gray(240));
                 if self.mixer_armed.contains(&i) {
                     ui.painter().circle_filled(rect.right_top() + Vec2::new(-5.0, 5.0), 3.0, Color32::from_rgb(235, 70, 60));
                 }
