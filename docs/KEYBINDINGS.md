@@ -194,6 +194,14 @@ keyboard off and outside the channel rack.
 | Shift+M, Shift+N | Select groups of notes at random; chord stamp off (the Stamp menu on the toolbar picks a chord the draw tool lays down) | yes |
 | Alt+wheel | Change the property of the note under the pointer (and the selection it belongs to) | yes |
 | Right Shift+click, right Alt+click, right Alt+right-click | Slice; mute; quick quantise | yes (with the right button the shorter piece of each cut note is dropped) |
+| Ctrl+T | Add a time marker at the play position, named by itself | yes |
+| Shift+Alt+T | Add a time signature change | yes |
+| Ctrl+Alt+Ins | Slice the notes at the selection's start and open a gap as long as the selection | yes |
+| Ctrl+Alt+Home | Resize notes from their left edge | yes |
+| Ctrl+Alt+Y | Run the last helper tool again | yes |
+| Shift+Enter | Flip the separator (control lane above the notes) | yes |
+| Shift+6 | Step sequencer zoom | yes |
+| Shift+wheel over a note | Nudge it by the snap value (Edit > wheel nudge) | yes |
 
 ## Playlist
 | Binding | Action | Done |

@@ -2957,7 +2957,7 @@ impl App {
                     continue;
                 }
                 egui::Event::Paste(text) if !typing_text => {
-                    if self.focus == Win::Piano && self.show_piano && ctx.input(|i| i.modifiers.shift) {
+                    if std::mem::take(&mut self.piano.midi_paste) || (self.focus == Win::Piano && self.show_piano && ctx.input(|i| i.modifiers.shift)) {
                         self.pr_paste_midi(text);
                     } else if self.focus == Win::Rack && self.show_rack {
                         self.rack_paste();

@@ -99,6 +99,8 @@ pub struct Settings {
     pub pl_edit_in: u8,
     /// Song jumps wait for: 0 nothing, 1 the beat, 2 the bar, 3 two bars, 4 four bars, 5 eight bars.
     pub pl_jump_q: u8,
+    /// The piano roll's option switches (bits in `pianoroll::pro`).
+    pub pr_opts: u64,
     /// How many steps back undo keeps; 0 = the usual hundred.
     pub undo_levels: u32,
     /// The mixer track browser previews and the metronome play through.
@@ -249,7 +251,7 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        let mut s = Self { pl_opts: crate::playlist::plo::DEFAULT, ..Self::default() };
+        let mut s = Self { pl_opts: crate::playlist::plo::DEFAULT, pr_opts: crate::pianoroll::pro::DEFAULT, ..Self::default() };
         let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
         for line in text.lines() {
             match line.split_once('=') {
@@ -268,6 +270,7 @@ impl Settings {
                 Some(("pl_opts", v)) => s.pl_opts = v.trim().parse().unwrap_or(crate::playlist::plo::DEFAULT),
                 Some(("pl_edit_in", v)) => s.pl_edit_in = v.trim().parse().unwrap_or(0),
                 Some(("pl_jump_q", v)) => s.pl_jump_q = v.trim().parse().unwrap_or(0),
+                Some(("pr_opts", v)) => s.pr_opts = v.trim().parse().unwrap_or(crate::pianoroll::pro::DEFAULT),
                 Some(("toolbar_flags", v)) => s.toolbar_flags = v.trim().parse().unwrap_or(0),
                 Some(("undo_levels", v)) => s.undo_levels = v.trim().parse().unwrap_or(0),
                 Some(("preview_track", v)) => s.preview_track = v.trim().parse().unwrap_or(0),
@@ -394,7 +397,7 @@ impl Settings {
         if !self.toolbar.is_empty() {
             out += &format!("toolbar={}\n", self.toolbar.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
         }
-        out += &format!("pl_opts={}\npl_edit_in={}\npl_jump_q={}\n", self.pl_opts, self.pl_edit_in, self.pl_jump_q);
+        out += &format!("pl_opts={}\npl_edit_in={}\npl_jump_q={}\npr_opts={}\n", self.pl_opts, self.pl_edit_in, self.pl_jump_q, self.pr_opts);
         if self.pdc_off {
             out += "pdc_off=1\n";
         }

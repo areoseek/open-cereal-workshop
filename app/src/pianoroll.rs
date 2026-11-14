@@ -121,7 +121,7 @@ pub fn snap_label(i: usize) -> &'static str {
     if i == SNAP_MAIN { "Main" } else { SNAPS[i.min(SNAPS.len() - 1)].0 }
 }
 
-pub const SNAPS: [(&str, u8, u32); 14] = [
+pub const SNAPS: [(&str, u8, u32); 16] = [
     ("Line", 0, 1),
     ("(none)", 1, 1),
     ("1/6 step", 2, 6),
@@ -136,17 +136,55 @@ pub const SNAPS: [(&str, u8, u32); 14] = [
     ("Beat", 3, 1),
     ("Bar", 4, 1),
     ("Cell", 0, 1),
+    ("Events", 0, 1),
+    ("Markers", 0, 1),
 ];
 
 /// The snap choices in the order the lists show them, each with its place in `SNAPS`.
 pub fn snap_order() -> impl Iterator<Item = (usize, &'static str)> {
-    [0usize, 13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].into_iter().map(|i| (i, SNAPS[i].0))
+    [0usize, 13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15].into_iter().map(|i| (i, SNAPS[i].0))
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Move,
     Resize,
+    ResizeLeft,
+}
+
+/// The piano roll's option switches, kept in the settings as one number.
+pub(crate) mod pro {
+    pub const RESIZE_LEFT: u64 = 1;
+    pub const WHEEL_NUDGE: u64 = 1 << 1;
+    pub const INVERT_GRID: u64 = 1 << 3;
+    pub const KEEP_LABELS: u64 = 1 << 4;
+    pub const SHADOW: u64 = 1 << 5;
+    pub const ROUNDED: u64 = 1 << 6;
+    pub const INCR_SCROLL: u64 = 1 << 7;
+    pub const PRECISE_TIME: u64 = 1 << 8;
+    pub const MINI: u64 = 1 << 9;
+    pub const MINI_DOUBLE: u64 = 1 << 10;
+    pub const MINI_MARKERS: u64 = 1 << 11;
+    pub const CHORD_NAME: u64 = 1 << 12;
+    pub const LEN_PROPS: u64 = 1 << 13;
+    pub const SWAP_PANELS: u64 = 1 << 14;
+    pub const AUTO_SMOOTH: u64 = 1 << 15;
+    pub const PREVIEW_PLAY: u64 = 1 << 16;
+    pub const LASSO: u64 = 1 << 17;
+    pub const SNAP_SCALE: u64 = 1 << 18;
+    pub const SNAP_MIDI: u64 = 1 << 19;
+    pub const WHITE_ONLY: u64 = 1 << 20;
+    /// Two bits: grid contrast low, medium, high.
+    pub const CONTRAST_SHIFT: u32 = 24;
+    /// Three bits: time segments none, beats, bars, 4 bars, markers.
+    pub const SEG_SHIFT: u32 = 26;
+    /// Three bits: the key strip classic, modern, flat, dark, list.
+    pub const KB_SHIFT: u32 = 29;
+    /// Two bits: key labels none, all notes, root notes, highlighted notes.
+    pub const LABEL_SHIFT: u32 = 32;
+    /// Two bits: row highlights default, black notes, automatic, a chosen scale.
+    pub const HL_SHIFT: u32 = 34;
+    pub const DEFAULT: u64 = INVERT_GRID | KEEP_LABELS | INCR_SCROLL | PRECISE_TIME | MINI | MINI_MARKERS | LEN_PROPS | SNAP_SCALE | (1 << CONTRAST_SHIFT) | (3 << SEG_SHIFT) | (1 << KB_SHIFT) | (2 << LABEL_SHIFT) | (1 << HL_SHIFT);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -168,6 +206,8 @@ enum Drag {
     /// Picking out a stretch of time on the ruler, from this tick.
     TimeSel { from: u32 },
     Keys,
+    /// Dragging the view along the small preview strip.
+    Mini,
 }
 
 pub struct State {
@@ -200,8 +240,6 @@ pub struct State {
     ghost_edit: bool,
     /// Where the last click put a new note: position and key.
     made: Option<(u32, u8)>,
-    /// The key strip shows every note's name instead of a keyboard.
-    names: bool,
     /// The light rows that show the white keys or the scale, and the channel's sample drawn behind the notes.
     rows: bool,
     wave: bool,
@@ -220,6 +258,16 @@ pub struct State {
     view_w: f32,
     /// The snap choice the Backspace key goes back to.
     snap_back: usize,
+    /// Wheel turns waiting to become a nudge.
+    nudge_acc: f32,
+    /// The control panel takes the large share of the height.
+    flip: bool,
+    /// The next paste reads a MIDI file off the clipboard.
+    pub(crate) midi_paste: bool,
+    /// The time signature window is wanted.
+    ask_sig: bool,
+    /// The helper run last, for the key that runs it again.
+    last_helper: Option<usize>,
 }
 
 impl Default for State {
@@ -247,7 +295,6 @@ impl Default for State {
             ghosts: true,
             ghost_edit: true,
             made: None,
-            names: false,
             rows: true,
             wave: false,
             stamp: 0,
@@ -260,6 +307,11 @@ impl Default for State {
             lane_x: None,
             view_w: 600.0,
             snap_back: 0,
+            nudge_acc: 0.0,
+            flip: false,
+            midi_paste: false,
+            ask_sig: false,
+            last_helper: None,
         }
     }
 }
@@ -283,28 +335,112 @@ fn note_len(n: &Note, step: u32) -> u32 {
     }
 }
 
-/// Chords the draw tool can lay down in one click: name and the keys above the clicked one.
-const STAMPS: [(&str, &[u8]); 19] = [
-    ("None", &[0]),
-    ("Major", &[0, 4, 7]),
-    ("Minor", &[0, 3, 7]),
-    ("Diminished", &[0, 3, 6]),
-    ("Augmented", &[0, 4, 8]),
-    ("Sus 2", &[0, 2, 7]),
-    ("Sus 4", &[0, 5, 7]),
-    ("Fifth", &[0, 7]),
-    ("Octave", &[0, 12]),
-    ("Major 6", &[0, 4, 7, 9]),
-    ("Minor 6", &[0, 3, 7, 9]),
-    ("Seventh", &[0, 4, 7, 10]),
-    ("Major 7", &[0, 4, 7, 11]),
-    ("Minor 7", &[0, 3, 7, 10]),
-    ("Diminished 7", &[0, 3, 6, 9]),
-    ("Minor 7 flat 5", &[0, 3, 6, 10]),
-    ("Ninth", &[0, 4, 7, 10, 14]),
-    ("Major 9", &[0, 4, 7, 11, 14]),
-    ("Minor 9", &[0, 3, 7, 10, 14]),
-];
+/// What one click of the draw tool lays down.
+#[derive(Clone)]
+enum Stamp {
+    /// The keys above the clicked one.
+    Chord(Vec<u8>),
+    /// A hit every so many steps for a bar.
+    Fill(u32),
+    /// A soft hit just ahead of the main one; the gap in sixteenths of a step.
+    Flam(u32),
+    /// Hits in a row for a beat: sixteenths of a step between them, and whether they grow louder.
+    Roll(u32, bool),
+}
+
+/// The stamp list: name, section (0 chords, 1 scales, 2 percussion), shape. The first is "none".
+fn stamps() -> &'static [(String, u8, Stamp)] {
+    static LIST: std::sync::OnceLock<Vec<(String, u8, Stamp)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v: Vec<(String, u8, Stamp)> = vec![("None".into(), 0, Stamp::Chord(vec![0]))];
+        let chords: [(&str, &[u8]); 13] = [
+            ("Augmented", &[0, 4, 8]),
+            ("Diminished", &[0, 3, 6]),
+            ("Fifth", &[0, 7]),
+            ("Fifth 9th", &[0, 7, 14]),
+            ("Fifth Octave", &[0, 7, 12]),
+            ("Major", &[0, 4, 7]),
+            ("Major 7th", &[0, 4, 7, 11]),
+            ("Minor", &[0, 3, 7]),
+            ("Minor 7th", &[0, 3, 7, 10]),
+            ("Minor 9th", &[0, 3, 7, 10, 14]),
+            ("Octave", &[0, 12]),
+            ("Suspended 2", &[0, 2, 7]),
+            ("Suspended 4", &[0, 5, 7]),
+        ];
+        v.extend(chords.iter().map(|(n, k)| (n.to_string(), 0, Stamp::Chord(k.to_vec()))));
+        v.extend(SCALES[1..SCALES.len() - 1].iter().map(|(n, k)| (n.to_string(), 1, Stamp::Chord(k.to_vec()))));
+        for n in [1u32, 2, 3, 4, 8] {
+            v.push((format!("Fill each {n} step{}", if n == 1 { "" } else { "s" }), 2, Stamp::Fill(n)));
+        }
+        for (n, gap) in [("fast", 2u32), ("med", 4), ("slow", 8)] {
+            v.push((format!("Flam {n}"), 2, Stamp::Flam(gap)));
+        }
+        for (kind, grow) in [("dynamic", true), ("relative", false)] {
+            for (n, gap) in [("fast", 4u32), ("med", 8), ("slow", 16)] {
+                v.push((format!("Roll {n} {kind}"), 2, Stamp::Roll(gap, grow)));
+            }
+        }
+        v
+    })
+}
+
+/// The notes of a stamp around the clicked one: ticks after it, keys above it, loudness as a share of its
+/// own, and a length when the stamp sets one.
+fn stamp_notes(st: &Stamp, step: u32, bar: u32, ppq: u32) -> Vec<(u32, i32, f32, Option<u32>)> {
+    match st {
+        Stamp::Chord(keys) => keys.iter().map(|k| (0, *k as i32, 1.0, None)).collect(),
+        Stamp::Fill(n) => (0..bar.div_ceil((step * n).max(1))).map(|i| (i * step * n, 0, 1.0, None)).collect(),
+        Stamp::Flam(gap) => {
+            let d = (step * gap / 16).max(1);
+            vec![(0, 0, 0.6, Some(d)), (d, 0, 1.0, None)]
+        }
+        Stamp::Roll(gap, grow) => {
+            let d = (step * gap / 16).max(1);
+            let n = (ppq / d).max(2);
+            (0..n).map(|i| (i * d, 0, if *grow { 0.4 + 0.6 * i as f32 / (n - 1) as f32 } else { 1.0 }, Some(d))).collect()
+        }
+    }
+}
+
+/// A name for the chord a set of keys makes, when it is one of the usual ones.
+fn chord_name(keys: &[u8]) -> Option<String> {
+    const SHAPES: [(&str, &[u8]); 16] = [
+        ("", &[0, 4, 7]),
+        ("m", &[0, 3, 7]),
+        ("dim", &[0, 3, 6]),
+        ("aug", &[0, 4, 8]),
+        ("sus2", &[0, 2, 7]),
+        ("sus4", &[0, 5, 7]),
+        ("5", &[0, 7]),
+        ("maj7", &[0, 4, 7, 11]),
+        ("m7", &[0, 3, 7, 10]),
+        ("7", &[0, 4, 7, 10]),
+        ("dim7", &[0, 3, 6, 9]),
+        ("m7b5", &[0, 3, 6, 10]),
+        ("6", &[0, 4, 7, 9]),
+        ("m6", &[0, 3, 7, 9]),
+        ("9", &[0, 2, 4, 7, 10]),
+        ("m9", &[0, 2, 3, 7, 10]),
+    ];
+    let low = *keys.iter().min()? % 12;
+    let mut pcs: Vec<u8> = keys.iter().map(|k| k % 12).collect();
+    pcs.sort_unstable();
+    pcs.dedup();
+    if pcs.len() < 2 {
+        return None;
+    }
+    // the lowest note is tried as the root first, so an inversion reads as a slash chord
+    for root in std::iter::once(low).chain(pcs.iter().copied().filter(|p| *p != low)) {
+        let mut rel: Vec<u8> = pcs.iter().map(|p| (p + 12 - root) % 12).collect();
+        rel.sort_unstable();
+        if let Some((n, _)) = SHAPES.iter().find(|(_, s)| **s == rel[..]) {
+            let slash = if root == low { String::new() } else { format!("/{}", NAMES[low as usize]) };
+            return Some(format!("{}{n}{slash}", NAMES[root as usize]));
+        }
+    }
+    None
+}
 
 impl App {
     fn pr_sound(&mut self, key: Option<u8>) {
@@ -313,6 +449,9 @@ impl App {
         if self.piano.sounding == want {
             return;
         }
+        // while the pattern plays, clicked notes stay silent unless the switch asks for them
+        let quiet = want.is_some() && self.handle.transport.playing() && self.settings.pr_opts & pro::PREVIEW_PLAY == 0;
+        let want = if quiet { None } else { want };
         if let Some((c, k)) = self.piano.sounding.take() {
             self.handle.send(Cmd::NoteOff { chan: c, key: k });
         }
@@ -340,6 +479,126 @@ impl App {
             ms.sort_by_key(|m| m.pos);
             self.dirty = true;
         }
+    }
+
+    /// The marker tools of the menu: 0 one at the play position, 1 one at each end of the picked time,
+    /// 2 one every `n` bars across it, 3 a key marker (`n` = root * 256 + scale), 4 delete them all.
+    fn pr_marker_tool(&mut self, what: u8, n: u32) {
+        use cereal_engine::song::TimeMarker;
+        let pat = self.pr_pat();
+        let bar = self.pr_bar().max(1);
+        let tr = &self.handle.transport;
+        let now = if tr.playing() && !tr.song_mode() { (tr.tick().max(0.0) as u32 / bar) * bar } else { 0 };
+        let sel = self.piano.time_sel;
+        let ms = &mut self.song.patterns[pat].markers;
+        let mut put = |pos: u32, name: String| {
+            if !ms.iter().any(|m| m.pos == pos && m.kind == 0) {
+                ms.push(TimeMarker { pos, name, kind: 0, sig: (4, 4) });
+            }
+        };
+        match (what, sel) {
+            (0, _) => put(sel.map(|t| t.0).unwrap_or(now), "Auto".into()),
+            (1, Some((a, b))) => {
+                put(a, "Start".into());
+                put(b, "End".into());
+            }
+            (2, Some((a, b))) => {
+                let mut t = a;
+                let mut k = 1;
+                while t < b {
+                    put(t, format!("Marker #{k}"));
+                    k += 1;
+                    t += bar * n.max(1);
+                }
+            }
+            (1 | 2, None) => {
+                self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into();
+                return;
+            }
+            (3, _) => {
+                let (root, scale) = ((n >> 8) as usize % 12, (n & 255) as usize);
+                put(sel.map(|t| t.0).unwrap_or(now), format!("{} {}", NAMES[root], SCALES[scale.min(SCALES.len() - 1)].0));
+            }
+            _ => ms.retain(|m| m.kind != 0),
+        }
+        ms.sort_by_key(|m| m.pos);
+        self.dirty = true;
+    }
+
+    /// Cut every note that crosses the start of the picked time in two there, then open the space.
+    fn pr_slice_space(&mut self) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let step = self.song.step();
+        let bar = self.pr_bar();
+        let from = self.pr_span().map(|t| t.0).unwrap_or_else(|| self.piano.left_tick.div_ceil(bar) * bar);
+        let notes = &mut self.song.patterns[pat].notes;
+        for i in 0..notes.len() {
+            let len = note_len(&notes[i], step);
+            if notes[i].chan == chan && notes[i].pos < from && notes[i].pos + len > from {
+                let mut tail = notes[i].clone();
+                tail.pos = from;
+                tail.len = notes[i].pos + len - from;
+                notes[i].len = from - notes[i].pos;
+                notes.push(tail);
+            }
+        }
+        self.pr_space(true);
+    }
+
+    /// Keep only what lies inside the picked time: notes outside go, notes across its ends are cut to it.
+    fn pr_trim(&mut self) {
+        let pat = self.pr_pat();
+        let chan = self.sel_chan as u16;
+        let step = self.song.step();
+        let Some((a, b)) = self.piano.time_sel else {
+            self.status = "Pick a stretch of time on the ruler first (Ctrl and drag)".into();
+            return;
+        };
+        let notes = &mut self.song.patterns[pat].notes;
+        let mut gone = BTreeSet::new();
+        for (i, n) in notes.iter_mut().enumerate().filter(|(_, n)| n.chan == chan) {
+            let end = n.pos + note_len(n, step);
+            if end <= a || n.pos >= b {
+                gone.insert(i);
+                continue;
+            }
+            let (p0, p1) = (n.pos.max(a), end.min(b));
+            n.pos = p0;
+            n.len = p1 - p0;
+        }
+        self.pr_remove(pat, &gone);
+        self.piano.sel.clear();
+        self.pr_sort(pat);
+        self.dirty = true;
+    }
+
+    /// The pattern's notes as a MIDI file in the temporary folder, with its address on the clipboard for
+    /// other programs to paste.
+    fn pr_copy_midi(&mut self, ctx: &egui::Context) {
+        let pat = self.pr_pat();
+        let bytes = cereal_engine::midifile::export(&self.song, false, pat);
+        let path = std::env::temp_dir().join("open-cereal-workshop-clipboard.mid");
+        self.status = match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                ctx.copy_text(format!("file://{}", path.display()));
+                "The pattern is on the clipboard as a MIDI file".into()
+            }
+            Err(e) => format!("Could not write the MIDI file: {e}"),
+        };
+    }
+
+    /// One switch of the piano roll's options, flipped and remembered.
+    fn pr_flip_opt(&mut self, bit: u64) {
+        self.settings.pr_opts ^= bit;
+        let _ = self.settings.save();
+    }
+
+    /// A choice kept in a few bits of the piano roll's options.
+    fn pr_set_opt(&mut self, shift: u32, bits: u32, v: u64) {
+        let mask = ((1u64 << bits) - 1) << shift;
+        self.settings.pr_opts = (self.settings.pr_opts & !mask) | (v << shift);
+        let _ = self.settings.save();
     }
 
     fn pr_pat(&mut self) -> usize {
@@ -610,6 +869,13 @@ impl App {
             4 => {
                 let end = self.song.pattern_length(pat);
                 self.pr_show(0, end.max(bar));
+            }
+            // the look of the step buttons: each step as wide as it is high
+            6 => {
+                let px = KEY_H * 2.0 / self.song.step().max(1) as f32;
+                let old = self.piano.zoom * 96.0 / self.song.ppq as f32;
+                self.piano.zoom = (px * self.song.ppq as f32 / 96.0).clamp(0.02, 12.0);
+                self.piano.scroll_x = (self.piano.scroll_x / old.max(1e-6) * px).max(0.0);
             }
             _ => {
                 if let Some((a, b)) = self.pr_span() {
@@ -903,6 +1169,7 @@ impl App {
 
     /// Open one of the helper tools on the selected notes (all of the channel's when nothing is selected).
     pub(crate) fn pr_helper(&mut self, which: usize) {
+        self.piano.last_helper = Some(which);
         let pat = self.pr_pat();
         let (ppq, step, snap) = (self.song.ppq, self.song.step(), self.pr_snap().max(1));
         let grid = if snap <= 1 { step } else { snap };
@@ -1216,14 +1483,25 @@ impl App {
                 Key::ArrowDown => self.pr_transpose(-12),
                 Key::Insert if !m.shift => self.pr_space(true),
                 Key::Delete => self.pr_space(false),
+                Key::T if !repeat => self.pr_marker_tool(0, 0),
+                Key::I if !repeat => self.status = "Insert current controller value works on an event lane; note properties have none".into(),
                 Key::ArrowLeft => self.pr_select_beside(false),
                 Key::ArrowRight => self.pr_select_beside(true),
                 _ => return false,
             }
             return true;
         }
-        if m.alt && m.command && key == Key::V && !repeat {
-            self.piano.ghost_edit = !self.piano.ghost_edit;
+        if m.alt && m.command && !repeat {
+            match key {
+                Key::V => self.piano.ghost_edit = !self.piano.ghost_edit,
+                Key::Insert => self.pr_slice_space(),
+                Key::Home => self.pr_flip_opt(pro::RESIZE_LEFT),
+                Key::Y => match self.piano.last_helper {
+                    Some(i) => self.pr_helper(i),
+                    None => self.status = "No helper has run yet".into(),
+                },
+                _ => return false,
+            }
             return true;
         }
         if m.alt && !m.command {
@@ -1236,6 +1514,7 @@ impl App {
                 Key::G if !repeat => self.pr_group(false),
                 Key::B if !repeat => self.piano.rows = !self.piano.rows,
                 Key::N if !repeat => self.piano.wave = !self.piano.wave,
+                Key::T if !repeat && m.shift => self.piano.ask_sig = true,
                 Key::T if !repeat => self.pr_add_marker(),
                 k => match HELPERS.iter().position(|h| h.1 == k) {
                     Some(i) => self.pr_helper(i),
@@ -1251,6 +1530,7 @@ impl App {
                 Key::ArrowLeft => self.pr_nudge(-1),
                 Key::ArrowRight => self.pr_nudge(1),
                 Key::I => self.pr_invert_selection(),
+                Key::Enter if !repeat => self.piano.flip = !self.piano.flip,
                 Key::G if !repeat => self.pr_group(true),
                 Key::N if !repeat => self.piano.stamp = 0,
                 Key::M if !repeat => {
@@ -1270,7 +1550,7 @@ impl App {
                 Key::H => self.pr_step_channel(-1, true),
                 Key::K => self.pr_step_channel(1, true),
                 k => match crate::DIGITS.iter().position(|d| *d == k) {
-                    Some(d) if d <= 5 => self.pr_zoom_key(d),
+                    Some(d) if d <= 6 => self.pr_zoom_key(d),
                     _ => return false,
                 },
             }
@@ -1311,7 +1591,10 @@ impl App {
             Key::Y => self.piano.tool = Tool::Playback,
             Key::S => self.piano.slide = !self.piano.slide,
             Key::O => self.piano.porta = !self.piano.porta,
-            Key::M => self.piano.names = !self.piano.names,
+            Key::M => {
+                let now = (self.settings.pr_opts >> pro::KB_SHIFT) & 7;
+                self.pr_set_opt(pro::KB_SHIFT, 3, if now == 4 { 1 } else { 4 });
+            }
             _ => return false,
         }
         true
@@ -1319,8 +1602,9 @@ impl App {
 
     /// The piano roll's own menu, behind the arrow at the left of its toolbar.
     fn piano_menu(&mut self, ui: &mut Ui) {
-        use crate::menus::{mi, sect, tick};
+        use crate::menus::{col, mi, sect, tick};
         const N: Modifiers = Modifiers::NONE;
+        const CA: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: true };
         const C: Modifiers = Modifiers::COMMAND;
         const A: Modifiers = Modifiers::ALT;
         const S: Modifiers = Modifiers::SHIFT;
@@ -1347,6 +1631,11 @@ impl App {
                 ui.close_menu();
                 self.open_score_dialog();
             }
+            if mi(ui, "Browse scores", "").hint("Show the scores folder in the browser").clicked() {
+                ui.close_menu();
+                self.show_browser = true;
+                self.status = "Scores sit in the browser; a click on one loads it into the piano roll".into();
+            }
             if mi(ui, "Save score as...", "").clicked() {
                 ui.close_menu();
                 self.save_score_dialog();
@@ -1359,6 +1648,15 @@ impl App {
             if mi(ui, "Export as MIDI file...", "Shift+Ctrl+M").clicked() {
                 ui.close_menu();
                 self.export_midi();
+            }
+            if mi(ui, "Paste from MIDI clipboard", "Shift+Ctrl+V").hint("Notes of a MIDI file another program put on the clipboard").clicked() {
+                ui.close_menu();
+                self.piano.midi_paste = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            if mi(ui, "Copy to MIDI clipboard", "").hint("The pattern goes on the clipboard as a MIDI file other programs can paste").clicked() {
+                ui.close_menu();
+                self.pr_copy_midi(ui.ctx());
             }
             ui.separator();
             if mi(ui, "Export as score sheet...", "").clicked() {
@@ -1394,19 +1692,46 @@ impl App {
                     ("Transpose one octave down", "Ctrl+Down", C, Key::ArrowDown),
                     ("Discard lengths", "Shift+D", S, Key::D),
                     GAP,
+                ],
+                &mut press,
+            );
+            let o = self.settings.pr_opts;
+            if tick(ui, o & pro::RESIZE_LEFT != 0, "Allow resizing from left", "Ctrl+Alt+Home").hint("The left edge of a note drags its start").clicked() {
+                self.pr_flip_opt(pro::RESIZE_LEFT);
+            }
+            if tick(ui, o & pro::WHEEL_NUDGE != 0, "Nudge notes with mouse wheel", "").hint("Shift and the wheel over a note move it along the grid").clicked() {
+                self.pr_flip_opt(pro::WHEEL_NUDGE);
+            }
+            list(
+                ui,
+                &[
+                    GAP,
                     ("Change color", "Alt+C", A, Key::C),
                     ("Mute", "Alt+M", A, Key::M),
                     ("Unmute", "Shift+Alt+M", SA, Key::M),
                     GAP,
                     ("Insert space", "Ctrl+Ins", C, Key::Insert),
+                    ("Slice & insert space", "Ctrl+Alt+Ins", CA, Key::Insert),
                     ("Delete space", "Ctrl+Del", C, Key::Delete),
                 ],
                 &mut press,
             );
+            if mi(ui, "Trim selection", "").hint("Keep only what lies inside the picked time").clicked() {
+                self.pr_trim();
+                ui.close_menu();
+            }
+            list(ui, &[GAP, ("Insert current controller value", "Ctrl+I", C, Key::I)], &mut press);
+            if mi(ui, "Turn into automation clip...", "").clicked() {
+                self.status = "Turn into automation clip works on an event lane; open the control in the event editor".into();
+                ui.close_menu();
+            }
         });
         ui.menu_button("Tools", |ui| {
-            ui.set_min_width(250.0);
+            ui.set_min_width(470.0);
             let mut helper = None;
+            ui.horizontal_top(|ui| {
+            col(ui, 250.0, |ui| {
+            sect(ui, "Built-in");
             let mut h = |ui: &mut Ui, i: usize| {
                 let (name, keys) = HELPERS[i].0.split_once("  ").unwrap_or((HELPERS[i].0, ""));
                 if mi(ui, name, keys.trim()).clicked() {
@@ -1433,14 +1758,35 @@ impl App {
             ui.separator();
             h(ui, 10);
             h(ui, 11);
+            });
+            col(ui, 210.0, |ui| {
+                sect(ui, "Scripts");
+                list(ui, &[("Run last script again", "Ctrl+Alt+Y", CA, Key::Y)], &mut press);
+                if mi(ui, "Open script folder...", "").clicked() {
+                    if let Some(dir) = crate::setup::settings_path().and_then(|p| p.parent().map(|d| d.join("Piano roll scripts"))) {
+                        let _ = std::fs::create_dir_all(&dir);
+                        self.status = format!("Scripts folder: {}", dir.display());
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.add_enabled(false, egui::Button::new("(no scripts in the folder)"));
+            });
+            });
             if let Some(i) = helper {
                 self.pr_helper(i);
             }
         });
         ui.menu_button("Stamp", |ui| {
-            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-                for (i, (n, _)) in STAMPS.iter().enumerate() {
-                    if ui.radio(self.piano.stamp == i, if i == 0 { "(none)        Shift+N" } else { n }).clicked() {
+            ui.set_min_width(230.0);
+            egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                let mut at = 0;
+                for (i, (n, section, _)) in stamps().iter().enumerate() {
+                    if *section != at {
+                        at = *section;
+                        sect(ui, if at == 1 { "Melodic - scales" } else { "Percussions" });
+                    }
+                    if ui.radio(self.piano.stamp == i, if i == 0 { "(none)        Shift+N" } else { n.as_str() }).clicked() {
                         self.piano.stamp = i;
                         ui.close_menu();
                     }
@@ -1449,27 +1795,71 @@ impl App {
         });
         ui.menu_button("View", |ui| {
             ui.set_min_width(250.0);
+            let o = self.settings.pr_opts;
+            let opt = |app: &mut Self, ui: &mut Ui, bit: u64, label: &str, keys: &str, hint: &str| {
+                if tick(ui, o & bit != 0, label, keys).hint(hint).clicked() {
+                    app.pr_flip_opt(bit);
+                }
+            };
+            sect(ui, "Grid");
+            if mi(ui, "Grid color...", "").clicked() {
+                self.grid_win = !self.grid_win;
+                ui.close_menu();
+            }
+            ui.menu_button("Grid contrast", |ui| {
+                for (i, n) in ["Low", "Medium", "High"].iter().enumerate() {
+                    if ui.radio((o >> pro::CONTRAST_SHIFT) & 3 == i as u64, *n).clicked() {
+                        self.pr_set_opt(pro::CONTRAST_SHIFT, 2, i as u64);
+                        ui.close_menu();
+                    }
+                }
+            });
+            opt(self, ui, pro::INVERT_GRID, "Invert grid", "", "Swap the light and the dark rows");
+            ui.menu_button("Time segments", |ui| {
+                for (i, n) in ["None", "Beats", "Bars", "4 bars", "Markers"].iter().enumerate() {
+                    if ui.radio((o >> pro::SEG_SHIFT) & 7 == i as u64, *n).clicked() {
+                        self.pr_set_opt(pro::SEG_SHIFT, 3, i as u64);
+                        ui.close_menu();
+                    }
+                }
+            });
+            sect(ui, "Content");
+            opt(self, ui, pro::KEEP_LABELS, "Keep labels on screen", "", "A note that starts off the left edge still shows its name");
+            opt(self, ui, pro::SHADOW, "Shadow", "", "Notes cast a shadow on the grid");
+            opt(self, ui, pro::ROUNDED, "Rounded", "", "Notes have round corners");
+            ui.menu_button("Note colors", |ui| {
+                sect(ui, "Palette");
+                for n in ["Edit palette...", "Save preset as...", "Browse presets..."] {
+                    if mi(ui, n, "").clicked() {
+                        self.status = "The note colours are the sixteen of the colour picker on the toolbar".into();
+                        ui.close_menu();
+                    }
+                }
+                sect(ui, "Presets");
+                for n in ["Default (factory)", "High contrast (factory)", "Auto saved"] {
+                    if mi(ui, n, "").clicked() {
+                        ui.close_menu();
+                    }
+                }
+            });
+            sect(ui, "Time");
+            opt(self, ui, pro::INCR_SCROLL, "Incremental scrolling", "", "The view glides with the play position instead of turning pages");
+            opt(self, ui, pro::PRECISE_TIME, "Precise time indicator", "", "The play position draws a line down the whole grid");
+            ui.menu_button("Mini piano roll preview", |ui| {
+                for (bit, n) in [(pro::MINI, "Enable"), (pro::MINI_DOUBLE, "Double height"), (pro::MINI_MARKERS, "Show time markers")] {
+                    if tick(ui, o & bit != 0, n, "").clicked() {
+                        self.pr_flip_opt(bit);
+                    }
+                }
+            });
             sect(ui, "Helpers");
             if tick(ui, self.piano.rows, "Note grid highlights", "Alt+B").clicked() {
                 self.piano.rows = !self.piano.rows;
             }
-            ui.menu_button("Scale highlighting", |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        for (i, n) in NAMES.iter().enumerate() {
-                            ui.selectable_value(&mut self.piano.scale_root, i as u8, *n);
-                        }
-                    });
-                    ui.vertical(|ui| {
-                        for (i, (n, _)) in SCALES.iter().enumerate() {
-                            ui.selectable_value(&mut self.piano.scale, i, *n);
-                        }
-                    });
-                });
-            });
-            if tick(ui, self.piano.names, "Note names", "M").clicked() {
-                self.piano.names = !self.piano.names;
-            }
+            ui.menu_button("Scale highlighting", |ui| self.scale_menu(ui, true));
+            opt(self, ui, pro::CHORD_NAME, "Show chord name for selection", "", "The chord the selected notes make shows in the corner of the grid");
+            ui.separator();
+            opt(self, ui, pro::LEN_PROPS, "Note length in note properties", "", "The note properties window shows and sets the length");
             ui.separator();
             if tick(ui, self.piano.ghosts, "Ghost channels", "Alt+V").clicked() {
                 self.piano.ghosts = !self.piano.ghosts;
@@ -1481,13 +1871,57 @@ impl App {
             if tick(ui, self.piano.wave, "Background waveform", "Alt+N").clicked() {
                 self.piano.wave = !self.piano.wave;
             }
+            sect(ui, "Piano roll");
+            ui.menu_button("Keyboard options", |ui| {
+                for (i, n) in ["Classic", "Modern", "Flat", "Dark", "List"].iter().enumerate() {
+                    if ui.radio((o >> pro::KB_SHIFT) & 7 == i as u64, *n).clicked() {
+                        self.pr_set_opt(pro::KB_SHIFT, 3, i as u64);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.menu_button("Key labels", |ui| {
+                    ui.menu_button("Presets", |ui| {
+                        for (n, v) in [("Default", 2u64), ("All notes", 1), ("None", 0)] {
+                            if mi(ui, n, "").clicked() {
+                                self.pr_set_opt(pro::LABEL_SHIFT, 2, v);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    for (i, n) in ["None", "All notes", "Root notes", "Highlighted notes"].iter().enumerate() {
+                        let can = i != 3 || self.piano.scale != 0;
+                        if ui.add_enabled(can, egui::RadioButton::new((o >> pro::LABEL_SHIFT) & 3 == i as u64, *n)).clicked() {
+                            self.pr_set_opt(pro::LABEL_SHIFT, 2, i as u64);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if tick(ui, o & pro::WHITE_ONLY != 0, "White notes only", "").clicked() {
+                        self.pr_flip_opt(pro::WHITE_ONLY);
+                    }
+                });
+            });
+            ui.separator();
+            opt(self, ui, pro::SWAP_PANELS, "Swap panels", "", "The control panel sits above the notes");
+            if mi(ui, "Flip separator", "Shift+Enter").hint("The notes and the control panel trade heights").clicked() {
+                self.piano.flip = !self.piano.flip;
+                ui.close_menu();
+            }
+            ui.separator();
+            ui.add_enabled(false, egui::Button::new("Remove background picture"));
         });
         ui.menu_button("Snap", |ui| {
             if ui.radio(self.piano.snap == SNAP_MAIN, "Main").clicked() {
                 self.piano.snap = SNAP_MAIN;
                 ui.close_menu();
             }
+            ui.separator();
             for (i, label) in snap_order() {
+                if matches!(i, 1 | 14) {
+                    ui.separator();
+                }
                 if ui.radio(self.piano.snap == i, label).clicked() {
                     self.piano.snap = i;
                     ui.close_menu();
@@ -1522,9 +1956,13 @@ impl App {
                     ("Select time around selection", "Ctrl+Enter", C, Key::Enter),
                     ("Select previous time", "Ctrl+Left", C, Key::ArrowLeft),
                     ("Select next time", "Ctrl+Right", C, Key::ArrowRight),
+                    GAP,
                 ],
                 &mut press,
             );
+            if tick(ui, self.settings.pr_opts & pro::LASSO != 0, "Magic lasso", "").hint("Circle notes with the pointer, no button held, to select them").clicked() {
+                self.pr_flip_opt(pro::LASSO);
+            }
         });
         ui.menu_button("Group", |ui| list(ui, &[("Group", "Shift+G", S, Key::G), ("Ungroup", "Alt+G", A, Key::G)], &mut press));
         ui.menu_button("Zoom", |ui| {
@@ -1541,17 +1979,32 @@ impl App {
                     GAP,
                     ("Zoom out far", "Shift+4", S, Key::Num4),
                     ("Zoom on selection", "Shift+5", S, Key::Num5),
+                    GAP,
+                    ("Step sequencer mode zoom", "Shift+6", S, Key::Num6),
                 ],
                 &mut press,
             );
         });
         ui.menu_button("Time markers", |ui| {
             ui.set_min_width(200.0);
-            list(ui, &[("Add one...", "Alt+T", A, Key::T)], &mut press);
+            ui.set_min_width(250.0);
+            list(ui, &[("Add one...", "Alt+T", A, Key::T), ("Add auto", "Ctrl+T", C, Key::T)], &mut press);
+            if ui.add_enabled(self.piano.time_sel.is_some(), egui::Button::new("Add two...")).clicked() {
+                self.pr_marker_tool(1, 0);
+                ui.close_menu();
+            }
+            ui.menu_button("Add one every", |ui| {
+                for (n, label) in [(1u32, "Bar"), (2, "2 bars"), (4, "4 bars"), (8, "8 bars")] {
+                    if mi(ui, label, "").clicked() {
+                        self.pr_marker_tool(2, n);
+                        ui.close_menu();
+                    }
+                }
+            });
+            list(ui, &[("Add time signature change...", "Shift+Alt+T", SA, Key::T)], &mut press);
+            ui.menu_button("Add key marker", |ui| self.scale_menu(ui, false));
             if mi(ui, "Delete", "").clicked() {
-                let pat = self.pr_pat();
-                self.song.patterns[pat].markers.retain(|m| m.kind != 0);
-                self.dirty = true;
+                self.pr_marker_tool(4, 0);
                 ui.close_menu();
             }
         });
@@ -1575,6 +2028,13 @@ impl App {
             }
         });
         ui.separator();
+        if tick(ui, self.settings.pr_opts & pro::AUTO_SMOOTH != 0, "Auto smoothing", "").hint("Events drawn by hand are smoothed as they go down").clicked() {
+            self.pr_flip_opt(pro::AUTO_SMOOTH);
+        }
+        if tick(ui, self.settings.pr_opts & pro::PREVIEW_PLAY != 0, "Preview notes during playback", "").hint("Clicked notes sound even while the pattern plays").clicked() {
+            self.pr_flip_opt(pro::PREVIEW_PLAY);
+        }
+        ui.separator();
         if mi(ui, "Center", "Shift+0").clicked() {
             press = Some((S, Key::Num0));
             ui.close_menu();
@@ -1587,6 +2047,55 @@ impl App {
         if let Some((m, k)) = press {
             self.piano_key(k, m, false);
         }
+    }
+
+    /// The root and scale picker of the menus: for the row highlights (`light`), else it drops a key marker.
+    fn scale_menu(&mut self, ui: &mut Ui, light: bool) {
+        use crate::menus::{col, sect, tick};
+        let o = self.settings.pr_opts;
+        let hl = (o >> pro::HL_SHIFT) & 3;
+        ui.horizontal_top(|ui| {
+            col(ui, 48.0, |ui| {
+                sect(ui, "Root note");
+                for (i, n) in NAMES.iter().enumerate() {
+                    let can = !light || self.piano.scale != 0;
+                    if ui.add_enabled(can, egui::SelectableLabel::new(self.piano.scale_root == i as u8, *n)).clicked() {
+                        self.piano.scale_root = i as u8;
+                    }
+                }
+            });
+            col(ui, 190.0, |ui| {
+                sect(ui, "Scale");
+                egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
+                    if light {
+                        if tick(ui, o & pro::SNAP_SCALE != 0, "Snap PR notes to scale", "").hint("Notes drawn or moved land on the keys of the scale").clicked() {
+                            self.pr_flip_opt(pro::SNAP_SCALE);
+                        }
+                        if tick(ui, o & pro::SNAP_MIDI != 0, "Snap incoming MIDI", "").hint("Notes played in land on the keys of the scale").clicked() {
+                            self.pr_flip_opt(pro::SNAP_MIDI);
+                        }
+                        ui.separator();
+                        for (i, n) in ["Default", "Black notes", "Automatic"].iter().enumerate() {
+                            if ui.radio(self.piano.scale == 0 && hl == i as u64, *n).clicked() {
+                                self.piano.scale = 0;
+                                self.pr_set_opt(pro::HL_SHIFT, 2, i as u64);
+                            }
+                        }
+                        ui.separator();
+                    }
+                    for (i, (n, _)) in SCALES.iter().enumerate().take(SCALES.len() - 1).skip(1) {
+                        if light {
+                            if ui.radio(self.piano.scale == i, *n).clicked() {
+                                self.piano.scale = i;
+                            }
+                        } else if ui.button(*n).clicked() {
+                            self.pr_marker_tool(3, (self.piano.scale_root as u32) << 8 | i as u32);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        });
     }
 
     fn piano_header(&mut self, ui: &mut Ui, pat: usize) {
@@ -1630,32 +2139,26 @@ impl App {
                     }
                 }
             });
-            let stamp_name = if self.piano.stamp == 0 { "Stamp" } else { STAMPS[self.piano.stamp.min(STAMPS.len() - 1)].0 };
+            let stamp_name = if self.piano.stamp == 0 { "Stamp" } else { stamps()[self.piano.stamp.min(stamps().len() - 1)].0.as_str() };
             ui.menu_button(RichText::new(stamp_name).small(), |ui| {
-                for (i, (n, _)) in STAMPS.iter().enumerate() {
-                    let label = if i == 0 { "None        Shift+N" } else { n };
-                    if ui.selectable_label(self.piano.stamp == i, label).clicked() {
-                        self.piano.stamp = i;
-                        ui.close_menu();
+                egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                    let mut at = 0;
+                    for (i, (n, section, _)) in stamps().iter().enumerate() {
+                        if *section != at {
+                            at = *section;
+                            crate::menus::sect(ui, if at == 1 { "Melodic - scales" } else { "Percussions" });
+                        }
+                        let label = if i == 0 { "None        Shift+N" } else { n.as_str() };
+                        if ui.selectable_label(self.piano.stamp == i, label).clicked() {
+                            self.piano.stamp = i;
+                            ui.close_menu();
+                        }
                     }
-                }
+                });
             });
             let (root, scale) = (self.piano.scale_root, self.piano.scale);
             let scale_name = if scale == 0 { "Scale".to_string() } else { format!("{} {}", NAMES[root as usize % 12], SCALES[scale].0) };
-            ui.menu_button(RichText::new(scale_name).small(), |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        for (i, n) in NAMES.iter().enumerate() {
-                            ui.selectable_value(&mut self.piano.scale_root, i as u8, *n);
-                        }
-                    });
-                    ui.vertical(|ui| {
-                        for (i, (n, _)) in SCALES.iter().enumerate() {
-                            ui.selectable_value(&mut self.piano.scale, i, *n);
-                        }
-                    });
-                });
-            })
+            ui.menu_button(RichText::new(scale_name).small(), |ui| self.scale_menu(ui, true))
             .response
             .hint("Scale highlighting");
             if ui.selectable_label(self.piano.ghosts, RichText::new("Ghosts").small()).hint("Show the other channels' notes behind").clicked() {
@@ -1691,12 +2194,20 @@ impl App {
         self.piano_header(ui, pat);
 
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(Vec2::new(240.0, 200.0)), Sense::click_and_drag());
-        let lane_top = rect.bottom() - LANE_H;
-        let grid = Rect::from_min_max(rect.min + Vec2::new(KEYS_W, RULER_H), Pos2::new(rect.right(), lane_top - 2.0));
+        let opts = self.settings.pr_opts;
+        // from the top: the small preview strip, the ruler, then the notes and the control panel
+        let mini_h = if opts & pro::MINI == 0 { 0.0 } else if opts & pro::MINI_DOUBLE != 0 { 36.0 } else { 18.0 };
+        let top = rect.top() + mini_h + RULER_H;
+        let lane_h = if self.piano.flip { ((rect.bottom() - top) - LANE_H - 2.0).max(LANE_H) } else { LANE_H }.min((rect.bottom() - top - 40.0).max(20.0));
+        let swap = opts & pro::SWAP_PANELS != 0;
+        let (grid_y, lane_y) = if swap { ((top + lane_h + 2.0, rect.bottom()), (top, top + lane_h)) } else { ((top, rect.bottom() - lane_h - 2.0), (rect.bottom() - lane_h, rect.bottom())) };
+        let grid = Rect::from_min_max(Pos2::new(rect.left() + KEYS_W, grid_y.0), Pos2::new(rect.right(), grid_y.1));
         let keys = Rect::from_min_max(Pos2::new(rect.left(), grid.top()), Pos2::new(grid.left(), grid.bottom()));
-        let ruler = Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(rect.right(), grid.top()));
-        let lane = Rect::from_min_max(Pos2::new(grid.left(), lane_top), rect.max);
-        let lane_head = Rect::from_min_max(Pos2::new(rect.left(), lane_top), Pos2::new(grid.left(), rect.bottom()));
+        let ruler = Rect::from_min_max(Pos2::new(grid.left(), rect.top() + mini_h), Pos2::new(rect.right(), top));
+        let lane = Rect::from_min_max(Pos2::new(grid.left(), lane_y.0), Pos2::new(rect.right(), lane_y.1));
+        let lane_head = Rect::from_min_max(Pos2::new(rect.left(), lane_y.0), Pos2::new(grid.left(), lane_y.1));
+        let mini = Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(rect.right(), rect.top() + mini_h));
+        let lane_span = lane_h - 8.0;
 
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let inp = ui.input(|i| {
@@ -1718,6 +2229,7 @@ impl App {
 
         // scrolling and zoom
         let mut alt_wheel = 0.0_f32;
+        let mut nudge_wheel = 0.0_f32;
         if resp.hovered() {
             let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
             if mods.alt && !mods.shift && zoom == 1.0 {
@@ -1731,6 +2243,9 @@ impl App {
                     let off = pp.x - grid.left();
                     self.piano.scroll_x = (self.piano.scroll_x + off) * self.piano.zoom / old - off;
                 }
+            } else if mods.shift && !mods.alt && opts & pro::WHEEL_NUDGE != 0 {
+                // over a note the wheel nudges it, anywhere else it scrolls sideways (settled below)
+                nudge_wheel = scroll.y + scroll.x;
             } else if mods.shift {
                 self.piano.scroll_x -= scroll.y + scroll.x;
             } else {
@@ -1746,7 +2261,10 @@ impl App {
         if self.auto_scroll && self.handle.transport.playing() && !self.handle.transport.song_mode() {
             // auto scrolling: the view turns the page when the play position leaves it
             let x = self.handle.transport.tick() as f32 * px;
-            if x < self.piano.scroll_x || x > self.piano.scroll_x + grid.width() {
+            if opts & pro::INCR_SCROLL != 0 {
+                // gliding: the play position stays in the middle once it gets there
+                self.piano.scroll_x = (x - grid.width() * 0.5).max(0.0);
+            } else if x < self.piano.scroll_x || x > self.piano.scroll_x + grid.width() {
                 self.piano.scroll_x = x;
             }
         }
@@ -1795,12 +2313,35 @@ impl App {
         let top_key = key_of(grid.top());
         let bottom_key = key_of(grid.bottom());
         let gp = ui.painter_at(grid);
+        // the scale the rows show: the chosen one, or the one that fits the pattern's notes best
+        let (lit_root, lit_scale) = if self.piano.scale != 0 {
+            (self.piano.scale_root, self.piano.scale)
+        } else if (opts >> pro::HL_SHIFT) & 3 == 2 {
+            let mut seen = [0u32; 12];
+            for n in &self.song.patterns[pat].notes {
+                seen[n.key as usize % 12] += 1;
+            }
+            let all: u32 = seen.iter().sum();
+            let mut best = (0u8, 0usize, 0u32);
+            for root in 0..12u8 {
+                for scale in [1usize, 11] {
+                    let fit: u32 = (0..12u8).filter(|k| prtools::in_scale(*k, root, scale)).map(|k| seen[k as usize]).sum();
+                    if fit > best.2 {
+                        best = (root, scale, fit);
+                    }
+                }
+            }
+            if all == 0 { (0, 0) } else { (best.0, best.1) }
+        } else {
+            (0, 0)
+        };
+        let invert = opts & pro::INVERT_GRID != 0;
         for key in bottom_key..=top_key {
             let y = y_of(key);
             let row = Rect::from_min_max(Pos2::new(grid.left(), y), Pos2::new(grid.right(), y + KEY_H));
             // with a scale chosen its keys are the light rows, else the white keys are
-            let lit = if self.piano.scale == 0 { !is_black(key) } else { prtools::in_scale(key as u8, self.piano.scale_root, self.piano.scale) };
-            if lit && self.piano.rows {
+            let lit = if lit_scale == 0 { !is_black(key) } else { prtools::in_scale(key as u8, lit_root, lit_scale) };
+            if (lit == invert) && self.piano.rows {
                 gp.rect_filled(row, 0.0, grid_light);
             }
             gp.line_segment([row.left_top(), row.right_top()], Stroke::new(1.0_f32, if key % 12 == 11 { LINE } else { LINE_SOFT }));
@@ -1828,6 +2369,38 @@ impl App {
         let last = tick_of(grid.right()) as u32 + line;
         let lp = ui.painter_at(lane);
         lp.rect_filled(lane, 0.0, PANEL_DARK);
+        // time segments: every other stretch a shade darker
+        {
+            let shade = Color32::from_black_alpha(26);
+            let seg = match (opts >> pro::SEG_SHIFT) & 7 {
+                1 => self.song.ppq,
+                2 => bar,
+                3 => bar * 4,
+                _ => 0,
+            };
+            if seg > 0 && seg as f32 * px >= 4.0 {
+                let mut t = (tick_of(grid.left()) as u32 / seg) * seg;
+                while t <= last {
+                    if (t / seg) % 2 == 1 {
+                        gp.rect_filled(Rect::from_min_max(Pos2::new(x_of(t as f32), grid.top()), Pos2::new(x_of((t + seg) as f32), grid.bottom())), 0.0, shade);
+                    }
+                    t += seg;
+                }
+            } else if (opts >> pro::SEG_SHIFT) & 7 == 4 {
+                let mut cuts: Vec<u32> = self.song.patterns[pat].markers.iter().filter(|m| m.kind == 0).map(|m| m.pos).collect();
+                cuts.push(u32::MAX / 2);
+                for (i, w) in cuts.windows(2).enumerate() {
+                    if i % 2 == 0 {
+                        gp.rect_filled(Rect::from_min_max(Pos2::new(x_of(w[0] as f32), grid.top()), Pos2::new(x_of(w[1].min(last) as f32), grid.bottom())), 0.0, shade);
+                    }
+                }
+            }
+        }
+        let contrast = match (opts >> pro::CONTRAST_SHIFT) & 3 {
+            0 => 0.55,
+            2 => 1.6,
+            _ => 1.0,
+        };
         let mut t = (tick_of(grid.left()) as u32 / line) * line;
         while t <= last {
             let x = x_of(t as f32);
@@ -1838,6 +2411,7 @@ impl App {
             } else {
                 LINE_SOFT.gamma_multiply(0.6)
             };
+            let col = if contrast > 1.0 { col.lerp_to_gamma(Color32::WHITE, 0.22) } else { col.gamma_multiply(contrast) };
             gp.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, col));
             if t % self.song.ppq == 0 {
                 lp.line_segment([Pos2::new(x, lane.top()), Pos2::new(x, lane.bottom())], Stroke::new(1.0_f32, LINE_SOFT));
@@ -1847,6 +2421,8 @@ impl App {
 
         // notes: the other channels behind, then ours
         let mut hit: Option<(usize, bool)> = None;
+        let mut hit_left = false;
+        let round = if opts & pro::ROUNDED != 0 { 3.0 } else { 0.0 };
         let lane_frac = |n: &Note, which: Lane| match which {
             Lane::Vel => (n.vel / 1.28).clamp(0.0, 1.0),
             Lane::Pan => (n.pan * 0.5 + 0.5).clamp(0.0, 1.0),
@@ -1871,8 +2447,11 @@ impl App {
                     continue;
                 }
                 if ghost {
-                    gp.rect_filled(r, 2.0, Color32::from_rgba_unmultiplied(150, 170, 180, 34));
+                    gp.rect_filled(r, round, Color32::from_rgba_unmultiplied(150, 170, 180, 34));
                     continue;
+                }
+                if opts & pro::SHADOW != 0 {
+                    gp.rect_filled(r.translate(Vec2::new(2.0, 2.0)), round, Color32::from_black_alpha(80));
                 }
                 let selected = self.piano.sel.contains(&i);
                 let base = if n.muted {
@@ -1883,7 +2462,7 @@ impl App {
                     let c = if n.color == 0 { NOTE } else { NOTE_COLORS[n.color as usize & 15] };
                     c.gamma_multiply(0.55 + 0.45 * n.vel.clamp(0.0, 1.28) / 1.28)
                 };
-                gp.rect_filled(r, 2.0, base);
+                gp.rect_filled(r, round, base);
                 if n.slide {
                     // the small triangle that marks a slide note
                     let (a, h) = (r.right_top() + Vec2::new(-1.0, 1.0), r.height() - 2.0);
@@ -1893,23 +2472,41 @@ impl App {
                     let c = r.right_center() - Vec2::new(5.0, 0.0);
                     gp.line_segment([c + Vec2::new(-3.0, 3.0), c + Vec2::new(3.0, -3.0)], Stroke::new(1.5_f32, LINE));
                 }
-                gp.rect_stroke(r, 2.0, Stroke::new(1.0_f32, if selected { Color32::WHITE } else { LINE }), egui::StrokeKind::Inside);
-                if r.width() > 24.0 {
-                    gp.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, format!("{}{}", NAMES[n.key as usize % 12], n.key / 12), FontId::proportional(9.5), LINE);
+                gp.rect_stroke(r, round, Stroke::new(1.0_f32, if selected { Color32::WHITE } else { LINE }), egui::StrokeKind::Inside);
+                let label_x = if opts & pro::KEEP_LABELS != 0 { r.left().max(grid.left()) } else { r.left() };
+                if r.right() - label_x > 24.0 {
+                    gp.text(Pos2::new(label_x + 3.0, r.center().y), Align2::LEFT_CENTER, format!("{}{}", NAMES[n.key as usize % 12], n.key / 12), FontId::proportional(9.5), LINE);
                 }
                 if let Some(pp) = pointer {
                     if r.contains(pp) && grid.contains(pp) {
                         hit = Some((i, pp.x > r.right() - 5.0 && r.width() > 8.0));
+                        hit_left = opts & pro::RESIZE_LEFT != 0 && pp.x < r.left() + 4.0 && r.width() > 14.0;
                     }
                 }
                 // the note's stick in the lane
                 let x = x_of(n.pos as f32);
-                let y = lane.bottom() - 3.0 - lane_frac(n, which) * (LANE_H - 8.0);
+                let y = lane.bottom() - 3.0 - lane_frac(n, which) * lane_span;
                 let col = if selected { SELECTED } else { NOTE };
                 let foot = if from_foot { lane.bottom() } else { lane.center().y };
                 lp.line_segment([Pos2::new(x, foot), Pos2::new(x, y)], Stroke::new(1.5_f32, col));
                 lp.line_segment([Pos2::new(x, y), Pos2::new((x + len as f32 * px).min(x + 40.0), y)], Stroke::new(1.5_f32, col));
                 lp.circle_filled(Pos2::new(x, y), 2.5, col);
+            }
+        }
+        if nudge_wheel != 0.0 {
+            match hit {
+                Some((i, _)) => {
+                    self.piano.nudge_acc += nudge_wheel / 50.0;
+                    let steps = self.piano.nudge_acc.trunc();
+                    self.piano.nudge_acc -= steps;
+                    if steps != 0.0 {
+                        if !self.piano.sel.contains(&i) {
+                            self.piano.sel = [i].into();
+                        }
+                        self.pr_nudge(-(steps as i32));
+                    }
+                }
+                None => self.piano.scroll_x = (self.piano.scroll_x - nudge_wheel).max(0.0),
             }
         }
         if alt_wheel != 0.0 {
@@ -1934,12 +2531,17 @@ impl App {
             }
         }
 
-        // play head
-        if !self.handle.transport.song_mode() {
-            let x = x_of(self.handle.transport.tick() as f32);
-            if x >= grid.left() && x <= grid.right() {
-                p.line_segment([Pos2::new(x, ruler.top()), Pos2::new(x, grid.bottom())], Stroke::new(1.0_f32, GREEN));
+        if opts & pro::CHORD_NAME != 0 && self.piano.sel.len() > 1 {
+            let keys: Vec<u8> = self.piano.sel.iter().filter_map(|&i| self.song.patterns[pat].notes.get(i)).map(|n| n.key).collect();
+            if let Some(name) = chord_name(&keys) {
+                gp.text(grid.left_top() + Vec2::new(8.0, 6.0), Align2::LEFT_TOP, name, FontId::proportional(13.0), Color32::WHITE);
             }
+        }
+
+        // play head
+        let head_x = (!self.handle.transport.song_mode()).then(|| x_of(self.handle.transport.tick() as f32)).filter(|x| *x >= grid.left() && *x <= grid.right());
+        if let (Some(x), true) = (head_x, opts & pro::PRECISE_TIME != 0) {
+            p.line_segment([Pos2::new(x, grid.top().min(lane.top())), Pos2::new(x, grid.bottom().max(lane.bottom()))], Stroke::new(1.0_f32, GREEN));
         }
 
         // ruler
@@ -1961,6 +2563,38 @@ impl App {
                 p.text(Pos2::new(x + 3.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", b / bar + 1), FontId::proportional(10.5), TEXT_DIM);
             }
             b += bar;
+        }
+        if let Some(x) = head_x {
+            // the play position's flag on the ruler
+            p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 5.0, ruler.top()), Pos2::new(x + 5.0, ruler.top()), Pos2::new(x, ruler.bottom() - 3.0)], GREEN, Stroke::NONE));
+        }
+        // the small preview: every note of the channel across the whole pattern, and the stretch in view
+        if mini_h > 0.0 {
+            p.rect_filled(Rect::from_min_max(rect.min, Pos2::new(rect.right(), mini.bottom())), 0.0, PANEL_DARK);
+            let mp = ui.painter_at(mini);
+            let notes = &self.song.patterns[pat].notes;
+            let end = notes.iter().map(|n| n.pos + note_len(n, step)).max().unwrap_or(0).max(bar * 4).max(tick_of(grid.right()) as u32) as f32;
+            let own = || notes.iter().filter(|n| n.chan == chan);
+            let (lo, hi) = (own().map(|n| n.key).min().unwrap_or(48) as f32 - 2.0, own().map(|n| n.key).max().unwrap_or(72) as f32 + 2.0);
+            let mx = |t: f32| mini.left() + t / end * mini.width();
+            for n in own() {
+                let y = mini.bottom() - 2.0 - (n.key as f32 - lo) / (hi - lo).max(1.0) * (mini_h - 4.0);
+                mp.line_segment([Pos2::new(mx(n.pos as f32), y), Pos2::new(mx((n.pos + note_len(n, step)) as f32).max(mx(n.pos as f32) + 1.0), y)], Stroke::new(1.5_f32, NOTE));
+            }
+            if opts & pro::MINI_MARKERS != 0 {
+                for m in self.song.patterns[pat].markers.iter().filter(|m| m.kind == 0) {
+                    let x = mx(m.pos as f32);
+                    mp.line_segment([Pos2::new(x, mini.top()), Pos2::new(x, mini.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(230, 170, 70)));
+                }
+            }
+            let view = Rect::from_min_max(Pos2::new(mx(tick_of(grid.left())), mini.top() + 1.0), Pos2::new(mx(tick_of(grid.right())), mini.bottom() - 1.0));
+            mp.rect(view, 0.0, Color32::from_white_alpha(14), Stroke::new(1.0_f32, TEXT_DIM), egui::StrokeKind::Inside);
+            if matches!(self.piano.drag, Some(Drag::Mini)) {
+                if let Some(pp) = pointer {
+                    let t = ((pp.x - mini.left()) / mini.width()).clamp(0.0, 1.0) * end;
+                    self.piano.scroll_x = (t * px - grid.width() * 0.5).max(0.0);
+                }
+            }
         }
         // the pattern's own time markers: a flag on the ruler, a faint line down the grid
         {
@@ -1998,33 +2632,46 @@ impl App {
         }
 
         // keyboard
-        p.rect_filled(Rect::from_min_max(rect.min, Pos2::new(grid.left(), grid.top())), 0.0, PANEL_DARK);
+        p.rect_filled(Rect::from_min_max(rect.min, Pos2::new(grid.left(), top)), 0.0, PANEL_DARK);
         let kp = ui.painter_at(keys);
+        let style = (opts >> pro::KB_SHIFT) & 7;
+        let labels = (opts >> pro::LABEL_SHIFT) & 3;
+        // white and black key shades, the label shade, and the gap between keys
+        let (white, black, ink, gap) = match style {
+            0 => (245, 16, 40, 0.5),
+            2 => (205, 70, 40, 0.0),
+            3 => (96, 34, 215, 0.5),
+            4 => (62, 46, 215, 0.5),
+            _ => (225, 38, 60, 0.5),
+        };
         for key in bottom_key..=top_key {
             let y = y_of(key);
             let r = Rect::from_min_max(Pos2::new(keys.left(), y), Pos2::new(keys.right(), y + KEY_H));
             let sounding = self.piano.sounding.map(|s| s.1 as i32 == key).unwrap_or(false);
-            let names = self.piano.names;
-            let fill = if sounding {
-                ACCENT
-            } else if names {
-                Color32::from_gray(if is_black(key) { 46 } else { 62 })
-            } else if is_black(key) {
-                Color32::from_gray(38)
-            } else {
-                Color32::from_gray(225)
+            let fill = if sounding { ACCENT } else { Color32::from_gray(if is_black(key) { black } else { white }) };
+            let body = if style != 4 && is_black(key) && style != 2 { Rect::from_min_max(r.min, Pos2::new(r.left() + r.width() * 0.62, r.bottom())) } else { r };
+            if body != r {
+                kp.rect_filled(r, 0.0, Color32::from_gray(white));
+            }
+            kp.rect_filled(body.shrink2(Vec2::new(0.0, gap)), 0.0, fill);
+            let root = if lit_scale != 0 { lit_root as usize } else { 0 };
+            let wanted = match labels {
+                _ if style == 4 => true,
+                0 => false,
+                1 => true,
+                2 => key as usize % 12 == root,
+                _ => lit_scale != 0 && prtools::in_scale(key as u8, lit_root, lit_scale),
             };
-            kp.rect_filled(r.shrink2(Vec2::new(0.0, 0.5)), 0.0, fill);
-            if names {
-                kp.text(r.right_center() - Vec2::new(4.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", NAMES[key as usize % 12], key / 12), FontId::proportional(9.5), Color32::from_gray(215));
-            } else if key % 12 == 0 {
-                kp.text(r.right_center() - Vec2::new(4.0, 0.0), Align2::RIGHT_CENTER, format!("C{}", key / 12), FontId::proportional(10.0), Color32::from_gray(60));
+            if wanted && (style == 4 || !(opts & pro::WHITE_ONLY != 0 && is_black(key))) {
+                let col = Color32::from_gray(if is_black(key) && body == r && style != 4 && style != 3 { 200 } else { ink });
+                kp.text(r.right_center() - Vec2::new(4.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", NAMES[key as usize % 12], key / 12), FontId::proportional(9.5), col);
             }
         }
 
         // lane head: which property the lane shows; click to step through them
         p.rect_filled(lane_head, 0.0, PANEL_DARK);
-        p.line_segment([Pos2::new(rect.left(), lane_top - 1.0), Pos2::new(rect.right(), lane_top - 1.0)], Stroke::new(2.0_f32, LINE));
+        let sep_y = if swap { lane.bottom() + 1.0 } else { lane.top() - 1.0 };
+        p.line_segment([Pos2::new(rect.left(), sep_y), Pos2::new(rect.right(), sep_y)], Stroke::new(2.0_f32, LINE));
         let lane_name = LANES.iter().find(|l| l.0 == which).map(|l| l.1).unwrap_or("");
         p.text(lane_head.left_top() + Vec2::new(6.0, 6.0), Align2::LEFT_TOP, "Control", FontId::proportional(9.5), TEXT_DIM);
         p.text(lane_head.left_top() + Vec2::new(6.0, 20.0), Align2::LEFT_TOP, lane_name, FontId::proportional(11.0), TEXT);
@@ -2042,6 +2689,8 @@ impl App {
                 if lane_head.contains(pp) {
                     let at = LANES.iter().position(|l| l.0 == which).unwrap_or(0);
                     self.piano.lane = LANES[(at + 1) % LANES.len()].0;
+                } else if mini_h > 0.0 && pp.y < mini.bottom() {
+                    self.piano.drag = Some(Drag::Mini);
                 } else if ruler.contains(pp) && mods.command {
                     self.piano.time_sel = None;
                     self.piano.drag = Some(Drag::TimeSel { from: snap_floor(tick_of(pp.x)) });
@@ -2115,19 +2764,22 @@ impl App {
                                 self.piano.last_vel = n.vel;
                                 self.piano.last_pan = n.pan;
                                 let orig = targets.iter().map(|&t| (t, notes[t].clone())).collect();
-                                self.piano.drag = Some(Drag::Notes { mode: if edge { Mode::Resize } else { Mode::Move }, anchor_tick: tick_of(pp.x), anchor_key: key as i32, orig });
+                                self.piano.drag = Some(Drag::Notes { mode: if edge { Mode::Resize } else if hit_left && !mods.shift { Mode::ResizeLeft } else { Mode::Move }, anchor_tick: tick_of(pp.x), anchor_key: key as i32, orig });
                                 self.pr_sound(Some(n.key));
                             }
                             None => {
                                 let pos = snap_floor(tick_of(pp.x));
+                                // with a scale chosen, new notes land on its keys
+                                let key = if self.piano.scale != 0 && opts & pro::SNAP_SCALE != 0 { prtools::to_scale(key, self.piano.scale_root, self.piano.scale) } else { key };
                                 let n = Note { pos, len: self.piano.last_len, chan, key, vel: self.piano.last_vel, pan: self.piano.last_pan, slide: self.piano.slide, porta: self.piano.porta, color: self.piano.color, ..Default::default() };
                                 self.piano.made = Some((pos, key));
                                 let notes = &mut self.song.patterns[pat].notes;
                                 let mut orig = vec![];
-                                for add in STAMPS[self.piano.stamp.min(STAMPS.len() - 1)].1 {
-                                    let k = key as i32 + *add as i32;
+                                let stamp = &stamps()[self.piano.stamp.min(stamps().len() - 1)].2;
+                                for (after, add, loud, len) in stamp_notes(stamp, step, bar, self.song.ppq) {
+                                    let k = key as i32 + add;
                                     if (0..=131).contains(&k) {
-                                        let n = Note { key: k as u8, ..n.clone() };
+                                        let n = Note { key: k as u8, pos: pos + after, vel: n.vel * loud, len: len.unwrap_or(n.len), ..n.clone() };
                                         notes.push(n.clone());
                                         orig.push((notes.len() - 1, n));
                                     }
@@ -2180,7 +2832,7 @@ impl App {
                     }
                 }
             }
-            if self.piano.drag.is_none() && hit.map(|h| h.1).unwrap_or(false) && matches!(tool, Tool::Draw | Tool::Paint) {
+            if self.piano.drag.is_none() && (hit.map(|h| h.1).unwrap_or(false) || (hit.is_some() && hit_left)) && matches!(tool, Tool::Draw | Tool::Paint) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
         }
@@ -2213,6 +2865,18 @@ impl App {
                                 }
                                 if dk != 0 || self.piano.sounding.is_some() {
                                     self.pr_sound(heard);
+                                }
+                            }
+                            Mode::ResizeLeft => {
+                                for (i, o) in orig {
+                                    let len = note_len(o, step) as i64;
+                                    let dt = dt.clamp(-(o.pos as i64), len - g.min(step) as i64);
+                                    let (pos, len) = ((o.pos as i64 + dt) as u32, (len - dt) as u32);
+                                    if notes[*i].pos != pos || notes[*i].len != len {
+                                        notes[*i].pos = pos;
+                                        notes[*i].len = len;
+                                        self.dirty = true;
+                                    }
                                 }
                             }
                             Mode::Resize => {
@@ -2345,7 +3009,7 @@ impl App {
                 }
                 Drag::Lane => {
                     if down {
-                        let frac = ((lane.bottom() - 3.0 - pp.y) / (LANE_H - 8.0)).clamp(0.0, 1.0);
+                        let frac = ((lane.bottom() - 3.0 - pp.y) / lane_span).clamp(0.0, 1.0);
                         let from = self.piano.lane_x.unwrap_or(pp.x);
                         let (x0, x1) = (from.min(pp.x) - 5.0, from.max(pp.x) + 5.0);
                         self.piano.lane_x = Some(pp.x);
@@ -2394,6 +3058,7 @@ impl App {
                         done = true;
                     }
                 }
+                Drag::Mini => done = !down,
             }
         } else if self.piano.drag.is_some() && !down && !sec_down {
             done = true;
@@ -2408,6 +3073,10 @@ impl App {
             self.pr_sound(None);
         }
 
+        if std::mem::take(&mut self.piano.ask_sig) {
+            let now = self.song.patterns[pat].markers.iter().find(|m| m.kind == 8 && m.pos == 0).map(|m| m.sig).unwrap_or(self.song.time_sig);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("patsig-ask"), Some(now)));
+        }
         self.note_props(ui.ctx(), pat);
         self.helper_window(ui.ctx());
     }
@@ -2415,6 +3084,7 @@ impl App {
     /// The small window a double-click on a note opens.
     fn note_props(&mut self, ctx: &egui::Context, pat: usize) {
         let Some(i) = self.piano.props else { return };
+        let with_len = self.settings.pr_opts & pro::LEN_PROPS != 0;
         let ppq = self.song.ppq;
         let step = self.song.step();
         let Some(n) = self.song.patterns[pat].notes.get_mut(i) else {
@@ -2448,13 +3118,15 @@ impl App {
                 ui.label("Start");
                 changed |= ui.add(egui::DragValue::new(&mut n.pos).speed(1.0).suffix(" ticks")).changed();
                 ui.end_row();
-                ui.label("Length");
-                let mut len = if n.len == 0 { step } else { n.len };
-                if ui.add(egui::DragValue::new(&mut len).range(1..=ppq * 64).speed(1.0).suffix(" ticks")).changed() {
-                    n.len = len;
-                    changed = true;
+                if with_len {
+                    ui.label("Length");
+                    let mut len = if n.len == 0 { step } else { n.len };
+                    if ui.add(egui::DragValue::new(&mut len).range(1..=ppq * 64).speed(1.0).suffix(" ticks")).changed() {
+                        n.len = len;
+                        changed = true;
+                    }
+                    ui.end_row();
                 }
-                ui.end_row();
                 ui.label("Release");
                 let mut v = n.release * 100.0;
                 if ui.add(egui::DragValue::new(&mut v).range(0.0..=100.0).speed(0.5).suffix(" %")).changed() {
