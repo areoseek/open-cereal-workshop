@@ -27,6 +27,21 @@ fn main() {
                 }
             }
         }
+        // MKGEN_SF2="stored path;bank;patch": a sound bank channel; setting=value then writes the block's 4-byte numbers
+        Err(_) if std::env::var("MKGEN_SF2").is_ok() => {
+            let sf = std::env::var("MKGEN_SF2").unwrap();
+            let mut it = sf.split(';');
+            let want = cereal_engine::sf2::Setting { path: it.next().unwrap().into(), bank: it.next().and_then(|x| x.parse().ok()).unwrap_or(0), patch: it.next().and_then(|x| x.parse().ok()).unwrap_or(0) };
+            let mut block = cereal_engine::sf2::with(&[], &want);
+            for kv in &a[3..] {
+                let (k, v) = kv.split_once('=').expect("setting=value");
+                let k: usize = k.parse().expect("index");
+                block[k * 4..k * 4 + 4].copy_from_slice(&v.parse::<i32>().expect("value").to_le_bytes());
+            }
+            let mut c = Chan { name: "bank".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: a[2].clone(), ..Chan::default() };
+            c.zones = cereal_engine::sf2::open("SoundFont Player", &block, None, None).map(std::sync::Arc::new);
+            c
+        }
         Err(_) => {
             let def = cereal_engine::synth::DEFS.iter().find(|d| d.ident == a[2]).expect("no such instrument");
             let mut c = Chan::instrument(def.kind);
@@ -40,6 +55,12 @@ fn main() {
             g.p[k.parse::<usize>().expect("index")] = v.parse().expect("value");
         }
         println!("{:?}", &g.p[..g.p.len().min(40)]);
+    }
+    if let Some(v) = std::env::var("MKGEN_VOL").ok().and_then(|x| x.parse().ok()) {
+        c.volume = v;
+    }
+    if let Some(v) = std::env::var("MKGEN_PAN").ok().and_then(|x| x.parse().ok()) {
+        c.pan = v;
     }
     song.channels.clear();
     song.channels.push(c);

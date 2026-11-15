@@ -500,8 +500,48 @@ impl App {
                     } else if !info.setting.path.is_empty() {
                         ui.label(RichText::new("The sound bank file was not found.").small().color(Color32::from_rgb(255, 120, 110)));
                     }
-                    if want != info.setting {
-                        let block = cereal_engine::sf2::with(&info.block, &want);
+                    // the player's own knobs over what the bank says
+                    let was = cereal_engine::sf2::hand(&info.block);
+                    let mut hand = was;
+                    section(ui, "OVERRIDES");
+                    ui.horizontal(|ui| {
+                        let mut wheel = hand[0].clamp(0, 127) as f32;
+                        if cap_knob(ui, "MOD", &mut wheel, 0.0, 127.0, 0.0, |v| format!("Modulation wheel: {v:.0}")) {
+                            hand[0] = wheel.round() as i32;
+                        }
+                        ui.separator();
+                        let mut env = hand[1] >= 0;
+                        if ui.checkbox(&mut env, "Envelope").hint("Use these four knobs in place of the bank's level envelope").changed() {
+                            (hand[1], hand[2], hand[3], hand[4]) = if env { (0, 0, 127, 20) } else { (-1, -1, -1, -1) };
+                        }
+                        if env {
+                            for (k, (name, top)) in [("ATT", 250.0), ("DEC", 250.0), ("SUS", 127.0), ("REL", 250.0)].into_iter().enumerate() {
+                                let mut v = hand[1 + k].max(0) as f32;
+                                if cap_knob(ui, name, &mut v, 0.0, top, 0.0, |v| if k == 2 { format!("{:.0} %", v / 1.27) } else if k == 0 { format!("{v:.0} ms") } else { format!("{:.0} ms", v * 4.0) }) {
+                                    hand[1 + k] = v.round() as i32;
+                                }
+                            }
+                        }
+                        ui.separator();
+                        let mut lfo = hand[6] != -128;
+                        if ui.checkbox(&mut lfo, "LFO").hint("Use these three knobs for the pitch wobble in place of the bank's").changed() {
+                            (hand[5], hand[6], hand[7]) = if lfo { (0, 0, 100) } else { (-1, -128, -1) };
+                        }
+                        if lfo {
+                            for (k, (name, lo, top)) in [("PRE", 0.0, 250.0), ("AMT", -127.0, 127.0), ("SPD", 0.0, 250.0)].into_iter().enumerate() {
+                                let mut v = hand[5 + k].max(lo as i32) as f32;
+                                if cap_knob(ui, name, &mut v, lo, top, 0.0, |v| match k {
+                                    0 => format!("{:.0} ms", v * 4.0),
+                                    1 => format!("{:.0} cents", v.abs() * 1000.0 / 127.0),
+                                    _ => format!("{:.1} Hz", v * 0.0842),
+                                }) {
+                                    hand[5 + k] = v.round() as i32;
+                                }
+                            }
+                        }
+                    });
+                    if want != info.setting || hand != was {
+                        let block = cereal_engine::sf2::with(&cereal_engine::sf2::with_hand(&info.block, &hand), &want);
                         let dir = self.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
                         if let Some(m) = cereal_engine::sf2::open("SoundFont Player", &block, Some(&mut self.lib), dir.as_deref()) {
                             self.song.channels[ci].zones = Some(std::sync::Arc::new(m));

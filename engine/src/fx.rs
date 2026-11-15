@@ -3147,8 +3147,10 @@ fn chorus_wave(ph: f32, shape: f32) -> f32 {
 }
 /// Echo time of the plain echo in frames: the song's steps, or steps of its own tempo.
 fn old_delay_time(p: &[f32], cx: &Ctx) -> f32 {
-    let step = if p[3] < 1.0 { cx.step } else { 15.0 / (280.0 * p[3] / 1024.0).max(20.0) * cx.sr };
-    (p[4].max(1.0) * step).max(1.0)
+    // Measured: the own tempo runs from 60 to 280 in whole beats per minute, and a step is a whole number of
+    // frames (halves go to the even one) before it is multiplied.
+    let step = if p[3] < 1.0 { cx.step } else { 15.0 / (60.0 + 220.0 * p[3] / 1024.0).round() * cx.sr };
+    (p[4].max(1.0) * step.round_ties_even()).max(1.0)
 }
 
 fn biquad(c: &[f32; 5], z: &mut [f32], x: f32) -> f32 {
@@ -4646,9 +4648,12 @@ impl Unit {
             Kind::OldDelay => {
                 let n = self.buf.len();
                 let len = (old_delay_time(p, cx) as usize).clamp(1, n - 1);
-                let (ing, fb) = (p[0] / 1024.0, p[1] / 1024.0);
-                let a = if p[2] >= 1024.0 { 1.0 } else { 1.0 - (-TAU * knob_hz(p[2] / 1024.0) / sr).exp() };
-                let (swap_out, cross) = (p[5] >= 341.0 && p[5] < 683.0, p[5] >= 683.0);
+                // Measured against renders: feedback tops out at 0.99, the one-pole coefficient follows
+                // (21^knob - 1) / 20 (shut at the bottom), and the bouncing mode swaps the sides as well as
+                // crossing the feedback.
+                let (ing, fb) = (p[0] / 1024.0, p[1] / 1024.0 * 0.99);
+                let a = ((21f32.powf((p[2] / 1024.0).clamp(0.0, 1.0)) - 1.0) / 20.0).clamp(0.0, 1.0);
+                let (swap_out, cross) = (p[5] >= 341.0, p[5] >= 683.0);
                 for f in io.iter_mut() {
                     let d = self.buf[(self.pos + n - len) % n];
                     z[0] += a * (d[0] - z[0]);

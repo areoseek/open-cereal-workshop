@@ -10,6 +10,26 @@ pub fn channel_gain(v: f32) -> f32 {
     (11f32.powf(v.clamp(0.0, 1.0)) - 1.0) / 10.0
 }
 
+/// A sound bank voice's level for a note velocity (1.0 is the usual 100). Measured from 10 to 126: the
+/// square of the velocity, 0.7372 at 100; the top two steps play at exactly 1.
+pub fn bank_velocity(v: f32) -> f32 {
+    let v = (v * 100.0).round();
+    if v >= 127.0 { 1.0 } else { v * v / 13565.0 }
+}
+
+/// Left and right factors of a sound bank zone set to `pan` (-1..=1). Measured: a quarter circle over the
+/// 127 steps, read half a step to the right, so the middle leans right by a hair.
+pub fn bank_place(pan: f32) -> (f32, f32) {
+    let p = ((pan.clamp(-1.0, 1.0) + 1.0) * 0.5 + 0.5 / 127.0).min(1.0) * std::f32::consts::FRAC_PI_2;
+    (p.cos(), p.sin())
+}
+
+/// How far a sound bank's filter closes for a note velocity, on the voice filter's 0..=1 scale: 2400 cents
+/// at velocity zero, nothing at 127, a straight line between.
+pub fn bank_cut_drop(v: f32) -> f32 {
+    2400.0 / 11958.9 * (1.0 - ((v * 100.0).round() / 127.0).clamp(0.0, 1.0))
+}
+
 /// Mixer fader: `v` is file value / 12800, so 1.0 is 0 dB and 1.25 the top of the fader (about +5.6 dB).
 pub fn fader_gain(v: f32) -> f32 {
     v.clamp(0.0, 1.25).powf(2.9)

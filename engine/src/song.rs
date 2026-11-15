@@ -77,11 +77,13 @@ pub struct Env {
     pub tension: [f32; 3],
     /// Times follow the tempo: they are as set at 120 and stretch or shrink with it.
     pub tempo: bool,
+    /// The decay and release fall in a straight line of decibels, this many over their full time (0: off).
+    pub db_span: f32,
 }
 
 impl Default for Env {
     fn default() -> Self {
-        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3], tempo: false }
+        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3], tempo: false, db_span: 0.0 }
     }
 }
 
@@ -176,6 +178,7 @@ impl Env {
             amount: e.amount as f32 * amount_scale,
             tension: [t(e.tension[0]), t(e.tension[1]), t(e.tension[2])],
             tempo: e.flags & 1 != 0,
+            db_span: 0.0,
         }
     }
 
@@ -193,6 +196,9 @@ impl Env {
             return 1.0;
         }
         t -= self.hold;
+        if self.db_span > 0.0 {
+            return if t < self.decay { 10f32.powf(-self.db_span * t / self.decay / 20.0).max(self.sustain) } else { self.sustain };
+        }
         if t < self.decay {
             return self.sustain + (1.0 - self.sustain) * env_bend(1.0 - t / self.decay, -self.tension[1]);
         }
@@ -203,6 +209,10 @@ impl Env {
     pub fn released(&self, from: f32, t: f32) -> Option<f32> {
         if t >= self.release {
             return None;
+        }
+        if self.db_span > 0.0 {
+            let now = from * 10f32.powf(-self.db_span * t / self.release.max(1e-6) / 20.0);
+            return (now > 10f32.powf(-self.db_span / 20.0)).then_some(now);
         }
         Some(from * env_bend(1.0 - t / self.release.max(1e-6), -self.tension[2]))
     }

@@ -51,11 +51,20 @@ pub struct Zone {
     /// Two slow wobbles: seconds before it starts, cycles per second, then its reach over pitch (cents),
     /// the cutoff (0..=1 scale) and the level (decibels).
     pub lfos: [[f32; 5]; 2],
+    /// Cents each key above the root raises the pitch (100 for the usual scale).
+    pub key_cents: f32,
+    /// Decibels the level wobble may lift the zone above its resting level, when there is a ceiling.
+    pub lift_db: Option<f32>,
+    /// How the envelopes' hold and decay shrink up the keyboard: time cents per key below 60, for the level
+    /// envelope's hold and decay and then the moving envelope's.
+    pub key_times: [f32; 4],
+    /// A velocity the zone always plays at, whatever the note's.
+    pub fix_vel: Option<f32>,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, cut_links: [0.0; 2], pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2] }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, cut_links: [0.0; 2], pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2], key_cents: 100.0, lift_db: None, key_times: [0.0; 4], fix_vel: None }
     }
 }
 
