@@ -42,6 +42,32 @@ fn main() {
             c.zones = cereal_engine::sf2::open("SoundFont Player", &block, None, None).map(std::sync::Arc::new);
             c
         }
+        // MKGEN_ZONES="stored path;frames;channels;rate;root": a zone player with one zone; then
+        // [p]id[#n]@offset=<f|b|h>value writes a float, byte or 16-bit number into a zone (or, with p, program) piece
+        Err(_) if std::env::var("MKGEN_ZONES").is_ok() => {
+            let z = std::env::var("MKGEN_ZONES").unwrap();
+            let it: Vec<&str> = z.split(';').collect();
+            let mut block = cereal_engine::zones::fresh_program(it[0], it[1].parse().unwrap(), it[2].parse().unwrap(), it[3].parse().unwrap(), it[4].parse().unwrap());
+            for kv in &a[3..] {
+                let (k, v) = kv.split_once('=').expect("piece@offset=value");
+                let (top, k) = match k.strip_prefix('p') {
+                    Some(r) => (true, r),
+                    None => (false, k),
+                };
+                let (idn, at) = k.split_once('@').expect("piece@offset");
+                let (id, nth) = idn.split_once('#').unwrap_or((idn, "0"));
+                let bytes = match v.split_at(1) {
+                    ("f", x) => x.parse::<f32>().unwrap().to_le_bytes().to_vec(),
+                    ("b", x) => vec![x.parse::<u8>().unwrap()],
+                    ("h", x) => x.parse::<u16>().unwrap().to_le_bytes().to_vec(),
+                    _ => panic!("value kind"),
+                };
+                block = cereal_engine::zones::put_zone_bytes(&block, top, id.parse().unwrap(), nth.parse().unwrap(), at.parse().unwrap(), &bytes).expect("no such piece");
+            }
+            let mut c = Chan { name: "zones".into(), kind: cereal_engine::flp::ChannelKind::Plugin, plugin: a[2].clone(), ..Chan::default() };
+            c.zones = cereal_engine::zones::Map::parse("DirectWave", &block).map(std::sync::Arc::new);
+            c
+        }
         Err(_) => {
             let def = cereal_engine::synth::DEFS.iter().find(|d| d.ident == a[2]).expect("no such instrument");
             let mut c = Chan::instrument(def.kind);

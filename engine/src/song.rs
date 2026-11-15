@@ -79,11 +79,14 @@ pub struct Env {
     pub tempo: bool,
     /// The decay and release fall in a straight line of decibels, this many over their full time (0: off).
     pub db_span: f32,
+    /// The lines are straight and run at the pace of their full time whatever the distance (so a decay to a
+    /// high sustain is short, and a release from a low level too), and the level is the line squared.
+    pub squared: bool,
 }
 
 impl Default for Env {
     fn default() -> Self {
-        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3], tempo: false, db_span: 0.0 }
+        Self { on: false, delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.0, amount: 0.0, tension: [0.0; 3], tempo: false, db_span: 0.0, squared: false }
     }
 }
 
@@ -179,6 +182,7 @@ impl Env {
             tension: [t(e.tension[0]), t(e.tension[1]), t(e.tension[2])],
             tempo: e.flags & 1 != 0,
             db_span: 0.0,
+            squared: false,
         }
     }
 
@@ -189,13 +193,17 @@ impl Env {
             return 0.0;
         }
         if t < self.attack {
-            return env_bend(t / self.attack, self.tension[0]);
+            return if self.squared { (t / self.attack) * (t / self.attack) } else { env_bend(t / self.attack, self.tension[0]) };
         }
         t -= self.attack;
         if t < self.hold {
             return 1.0;
         }
         t -= self.hold;
+        if self.squared {
+            let x = (1.0 - t / self.decay.max(1e-6)).max(self.sustain);
+            return x * x;
+        }
         if self.db_span > 0.0 {
             return if t < self.decay { 10f32.powf(-self.db_span * t / self.decay / 20.0).max(self.sustain) } else { self.sustain };
         }
@@ -207,6 +215,10 @@ impl Env {
 
     /// Level `t` seconds after the note was let go at level `from`; None once it has died away.
     pub fn released(&self, from: f32, t: f32) -> Option<f32> {
+        if self.squared {
+            let x = from.max(0.0).sqrt() - t / self.release.max(1e-6);
+            return (x > 0.0).then_some(x * x);
+        }
         if t >= self.release {
             return None;
         }

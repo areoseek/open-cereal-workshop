@@ -316,10 +316,10 @@ impl Bank {
                 // time, in a straight line of decibels, and the sustain figure is a share of it
                 const FALL: f32 = 96.0;
                 let sustain = if v[37] >= 1000 { 0.0 } else { 10f32.powf(-(v[37].max(0) as f32) / 1000.0 * FALL / 20.0) };
-                let env = Env { on: true, delay: seconds(v[33]), attack: seconds(v[34]).max(64.0 / 44100.0), hold: seconds(v[35]), decay: seconds(v[36]), sustain, release: seconds(v[38]).max(0.001), amount: 0.0, tension: [0.0, -1.0, -1.0], tempo: false, db_span: FALL };
+                let env = Env { on: true, delay: seconds(v[33]), attack: seconds(v[34]).max(64.0 / 44100.0), hold: seconds(v[35]), decay: seconds(v[36]), sustain, release: seconds(v[38]).max(0.001), amount: 0.0, tension: [0.0, -1.0, -1.0], tempo: false, db_span: FALL, squared: false };
                 let hz = 8.176 * 2f32.powf(v[8].clamp(1500, 13500) as f32 / 1200.0);
                 let q = 10f32.powf(v[9].clamp(0, 960) as f32 / 200.0) * 0.707;
-                let menv = |amount: f32| Env { on: true, delay: seconds(v[25]), attack: seconds(v[26]), hold: seconds(v[27]), decay: seconds(v[28]), sustain: 1.0 - (v[29].clamp(0, 1000) as f32) / 1000.0, release: seconds(v[30]).max(0.005), amount, tension: [0.0; 3], tempo: false, db_span: 0.0 };
+                let menv = |amount: f32| Env { on: true, delay: seconds(v[25]), attack: seconds(v[26]), hold: seconds(v[27]), decay: seconds(v[28]), sustain: 1.0 - (v[29].clamp(0, 1000) as f32) / 1000.0, release: seconds(v[30]).max(0.005), amount, tension: [0.0; 3], tempo: false, db_span: 0.0, squared: false };
                 const SPAN: f32 = 11958.9; // cents across the cutoff scale
                 let rate = |c: i32| 8.176 * 2f32.powf(c.clamp(-16000, 4500) as f32 / 1200.0);
                 let lfos = [[seconds(v[21]), rate(v[22]), v[5] as f32, v[10] as f32 / SPAN, v[13] as f32 / 10.0], [seconds(v[23]), rate(v[24]), v[6] as f32, 0.0, 0.0]];
@@ -390,6 +390,13 @@ impl Bank {
                     lift_db: Some(v[48].clamp(0, 1440) as f32 * 0.04),
                     key_times: [v[39] as f32, v[40] as f32, v[31] as f32, v[32] as f32],
                     fix_vel: (1..=127).contains(&v[47]).then(|| v[47] as f32 / 100.0),
+                    sides: None,
+                    early: 0.0,
+                    filter_kind: 0,
+                    filter2: None,
+                    links: None,
+                    ping: false,
+                    loop_held: false,
                 });
             }
         }
@@ -448,8 +455,8 @@ pub fn open(ident: &str, state: &[u8], lib: Option<&mut Library>, project_dir: O
     let bank = lib.filter(|_| !setting.path.is_empty()).and_then(|l| l.resolve(&setting.path, project_dir)).and_then(|p| std::fs::read(p).ok()).and_then(Bank::parse);
     let block = if state.len() > PATH_AT { state.to_vec() } else { with(state, &setting) };
     Some(match bank {
-        Some(b) => Map { zones: b.zones_with(setting.bank, setting.patch, &hand(state)), bank: Some(Info { setting, found: true, presets: b.presets(), block }), kit: None, tail: Default::default() },
-        None => Map { zones: vec![], bank: Some(Info { setting, found: false, presets: vec![], block }), kit: None, tail: Default::default() },
+        Some(b) => Map { zones: b.zones_with(setting.bank, setting.patch, &hand(state)), bank: Some(Info { setting, found: true, presets: b.presets(), block }), kit: None, program: None, tail: Default::default() },
+        None => Map { zones: vec![], bank: Some(Info { setting, found: false, presets: vec![], block }), kit: None, program: None, tail: Default::default() },
     })
 }
 

@@ -166,13 +166,15 @@ pub struct Set {
     pub tone_at: u8,
     /// The effects section of the operator synth, which stands in for everything above but the equaliser.
     pub op: Option<crate::opfx::Set>,
+    /// The effects section of the zone player, which stands in for everything above.
+    pub zone: Option<crate::zonefx::Set>,
     /// Anything standing still in the sound is let drain away (the operator synth's own switch).
     pub level: bool,
 }
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.split || self.level || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.split || self.level || self.zone.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
@@ -180,6 +182,9 @@ impl Set {
         let mut n = 0.0;
         if let Some(o) = &self.op {
             return o.tail(sr, step) + if self.level { (sr * 0.5) as usize } else { 0 };
+        }
+        if let Some(z) = &self.zone {
+            return z.tail(sr, step);
         }
         if self.level {
             n = sr * 0.5;
@@ -225,6 +230,7 @@ pub struct State {
     more: [Side; 2],
     dry: Vec<[f32; 2]>,
     op: Option<Box<crate::opfx::State>>,
+    zone: Option<Box<crate::zonefx::State>>,
 }
 
 /// What one of the further echoes remembers.
@@ -241,12 +247,16 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None }
+        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
     /// sixteenth notes while it plays, so the gate keeps its place in the bar.
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        if let Some(z) = &set.zone {
+            self.zone.get_or_insert_with(|| Box::new(crate::zonefx::State::new(self.sr))).process(z, buf, step, song);
+            return;
+        }
         self.tone(set, buf);
         self.rest(set, buf, step, song);
         self.level(set, buf);

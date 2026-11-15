@@ -607,9 +607,8 @@ fn patch_channels(ev: &mut Vec<Event>, song: &Song, base: &Song, unicode: bool, 
                     }
                 }
             }
-        } else if let Some(block) = now.zones.as_ref().and_then(|z| z.kit.as_ref()).filter(|b| was.zones.as_ref().and_then(|z| z.kit.as_ref()) != Some(b) || now.kind != was.kind) {
-            // a pad machine whose pads were edited (or a new one): the channel carries the block as it now stands
-            let ident = crate::zones::Kit::IDENT;
+        } else if let Some((ident, block)) = now.zones.as_ref().and_then(|z| z.own_block()).filter(|b| was.zones.as_ref().and_then(|z| z.own_block()) != Some(*b) || now.kind != was.kind) {
+            // a pad machine or zone player whose block was edited (or a new one): the channel carries the block as it now stands
             if let Some(i) = find(ev, end, id::CHAN_TYPE) {
                 ev[i].value = Value::Byte(2);
             }

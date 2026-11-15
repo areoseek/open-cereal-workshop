@@ -7,6 +7,74 @@ use crate::sample::{Library, Sample};
 use std::path::Path;
 use std::sync::Arc;
 
+/// One of the zone player's slow waves, as its knobs stand.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Wave {
+    pub kind: u8,
+    /// Runs with the song's tempo.
+    pub sync: bool,
+    pub rate: f32,
+    pub phase: f32,
+    /// Seconds over which it grows to its full reach.
+    pub attack: f32,
+}
+
+impl Wave {
+    /// (measured) Its value `t` seconds after its start: 20 turns a second with the knob full (it goes by
+    /// the square), a slow count of beats when tied to the tempo; the kinds are a sine, a rectified sine,
+    /// a triangle and a square from their low side, a rising and a falling ramp, and steps picked by chance
+    /// once the first turn has passed.
+    pub fn at(&self, t: f32, beat_secs: f32, seed: u32) -> f32 {
+        if t < 0.0 {
+            return 0.0;
+        }
+        let k2 = self.rate * self.rate;
+        // (measured) in step with the song one turn takes a whole number of sixteenth notes, up to 128
+        let hz = if self.sync { 4.0 / ((128.0 * k2).ceil().max(1.0) * beat_secs).max(1e-3) } else { 20.0 * k2 };
+        let ph = t as f64 * hz as f64 + (1.0 - self.phase) as f64;
+        let (n, fr) = (ph.floor(), ph.fract() as f32);
+        let depth = if self.attack > 0.0 { (t / self.attack).min(1.0) } else { 1.0 };
+        let v = match self.kind {
+            0 => (fr * std::f32::consts::TAU).sin(),
+            1 => (fr * std::f32::consts::TAU).sin().abs(),
+            2 => if fr < 0.5 { 4.0 * fr - 1.0 } else { 3.0 - 4.0 * fr },
+            3 => if fr < 0.5 { -1.0 } else { 1.0 },
+            4 => 2.0 * fr - 1.0,
+            5 => 1.0 - 2.0 * fr,
+            _ => {
+                if n < 1.0 {
+                    0.0
+                } else {
+                    let mut h = seed ^ (n as u32).wrapping_mul(0x9e37_79b9);
+                    h ^= h >> 16;
+                    h = h.wrapping_mul(0x85eb_ca6b);
+                    h ^= h >> 13;
+                    h = h.wrapping_mul(0xc2b2_ae35);
+                    h ^= h >> 16;
+                    h as f32 / 2_147_483_648.0 - 1.0
+                }
+            }
+        };
+        v * depth
+    }
+}
+
+/// The zone player's table of links: what moves what, and the sources and resting knobs it needs.
+#[derive(Debug, Clone, Default)]
+pub struct Links {
+    /// Source, destination and the amount knob (half way is none) of each row.
+    pub rows: Vec<(u8, u8, f32)>,
+    /// The program's two waves (running with the song), then the zone's two (starting with the note).
+    pub waves: [Wave; 4],
+    /// The two free envelopes.
+    pub free: [crate::song::Env; 2],
+    pub tune: f32,
+    pub place: f32,
+    /// Corner, emphasis and shape knobs of the two filters.
+    pub f1: [f32; 3],
+    pub f2: [f32; 3],
+}
+
 #[derive(Debug, Clone)]
 pub struct Zone {
     pub name: String,
@@ -60,11 +128,26 @@ pub struct Zone {
     pub key_times: [f32; 4],
     /// A velocity the zone always plays at, whatever the note's.
     pub fix_vel: Option<f32>,
+    /// The zone's own place between the sides as a gain for each, when it does not go through the usual pan.
+    pub sides: Option<[f32; 2]>,
+    /// Seconds before the note's end at which the zone already lets go.
+    pub early: f32,
+    /// Which of the zone player's filters `filter` is (1 low, 2 high, 3 band, 4 notch, 5 all-pass, each two
+    /// stages); 0 for the plain low-pass of a sound bank.
+    pub filter_kind: u8,
+    /// The zone player's second filter, after the first: kind as in `filter_kind`, corner and emphasis knobs.
+    pub filter2: Option<(u8, f32, f32)>,
+    /// The zone player's link table, when the zone comes from it.
+    pub links: Option<Arc<Links>>,
+    /// The loop is read forth and back.
+    pub ping: bool,
+    /// The loop holds only while the note is held; let go, the recording runs on to its end.
+    pub loop_held: bool,
 }
 
 impl Default for Zone {
     fn default() -> Self {
-        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, cut_links: [0.0; 2], pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2], key_cents: 100.0, lift_db: None, key_times: [0.0; 4], fix_vel: None }
+        Self { name: String::new(), key_lo: 0, key_hi: 127, vel_lo: 0, vel_hi: 127, root: 60, track: true, path: String::new(), sample: None, gain: 1.0, cut_links: [0.0; 2], pan: 0.0, tune_cents: 0.0, vel_scale: true, pick: 0, one_shot: false, looped: None, attack: 0.001, release: 0.01, cut: -1, cut_by: -1, out: 0, env: None, filter: None, penv: None, cenv: None, lfos: [[0.0; 5]; 2], key_cents: 100.0, lift_db: None, key_times: [0.0; 4], fix_vel: None, sides: None, early: 0.0, filter_kind: 0, filter2: None, links: None, ping: false, loop_held: false }
     }
 }
 
@@ -75,6 +158,8 @@ pub struct Map {
     pub bank: Option<crate::sf2::Info>,
     /// The pad machine's own block behind the zones, when they come from one.
     pub kit: Option<Vec<u8>>,
+    /// The zone player's own block behind the zones, when they come from one in today's layout.
+    pub program: Option<Vec<u8>>,
     /// Effects the instrument runs on the sum of its voices.
     pub tail: crate::tailfx::Set,
 }
@@ -90,11 +175,19 @@ impl Map {
         } else if ident.eq_ignore_ascii_case("DirectWave") {
             match early_programs(state) {
                 Some(now) => programs(&now),
-                None => programs(state),
+                None => programs(state).map(|mut m| {
+                    m.program = Some(state.to_vec());
+                    m
+                }),
             }
         } else {
             None
         }
+    }
+
+    /// The block this map was read from and the file identifier it is saved under, for the kinds that keep one.
+    pub fn own_block(&self) -> Option<(&'static str, &Vec<u8>)> {
+        self.kit.as_ref().map(|b| (Kit::IDENT, b)).or(self.program.as_ref().map(|b| (PROGRAM_IDENT, b)))
     }
 
     /// Load every zone's recording. Zones whose file is not found stay silent.
@@ -202,7 +295,7 @@ fn pads(state: &[u8]) -> Option<Map> {
             });
         }
     }
-    Some(Map { zones, bank: None, kit: Some(state.to_vec()), tail: Default::default() })
+    Some(Map { zones, bank: None, kit: Some(state.to_vec()), program: None, tail: Default::default() })
 }
 
 type Parts = Vec<(u32, Vec<u8>)>;
@@ -469,58 +562,79 @@ fn programs(state: &[u8]) -> Option<Map> {
             }
             let facts = find(503).unwrap_or(&[]);
             let int = |at: usize| facts.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).unwrap_or(0);
-            let looped = (int(20) != 0 && int(28) > int(24)).then(|| (int(24), int(28)));
+            // (measured) the loop kinds: 1 plays the recording through whatever the note's length, 2 loops, 3 loops
+            // while the note is held, 4 loops forth and back
+            let kind = int(20);
+            let looped = (matches!(kind, 2..=4) && int(28) > int(24)).then(|| (int(24), int(28)));
             let all = |n: u32| inner.iter().filter(move |p| p.0 == n).map(|p| p.1);
             let knobs = |b: &[u8], from: usize| -> Vec<f32> { b.get(from..).unwrap_or(&[]).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()).clamp(0.0, 1.0)).collect() };
             // measured on the factory test: times go with the fourth power of the knob and the lines are squared
             let secs = |k: f32| 10.0 * k * k * k * k;
             let adsr = |b: &[u8], amount: f32| {
                 let k = knobs(b, 0);
-                (k.len() >= 4).then(|| crate::song::Env { on: true, attack: secs(k[0]), decay: secs(k[1]), sustain: k[2], release: secs(k[3]).max(0.005), amount, tension: [0.0, -1.0 / 3.0, -1.0 / 3.0], ..Default::default() })
+                (k.len() >= 4).then(|| crate::song::Env { on: true, attack: if k[0] > 0.0 { secs(k[0]) + 0.001 } else { 0.0 }, decay: secs(k[1]) + 0.001, sustain: k[2], release: secs(k[3]) + 0.001, amount, squared: true, ..Default::default() })
             };
             let env = find(509).and_then(|b| adsr(b, 0.0));
-            // links: velocity (2) to level (2), the free envelopes (9, 10) to pitch (1) or the first cutoff (7)
-            let mut vel_scale = all(516).next().is_none();
-            let (mut penv, mut cenv) = (None, None);
-            let mut cut_links = [0.0f32; 2];
-            let free: Vec<&[u8]> = all(514).collect();
-            for l in all(516) {
-                if l.len() < 8 {
-                    continue;
-                }
-                let (src, dst) = (u16::from_le_bytes([l[0], l[1]]), u16::from_le_bytes([l[2], l[3]]));
-                let amount = (f32::from_le_bytes(l[4..8].try_into().unwrap()).clamp(0.0, 1.0) - 0.5) * 2.0;
-                if amount == 0.0 {
-                    continue;
-                }
-                match (src, dst) {
-                    (2, 2) => vel_scale = amount > 0.0,
-                    (2, 7) => cut_links[0] = amount,
-                    (1, 7) => cut_links[1] = amount,
-                    (9 | 10, 1) => penv = free.get(src as usize - 9).and_then(|b| adsr(b, amount * 1200.0)),
-                    (9 | 10, 7) => cenv = free.get(src as usize - 9).and_then(|b| adsr(b, amount)),
-                    _ => {}
-                }
+            let mut rows: Vec<(u8, u8, f32)> = all(516)
+                .filter(|l| l.len() >= 8)
+                .map(|l| (l[0], l[2], f32::from_le_bytes(l[4..8].try_into().unwrap()).clamp(0.0, 1.0)))
+                .collect();
+            if all(516).next().is_none() {
+                rows.push((2, 2, 1.0));
             }
-            // only the low-pass kind (1) is run; emphasis 0.5 is the knob's rest
-            let filter = all(507).next().filter(|b| b.len() >= 12 && b[0] == 1).map(|b| {
+            let wave = |b: &[u8]| {
                 let k = knobs(b, 4);
-                (k[0], ((k[1] - 0.5) * 2.0).clamp(0.0, 1.0))
+                (k.len() >= 3).then(|| Wave { kind: b[0], sync: b[1] != 0, rate: k[0], phase: k[1], attack: secs(k[2]) })
+            };
+            let mut waves = [Wave::default(); 4];
+            for (i, b) in parts.iter().filter(|p| p.0 == 108).map(|p| p.1).take(2).enumerate() {
+                waves[i] = wave(b).unwrap_or_default();
+            }
+            for (i, b) in all(515).take(2).enumerate() {
+                waves[2 + i] = wave(b).unwrap_or_default();
+            }
+            let mut free = [crate::song::Env::default(); 2];
+            for (i, b) in all(514).take(2).enumerate() {
+                free[i] = adsr(b, 1.0).unwrap_or_default();
+            }
+            // the first filter: its kind, then the corner and emphasis knobs as they stand
+            let filter_kind = all(507).next().filter(|b| b.len() >= 12 && (1..=5).contains(&b[0])).map_or(0, |b| b[0]);
+            let filter = all(507).next().filter(|_| filter_kind > 0).map(|b| {
+                let k = knobs(b, 4);
+                (k[0], k[1])
             });
+            // (measured) the level knob is a plain factor, the place between the sides keeps the power even,
+            // the tune knob spans an octave each way and the key follow is a percentage
+            let float_at = |b: Option<&[u8]>, at: usize| b.and_then(|b| b.get(at..at + 4)).map(|c| f32::from_le_bytes(c.try_into().unwrap()));
+            let level = float_at(find(500), 9).unwrap_or(1.0).clamp(0.0, 8.0);
+            let place = float_at(find(500), 13).unwrap_or(0.5).clamp(0.0, 1.0);
+            let tune = float_at(find(504), 0).unwrap_or(0.5).clamp(0.0, 1.0);
+            let follow = find(504).and_then(|b| b.get(6..8)).map_or(100, |c| i16::from_le_bytes([c[0], c[1]]));
+            let filter2 = all(507).nth(1).filter(|b| b.len() >= 12 && (1..=5).contains(&b[0])).map(|b| {
+                let k = knobs(b, 4);
+                (b[0], k[0], k[1])
+            });
+            let three = |n: usize| all(507).nth(n).map(|b| knobs(b, 4)).filter(|k| k.len() >= 3).map_or([0.5, 0.5, 0.0], |k| [k[0], k[1], k[2]]);
+            let links = Links { rows, waves, free, tune, place, f1: three(0), f2: three(1) };
+            // (measured) the last send knob is a gain after everything, going by the square
+            let post = find(506).map(|b| knobs(b, 0)).and_then(|k| k.get(3).copied()).map_or(1.0, |k| k * k);
             let pick = find(505).and_then(|b| b.get(1).copied()).filter(|&t| t <= 3).unwrap_or(0);
             // the program's echo, chorus and room, each fed by the zone's send knob (half way is a quarter
             // of the level); they run once for the instrument, so the first zone's sends stand for all
             if zones.is_empty() {
-                use crate::tailfx::{Chorus, Delay, Reverb};
+                use crate::zonefx::{Chorus, Echo, Room, Set};
                 let sends = find(506).map(|b| knobs(b, 0)).filter(|k| k.len() >= 3).unwrap_or(vec![0.0; 3]);
                 let unit = |n: u32, lead: usize| parts.iter().find(|p| p.0 == n).map(|p| p.1).filter(|b| b.first() == Some(&1)).map(|b| knobs(b, lead)).filter(|k| k.len() >= 4);
                 let wet = |i: usize| sends[i] * sends[i];
-                tail = crate::tailfx::Set {
-                    delay: unit(105, 2).filter(|_| sends[0] > 0.0).map(|k| Delay { free: 0.02 * 50f32.powf(k[0]), fb: k[1] * 0.95, low_hz: 20.0 * 100f32.powf(k[2]), high_hz: 200.0 * 100f32.powf(k[3]), wet: wet(0), ..Default::default() }),
-                    chorus: unit(107, 1).filter(|_| sends[1] > 0.0).map(|k| Chorus { depth: k[1], hz: 0.05 * 100f32.powf(k[2]), wet: wet(1) }),
-                    reverb: unit(106, 1).filter(|_| sends[2] > 0.0).map(|k| Reverb { secs: 0.2 + 20.0 * k[3] * k[3], high_hz: 1000.0 * 20f32.powf(k[1]), wet: wet(2) }),
-                    ..Default::default()
+                let turns = parts.iter().find(|p| p.0 == 105).and_then(|p| p.1.get(1)).is_some_and(|&b| b != 0);
+                let set = Set {
+                    echo: unit(105, 2).filter(|_| sends[0] > 0.0).map(|k| Echo { beats: k[0], keep: k[1], low: k[2], high: k[3], turns, wet: wet(0) }),
+                    chorus: unit(107, 1).filter(|_| sends[1] > 0.0).map(|k| Chorus { delay: k[0], depth: k[1], rate: k[2], keep: k[3], wet: wet(1) }),
+                    room: unit(106, 1).filter(|_| sends[2] > 0.0).map(|k| Room { size: k[0], bright: k[1], spread: k[2], decay: k[3], wet: wet(2) }),
                 };
+                if set.any() {
+                    tail.zone = Some(set);
+                }
             }
             zones.push(Zone {
                 name: find(501).map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default(),
@@ -533,12 +647,23 @@ fn programs(state: &[u8]) -> Option<Map> {
                 looped,
                 release: env.map_or(0.25, |e| e.release),
                 env,
-                vel_scale,
-                // the zone's level knob, squared: half way measured 11.5 dB down on the factory test
-                gain: find(504).map(|b| knobs(b, 0)).and_then(|k| k.first().copied()).map_or(1.0, |k| k * k * 1.0614),
-                cut_links,
-                penv,
-                cenv,
+                vel_scale: false,
+                // (measured) a loop kind past the last gives no sound
+                gain: if kind > 4 { 0.0 } else { level * 0.5568 * post },
+                attack: 0.0,
+                // level, place and tune go through the link table
+                sides: Some([1.0, 1.0]),
+                links: Some(Arc::new(links)),
+                // (measured) a whole number of semitones up or down, beside the fine knob
+                tune_cents: find(504).and_then(|b| b.get(4..6)).map_or(0.0, |c| i16::from_le_bytes([c[0], c[1]]) as f32 * 100.0),
+                one_shot: kind == 1,
+                ping: kind == 4,
+                loop_held: kind == 3,
+                key_cents: follow as f32,
+                // (measured) the note is let go about 4.4 ms before its end; the rest covers our control step
+                early: 0.00003,
+                filter_kind,
+                filter2,
                 filter,
                 pick,
                 ..Default::default()
@@ -548,7 +673,114 @@ fn programs(state: &[u8]) -> Option<Map> {
             break;
         }
     }
-    Some(Map { zones, bank: None, kit: None, tail })
+    Some(Map { zones, bank: None, kit: None, program: None, tail })
+}
+
+/// The zone player's file identifier.
+pub const PROGRAM_IDENT: &str = "DirectWave";
+
+fn piece(id: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = id.to_le_bytes().to_vec();
+    out.extend((body.len() as u64).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+/// A zone player block with one program holding one zone at its rest settings: the recording `path` (as the
+/// project stores it) of `frames` frames at `rate`, played at its own pitch on `root` and spread over the
+/// whole keyboard.
+pub fn fresh_program(path: &str, frames: u32, channels: u32, rate: f32, root: u8) -> Vec<u8> {
+    let floats = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+    let lead = |b: &[u8], v: &[f32]| b.iter().copied().chain(floats(v)).collect::<Vec<u8>>();
+    let mut zone = vec![];
+    let mut keys = vec![root, 0, 127, 0, 127, 0, 0, 0xcc];
+    keys.extend(lead(&[0], &[1.0, 0.5, 0.0]));
+    keys.extend([0, 2, 0, 0]);
+    zone.extend(piece(500, &keys));
+    zone.extend(piece(501, b"zone"));
+    zone.extend(piece(502, path.as_bytes()));
+    let mut facts = vec![];
+    for v in [frames, 0, channels, 16] {
+        facts.extend(v.to_le_bytes());
+    }
+    facts.extend(rate.to_le_bytes());
+    for v in [0u32, 0, frames, 0] {
+        facts.extend(v.to_le_bytes());
+    }
+    zone.extend(piece(503, &facts));
+    zone.extend(piece(504, &lead(&[], &[0.5]).into_iter().chain([0, 0, 100, 0]).collect::<Vec<u8>>()));
+    zone.extend(piece(505, &lead(&[0, 0], &[0.5, 0.5, 1.0])));
+    zone.extend(piece(506, &floats(&[0.5, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])));
+    for _ in 0..2 {
+        zone.extend(piece(507, &lead(&[0, 0, 0, 0], &[0.4724, 0.5, 0.0, 0.0])));
+    }
+    zone.extend(piece(508, &[0, 0]));
+    zone.extend(piece(509, &floats(&[0.0, 0.5, 1.0, 0.36])));
+    for (id, k) in [(510, 0.0), (511, 0.0), (512, 0.0), (513, 0.5)] {
+        zone.extend(piece(id, &lead(&[0], &[k, 1.0])));
+    }
+    for _ in 0..2 {
+        zone.extend(piece(514, &floats(&[0.0, 0.5, 0.5, 0.25])));
+    }
+    for rate in [0.1, 0.55] {
+        zone.extend(piece(515, &lead(&[0, 0, 0, 0], &[rate, 1.0, 0.0, 0.0])));
+    }
+    for (src, dst, amount) in [(2u16, 2u16, 1.0f32), (3, 34, 0.75), (12, 1, 0.5)].into_iter().chain(std::iter::repeat_n((0, 0, 0.5), 13)) {
+        let mut l = src.to_le_bytes().to_vec();
+        l.extend(dst.to_le_bytes());
+        l.extend(amount.to_le_bytes());
+        zone.extend(piece(516, &l));
+    }
+    zone.extend(piece(4, &[]));
+    let mut head = vec![0u8; 34];
+    head[6..10].copy_from_slice(&1f32.to_le_bytes());
+    head[14] = 1;
+    let mut prog = piece(100, &head);
+    prog.extend(piece(102, b"program"));
+    prog.extend(piece(103, &[]));
+    prog.extend(piece(104, &[0; 10]));
+    prog.extend(piece(105, &lead(&[0, 0], &[0.75, 0.75, 0.5, 0.75])));
+    prog.extend(piece(106, &lead(&[0], &[0.25, 0.5, 0.75, 0.25])));
+    prog.extend(piece(107, &lead(&[0], &[0.25, 0.5, 0.25, 0.0])));
+    for _ in 0..2 {
+        prog.extend(piece(108, &lead(&[0, 0, 0, 0], &[0.1, 1.0, 0.0, 0.0])));
+    }
+    for _ in 0..4 {
+        prog.extend(piece(109, &[0; 4]));
+    }
+    prog.extend(piece(3, &zone));
+    prog.extend(piece(2, &[]));
+    let mut b = vec![0x24, 0, 0, 0];
+    b.extend(piece(6, &[0; 16]));
+    b.extend(piece(1, &prog));
+    b
+}
+
+/// Write a number into the `nth` piece `id` of the first zone of a zone player block, at byte `at`.
+pub fn put_zone_bytes(block: &[u8], top: bool, id: u32, nth: usize, at: usize, v: &[u8]) -> Option<Vec<u8>> {
+    fn own(b: &[u8]) -> Option<Vec<(u32, Vec<u8>)>> {
+        Some(pieces(b)?.into_iter().map(|(i, d)| (i, d.to_vec())).collect())
+    }
+    fn join(p: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        p.iter().flat_map(|(i, d)| piece(*i, d)).collect()
+    }
+    let mut all = own(block.get(4..)?)?;
+    let prog = all.iter_mut().find(|p| p.0 == 1)?;
+    let mut parts = own(&prog.1)?;
+    if top {
+        let hit = parts.iter_mut().filter(|p| p.0 == id).nth(nth)?;
+        hit.1.get_mut(at..at + v.len())?.copy_from_slice(v);
+    } else {
+        let zone = parts.iter_mut().find(|p| p.0 == 3)?;
+        let mut inner = own(&zone.1)?;
+        let hit = inner.iter_mut().filter(|p| p.0 == id).nth(nth)?;
+        hit.1.get_mut(at..at + v.len())?.copy_from_slice(v);
+        zone.1 = join(&inner);
+    }
+    prog.1 = join(&parts);
+    let mut out = block[..4].to_vec();
+    out.extend(join(&all));
+    Some(out)
 }
 
 /// The pad machine's block as versions before the pieces wrote it: the letters JB and a version, the pad
@@ -801,15 +1033,19 @@ pub(crate) mod tests {
         assert!(z.path.ends_with("tone.wav"));
         assert!(m.hit(72, 100).next().is_none());
         let e = z.env.unwrap();
-        assert!((e.sustain - 0.8).abs() < 1e-6 && (e.release - 0.625).abs() < 1e-4 && e.attack == 0.0);
-        assert_eq!(z.filter, Some((0.4, 0.5)));
-        assert!(z.vel_scale && z.penv.is_none());
-        let c = z.cenv.unwrap();
-        assert!((c.amount - 0.5).abs() < 1e-6 && (c.attack - 0.016).abs() < 1e-4);
+        assert!((e.sustain - 0.8).abs() < 1e-6 && (e.release - 0.626).abs() < 1e-4 && e.attack == 0.0 && e.squared);
+        assert_eq!((z.filter, z.filter_kind), (Some((0.4, 0.75)), 1));
+        // level and tune go through the link table: the rows as written, the free envelope ready for its row
+        let l = z.links.as_ref().unwrap();
+        assert!(!z.vel_scale && z.penv.is_none() && z.cenv.is_none());
+        assert_eq!(l.rows.len(), 4);
+        assert_eq!(l.rows[3], (9, 7, 0.75));
+        assert!((l.free[0].attack - 0.017).abs() < 1e-4 && (l.tune - 0.5).abs() < 1e-6);
         // the room is on and fed; the echo is switched off and the chorus gets nothing
-        let r = m.tail.reverb.unwrap();
-        assert!((r.wet - 0.25).abs() < 1e-6 && (r.secs - 1.45).abs() < 1e-4);
-        assert!(m.tail.delay.is_none() && m.tail.chorus.is_none());
+        let fx = m.tail.zone.unwrap();
+        let r = fx.room.unwrap();
+        assert!((r.wet - 0.25).abs() < 1e-6 && (r.size - 0.25).abs() < 1e-6 && (r.decay - 0.25).abs() < 1e-6);
+        assert!(fx.echo.is_none() && fx.chorus.is_none());
     }
 
     #[test]
@@ -897,7 +1133,7 @@ pub(crate) mod tests {
                     let pre = crate::preset::read(&p).unwrap();
                     let mut m = Map::parse(&pre.ident, &pre.state).unwrap_or_else(|| panic!("{} is not read", p.display()));
                     assert!(!m.zones.is_empty(), "{}", p.display());
-                    assert!(m.zones.iter().all(|z| z.env.is_some_and(|e| e.release > 0.0 && e.release < 2.0) && z.vel_scale), "{}", p.display());
+                    assert!(m.zones.iter().all(|z| z.env.is_some_and(|e| e.release > 0.0 && e.release < 40.0) && z.links.is_some()), "{}", p.display());
                     if seen % 8 == 0 {
                         m.load(&mut lib, p.parent());
                         found += m.zones.iter().filter(|z| z.sample.is_some()).count();

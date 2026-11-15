@@ -1133,6 +1133,22 @@ struct Voice {
     finc: f32,
     fleft: u32,
     fs: [[f32; 2]; 4],
+    /// The zone player's second filter: kind, step and damping, then its state.
+    f2: Option<(u8, f32, f32)>,
+    f2s: [[f32; 2]; 4],
+    /// The zone player's link table with what it needs of the note (velocity, seconds to a beat, a seed for
+    /// its chance waves), then what it last came to: a gain for each side with its slope, the offsets on the
+    /// first filter's knobs, the levels the two shapers cut at and the smoothed chance waves.
+    zm: Option<Arc<crate::zones::Links>>,
+    zvel: f32,
+    zbeat: f32,
+    zseed: u32,
+    zg: [f32; 2],
+    zg_inc: [f32; 2],
+    zf: [f32; 2],
+    zclip: [f32; 2],
+    zsm: [f32; 4],
+    loop_held: bool,
     /// Time stretch: source frames used per output frame, while `step` stays the pitch.
     stretch: bool,
     rate: f64,
@@ -1149,6 +1165,9 @@ impl Voice {
             self.rel_from = self.env_now;
             self.rel_t = 0;
             self.ctl = 0;
+            if self.loop_held {
+                self.loop_pts = None;
+            }
             if let Some(tone) = &self.tone {
                 self.tail = (self.tstate.release(tone) * self.sr) as u32;
             }
@@ -1183,7 +1202,11 @@ impl Voice {
                 };
                 if at(self.rel_t as f32) < 0.0 { -1.0 } else { at((self.rel_t + CTL) as f32).max(0.0) }
             } else if self.releasing {
-                self.venv.released(self.rel_from, self.rel_t as f32 / self.sr).unwrap_or(-1.0)
+                // (measured on the zone player) its lines carry no lag: each stretch ends on the line itself
+                let ahead = if self.venv.squared { CTL } else { 0 };
+                self.venv.released(self.rel_from, (self.rel_t + ahead) as f32 / self.sr).unwrap_or(if ahead > 0 && self.rel_t == 0 { 0.0 } else { -1.0 })
+            } else if self.venv.squared {
+                self.venv.held(t + CTL as f32 / self.sr)
             } else {
                 self.venv.held(t)
             };
@@ -1195,6 +1218,9 @@ impl Voice {
                     self.active = false;
                 }
                 self.env_inc = -self.env_now / CTL as f32;
+            } else if self.t == 0 && self.venv.squared {
+                self.env_now = self.venv.held(0.0);
+                self.env_inc = (target - self.env_now) / CTL as f32;
             } else if self.t == 0 {
                 self.env_now = target;
                 self.env_inc = 0.0;
@@ -1269,13 +1295,105 @@ impl Voice {
                 self.step = self.step_to;
             }
         }
+        let mut zcents = 0.0f32;
+        if let Some(m) = self.zm.clone() {
+            // (measured) the waves come out about 2.4 ms late
+            let tm = (self.t as f32 + CTL as f32 * 0.5) / self.sr - 0.0024;
+            let mut src = [0.0f32; 21];
+            src[1] = self.key as f32 / 127.0;
+            // (measured) velocity counts on the level's own scale
+            src[2] = 0.5506 * law::velocity_gain(self.zvel);
+            for (i, at) in [5usize, 6, 11, 12].into_iter().enumerate() {
+                let w = &m.waves[i];
+                // (measured) the program's waves are 2048 frames into their run when the song starts
+                let t = if i < 2 { tm + self.lfo_t0 + 2048.0 / 44100.0 } else { tm };
+                let mut v = w.at(t, self.zbeat, self.zseed.wrapping_add(i as u32));
+                if w.kind == 7 {
+                    // the smoothed chance wave eases to each new value
+                    self.zsm[i] += (v - self.zsm[i]) * (1.0 - (-(CTL as f32) / (0.046 * self.sr)).exp());
+                    v = self.zsm[i];
+                }
+                src[at] = v;
+            }
+            // (measured) on the level and the place the zone's waves land 200 frames later still, the
+            // program's 308 frames sooner
+            let mut srcl = src;
+            if m.rows.iter().any(|r| matches!(r.1, 2 | 3) && matches!(r.0, 5 | 6 | 11 | 12)) {
+                for (i, at) in [5usize, 6, 11, 12].into_iter().enumerate() {
+                    let w = &m.waves[i];
+                    if w.kind != 7 {
+                        let t = if i < 2 { tm + self.lfo_t0 + (2048.0 + 308.0) / 44100.0 } else { tm - 200.0 / 44100.0 };
+                        srcl[at] = w.at(t, self.zbeat, self.zseed.wrapping_add(i as u32));
+                    }
+                }
+            }
+            for i in 0..2 {
+                let e = &m.free[i];
+                src[9 + i] = if self.releasing {
+                    let since = self.rel_t as f32 / self.sr;
+                    e.released(e.held((t - since).max(0.0)), since).unwrap_or(0.0)
+                } else {
+                    e.held(t)
+                };
+            }
+            // (measured) a row's reach is its knob taken from the middle, doubled and cubed; rows may move
+            // other rows' knobs
+            let cube = |a: f32| {
+                let x = 2.0 * a.clamp(0.0, 1.0) - 1.0;
+                x * x * x
+            };
+            let mut knob = [0.5f32; 32];
+            for (i, r) in m.rows.iter().take(32).enumerate() {
+                knob[i] = r.2;
+            }
+            for r in m.rows.iter().filter(|r| (32..64).contains(&r.1)) {
+                knob[r.1 as usize - 32] += src[(r.0 as usize).min(20)] * cube(r.2);
+            }
+            let mut d = [0.0f32; 13];
+            // (measured) velocity sets the level by its usual law; anything else linked to the level adds on
+            // a scale where the top velocity nearly fills it, and the sum is then kept inside that scale
+            let (mut vel, mut vels, mut others) = (1.0f32, 0, false);
+            for (i, r) in m.rows.iter().take(32).enumerate() {
+                let a = cube(knob[i]);
+                if a == 0.0 {
+                    continue;
+                }
+                if r.0 == 2 && r.1 == 2 {
+                    vel *= law::velocity_gain(self.zvel) * a * if vels > 0 { 0.5506 } else { 1.0 };
+                    vels += 1;
+                } else if (1..13).contains(&r.1) {
+                    d[r.1 as usize] += if matches!(r.1, 2 | 3) { srcl } else { src }[(r.0 as usize).min(20)] * a;
+                    others |= r.1 == 2;
+                }
+            }
+            if vels == 0 {
+                vel = 0.0;
+            }
+            let level = if others { 1.8163 * (0.5506 * vel + 0.984 * d[2]).clamp(0.0, 1.0) } else { vel };
+            let p = (m.place + d[3]).clamp(0.0, 1.0);
+            let want = [level * (1.0 - p).sqrt(), level * p.sqrt()];
+            if self.t == 0 {
+                self.zg = want;
+                self.zg_inc = [0.0; 2];
+            } else {
+                self.zg_inc = [(want[0] - self.zg[0]) / CTL as f32, (want[1] - self.zg[1]) / CTL as f32];
+            }
+            // (measured) the tune knob spans an octave each way, and no link takes it past that
+            zcents = ((m.tune + d[1]).clamp(0.0, 1.0) - 0.5) * 2400.0;
+            self.zf = [d[7], d[8]];
+            self.zclip = [1.0 - (m.f1[2] + d[9]).clamp(0.0, 1.0), 1.0 - (m.f2[2] + d[12]).clamp(0.0, 1.0)];
+            if let Some(f) = self.f2.as_mut() {
+                let hz = (13.75 * ((127.0 * (m.f2[0] + d[10]).clamp(0.0, 1.0)) / 12.0).exp2()).min(self.sr * 0.49);
+                *f = (f.0, (std::f32::consts::PI * hz / self.sr).tan(), (1.0 - 0.99 * (m.f2[1] + d[11]).clamp(0.0, 1.0)) / 0.7);
+            }
+        }
         self.step_now = if self.penv.on && self.penv.amount != 0.0 {
             self.step * ((self.penv.amount * self.penv.held(t)) as f64 / 1200.0).exp2()
         } else {
             self.step
         };
-        if wob[0] + lf[4] != 0.0 {
-            self.step_now *= ((wob[0] + lf[4]) as f64 / 1200.0).exp2();
+        if wob[0] + lf[4] + zcents != 0.0 {
+            self.step_now *= ((wob[0] + lf[4] + zcents) as f64 / 1200.0).exp2();
         }
         if self.slide != self.slide_to {
             let d = self.slide_inc * CTL as f32;
@@ -1302,14 +1420,20 @@ impl Voice {
             if self.cenv.on {
                 x += self.cenv.amount * self.cenv.held(t);
             }
-            x += wob[1] + lf[2];
+            x += wob[1] + lf[2] + self.zf[0];
             let x = x.clamp(0.0, 1.0);
-            let mut y = self.fres + lf[3];
+            let mut y = self.fres + lf[3] + self.zf[1];
             if self.renv.on {
                 y += self.renv.amount * self.renv.held(t);
             }
             let y = y.clamp(0.0, 1.0);
-            if self.ftype == 255 {
+            if self.ftype > 16 && self.ftype != 255 {
+                // (measured) the zone player's filters: the corner climbs the 127 keys from 13.75 Hz, and the
+                // emphasis knob takes the damping from 1/0.7 almost to nothing
+                let hz = (13.75 * ((127.0 * x) / 12.0).exp2()).min(self.sr * 0.49);
+                self.fg = (std::f32::consts::PI * hz / self.sr).tan();
+                self.fk = (1.0 - 0.99 * y) / 0.7;
+            } else if self.ftype == 255 {
                 // a sample bank's own filter
                 let hz = (20.0 * 1000f32.powf(x)).min(self.sr * 0.45);
                 self.fg = (std::f32::consts::PI * hz / self.sr).tan();
@@ -1365,7 +1489,7 @@ impl Voice {
         let a1 = 1.0 / (1.0 + g * (g + k));
         let a2 = g * a1;
         let a3 = g * a2;
-        let stages = if matches!(self.ftype, 5 | 7) { 2 } else { 1 };
+        let stages = if matches!(self.ftype, 5 | 7 | 17..=21) { 2 } else { 1 };
         let mut x = x;
         for st in 0..stages {
             for c in 0..2 {
@@ -1377,7 +1501,10 @@ impl Voice {
                 x[c] = match self.ftype {
                     2 => v1 * k,
                     3 => x[c] - k * v1 - v2,
-                    4 => x[c] - k * v1,
+                    4 | 20 => x[c] - k * v1,
+                    18 => x[c] - k * v1 - v2,
+                    19 => v1,
+                    21 => x[c] - 2.0 * k * v1,
                     _ => v2,
                 };
             }
@@ -1511,6 +1638,36 @@ impl Voice {
             if self.fon {
                 s = self.filter(s);
             }
+            // (measured) each filter is followed by its shaper, which cuts the wave off flat at its level
+            if self.zm.is_some() && self.zclip[0] < 1.0 {
+                let th = self.zclip[0];
+                s = [s[0].clamp(-th, th), s[1].clamp(-th, th)];
+            }
+            if let Some((kind, g, k)) = self.f2 {
+                let a1 = 1.0 / (1.0 + g * (g + k));
+                let a2 = g * a1;
+                let a3 = g * a2;
+                for st in 0..2 {
+                    for c in 0..2 {
+                        let [ic1, ic2] = self.f2s[st * 2 + c];
+                        let v3 = s[c] - ic2;
+                        let v1 = a1 * ic1 + a2 * v3;
+                        let v2 = ic2 + a2 * ic1 + a3 * v3;
+                        self.f2s[st * 2 + c] = [2.0 * v1 - ic1, 2.0 * v2 - ic2];
+                        s[c] = match kind {
+                            2 => s[c] - k * v1 - v2,
+                            3 => v1,
+                            4 => s[c] - k * v1,
+                            5 => s[c] - 2.0 * k * v1,
+                            _ => v2,
+                        };
+                    }
+                }
+            }
+            if self.zm.is_some() && self.zclip[1] < 1.0 {
+                let th = self.zclip[1];
+                s = [s[0].clamp(-th, th), s[1].clamp(-th, th)];
+            }
             let level = if self.droop && self.releasing {
                 // falls like a discharge with a time constant of 650 frames, cut off where it would have reached 1%
                 (((self.level - 1.0) * 4.54).exp() - 0.010_67) / 0.989_33
@@ -1551,7 +1708,13 @@ impl Voice {
                 self.gl += self.g_inc[0];
                 self.gr += self.g_inc[1];
             }
-            let (gl, gr) = (self.gl * g * (1.0 + self.lr[0]) * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + self.lr[1]) * (1.0 + lean).clamp(0.0, 1.0));
+            let (mut gl, mut gr) = (self.gl * g * (1.0 + self.lr[0]) * (1.0 - lean).clamp(0.0, 1.0), self.gr * g * (1.0 + self.lr[1]) * (1.0 + lean).clamp(0.0, 1.0));
+            if self.zm.is_some() {
+                gl *= self.zg[0];
+                gr *= self.zg[1];
+                self.zg[0] += self.zg_inc[0];
+                self.zg[1] += self.zg_inc[1];
+            }
             out[0] += s[0] * gl;
             out[1] += s[1] * gr;
             if sends {
@@ -2816,6 +2979,11 @@ impl Player {
                     }
                 }
                 let last = song.inserts.len().saturating_sub(1);
+                let (zone_t0, zone_tempo) = {
+                    let tpf = self.now_tpf(song);
+                    let t0 = if self.was_playing && tpf > 0.0 { (self.pos / tpf / self.sr as f64) as f32 + delay as f32 / self.sr } else { 0.0 };
+                    (t0, (tpf * self.sr as f64 * 60.0 / song.ppq.max(1) as f64) as f32)
+                };
                 // layers that share the note either sound together or take turns, as the pad asks
                 let mode = map.hit(n.key, vel).next().map_or(0, |z| z.pick);
                 let among = map.hit(n.key, vel).count();
@@ -2839,7 +3007,8 @@ impl Player {
                         e.map(|e| if hold == 0.0 && decay == 0.0 { e } else { Env { hold: e.hold * 2f32.powf((60.0 - n.key as f32) * hold / 1200.0), decay: e.decay * 2f32.powf((60.0 - n.key as f32) * decay / 1200.0), ..e } })
                     };
                     let note_gain = if banked { law::bank_velocity(nvel) } else if z.vel_scale { law::velocity_gain(n.vel) } else { 1.0 };
-                    let place = banked.then(|| law::bank_place(z.pan));
+                    let place = if banked { Some(law::bank_place(z.pan)) } else { z.sides.map(|s| (s[0], s[1])) };
+                    let held = if z.early > 0.0 { held.map(|h| h.saturating_sub((z.early * sr) as u64).max(1)) } else { held };
                     let (pl, pr) = if let Some((zl, zr)) = place {
                         let (l, r) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
                         (l * zl, r * zr)
@@ -2847,6 +3016,8 @@ impl Player {
                         law::pan((chan_pan + n.pan + z.pan).clamp(-1.0, 1.0))
                     };
                     let gain = chan_vol * note_gain * z.gain;
+                    // (measured) the zone player turns round half a frame short of the loop's end
+                    let loop_pts = if z.ping { loop_pts.map(|(a, b)| (a, b + 0.5)) } else { loop_pts };
                     self.start(Voice {
                         sample: Some(smp),
                         loop_pts,
@@ -2871,13 +3042,24 @@ impl Player {
                         follow: z.track,
                         venv: keyed(z.env, z.key_times[0], z.key_times[1]).unwrap_or_default(),
                         fon: z.filter.is_some(),
-                        ftype: 255,
+                        ftype: if z.filter_kind > 0 { 16 + z.filter_kind } else { 255 },
                         // (measured) a sound bank's filter closes two octaves from the top velocity down to none
                         fcut: z.filter.map_or(1.0, |f| f.0 + z.cut_links[0] * n.vel + z.cut_links[1] * (n.key as f32 - 60.0) / 120.0) - if banked { law::bank_cut_drop(nvel) } else { 0.0 },
                         fres: z.filter.map_or(0.0, |f| f.1),
+                        f2: z.filter2.map(|(kind, x, y)| {
+                            let hz = (13.75 * ((127.0 * x) / 12.0).exp2()).min(sr * 0.49);
+                            (kind, (std::f32::consts::PI * hz / sr).tan(), (1.0 - 0.99 * y) / 0.7)
+                        }),
                         penv: keyed(z.penv, z.key_times[2], z.key_times[3]).unwrap_or_default(),
                         cenv: keyed(z.cenv, z.key_times[2], z.key_times[3]).unwrap_or_default(),
                         zl: z.lfos,
+                        zm: z.links.clone(),
+                        zvel: n.vel,
+                        zbeat: 60.0 / zone_tempo.max(1.0),
+                        zseed: (n.key as u32) << 8 ^ (self.pos as u32).wrapping_mul(2_654_435_761),
+                        lfo_t0: zone_t0,
+                        ping: z.ping && loop_pts.is_some(),
+                        loop_held: z.loop_held,
                         place,
                         lift_db: z.lift_db,
                         ..Default::default()
@@ -5977,7 +6159,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = |key: u8, lo: u8, hi: u8, cut: i32| crate::zones::Zone { key_lo: key, key_hi: key, vel_lo: lo, vel_hi: hi, root: key as i32, track: false, sample: Some(tone.clone()), one_shot: true, cut, cut_by: cut, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None, kit: None, tail: Default::default() }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad(36, 0, 110, -1), pad(46, 0, 127, 0), pad(42, 0, 127, 0)], bank: None, kit: None, program: None, tail: Default::default() }));
         s.patterns[0].toggle_step(0, 0);
         s.patterns[0].notes[0].key = 36;
         // a short note still plays the whole recording
@@ -6013,7 +6195,7 @@ mod tests {
         let tone = s.channels[0].sample.take().unwrap();
         s.channels[0].kind = ChannelKind::Plugin;
         let pad = crate::zones::Zone { key_lo: 48, key_hi: 48, root: 48, track: false, sample: Some(tone), one_shot: true, ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad], bank: None, kit: None, tail: Default::default() }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![pad], bank: None, kit: None, program: None, tail: Default::default() }));
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) < 1e-6);
         s.channels[0].root_key = 72;
         assert!(loud(&crate::render_song(&s, 48_000.0, false, 0, 0.0), 0.0, 0.5) > 0.1);
@@ -6137,11 +6319,11 @@ mod tests {
             n.key = 36;
         }
         // together: the loud layer is heard from the first note
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 0), layer(1.0, 0)], bank: None, kit: None, tail: Default::default() }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 0), layer(1.0, 0)], bank: None, kit: None, program: None, tail: Default::default() }));
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 0.3) > 0.1);
         // in turn: the first note plays the silent layer, the second the loud one
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 1), layer(1.0, 1)], bank: None, kit: None, tail: Default::default() }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![layer(0.0, 1), layer(1.0, 1)], bank: None, kit: None, program: None, tail: Default::default() }));
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         assert!(loud(&buf, 0.0, 0.9) < 1e-6);
         assert!(loud(&buf, 1.1, 1.8) > 0.1);
@@ -6242,7 +6424,7 @@ mod tests {
         s.channels[0].kind = ChannelKind::Plugin;
         let env = crate::song::Env { on: true, decay: 0.3, sustain: 0.0, release: 0.01, ..Default::default() };
         let zone = crate::zones::Zone { root: 60, sample: Some(tone), one_shot: true, env: Some(env), ..Default::default() };
-        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None, kit: None, tail: Default::default() }));
+        s.channels[0].zones = Some(Arc::new(crate::zones::Map { zones: vec![zone], bank: None, kit: None, program: None, tail: Default::default() }));
         s.patterns[0].toggle_step(0, 0);
         let buf = crate::render_song(&s, 48_000.0, false, 0, 0.0);
         // loud at the start, gone once the decay has run to its silent sustain
