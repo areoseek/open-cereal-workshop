@@ -1202,9 +1202,10 @@ impl Gen {
                         shape: f[1] as u8,
                         // the keyboard's C5 is 523 Hz here: an octave above the note number
                         ratio: 2.0 * 2f32.powf((f[2] + f[3] / 100.0) / 12.0),
-                        phase: f[4] / 64.0,
-                        // the knob spreads the two sides by up to half a semitone
-                        spread: 2f32.powf(f[5] / 64.0 * 0.5 / 12.0),
+                        // measured: the knob moves only the right side, up to half a cycle ahead
+                        phase: f[4].max(0.0) / 128.0,
+                        // measured: the knob raises only the right side, one cent a step
+                        spread: 2f32.powf(f[5].max(0.0) / 1200.0),
                         invert: self.p[21 + k] != 0.0,
                     };
                 }
@@ -1312,47 +1313,42 @@ impl Tone {
 pub struct ToneState {
     ph: [[f64; 2]; 3],
     seed: u32,
-    hold: [f32; 3],
     add: Option<Box<crate::additive::Voice>>,
     fm: Option<Box<crate::fm::Voice>>,
     mini: Option<crate::minis::Voice>,
 }
 
+/// One plain reading of a shape at `t` of its cycle (measured from single readings of low notes).
 #[inline]
-fn blep(t: f32, dt: f32) -> f32 {
-    if t < dt {
-        let x = t / dt;
-        x + x - x * x - 1.0
-    } else if t > 1.0 - dt {
-        let x = (t - 1.0) / dt;
-        x * x + x + x + 1.0
-    } else {
-        0.0
-    }
-}
-
-#[inline]
-fn wave(shape: u8, t: f32, dt: f32) -> f32 {
+fn wave(shape: u8, t: f32) -> f32 {
     match shape {
+        0 => (t * TAU).sin(),
         1 => {
-            let x = t + 0.25;
-            let x = x - x.floor();
-            1.0 - 4.0 * (x - 0.5).abs()
+            if t < 0.25 {
+                4.0 * t
+            } else if t < 0.75 {
+                2.0 - 4.0 * t
+            } else {
+                4.0 * t - 4.0
+            }
         }
         2 => {
-            let mut v = if t < 0.5 { 1.0 } else { -1.0 };
-            v += blep(t, dt);
-            let t2 = t + 0.5;
-            v -= blep(t2 - t2.floor(), dt);
-            v
+            if t < 0.5 {
+                1.0
+            } else {
+                -1.0
+            }
         }
-        3 => 2.0 * t - 1.0 - blep(t, dt),
+        // a fast climb from the bottom that settles at the top, then the last sixth of the cycle at the bottom
         4 => {
-            // a saw with the edge rounded off: the rising half of a parabola
-            let x = 2.0 * t - 1.0;
-            x * (2.0 - x.abs()) - blep(t, dt)
+            if t < 5.0 / 6.0 {
+                1.0 - 2.0 * (-49.26 * t).exp()
+            } else {
+                -1.0
+            }
         }
-        _ => (t * TAU).sin(),
+        // the drawn shape is a saw until a wave is loaded into it
+        _ => 2.0 * t - 1.0,
     }
 }
 
@@ -1363,9 +1359,10 @@ impl ToneState {
             return s;
         }
         for k in 0..3 {
-            let r = if tone.random > 0.0 { s.rand() * 0.5 + 0.5 } else { 0.0 };
-            let ph = (tone.osc[k].phase + r * tone.random).fract();
-            s.ph[k] = [ph as f64, ph as f64];
+            // measured: the two sides start at places of their own
+            let mut r = || if tone.random > 0.0 { (s.rand() * 0.5 + 0.5) * tone.random } else { 0.0 };
+            let (a, b) = (r(), r());
+            s.ph[k] = [a.fract() as f64, (b + tone.osc[k].phase).fract() as f64];
         }
         s
     }
@@ -1445,51 +1442,53 @@ impl ToneState {
             let osc = &tone.osc[k];
             let base = dphase * osc.ratio;
             if osc.shape == 5 {
-                // noise, stepped at the oscillator's pitch so the note still has a colour
-                let p = &mut self.ph[k][0];
-                *p += (base * 64.0).min(1.0) as f64;
-                if *p >= 1.0 {
-                    *p -= 1.0;
-                    self.hold[k] = self.rand();
-                }
-                o[k] = [self.hold[k]; 2];
+                // noise (measured: a fresh even-spread value every frame on each side, whatever the pitch)
+                o[k] = [self.rand(), self.rand()];
             } else {
-                let half = osc.spread.sqrt();
-                for (c, d) in [(0usize, base / half), (1usize, base * half)] {
-                    let d = d.min(0.49);
+                for (c, d) in [(0usize, base), (1usize, base * osc.spread)] {
+                    let d = d.min(0.49) as f64;
                     let p = &mut self.ph[k][c];
-                    // each frame is the mean of three plain readings a third of a step apart (measured: the
-                    // edges land on thirds of the full jump and nothing is rounded off)
-                    // (the place in the cycle is kept in double precision: the edges then fall on the same
-                    // frames as the reference for the whole note)
-                    let d = d as f64;
-                    let third = d / 3.0;
-                    let at = |q: f64| (if q >= 1.0 { q - 1.0 } else { q }) as f32;
-                    o[k][c] = if osc.shape == 0 {
-                        // the sine's three readings sit around the frame instead of after it
-                        (wave(0, *p as f32, 0.0) + wave(0, (*p + third) as f32, 0.0) + wave(0, (*p - third) as f32, 0.0)) / 3.0
+                    // measured: the cycle is 1024 places long, and a frame that crosses several of them is the
+                    // mean of that many plain readings spread evenly over the frame, nothing rounded off; the
+                    // place is kept in double precision and moved reading by reading, which puts every edge on
+                    // the same frame as the reference for the whole note. The sine is read once, and so is the third
+                    // oscillator while it shapes the level of the others.
+                    if osc.shape == 0 || (k == 2 && tone.am) {
+                        o[k][c] = wave(osc.shape, *p as f32);
+                        *p += d;
+                        if *p >= 1.0 {
+                            *p -= 1.0;
+                        }
                     } else {
-                        (wave(osc.shape, at(*p), 0.0) + wave(osc.shape, at(*p + third), 0.0) + wave(osc.shape, at(*p + 2.0 * third), 0.0)) / 3.0
-                    };
-                    *p += d;
-                    if *p >= 1.0 {
-                        *p -= 1.0;
+                        let n = ((d * 1024.0) as usize).max(1);
+                        let sub = d / n as f64;
+                        let mut a = 0.0f32;
+                        for _ in 0..n {
+                            a += wave(osc.shape, *p as f32);
+                            *p += sub;
+                            if *p >= 1.0 {
+                                *p -= 1.0;
+                            }
+                        }
+                        o[k][c] = a / n as f32;
                     }
                 }
             }
             if osc.invert {
                 o[k] = [-o[k][0], -o[k][1]];
             }
-            let (l, r) = (1.0 - osc.pan.max(0.0), 1.0 + osc.pan.min(0.0));
-            o[k][0] *= l;
-            o[k][1] *= r;
+            // measured: equal power, level with the plain sound in the middle
+            let th = (osc.pan + 1.0) * std::f32::consts::FRAC_PI_4;
+            o[k][0] *= th.cos() * std::f32::consts::SQRT_2;
+            o[k][1] *= th.sin() * std::f32::consts::SQRT_2;
         }
         let mut out = [0.0f32; 2];
         for c in 0..2 {
             let a = o[0][c] + (o[1][c] - o[0][c]) * tone.mix2;
             out[c] = if tone.am {
-                // the third oscillator shapes the level of the other two
-                a * (1.0 + (o[2][c] - 1.0) * tone.mix3)
+                // the third oscillator shapes the level of the other two (measured: its top takes the level
+                // down, and each side follows its own share of the oscillator's place across the field)
+                a * (1.0 - o[2][c] * std::f32::consts::FRAC_1_SQRT_2 * tone.mix3)
             } else {
                 a + (o[2][c] - a) * tone.mix3
             } * 0.5; // measured level
@@ -1538,6 +1537,49 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
+    fn the_triple_oscillator_follows_the_measured_voice() {
+        let run = |set: &[(usize, f32)], n: usize| {
+            let mut g = Gen::new(Kind::Osc3);
+            for &(i, v) in set {
+                g.p[i] = v;
+            }
+            let t = g.tone();
+            let mut s = ToneState::start(&t, 1);
+            // the keyboard's C5 on the default saw: 12 places of the 1024 a frame
+            (0..n).map(|_| s.frame(&t, 261.625_58 / 44100.0)).collect::<Vec<_>>()
+        };
+        // a frame is the mean of twelve readings spread over it
+        let step = 523.251_16f64 / 44100.0;
+        let saw = run(&[], 200);
+        let want: f64 = (0..12).map(|j| 2.0 * (j as f64 * step / 12.0) - 1.0).sum::<f64>() / 12.0 * 0.5;
+        assert!((saw[0][0] as f64 - want).abs() < 1e-6, "{} {want}", saw[0][0]);
+        // the edge frame sits on a twelfth of the jump: nothing rounded off
+        let edge = saw.windows(2).map(|w| w[1][0] - w[0][0]).fold(0.0f32, f32::min);
+        assert!((-1.0..-0.5).contains(&edge), "{edge}");
+        assert_eq!(saw[50][0], saw[50][1]);
+        // the phase and detune knobs move only the right side
+        let ph = run(&[(4, 32.0)], 4);
+        assert_eq!(ph[0][0], saw[0][0]);
+        assert!((ph[0][1] - (saw[0][0] + 0.25)).abs() < 1e-4, "{}", ph[0][1]);
+        let de = run(&[(5, 64.0)], 3000);
+        assert!((0..200).all(|i| de[i][0] == saw[i][0]) && de[150][1] != saw[150][1]);
+        // equal-power placing, level in the middle
+        let pan = run(&[(0, 32.0), (1, 0.0)], 30);
+        let mid = run(&[(1, 0.0)], 30);
+        assert!((pan[20][0] / mid[20][0] - 0.5412).abs() < 1e-3 && (pan[20][1] / mid[20][1] - 1.3066).abs() < 1e-3);
+        // the third oscillator's top takes the level of the others down
+        let am = run(&[(13, 128.0), (24, 1.0), (15, 2.0)], 30);
+        let k = 1.0 - std::f32::consts::FRAC_1_SQRT_2;
+        assert!((am[10][0] - saw[10][0] * k).abs() < 1e-5, "{} {}", am[10][0], saw[10][0] * k);
+        // the last shape climbs fast and rests at the bottom for the final sixth; the drawn one is a saw
+        assert!(wave(4, 0.0) == -1.0 && wave(4, 0.5) > 0.9999 && wave(4, 0.9) == -1.0);
+        assert_eq!(run(&[(1, 6.0)], 50), saw[..50].to_vec());
+        // noise is fresh on every frame and on each side
+        let nz = run(&[(1, 5.0)], 50);
+        assert!(nz.iter().all(|f| f[0] != f[1]) && nz[3][0] != nz[4][0]);
     }
 
     #[test]

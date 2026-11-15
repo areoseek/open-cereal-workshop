@@ -3,7 +3,7 @@
 What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list. Names on the left are theirs and are used here only to track coverage; our own parts get our own names.
 
 ## Instruments (51)
-- [~] 3x Osc (built, approximate)
+- [x] 3x Osc (measured against the reference: 1024-place cycle read as the mean of evenly spread plain readings, all seven shapes, right-side phase and detune, equal-power placing, mixing, level shaping by the third oscillator, per-side random start and noise; renders match to 0.05 %. A wave loaded into the drawn shape is not read yet: it plays the saw the reference plays when none is loaded)
 - [~] Autogun (plays as Metal Bank from the settings stored with the project; picking another preset number is not done)
 - [~] BassDrum (built as Kick Designer: all 23 stored settings read, shown as knobs and saved back; two sliding oscillators, click, sub tone, drive, attack, sampling ratio, fixed duration and the layered sample with its envelope, delay, pitch and low pass all play; new ones can be added. The settings sit in their stored places, but the curves behind the knobs are our own and have not been matched by ear against the original; old-format preset conversion is not done)
 - [~] BeepMap (opens as Picture Synth and plays the stored picture: rows as sine waves, red left, green right, range, pixel length, cents or linear scale, loop, grainy, widen and the row limit, all on the panel with the picture shown; a PNG, JPEG or BMP picture can be opened and is kept in the block; can be added new with a picture of our own; blue lifts a pixel's pitch by up to the whole range, which is our reading of one line of the manual; copy and paste of pictures through the clipboard is not done; pitch and time scales are estimates)
