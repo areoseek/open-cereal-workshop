@@ -2037,27 +2037,37 @@ impl Voice {
                         s.fk[k] = 0.916 * r.powf(0.40);
                     }
                     11 => {
-                        // the drive kind is a ladder of four plain stages per slope step, with the resonance
-                        // fed back round the first ladder and half made up for at its input
+                        // the drive kind is a ladder of four plain stages per slope step, each with the
+                        // resonance fed back round it and half of the loss made up
                         count = n;
                         let g = g_at(180.3 * 167.3f32.powf(c) - 70.3);
                         let big = g / (1.0 + g);
-                        let back = 3.83 * r;
-                        for (st, slot) in plan.iter_mut().enumerate().take(n) {
-                            let kb = if st == 0 { back } else { 0.0 };
-                            *slot = [big, kb, 1.0 + 0.49 * kb, 1.0 / (1.0 + kb * big * big * big * big), 0.0, 0.0];
+                        // (fitted to the response at four settings of the knob and three slopes, from a
+                        // low note rich in harmonics: every ladder has the resonance round it, less of it
+                        // the more ladders there are, and a third more once there is drive)
+                        let rows = n.max(1) as f32 - 1.0;
+                        let lean = if f.drive > 0.0 { 0.75 } else { 1.0 };
+                        let kb = r / ((0.265 + 0.073 * rows) * lean + 0.036 * rows * r);
+                        for slot in plan.iter_mut().take(n) {
+                            *slot = [big, kb, 1.0 + 0.51 * kb, 1.0 / (1.0 + kb * big * big * big * big), 0.0, 0.0];
                         }
                         if f.drive > 0.0 {
                             // with any drive the ladder works on a scaled copy of the signal: how far it is
                             // pushed into the bend, and what brings it back out
                             let lv = f.drive * 128.0;
-                            let push = 1.692 * 17.9f32.powf((lv - 64.0) / 64.0);
-                            const UP: [f32; 5] = [0.0, 1.9, 6.1, 11.6, 17.4];
+                            // (measured at seven settings with a quiet and a loud sine: what comes out of
+                            // the bend flat out grows by `UP`, quiet sound by `MORE` on top of that)
+                            let base = 1.692 * 17.9f32.powf((lv - 64.0) / 64.0);
+                            const UP: [f32; 5] = [0.0, 1.9, 6.1, 10.6, 16.4];
+                            const MORE: [f32; 5] = [0.0, 2.0, 6.0, 12.3, 19.0];
                             let at = ((lv - 64.0) / 16.0).clamp(0.0, 4.0);
                             let i = (at as usize).min(3);
                             let db = UP[i] + (UP[i + 1] - UP[i]) * (at - i as f32);
-                            plan[0][4] = push;
-                            plan[0][5] = 10f32.powf(db / 20.0) / push;
+                            let more = MORE[i] + (MORE[i + 1] - MORE[i]) * (at - i as f32);
+                            // (three slopes measured since: each ladder is pushed and pulled on its own, by
+                            // half of what a pair showed, and comes out 3 dB lower flat out)
+                            plan[0][5] = 10f32.powf((db - 3.0) / 20.0) / base;
+                            plan[0][4] = 10f32.powf((db + more) / 40.0) / plan[0][5];
                         }
                     }
                     kind => {
@@ -2307,6 +2317,9 @@ impl Voice {
                 let mut next = [0.0f32; 2];
                 for step in 0..self.fsteps as usize {
                 x = fed[step] + carry[step];
+                // (measured with a falling level in front of a driven filter and of a shaper: the level is
+                // set on the way in, so both keep the sound up while it falls)
+                x *= s.val[b + 1];
                 if f.kind == 12 {
                     // phaser: a row of all-pass stages whose output comes back to its own input, solved
                     // without a sample of delay (the row is a straight line: gain times input plus memory)
@@ -2331,18 +2344,20 @@ impl Voice {
                     // shows once it is mixed with another path. Measured against the filter before it.)
                     x = y;
                 } else if f.kind == 11 && s.plan[k][0][4] > 0.0 {
-                    // the driven ladder: every stage bends what comes in and what it holds, and the resonance
-                    // goes back in under the first bend
+                    // the driven ladders: every stage bends what comes in and what it holds, and each ladder
+                    // has its own push, pull and resonance, which goes back in under its first bend
                     let bend = |v: f32| v / (1.0 + v * v).sqrt();
                     let lean = |v: f32| {
                         let q = 1.0 / (1.0 + v * v);
                         q * q.sqrt()
                     };
                     let (push, pull) = (s.plan[k][0][4], s.plan[k][0][5]);
-                    let mut u_in = x * push;
-                    let mut first = true;
+                    // (with resonance the sound stays cleaner than the make-up alone would leave it: part of
+                    // the make-up is taken off going in and given back coming out)
+                    let pre = s.plan[k][0][2].sqrt();
                     for st in 0..s.stages[k] as usize {
                         let [big, back, make_up, ..] = s.plan[k][st];
+                        let u_in = x * push / pre;
                         let g = big / (1.0 - big).max(1e-6);
                         let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
                         let z = [&mut lo[st * 2], &mut hi[0]];
@@ -2350,7 +2365,7 @@ impl Voice {
                         // the four stages for one guess of what comes back; gives the last stage and how
                         // steeply it follows the guess
                         let chain = |guess: f32, keep: &mut [f32; 4]| -> (f32, f32) {
-                            let arg = if first { u_in - back * guess } else { u_in };
+                            let arg = u_in - back * guess;
                             let mut a = bend(arg);
                             let mut slope = -back * lean(arg);
                             let mut u = 0.0;
@@ -2372,7 +2387,7 @@ impl Voice {
                         };
                         let mut keep = [0.0f32; 4];
                         let mut guess = held[3];
-                        if first && back > 0.0 {
+                        if back > 0.0 {
                             for _ in 0..2 {
                                 let (got, slope) = chain(guess, &mut keep);
                                 guess -= (got - guess) / (slope - 1.0);
@@ -2382,13 +2397,7 @@ impl Voice {
                         for q in 0..4 {
                             z[q / 2][q % 2] = keep[q];
                         }
-                        if first {
-                            x = got * pull * make_up;
-                        } else {
-                            x = got * pull * s.plan[k][0][2];
-                        }
-                        u_in = got;
-                        first = false;
+                        x = got * pull * make_up * pre;
                     }
                 } else if f.kind == 11 {
                     for st in 0..s.stages[k] as usize {
@@ -2433,7 +2442,7 @@ impl Voice {
                     s.fb[k] = 0.0;
                 }
                 // a ringing stage after a hot shaper is kept inside sane bounds
-                x = (x * s.val[b + 1]).clamp(-8.0, 8.0);
+                x = x.clamp(-8.0, 8.0);
                 next[step] = x * f.next;
                 let g = p.out[6 + k];
                 if g != 0.0 {
@@ -2756,6 +2765,44 @@ pub(crate) mod tests {
             s += f[0] * (w * k as f32).sin();
         }
         (c * c + s * s).sqrt() * 2.0 / o.len() as f32
+    }
+
+    /// One operator through the first filter as a driven low-pass, and nothing else.
+    fn driven(slope: i32, drive: f32, res: f32, feed: f32) -> Patch {
+        let mut p = lone();
+        p.out[0] = 0.0;
+        p.out[6] = 1.0;
+        p.feed[0][0] = feed;
+        let f = &mut p.filts[0];
+        (f.kind, f.slope, f.drive, f.res, f.cut, f.env_amt, f.ws_on) = (11, slope, drive, res, 0.5, 0.5, false);
+        for j in 0..8 {
+            p.arts[36 + j] = Art::neutral(matches!(j, 0 | 2 | 3));
+        }
+        p.wire();
+        p
+    }
+
+    /// Every ladder of the driven low-pass has its own push and pull: quiet sound gains the same again with
+    /// each slope step, and the resonance sits round every ladder, weaker the more of them there are.
+    #[test]
+    fn each_driven_ladder_pushes_and_rings_on_its_own() {
+        // (the test block's operator sounds an octave over the key)
+        let at = |p: &Patch| level(&run(p, 45, 30000, 30000)[8000..28000], 220.0);
+        let db = |a: f32, b: f32| 20.0 * (a / b).log10();
+        let quiet = [1, 2, 3].map(|n| at(&driven(n, 1.0, 0.0, 0.0002)));
+        let (one, two) = (db(quiet[1], quiet[0]), db(quiet[2], quiet[1]));
+        assert!((one - 17.7).abs() < 1.5 && (two - one).abs() < 1.5, "{one} {two}");
+        // flat out the last ladder sets the level, so another one adds next to nothing
+        let loud = [1, 2].map(|n| at(&driven(n, 1.0, 0.0, 1.0)));
+        assert!(db(loud[1], loud[0]).abs() < 3.0, "{}", db(loud[1], loud[0]));
+        // without drive: well under the corner one ladder at half resonance leaves 1.97 / 2.89 of the sound,
+        // each of two leaves 1.72 / 2.40
+        let plain = |n, r| at(&driven(n, 0.0, r, 0.05));
+        let (a, b) = (db(plain(1, 0.5), plain(1, 0.0)), db(plain(2, 0.5), plain(2, 0.0)));
+        assert!((a + 3.3).abs() < 0.6 && (b + 5.8).abs() < 0.8, "{a} {b}");
+        // with drive the loop is a third stronger, so quiet sound loses more
+        let d = db(at(&driven(1, 1.0, 0.5, 0.004)), at(&driven(1, 1.0, 0.0, 0.004)));
+        assert!(d < a - 0.3, "{d} {a}");
     }
 
     /// The sub level knob hands its share of every voice to a copy an octave down, with one voice too.

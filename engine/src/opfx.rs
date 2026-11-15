@@ -97,7 +97,7 @@ impl Chorus {
 
     /// How far the slow sweep moves the delay.
     pub fn swing_ms(&self) -> f32 {
-        0.47 + 49.6 * grid(self.depth.clamp(0.0, 1.0))
+        0.452 + 49.6 * grid(self.depth.clamp(0.0, 1.0))
     }
 
     /// Sweeps per second of the first voice. The speed knob sets how fast the delay moves, so a deeper sweep
@@ -106,6 +106,9 @@ impl Chorus {
         pace(self.speed) / self.swing_ms()
     }
 }
+
+/// Frames the room's answer trails what it hears.
+const ROOM_LATE: usize = 18;
 
 /// Milliseconds of delay travelled per second, over four, for a place on the speed knob (measured points).
 fn pace(speed: f32) -> f32 {
@@ -189,6 +192,8 @@ pub struct State {
     cho: Line,
     phase: [[f64; VOICES]; 2],
     started: bool,
+    /// The room answers a little late.
+    late: std::collections::VecDeque<[f32; 2]>,
     echo: [Line; 3],
     room: Option<(Room, Box<Unit>)>,
     feed: Vec<[f32; 2]>,
@@ -199,7 +204,7 @@ pub struct State {
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
+        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
     }
 
     /// Turn what was sent to the effects (`buf`) into what they put out. `step` is frames per sixteenth note.
@@ -230,7 +235,7 @@ impl State {
         let sr = self.sr;
         let order = (c.order as usize).clamp(1, VOICES);
         let ms = 0.001 * sr;
-        let deep = c.swing_ms() - 0.47;
+        let deep = c.swing_ms() - 0.452;
         self.cho.fit(((0.16 * sr) as usize).next_power_of_two());
         let mask = self.cho.buf.len() - 1;
         let w = apart(c.spread);
@@ -253,7 +258,7 @@ impl State {
                 let part = (k + 1) as f32 / order as f32;
                 let pull = (1.0 + drift(order, side, k) * w * w).max(0.0);
                 let low = c.base_ms() * (1.0 - w + w * part) * pull;
-                v[side][k] = (low * ms, (0.47 + deep * part) * ms, hz * (1.0 - w + w / part) * pull / sr, over * part);
+                v[side][k] = (low * ms, (0.452 + deep * part) * ms, hz * (1.0 - w + w / part) * pull / sr, over * part);
             }
         }
         for i in 0..n {
@@ -264,7 +269,7 @@ impl State {
             for side in 0..2 {
                 for (k, &(low, swing, rate, over)) in v[side].iter().enumerate().take(order) {
                     let ph = &mut self.phase[side][k];
-                    let d = (low + swing * sweep(*ph)).max(2.0);
+                    let d = low.max(2.0) + swing * sweep(*ph);
                     *ph += rate as f64;
                     if *ph >= 1.0 {
                         *ph -= 1.0;
@@ -361,7 +366,14 @@ impl State {
         let Some((_, unit)) = &mut self.room else { return };
         let cx = Ctx { sr: self.sr, step, clock: Default::default() };
         self.wet.clear();
-        self.wet.extend_from_slice(&self.feed[..n]);
+        while self.late.len() < ROOM_LATE {
+            self.late.push_back([0.0; 2]);
+        }
+        for i in 0..n {
+            self.late.push_back(self.feed[i]);
+            let x = self.late.pop_front().unwrap_or_default();
+            self.wet.push(x);
+        }
         for c in self.wet.chunks_mut(256) {
             unit.process(c, &cx);
         }
@@ -410,6 +422,16 @@ mod tests {
         assert_eq!((b[1999], b[3998]), ([0.0, 1.0], [0.0, 0.5]));
         let b = run(Echo { mode: 2, fb: -0.5, ..e });
         assert_eq!((b[1999], b[3998], b[5997]), ([0.0, 1.0], [-0.5, 0.0], [0.0, 0.25]));
+    }
+
+    #[test]
+    fn the_room_answers_late() {
+        let room = Room { high: 221.0, size: 50.0, diffusion: 0.5, decay: 10.0, wet: 1.0, ..Default::default() };
+        let mut s = State::new(44100.0);
+        let mut io = click(8192);
+        s.process(&Set { room: Some(room), ..Default::default() }, &mut io, 4000.0);
+        assert!(io[..ROOM_LATE].iter().all(|f| *f == [0.0; 2]));
+        assert!(io.iter().any(|f| f[0].abs() > 1e-4));
     }
 
     #[test]
