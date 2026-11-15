@@ -85,7 +85,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [x] Fruity Fast LP (cutoff and resonance laws measured against renders of the original)
 - [~] Fruity Filter (cutoff, resonance and the three output levels measured against renders of the original)
 - [x] Fruity Flanger (measured: delay, depth and rate curves, counted sweep, shape, phase, damping, feedback loop, dry, wet and cross)
-- [~] Fruity Flangus (built, approximate)
+- [x] Fruity Flangus (measured: order ceiling, delay, depth and speed laws, the sweep shape, per-flanger reach, cross shares, spread starts and pace offsets, dry and wet)
 - [x] Fruity Formula Controller (Formula Sender: formula worked out live from a, b, c, song time and tempo, drives linked controls, notes kept; link from "Link to controller")
 - [~] Fruity Free Filter (built as Open Filter: seven shapes; frequency law fitted to three known points, Q and gain scales estimated)
 - [~] Fruity HTML NoteBook (Web Notes: the address is read, edited and saved, and opens in the system browser; no page view inside the window)

@@ -2750,6 +2750,14 @@ fn translate(kind: Kind, p: &[f32], q: &mut [f32], cx: &Ctx) {
     }
 }
 
+/// How far off its own pace each flanger of the stack runs at full spread, read off click trains at every
+/// order. The list is walked down the left side from the widest flanger and back up the right side from the
+/// narrowest, and comes round again after twenty; two of the twenty all but stand still.
+const STACK_OFF: [f32; 20] = [
+    -0.064931, 0.079540, 0.042449, -0.98975, -0.045490, 0.067082, -0.006020, -0.057225, 0.125743, -0.103170, 0.062910, -0.98977, 0.129950,
+    -0.091820, -0.017930, 0.100390, -0.033770, 0.104625, 0.038393, 0.142767,
+];
+
 /// One running effect: the settings plus whatever memory the processor needs.
 pub struct Unit {
     pub fx: Fx,
@@ -3322,7 +3330,9 @@ impl Unit {
                 u.lpos = vec![0];
             }
             Kind::Echo | Kind::OldDelay => u.buf = vec![[0.0; 2]; (sr * 6.0) as usize + 8],
-            Kind::Flanger | Kind::Chorus | Kind::Stack | Kind::OldFlanger => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            Kind::Flanger | Kind::Chorus | Kind::OldFlanger => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
+            // the delay knob alone reaches 1.2 s a quarter of the way up
+            Kind::Stack => u.buf = vec![[0.0; 2]; (sr * 3.0) as usize + 8],
             Kind::Swarm => u.buf = vec![[0.0; 2]; (sr * 0.12) as usize + 8],
             Kind::Spread => {
                 for ms in [7.3f32, 11.9, 17.1] {
@@ -6586,51 +6596,63 @@ impl Unit {
                 }
             }
             Kind::Stack => {
-                // a stack of plain flangers per side, no feedback: each sweeps its own delay at its own pace.
-                // The ranges are read off one render at the plain settings (delays of 0.5 to 7 ms moving at a
-                // third of a cycle a second, each flanger about 0.3 loud); the laws of the knobs are not measured
+                // a stack of plain flangers per side, no feedback, measured with clicks and click trains:
+                // every flanger rides the same slow wave (two parabolas, so its pace is a triangle), the right
+                // side half a turn ahead. The delay knob sets where the sweep starts (0.1 s times the level
+                // law, never under 8 frames), the depth how far it reaches (20 frames up to 50 ms, by the same
+                // law), and the speed how fast the delay moves at the middle of the sweep, whatever the depth.
+                // Flanger j of n reaches j/n of the way and crosses j/n of the cross amount to the other side.
                 let n = self.buf.len();
+                let k = sr / 44100.0;
+                let lev = |v: f32| ((11f64.powf(v.abs() as f64 / 128.0) - 1.0) / 10.0) as f32 * if v < 0.0 { -1.0 } else { 1.0 };
                 let order = (p[0].round() as usize).clamp(1, 16);
-                let span = p[1] / 1024.0 * 0.012 * sr;
-                let hz = 0.01 * 100f32.powf(p[2] / 1024.0);
-                let base = (p[3] / 1024.0 * 0.064 * sr).max(1.0);
-                let spread = (p[4] / 128.0).clamp(0.0, 1.0);
-                let cross = p[5] / 128.0;
-                let (dry, wet) = (p[6] / 192.0, p[7] / 128.0 * 0.78 / (order as f32).sqrt());
-                // three steady numbers between 0 and 1 for each flanger
-                let pick = |i: usize, k: u32| -> f32 {
-                    let mut h = (i as u32 + 1).wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
-                    h ^= h >> 15;
-                    h = h.wrapping_mul(0x2C1B_3C6D);
-                    h ^= h >> 12;
-                    (h & 0xFFFF) as f32 / 65536.0
-                };
-                if z[63] == 0.0 {
-                    z[63] = 1.0;
-                    for i in 0..32 {
-                        z[i] = pick(i, 3);
-                    }
-                }
-                let top = n as f32 * 0.9;
+                let full = (20.0 + 2185.0 * (11f64.powf(p[1].clamp(0.0, 1024.0) as f64 / 1024.0) - 1.0) / 10.0) * k as f64;
+                // frames of time for the delay to move one frame at its quickest: 25 at the top of the knob,
+                // 3775 at the bottom
+                let pace = sr as f64 / (25.0 + 37.5 * (101f64.powf(1.0 - p[2].clamp(0.0, 1024.0) as f64 / 1024.0) - 1.0));
+                let hz = pace / (4.0 * full);
+                let base = (441.0 * (11f64.powf(p[3].max(0.0) as f64 / 128.0) - 1.0)).max(8.0) * k as f64;
+                // the spread turns each flanger's start and pace away from the others, steeply near the top
+                let sp = ((1000f64.powf(p[4].clamp(0.0, 128.0) as f64 / 128.0) - 1.0) / 999.0) as f32;
+                let cross = (p[5] / 128.0).clamp(-1.0, 1.0);
+                // one gain for every flanger, set by the sum of all the shares they send out
+                let m = order as f64 + cross.abs() as f64 * (order as f64 + 1.0) / 2.0;
+                let g = (1.0 / ((0.28925 * m + 0.49997).powi(2) + 0.15634 + 0.34579 / (m + 0.21211)).sqrt()) as f32;
+                let (dry, wet) = (lev(p[6]), lev(p[7]) * g);
+                let top = n as f64 - 4.0;
                 for f in io.iter_mut() {
                     self.buf[self.pos] = *f;
-                    let mut out = [0.0f32; 2];
+                    let mut own = [0.0f32; 2];
+                    let mut over = [0.0f32; 2];
                     for c in 0..2 {
                         for v in 0..order {
+                            // v counts from the widest flanger down
+                            let share = (order - v) as f32 / order as f32;
                             let i = v * 2 + c;
-                            z[i] += hz * (1.0 + spread * (pick(i, 1) - 0.5)) / sr;
-                            if z[i] >= 1.0 {
-                                z[i] -= 1.0;
-                            }
-                            let d = (base + span * (1.0 - spread * 0.6 * pick(i, 2)) * (0.5 - 0.5 * (z[i] * TAU).cos())).min(top);
-                            let at = self.pos as f32 + n as f32 - d;
-                            let k = at as usize;
-                            let fr = at - k as f32;
-                            out[c] += self.buf[k % n][c] * (1.0 - fr) + self.buf[(k + 1) % n][c] * fr;
+                            // the phase is kept in two parts, the steps being far too small for one
+                            // with the spread up each flanger heads for its own turn rate, the one that makes
+                            // its delay move as fast as the widest one's, and a little off even that
+                            let reach = 20.0 * k + (full as f32 - 20.0 * k) * share;
+                            let turn = (1.0 - sp) + full as f32 / reach * sp * (1.0 + sp * STACK_OFF[(if c == 0 { v } else { 2 * order - 1 - v }) % STACK_OFF.len()]);
+                            let step = (hz / sr as f64) as f32 * turn - z[32 + i];
+                            let t = z[i] + step;
+                            z[32 + i] = (t - z[i]) - step;
+                            z[i] = if t >= 1.0 { t - 1.0 } else { t };
+                            let ph = z[i] + 0.5 * c as f32 + 0.5 * sp * share;
+                            let ph = ph - ph.floor();
+                            let h = if ph < 0.5 { ph } else { 1.0 - ph } as f64;
+                            let w = if h < 0.25 { 8.0 * h * h } else { 1.0 - 8.0 * (0.5 - h) * (0.5 - h) };
+                            let d = (base + (20.0 * k as f64 + (full - 20.0 * k as f64) * share as f64) * w).min(top);
+                            let at = self.pos as f64 + n as f64 - d;
+                            let q = at as usize;
+                            let fr = (at - q as f64) as f32;
+                            let y = self.buf[q % n][c] * (1.0 - fr) + self.buf[(q + 1) % n][c] * fr;
+                            own[c] += y;
+                            over[c] += y * share;
                         }
                     }
                     self.pos = (self.pos + 1) % n;
-                    *f = [f[0] * dry + (out[0] + out[1] * cross) * wet, f[1] * dry + (out[1] + out[0] * cross) * wet];
+                    *f = [f[0] * dry + (own[0] + over[1] * cross) * wet, f[1] * dry + (own[1] + over[0] * cross) * wet];
                 }
             }
             Kind::Chorus => {
@@ -7167,6 +7189,47 @@ mod tests {
         let out = run(set(&[(1, 2500.0), (2, 2000.0)]), late, at + 400);
         let (peak, _) = (0..400).map(|k| (k, out[at + k][0])).fold((0, 0.0), |m, x| if x.1 > m.1 { x } else { m });
         assert!((146..=147).contains(&peak), "peak {peak} frames late");
+    }
+
+    #[test]
+    fn the_flanger_stack_matches_the_measured_clicks() {
+        // order, depth, speed, delay, spread, cross, dry, wet; a 0.5 click on the left only
+        let shot = |v: [f32; 8], at: usize, len: usize| {
+            let mut fx = Fx::new(Kind::Stack);
+            fx.p[..8].copy_from_slice(&v);
+            let out = run(fx, move |i| if i == at { [0.5f32, 0.0] } else { [0.0, 0.0] }, at + len);
+            let sum = |c: usize| out[at..].iter().map(|f| f[c]).sum::<f32>();
+            let mid = out[at..].iter().enumerate().map(|(k, f)| k as f32 * f[0]).sum::<f32>() / sum(0).max(1e-9);
+            (sum(0), sum(1), mid)
+        };
+        let near = |a: f32, b: f32, tol: f32| assert!((a - b).abs() < tol, "{a} for {b}");
+        // the level laws: dry is exact, one flanger a little under, more flangers share a ceiling
+        near(shot([1.0, 0.0, 0.0, 8.0, 0.0, 0.0, 128.0, 0.0], 100, 200).0, 0.5, 1e-4);
+        near(shot([1.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 128.0], 100, 200).0, 0.4846, 4e-4);
+        near(shot([1.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 64.0], 100, 200).0, 0.1124, 2e-4);
+        near(shot([1.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, -32.0], 100, 200).0, -0.0398, 1e-4);
+        near(shot([2.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 128.0], 100, 200).0, 0.8231, 6e-4);
+        near(shot([4.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 128.0], 100, 200).0, 1.158, 8e-4);
+        near(shot([16.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 32.0], 100, 200).0, 0.1277, 1e-4);
+        // the cross: flanger j of n sends j/n of it over, and the shares count toward the ceiling
+        let (own, over, _) = shot([16.0, 0.0, 0.0, 8.0, 0.0, 128.0, 0.0, 32.0], 100, 200);
+        near(own, 0.0864, 1e-4);
+        near(over, 0.0460, 1e-4);
+        let (own, over, _) = shot([1.0, 0.0, 0.0, 8.0, 0.0, -64.0, 0.0, 128.0], 100, 200);
+        near(own, 0.4846 * 0.9293, 5e-4);
+        near(over, -0.4846 * 0.4645, 5e-4);
+        // the delay knob: 0.1 s times the level law, 8 frames at the least
+        near(shot([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 128.0], 100, 200).2, 8.0, 0.05);
+        near(shot([1.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0, 128.0], 100, 400).2, 154.17, 0.06);
+        near(shot([1.0, 0.0, 0.0, 64.0, 0.0, 0.0, 0.0, 128.0], 100, 1400).2, 1021.68, 0.06);
+        // the sweep: 199.42 frames deep at depth 256, 0.51969 turns a second at speed 768, half way up a
+        // quarter turn in; the smaller flanger of two reaches 109.71
+        near(shot([1.0, 256.0, 768.0, 8.0, 0.0, 0.0, 0.0, 128.0], 21044, 400).2, 171.01, 0.1);
+        near(shot([1.0, 256.0, 768.0, 8.0, 0.0, 0.0, 0.0, 128.0], 42430 - 271, 400).2, 270.72, 0.1);
+        near(shot([2.0, 256.0, 768.0, 8.0, 0.0, 0.0, 0.0, 128.0], 42430 - 226, 400).2, 71.30 + (199.42 + 109.71) / 2.0, 0.1);
+        // full spread starts the lone left flanger half a turn in and slows it to 0.93514 of the pace
+        near(shot([1.0, 256.0, 768.0, 8.0, 128.0, 0.0, 0.0, 128.0], 30, 400).2, 270.72, 0.1);
+        near(shot([1.0, 256.0, 768.0, 8.0, 128.0, 0.0, 0.0, 128.0], (42430.0f32 / 0.93514) as usize - 71, 400).2, 71.30, 0.1);
     }
 
     #[test]
