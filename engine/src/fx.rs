@@ -6531,42 +6531,57 @@ impl Unit {
                 }
             }
             Kind::OldFlanger => {
-                // one swept delay a side, each feeding back into itself, and the cross knob shares the two between
-                // the sides. Fitted to one render: the delay swings from one sample up over 2.3 ms at depth 0.4, a
-                // sine at 0.313 Hz for rate 0.4 that starts in the middle going up, the right side ahead by the
-                // phase knob; wet is the level of a side's own delay and cross the level of the other side's
+                // measured with clicks and click trains: one swept delay a side, each feeding back into itself,
+                // and the cross knob shares the two between the sides. Delay, depth and rate all follow the
+                // same bent knob curve x / (k - (k - 1) x): up to 20 ms each for delay and depth (k = 5) and
+                // up to 5 Hz for the rate (k = 10). The sweep is a sine that starts in the middle going up
+                // (blended toward a triangle by the shape knob), the right side ahead by the phase knob. The
+                // damping is a one pole low pass whose pole is the knob itself, the loop runs at 0.98 of the
+                // feedback knob, and dry, wet and cross are plain levels.
                 let n = self.buf.len();
-                let base = 1.0 + p[0] / 1024.0 * 0.010 * sr;
-                let span = p[1] / 5000.0 * 255.0 * sr / 44100.0;
-                let inc = 1.958 * (p[2] / 5000.0).powi(2) / sr;
+                let bend = |x: f32, k: f32| {
+                    let x = x.clamp(0.0, 1.0);
+                    x / (k - (k - 1.0) * x)
+                };
+                let base = bend(p[0] / 1024.0, 5.0) * 0.020 * sr;
+                let span = bend(p[1] / 5000.0, 5.0) * 0.020 * sr;
+                // the sweep runs on a 24 bit counter: a whole number of counts a frame
+                const TURN: f32 = 16_777_216.0;
+                let step = (5.0 * bend(p[2] / 5000.0, 10.0) * TURN / sr).round();
+                // the swing is the whole frames strictly inside half the depth, worked out in double precision
+                let deep = (p[1] as f64 / 5000.0).clamp(0.0, 1.0);
+                let half = deep / (5.0 - 4.0 * deep) * 0.02 * sr as f64 / 2.0;
+                let swing = (half.ceil() - 1.0).max(0.0) as f32;
                 let lead = p[3] / 360.0;
-                let damp = 1.0 - (-TAU * (20000.0 * 0.02f32.powf(p[4] / 5000.0)).min(0.45 * sr) / sr).exp();
+                let pole = (p[4] / 5000.0).clamp(0.0, 1.0);
                 let shape = (p[5] / 1024.0).clamp(0.0, 1.0);
-                let g = (p[6] / 100.0).clamp(0.0, 0.98) * if p[7] >= 512.0 { -1.0 } else { 1.0 };
+                let g = 0.98 * (p[6] / 100.0).clamp(0.0, 1.0) * if p[7] >= 512.0 { -1.0 } else { 1.0 };
                 let turn = if p[8] >= 512.0 { -1.0 } else { 1.0 };
                 let (near, far) = (p[10] / 5000.0 * turn, p[11] / 5000.0 * turn);
                 let dry = p[9] / 5000.0;
                 let top = n as f32 - 4.0;
                 for f in io.iter_mut() {
-                    self.ph += inc;
-                    if self.ph >= 1.0 {
-                        self.ph -= 1.0;
-                    }
                     let mut v = [0.0f32; 2];
+                    let ph = z[2] / TURN;
                     for c in 0..2 {
-                        let t = (self.ph + lead * c as f32).fract();
-                        let tri = 1.0 - 4.0 * ((t + 0.75).fract() - 0.5).abs();
-                        let l = 0.5 + 0.5 * ((t * TAU).sin() * (1.0 - shape) + tri * shape);
-                        let d = (base + span * l).min(top);
+                        let t = (ph + lead * c as f32).fract();
+                        let tri = 4.0 * ((t + 0.75).fract() - 0.5).abs() - 1.0;
+                        let w = (t * TAU).sin() * (1.0 - shape) + tri * shape;
+                                                let d = (base + 0.5 * span + swing * w).min(top);
+                        // the frame being written counts as zero frames back, and what is fed back is a frame late
+                        self.buf[self.pos][c] = f[c] + g * z[c];
                         let at = self.pos as f32 + n as f32 - d;
                         let k = at as usize;
                         let fr = at - k as f32;
                         let y = self.buf[k % n][c] * (1.0 - fr) + self.buf[(k + 1) % n][c] * fr;
-                        z[c] += damp * (y - z[c]);
-                        v[c] = if p[4] > 0.0 { z[c] } else { y };
-                        self.buf[self.pos][c] = f[c] + g * v[c];
+                        z[c] = y + pole * (z[c] - y);
+                        v[c] = z[c];
                     }
                     self.pos = (self.pos + 1) % n;
+                    z[2] += step;
+                    if z[2] >= TURN {
+                        z[2] -= TURN;
+                    }
                     *f = [f[0] * dry + v[0] * near + v[1] * far, f[1] * dry + v[1] * near + v[0] * far];
                 }
             }
@@ -7109,6 +7124,49 @@ mod tests {
         for i in 3..40 {
             assert!((sweep[i][1] - still[i][1]).abs() < 0.002, "right frame {i}: {} for {}", sweep[i][1], still[i][1]);
         }
+    }
+
+    #[test]
+    fn the_classic_flanger_matches_the_measured_clicks() {
+        let click = |i: usize| if i == 100 { [0.5f32, 0.5] } else { [0.0, 0.0] };
+        let set = |v: &[(usize, f32)]| {
+            let mut fx = Fx::new(Kind::OldFlanger);
+            for k in 0..12 {
+                fx.p[k] = if k == 10 { 5000.0 } else { 0.0 };
+            }
+            for &(k, x) in v {
+                fx.p[k] = x;
+            }
+            fx
+        };
+        let hits = |fx: Fx, want: &[(usize, f32)]| {
+            let out = run(fx, click, 1400);
+            for &(at, w) in want {
+                assert!((out[100 + at][0] - w).abs() < 2e-4, "frame {at}: {} for {w}", out[100 + at][0]);
+            }
+            let loud: f32 = out.iter().map(|f| f[0].abs()).sum();
+            let wanted: f32 = want.iter().map(|w| w.1.abs()).sum();
+            assert!((loud - wanted).abs() < 0.02 || want.len() > 4, "sum {loud} for {wanted}");
+        };
+        // the bent delay and depth curves
+        hits(set(&[]), &[(0, 0.5)]);
+        hits(set(&[(0, 256.0)]), &[(55, 0.4375), (56, 0.0625)]);
+        hits(set(&[(0, 512.0)]), &[(147, 0.5)]);
+        hits(set(&[(0, 1024.0)]), &[(882, 0.5)]);
+        hits(set(&[(1, 2500.0)]), &[(73, 0.25), (74, 0.25)]);
+        hits(set(&[(1, 5000.0)]), &[(441, 0.5)]);
+        // levels, the turned wet part, the damping pole
+        hits(set(&[(0, 256.0), (10, 2500.0), (9, 2500.0), (8, 1024.0)]), &[(0, 0.25), (55, -0.2188), (56, -0.0312)]);
+        hits(set(&[(0, 256.0), (4, 1000.0)]), &[(55, 0.3501), (56, 0.1199), (57, 0.024), (58, 0.0048), (59, 0.0009)]);
+        // the loop: 0.98 of the knob, one frame more than the delay a round
+        hits(set(&[(0, 256.0), (6, 50.0)]), &[(55, 0.4376), (56, 0.0624), (111, 0.1877), (112, 0.0535), (113, 0.0038), (167, 0.0805), (168, 0.0344)]);
+        hits(set(&[(0, 256.0), (6, 50.0), (7, 1024.0)]), &[(55, 0.4376), (111, -0.1877), (112, -0.0535), (167, 0.0805), (168, 0.0344), (169, 0.0049)]);
+        // the sweep: 119 counts a frame at rate 2000; a quarter turn on, the delay is the middle plus the whole frames of half the depth
+        let at = (4_194_304.0f32 / 119.0) as usize - 140;
+        let late = move |i: usize| if i == at { [0.5f32, 0.5] } else { [0.0, 0.0] };
+        let out = run(set(&[(1, 2500.0), (2, 2000.0)]), late, at + 400);
+        let (peak, _) = (0..400).map(|k| (k, out[at + k][0])).fold((0, 0.0), |m, x| if x.1 > m.1 { x } else { m });
+        assert!((146..=147).contains(&peak), "peak {peak} frames late");
     }
 
     #[test]
