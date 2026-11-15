@@ -54,6 +54,10 @@ fn main() {
             let (k, v) = kv.split_once('=').expect("setting=value");
             g.p[k.parse::<usize>().expect("index")] = v.parse().expect("value");
         }
+        // MKGEN_KEYSET names the sample set of the sampled keys
+        if let (Ok(name), cereal_engine::synth::Kind::Keys) = (std::env::var("MKGEN_KEYSET"), g.kind) {
+            cereal_engine::keys::rename(&mut g.raw, &name);
+        }
         println!("{:?}", &g.p[..g.p.len().min(40)]);
     }
     if let Some(v) = std::env::var("MKGEN_VOL").ok().and_then(|x| x.parse().ok()) {

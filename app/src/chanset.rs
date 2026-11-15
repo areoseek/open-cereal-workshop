@@ -2885,6 +2885,24 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
         _ => {
             // the small instruments: one knob per stored setting
             let d = def(g.kind);
+            if g.kind == Kind::Keys {
+                // the sample set: choosing one also takes the settings the set asks for
+                let now = cereal_engine::keys::name_in(&g.raw);
+                egui::ComboBox::from_id_salt(("keys_set", ci)).width(220.0).selected_text(format!("Set: {now}")).show_ui(ui, |ui| {
+                    for name in cereal_engine::keys::set_list() {
+                        if ui.selectable_label(name.eq_ignore_ascii_case(&now), &name).clicked() && !name.eq_ignore_ascii_case(&now) {
+                            cereal_engine::keys::rename(&mut g.raw, &name);
+                            for (idx, u) in cereal_engine::keys::first_values(&name) {
+                                if let (Some(v), Some(p)) = (g.p.get_mut(idx), d.params.get(idx)) {
+                                    *v = (p.min as f32 + u * (p.max - p.min) as f32).round();
+                                }
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
             for row in (0..d.params.len()).collect::<Vec<_>>().chunks(8) {
                 ui.horizontal(|ui| {
                     for &idx in row {

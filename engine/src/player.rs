@@ -743,6 +743,7 @@ impl Handle {
             perf_out: Vec::new(),
             perf_rng: 0x9e37_79b9,
             count_in: 0.0,
+            keys_from: Vec::new(),
             born: 0,
             ov: Overrides::default(),
             burn: None,
@@ -1947,6 +1948,9 @@ pub struct Player {
     perf_rng: u32,
     /// Ticks of the count-in bar still to click through before the song moves.
     count_in: f64,
+    /// The slow swing clock of each sampled keys instrument: (channel, song seconds it was last
+    /// read at, seconds it has run, song seconds until which a note of it still sounds).
+    keys_from: Vec<(u16, f64, f64, f64)>,
     born: u64,
     ov: Overrides,
     /// When set, every note this channel really starts (arpeggio steps, echoes and all) is written down
@@ -2933,7 +2937,9 @@ impl Player {
             ChannelKind::Plugin if ch.gen.is_none() && ch.ext.is_none() && ch.bay().is_none() && ch.plugin.eq_ignore_ascii_case(crate::song::WRAPPER) => {}
             ChannelKind::Plugin | ChannelKind::Other(_) => {
                 // (measured) the operator synth has a switch that keeps the usual velocity law out of it
-                let own_vel = ch.gen.as_ref().and_then(|g| g.fm.as_ref()).is_some_and(|f| !f.vel_vol);
+                // (measured) the sampled keyboard takes the touch itself, on its own curve
+                let touch = ch.gen.as_ref().is_some_and(|g| g.kind == crate::synth::Kind::Keys);
+                let own_vel = touch || ch.gen.as_ref().and_then(|g| g.fm.as_ref()).is_some_and(|f| !f.vel_vol);
                 let vel_gain = |v: f32| if own_vel { 1.0 } else { law::velocity_gain(v) };
                 let note_gain = vel_gain(n.vel);
                 let gain = chan_vol * note_gain;
@@ -3101,10 +3107,32 @@ impl Player {
                         g.tone()
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
-                    v.tstate.note_at(&tone, sr, key, note_gain.min(1.0), [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
+                    v.tstate.note_at(&tone, sr, key, if touch { ev.vel * ev.gain } else { note_gain.min(1.0) }, [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
                     v.tstate.set_bpm(self.ov.tempo.unwrap_or(song.tempo));
                     if self.was_playing && self.tpf > 0.0 {
-                        v.tstate.set_start(&tone, hz, self.pos / self.tpf / self.sr as f64 + delay as f64 / self.sr as f64);
+                        let at = self.pos / self.tpf / self.sr as f64 + delay as f64 / self.sr as f64;
+                        v.tstate.set_start(&tone, hz, at);
+                        if touch {
+                            // the keys' slow swing runs on from the instrument's first note, but only
+                            // while one of its notes still sounds (measured)
+                            let at_i = match self.keys_from.iter().position(|e| e.0 == n.chan && e.1 <= at) {
+                                Some(i) => i,
+                                None => {
+                                    self.keys_from.retain(|e| e.0 != n.chan);
+                                    self.keys_from.push((n.chan, at, 0.0, at));
+                                    self.keys_from.len() - 1
+                                }
+                            };
+                            let e = &mut self.keys_from[at_i];
+                            e.2 += (at.min(e.3) - e.1).max(0.0);
+                            e.1 = at;
+                            v.tstate.set_joined(e.2);
+                            let step = 1.0 / self.tpf / self.sr as f64;
+                            let hold = len_frames.map_or(1e9, |f| f as f64 / self.sr as f64);
+                            if let Some(life) = v.tstate.keys_sounding(hold, step) {
+                                e.3 = e.3.max(at + life);
+                            }
+                        }
                     }
                     // the three-oscillator instrument starts at full level on its first sample (measured)
                     let osc3 = g.kind == crate::synth::Kind::Osc3;

@@ -1389,6 +1389,21 @@ impl ToneState {
         }
     }
 
+    /// Tell a sampled keys voice how long after its instrument's first note it starts.
+    pub fn set_joined(&mut self, secs: f64) {
+        if let Some(crate::minis::Voice::Keys(v)) = &mut self.mini {
+            v.joined(secs);
+        }
+    }
+
+    /// How long a sampled keys voice held for `hold` seconds counts as sounding (see the voice).
+    pub fn keys_sounding(&self, hold: f64, step: f64) -> Option<f64> {
+        match &self.mini {
+            Some(crate::minis::Voice::Keys(v)) => Some(v.sounding(hold, step)),
+            _ => None,
+        }
+    }
+
     /// Tell the voice about its note; the additive instrument needs this before the first frame.
     pub fn note(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, dphase: f32) {
         self.note_at(tone, sr, key, vel, [vel, 0.5, 0.5], dphase)

@@ -181,8 +181,18 @@ fn read_set(wti: &Path) -> Option<KeySet> {
     for k in 0..count {
         let z = secs.get(&format!("sample{k}"))?;
         let num = |key: &str| z.get(key).and_then(|v| v.parse::<i64>().ok());
-        let root = num("root")? as i32;
-        let high = num("high").unwrap_or(999) as i32;
+        // the further layers of a key group leave the keys out and take the group's
+        let prev = zones.last().map(|z: &Zone| (z.root, z.high));
+        let root = match (num("root"), prev) {
+            (Some(r), _) => r as i32,
+            (None, Some((r, _))) => r,
+            _ => return None,
+        };
+        let high = match (num("high"), num("root"), prev) {
+            (Some(h), _, _) => h as i32,
+            (None, None, Some((_, h))) => h,
+            _ => 999,
+        };
         let loops = can_loop && z.get("canloop").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(true);
         if let Some(w) = &whole {
             let start = num("pos").unwrap_or(0).max(0) as usize;
@@ -207,8 +217,9 @@ fn read_set(wti: &Path) -> Option<KeySet> {
             let mut loop_len = 0;
             if let (true, Some((a, b))) = (loops, lp) {
                 if b > a && b < s.frames.len() {
-                    end = b;
-                    loop_len = b - a;
+                    // the last frame of the repeat belongs to it (measured)
+                    end = b + 1;
+                    loop_len = b - a + 1;
                 }
             }
             zones.push(Zone { root, hz: key_hz(root), high, sample: s, start: 0, end, loop_len });
@@ -308,10 +319,68 @@ pub fn set(name: &str) -> Arc<KeySet> {
 }
 
 /// The set name a stored block asks for.
+/// The sets on hand, by the name a project stores for them.
+pub fn set_list() -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for dir in set_dirs(&roots()) {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for f in rd.flatten().map(|e| e.path()) {
+            let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if !f.extension().map(|e| e.eq_ignore_ascii_case("wti")).unwrap_or(false) || stem.eq_ignore_ascii_case("default") {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&std::fs::read(&f).unwrap_or_default()).into_owned();
+            let name = ini(&text).get("info").and_then(|i| i.get("name")).filter(|n| !n.is_empty()).cloned().unwrap_or(stem);
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort_by_key(|n| n.to_lowercase());
+    out
+}
+
+/// The settings a set asks for when it is chosen: (setting, value from 0 to 1).
+pub fn first_values(name: &str) -> Vec<(usize, f32)> {
+    let want = name.trim().to_lowercase();
+    for dir in set_dirs(&roots()) {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for f in rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("wti")).unwrap_or(false)) {
+            let text = String::from_utf8_lossy(&std::fs::read(&f).unwrap_or_default()).into_owned();
+            let secs = ini(&text);
+            if secs.get("info").and_then(|i| i.get("name")).map(|n| n.to_lowercase()) != Some(want.clone()) {
+                continue;
+            }
+            let mut out: Vec<(usize, f32)> = secs
+                .get("parameters")
+                .map(|p| p.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.parse::<f32>().ok()?.clamp(0.0, 1.0)))).filter(|e: &(usize, f32)| e.0 < RANGES.len()).collect())
+                .unwrap_or_default();
+            out.sort_by_key(|e| e.0);
+            return out;
+        }
+    }
+    vec![]
+}
+
+/// Write another set's name into a stored block; the settings behind the name move with it.
+pub fn rename(raw: &mut Vec<u8>, name: &str) {
+    let name = &name.as_bytes()[..name.len().min(255)];
+    let old = 5 + raw.get(4).copied().unwrap_or(0) as usize;
+    let mut out = raw[..4.min(raw.len())].to_vec();
+    out.resize(4, 0);
+    out.push(name.len() as u8);
+    out.extend_from_slice(name);
+    out.extend_from_slice(raw.get(old..).unwrap_or(&[]));
+    *raw = out;
+}
+
 pub fn name_in(raw: &[u8]) -> String {
     let n = raw.get(4).copied().unwrap_or(0) as usize;
     raw.get(5..5 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
 }
+
+/// Frames the widening echo waits.
+const WIDE: usize = 127;
 
 #[derive(Debug, Clone)]
 pub struct Voice {
@@ -325,35 +394,53 @@ pub struct Voice {
     rel: f32,
     f0: f32,
     f1: f32,
+    /// The same pair for the right side of a set recorded in stereo.
+    g: [f32; 2],
     ff: f32,
     out: [f32; 2],
-    key: i32,
+    /// How fast the level falls each second, held and let go (in powers of e), and how many such
+    /// powers the note has before it counts as over.
+    fade: [f64; 3],
     held: bool,
     over: bool,
-    lfo: f32,
+    /// The slow swing: two numbers turning about each other, and the turn per frame.
+    lfo: [f32; 2],
     dlfo: f32,
-    pan: f32,
+    /// Turns a second of the slow swing.
+    swing: f32,
+    /// How far the swing moves the left and the right level.
+    sway: [f32; 2],
     drive: f32,
+    /// How far under the middle the bent wave may reach, as a share of the note's level.
+    low: f32,
     treble: f32,
-    tz: f32,
+    tz: [f32; 2],
     tf: f32,
+    /// The widening echo: the last frames of both sides summed, and how much of them comes back.
+    wide: [f32; WIDE + 1],
+    at: usize,
+    depth: f32,
 }
 
 impl Voice {
-    /// `u` holds the fifteen settings, each 0..1.
+    /// `u` holds the fifteen settings, each 0..1; `vel` is the note's velocity with 1.0 the usual 100.
+    /// (Measured against renders of the original: level, touch, stereo and swing laws.)
     pub fn start(set: &Arc<KeySet>, u: &[f32], sr: f32, key: u8, vel: f32, _dphase: f32) -> Self {
         let note = key as i32;
-        let velocity = (vel * 127.0).clamp(1.0, 127.0);
+        // the level follows the host's velocity curve; hardness, layers and muffle take the plain velocity
+        let level = 0.5515 * crate::law::velocity_gain(vel);
+        let velocity = (vel * 100.0).clamp(0.0, 127.0);
         let k = (note - 60) * (note - 60);
         // tuning in semitones: fine, a fixed scatter per key, and the stretch of high notes
         let mut l = (u[ix::TUNE] - 0.5) * 2.0 + 0.077 * u[ix::DETUNE] * u[ix::DETUNE] * ((k % 13) as f32 - 6.5);
         if note > 60 {
-            l += 0.000434 * (u[ix::STRETCH] - 0.5) * 2.0 * k as f32;
+            l += 0.000434 * (u[ix::STRETCH] - 0.5) * k as f32;
         }
         // hardness moves which zone a key takes: harder picks a lower zone and plays it faster
-        let mut shift = (12.0 * u[ix::HARDNESS] - 6.0) as i32;
+        // (measured: each part rounds to a whole key on its own)
+        let mut shift = (12.0 * u[ix::HARDNESS] - 6.0).round() as i32;
         if velocity > 40.0 {
-            shift += (0.12 * u[ix::VEL_HARDNESS] * (velocity - 40.0)) as i32;
+            shift += (0.12 * u[ix::VEL_HARDNESS] * (velocity - 40.0)).round() as i32;
         }
         let per_group = set.layers.len().max(1);
         let groups = set.zones.len() / per_group;
@@ -361,7 +448,7 @@ impl Voice {
         while g + 1 < groups && note > set.zones[g * per_group].high + shift {
             g += 1;
         }
-        let layer = set.layers.iter().rposition(|&low| velocity as i32 >= low).unwrap_or(0);
+        let layer = set.layers.iter().rposition(|&low| velocity as i32 > low).unwrap_or(0); // a layer starts just above its mark (measured)
         let zone = (g * per_group + layer).min(set.zones.len() - 1);
         let z = &set.zones[zone];
         let per = z.sample.rate as f64 / z.hz * 2f64.powf(l as f64 / 12.0);
@@ -373,10 +460,14 @@ impl Voice {
             }
             v
         };
-        let env = (0.5 + velsens) * (0.0078 * velocity).powf(velsens) * 0.2 * set.vel_factor.max(0.1);
+        // the wider the stereo, the lower the level
+        let depth = u[ix::STEREO] * u[ix::STEREO];
+        let trim = 1.5 - 0.79 * depth;
+        let env = LEVEL * trim * level.powf(velsens) * set.vel_factor.max(0.1);
         let muffvel = u[ix::VEL_MUFFLE] * u[ix::VEL_MUFFLE] * 5.0;
         let mut m = 50.0 + u[ix::MUFFLE] * u[ix::MUFFLE] * 160.0 + muffvel * (velocity - 64.0);
-        m = m.max(55.0 + 0.25 * note as f32).min(210.0);
+        // the muffle never closes further than a floor that rises with the key (measured)
+        m = m.max((2495.0 + 63.7 * note as f32).max(0.0).sqrt()).min(210.0);
         let ff = (m * m / sr).min(1.0);
         let n = note.clamp(12, 108) as f32;
         let width = (0.04 * u[ix::STEREO]).min(0.03);
@@ -391,7 +482,16 @@ impl Voice {
             }
             (-(1.0 / sr) * (-0.6 + 0.033 * n.max(44.0) - l).exp()).exp()
         };
-        let rel = (-(1.0 / sr) * (2.0 + 0.017 * n - 2.0 * u[ix::RELEASE]).exp()).exp();
+        // let go, the keys under 94 of a set that leaves its high notes alone fade slowly; the high
+        // keys, and every key of a set that lets them go too, fade fast (measured)
+        let rel = if note < 94 && !set.release_high {
+            (-(1.0 / sr) * (2.0 + 0.017 * n - 2.0 * u[ix::RELEASE]).exp()).exp()
+        } else {
+            (-(1.0 / sr) * (6.0 + 0.01 * note as f32 - 5.0 * u[ix::RELEASE]).exp()).exp()
+        };
+        // left of centre the two sides swing against each other, right of it together
+        let lean = u[ix::PAN] * 2.0 - 1.0;
+        let treble = u[ix::TREBLE];
         Self {
             set: set.clone(),
             zone,
@@ -402,83 +502,123 @@ impl Voice {
             rel,
             f0: 0.0,
             f1: 0.0,
+            g: [0.0; 2],
             ff,
             out: [2.0 - right, right],
-            key: note,
+            fade: [-(dec as f64).ln() * sr as f64, -(rel as f64).ln() * sr as f64, (set.vel_factor.max(0.1) as f64 / 1e-4).ln()],
             held: true,
             over: false,
-            lfo: 0.0,
-            dlfo: std::f32::consts::TAU * (0.2 + 9.8 * u[ix::LFO] * u[ix::LFO]) / sr,
-            pan: (u[ix::PAN] - 0.5) * 2.0,
-            drive: u[ix::DRIVE],
-            treble: (u[ix::TREBLE] - 0.5) * 2.0,
-            tz: 0.0,
-            tf: 1.0 - (-std::f32::consts::TAU * 3500.0 / sr).exp(),
+            lfo: [0.0, 1.0],
+            dlfo: std::f32::consts::TAU * swing_hz(u[ix::LFO]) / sr,
+            swing: swing_hz(u[ix::LFO]),
+            sway: [lean, lean.abs()],
+            // measured: the bend is set against the note's own starting level, so every touch bends alike
+            drive: 1.8 * set.vel_factor.max(0.1) * u[ix::DRIVE] / env.max(1e-6),
+            low: 0.48 / set.vel_factor.max(0.1),
+            treble: 4.0 * treble * treble - 1.0,
+            tz: [0.0; 2],
+            tf: 1.0 - (-(if treble > 0.5 { 14000.0 } else { 5000.0 }) / sr).exp(),
+            wide: [0.0; WIDE + 1],
+            at: 0,
+            depth,
         }
     }
 
     /// The key was let go. Returns the seconds the sound still needs.
     pub fn release(&mut self) -> f32 {
         self.held = false;
-        if self.key < 94 || self.set.release_high {
-            self.dec = self.rel;
-        }
-        if self.dec >= 1.0 {
-            self.dec = self.rel;
-        }
+        self.dec = self.rel;
         // until the level is under a thousandth of where it is
         ((0.001f32 / self.env.max(0.001)).min(0.999).ln() / self.dec.ln().min(-1e-9) / 44100.0).min(20.0)
     }
 
-    pub fn frame(&mut self, dphase: f32) -> [f32; 2] {
-        if self.over {
-            return [0.0; 2];
+    /// The slow swing belongs to the instrument, not the note: a note that starts `secs` after the
+    /// instrument's first joins the swing where it stands by then.
+    /// How long a note held for `hold` seconds counts as sounding, from its start. The original
+    /// drops a voice once its level has fallen to a set fraction of a full touch, whatever the
+    /// note's own touch, and looks once every `step` seconds (measured: once a tick).
+    pub fn sounding(&self, hold: f64, step: f64) -> f64 {
+        let [held, let_go, room] = self.fade;
+        let whole = |t: f64| if step > 0.0 { (t / step - 1e-6).ceil().max(0.0) * step } else { t };
+        if held * hold >= room {
+            return whole(room / held.max(1e-9));
         }
-        let z = &self.set.zones[self.zone];
-        self.pos += self.per * dphase as f64;
-        if self.pos >= z.end as f64 {
-            if z.loop_len > 0 {
-                self.pos -= z.loop_len as f64;
-            } else {
-                self.over = true;
-                return [0.0; 2];
-            }
-        }
-        let s = z.sample.at(self.pos);
-        let x = (s[0] + s[1]) * 0.5;
-        self.env *= self.dec;
-        // the muffle: a gentle low-pass that opens with the setting and the touch
-        self.f0 += self.ff * (x + self.f1 - self.f0);
-        self.f1 = x;
-        let mut y = self.f0 * self.env;
-        if self.treble != 0.0 {
-            self.tz += self.tf * (y - self.tz);
-            y += (y - self.tz) * self.treble * 1.5;
-        }
-        if self.drive > 0.0 {
-            let d = 1.0 + self.drive * 6.0;
-            y = (y * d).tanh() / d.sqrt();
-        }
-        let (mut l, mut r) = (y * self.out[0], y * self.out[1]);
-        if self.pan != 0.0 {
-            self.lfo += self.dlfo;
-            if self.lfo > std::f32::consts::TAU {
-                self.lfo -= std::f32::consts::TAU;
-            }
-            let w = self.lfo.sin();
-            if self.pan < 0.0 {
-                // left of centre: the sound swings from side to side
-                let a = -self.pan * w;
-                l *= 1.0 - a;
-                r *= 1.0 + a;
-            } else {
-                let a = 1.0 - self.pan * (0.5 + 0.5 * w);
-                l *= a;
-                r *= a;
-            }
-        }
-        [l, r]
+        hold + whole((room - held * hold) / let_go.max(1e-9))
     }
+
+    pub fn joined(&mut self, secs: f64) {
+        let turn = (self.swing as f64 * secs).fract() * std::f64::consts::TAU;
+        self.lfo = [turn.sin() as f32, turn.cos() as f32];
+    }
+
+    pub fn frame(&mut self, dphase: f32) -> [f32; 2] {
+        let mut y = 0.0;
+        let mut y2 = None;
+        if !self.over {
+            let z = &self.set.zones[self.zone];
+            self.pos += self.per * dphase as f64;
+            if self.pos >= z.end as f64 {
+                if z.loop_len > 0 {
+                    self.pos -= z.loop_len as f64;
+                } else {
+                    self.over = true;
+                }
+            }
+            if !self.over {
+                let s = z.sample.at(self.pos);
+                let stereo = !z.sample.mono;
+                let mut x = if stereo { s[0] } else { (s[0] + s[1]) * 0.5 } * self.env;
+                if stereo {
+                    // a set recorded in stereo keeps its two sides apart all the way through (measured)
+                    let mut x = s[1] * self.env;
+                    if self.drive > 0.0 && x > 0.0 {
+                        x -= self.drive * x * x;
+                        x = x.max(-self.low * self.env);
+                    }
+                    self.g[0] += self.ff * (x + self.g[1] - self.g[0]);
+                    self.g[1] = x;
+                    y2 = Some(self.g[0]);
+                }
+                // the overdrive bends the upper half of the wave down, as far as a floor that fades with the note
+                if self.drive > 0.0 && x > 0.0 {
+                    x -= self.drive * x * x;
+                    x = x.max(-self.low * self.env);
+                }
+                self.env *= self.dec;
+                // the muffle: a gentle low-pass that opens with the setting and the touch
+                self.f0 += self.ff * (x + self.f1 - self.f0);
+                self.f1 = x;
+                y = self.f0;
+            }
+        }
+        let (mut l, mut r) = (y * self.out[0], y2.unwrap_or(y) * self.out[1]);
+        if self.treble != 0.0 {
+            self.tz[0] += self.tf * (l - self.tz[0]);
+            self.tz[1] += self.tf * (r - self.tz[1]);
+            l += self.treble * (l - self.tz[0]);
+            r += self.treble * (r - self.tz[1]);
+        }
+        if self.sway[1] != 0.0 {
+            self.lfo[0] += self.dlfo * self.lfo[1];
+            self.lfo[1] -= self.dlfo * self.lfo[0];
+            l += l * self.sway[0] * self.lfo[1];
+            r += r * self.sway[1] * self.lfo[1];
+        }
+        // the sum of both sides comes back a moment later, added on the left and taken off the right
+        self.wide[self.at] = l + r;
+        self.at = (self.at + 1) % (WIDE + 1);
+        let back = self.depth * self.wide[self.at];
+        [l + back, r - back]
+    }
+}
+
+/// The level of a full-touch note before the stereo trim.
+const LEVEL: f32 = 0.171;
+
+/// Turns a second of the slow swing for its rate setting.
+fn swing_hz(u: f32) -> f32 {
+    // one turn a second at the middle, a hundred times slower and faster at the ends
+    (9.2198 * (u - 0.5)).exp()
 }
 
 #[cfg(test)]
