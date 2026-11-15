@@ -1145,13 +1145,23 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
     if pre < 128 {
         keep_harmonics(&mut base, kept);
     }
-    let finish = |mut t: Vec<f32>, scale: f32| -> Arc<Vec<f32>> {
-        t.iter_mut().for_each(|v| *v *= scale);
+    let halves = |t: &mut Vec<f32>| {
         if stretch {
-            t = (0..TN).map(|j| (t[j / 2] + t[(j + 1) / 2]) * 0.5).collect();
+            *t = (0..TN).map(|j| (t[j / 2] + t[(j + 1) / 2]) * 0.5).collect();
         }
         if squeeze {
-            t = (0..TN).map(|j| if j < TN / 2 { t[j * 2] } else { 0.0 }).collect();
+            *t = (0..TN).map(|j| if j < TN / 2 { t[j * 2] } else { 0.0 }).collect();
+        }
+    };
+    // (measured with three drawn harmonics: the two half switches work on every harmonic's own wave, so a
+    // squeezed set is silent only where all of its harmonics rest; the fold works on the finished sum)
+    if !plain {
+        halves(&mut base);
+    }
+    let finish = |mut t: Vec<f32>, scale: f32| -> Arc<Vec<f32>> {
+        t.iter_mut().for_each(|v| *v *= scale);
+        if plain {
+            halves(&mut t);
         }
         if absolute {
             t.iter_mut().for_each(|v| *v = v.abs());
@@ -2040,7 +2050,9 @@ impl Voice {
                         // the drive kind is a ladder of four plain stages per slope step, each with the
                         // resonance fed back round it and half of the loss made up
                         count = n;
-                        let g = g_at(180.3 * 167.3f32.powf(c) - 70.3);
+                        // (measured near and at wide open: past 15.85 kHz the corner climbs more slowly)
+                        let over = (180.3 * 167.3f32.powf(c) - 70.3 - 15850.0).max(0.0);
+                        let g = g_at(180.3 * 167.3f32.powf(c) - 70.3 - over + over / (1.0 + over / 26000.0));
                         let big = g / (1.0 + g);
                         // (fitted to the response at four settings of the knob and three slopes, from a
                         // low note rich in harmonics: every ladder has the resonance round it, less of it
@@ -3003,6 +3015,36 @@ pub(crate) mod tests {
         let shut = op_from(&h, &OpLay::NEW);
         assert!(part(&shut.tables[0], 4) > part(&shut.tables[0], 1) * 0.9);
         assert!(part(&shut.tables[0], 5) < part(&shut.tables[0], 1) * 0.01);
+    }
+
+    /// With drawn harmonics the squeeze switch squeezes every harmonic's own wave, and the fold works on the sum.
+    #[test]
+    fn half_switches_work_per_drawn_harmonic() {
+        let mut h = vec![0u8; 2128];
+        h[40..44].copy_from_slice(&10000i32.to_le_bytes());
+        h[4..8].copy_from_slice(&256i32.to_le_bytes());
+        h[2116..2120].copy_from_slice(&128i32.to_le_bytes());
+        h[56..60].copy_from_slice(&1.0f32.to_le_bytes());
+        h[2121] = 1;
+        let t = op_from(&h, &OpLay::NEW).tables[0].clone();
+        let m = t.len() - 1;
+        let loud = |from: usize, to: usize| t[m * from / 16..m * to / 16].iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        // the second harmonic alone: each of its two cycles plays in half of its own time
+        assert!(loud(1, 3) > 0.5 && loud(9, 11) > 0.5, "{} {}", loud(1, 3), loud(9, 11));
+        assert!(loud(5, 7) < 1e-3 && loud(13, 15) < 1e-3, "{} {}", loud(5, 7), loud(13, 15));
+        h[2121] = 0;
+        h[2122] = 1;
+        h[52..56].copy_from_slice(&1.0f32.to_le_bytes());
+        let t = op_from(&h, &OpLay::NEW).tables[0].clone();
+        assert!(t.iter().all(|&v| v >= 0.0));
+        // folded as a sum the wave still repeats once a period (folded one by one it would repeat twice)
+        let (mut c, mut q) = (0.0f32, 0.0f32);
+        for (k, v) in t[..m].iter().enumerate() {
+            let w = 2.0 * PI * k as f32 / m as f32;
+            c += v * w.cos();
+            q += v * w.sin();
+        }
+        assert!((c * c + q * q).sqrt() / m as f32 > 0.05);
     }
 
     /// A muted knob of the grid plays as zero, and only that knob.
