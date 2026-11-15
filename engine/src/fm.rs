@@ -245,17 +245,17 @@ pub struct OpLay {
     pub tail: usize,
     /// The half wave switch; fold up sits two bytes on.
     pub flags: usize,
-    pub centre: Option<usize>,
-    pub pluck: Option<usize>,
+    /// How many switch bytes there are from `flags` on: the two halves, fold up, free running, centre, soft
+    /// start and plucked string (measured: the first layout keeps the same seven in the same order).
+    pub switches: usize,
     /// The first layout: filters hold no type and keep the shaper switch in one byte.
     pub first: bool,
 }
 
 impl OpLay {
-    pub const NEW: OpLay = OpLay { len: 2128, noise: 48, mags: 52, harmonics: 256, tail: 2100, flags: 2120, centre: Some(2123), pluck: Some(2126), first: false };
-    pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 128, tail: 1076, flags: 1096, centre: Some(1099), pluck: Some(1102), first: false };
-    /// Which of the first layout's last switches are centre and plucked is not known, so they read as off.
-    pub const FIRST: OpLay = OpLay { len: 271, noise: 260, mags: 48, harmonics: 24, tail: 240, flags: 264, centre: None, pluck: None, first: true };
+    pub const NEW: OpLay = OpLay { len: 2128, noise: 48, mags: 52, harmonics: 256, tail: 2100, flags: 2120, switches: 8, first: false };
+    pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 128, tail: 1076, flags: 1096, switches: 8, first: false };
+    pub const FIRST: OpLay = OpLay { len: 271, noise: 260, mags: 48, harmonics: 24, tail: 240, flags: 264, switches: 7, first: true };
 
     /// The settings as the current layout holds them.
     fn widen(&self, h: &[u8]) -> Vec<u8> {
@@ -270,13 +270,7 @@ impl OpLay {
             w[1076..1076 + n].copy_from_slice(&h[self.mags + n..self.mags + n * 2]);
         }
         w[2100..2120].copy_from_slice(&h[self.tail..self.tail + 20]);
-        w[2120..2123].copy_from_slice(&h[self.flags..self.flags + 3]);
-        if let Some(c) = self.centre {
-            w[2123] = h[c];
-        }
-        if let Some(c) = self.pluck {
-            w[2126] = h[c];
-        }
+        w[2120..2120 + self.switches].copy_from_slice(&h[self.flags..self.flags + self.switches]);
         w
     }
 }
@@ -432,8 +426,8 @@ impl Curve {
     /// (measured: with the knob at 64 a point at nothing held at half and a point at half at full).
     pub fn lift(&mut self, by: f32) {
         let at = if self.sustain >= 0 { self.sustain as usize } else { self.pts.len().wrapping_sub(1) };
-        if let (true, Some(p)) = (by > 0.0, self.pts.get_mut(at)) {
-            p.y = (p.y + by).min(1.0);
+        if let (true, Some(p)) = (by != 0.0, self.pts.get_mut(at)) {
+            p.y = (p.y + by).clamp(0.0, 1.0);
         }
     }
 
@@ -817,7 +811,8 @@ impl<'a> R<'a> {
         self.bytes(16)?;
         let mut env = self.curve(1)?;
         let k = [self.i()?, self.i()?, self.i()?, self.i()?];
-        env.lift(k[2].max(0) as f32 / 128.0 + g[3]);
+        // (measured since on an older patch: the knob goes below the middle too, and then lowers the level held)
+        env.lift(k[2].clamp(-128, 128) as f32 / 128.0 + g[3]);
         env.prepare([knob(k[0]) * g[0], knob(k[1]) * g[1], knob(k[3]) * g[2]]);
         let mut lfo = self.curve(2)?;
         let speed = self.i()?;
@@ -882,7 +877,7 @@ impl Sender {
             r.bytes(16)?;
             let mut env = r.curve(1)?;
             let len = [r.i()?, r.i()?, r.i()?, r.i()?];
-            env.lift(len[2].max(0) as f32 / 128.0);
+            env.lift(len[2].clamp(-128, 128) as f32 / 128.0);
             env.prepare([knob(len[0]), knob(len[1]), knob(len[3])]);
             let mut lfo = r.curve(2)?;
             let speed = r.i()?;
@@ -1130,6 +1125,7 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
     // measured: the two "half" switches play the first half of the wave over the whole period, and the whole wave
     // in the first half of the period with silence after; the third folds the wave up
     let (stretch, squeeze, absolute) = (h[2120] != 0, h[2121] != 0, h[2122] != 0);
+    let centre = h[2124] != 0;
     let mags: Vec<f32> = (0..256).map(|k| f(52 + k * 4)).map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect();
     let phs: Vec<f32> = (0..256).map(|k| f(1076 + k * 4)).map(|v| if v.is_finite() { v } else { 0.0 }).collect();
     let top = mags.iter().rposition(|&m| m > 0.0).map(|k| k + 1).unwrap_or(0);
@@ -1165,6 +1161,11 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
         }
         if absolute {
             t.iter_mut().for_each(|v| *v = v.abs());
+        }
+        // (measured on a pulse: the next switch takes the wave's standing level away)
+        if centre {
+            let mean = t.iter().sum::<f32>() / t.len() as f32;
+            t.iter_mut().for_each(|v| *v -= mean);
         }
         t.push(t[0]);
         Arc::new(t)
@@ -3045,6 +3046,22 @@ pub(crate) mod tests {
             q += v * w.sin();
         }
         assert!((c * c + q * q).sqrt() / m as f32 > 0.05);
+    }
+
+    /// The sustain knob lowers the level held when it is below the middle, and the first layout keeps its
+    /// switches in the same order as the later ones.
+    #[test]
+    fn sustain_knob_goes_both_ways_and_old_switches_keep_their_order() {
+        let pt = |x: f32, y: f32| Pt { x, y, ..Default::default() };
+        let mut c = Curve { pts: vec![pt(0.0, 0.0), pt(0.1, 1.0), pt(0.4, 1.0), pt(0.1, 0.0)], flags: 0, live: true, decay: 1, loop_start: -1, sustain: 2, span: (0, 0), t: vec![] };
+        c.lift(-0.5);
+        c.prepare([1.0; 3]);
+        assert!((c.env(5.0, None) - 0.5).abs() < 1e-6 && (c.env(0.1, None) - 1.0).abs() < 1e-6);
+        let mut h = vec![0u8; 271];
+        h[264 + 4] = 1;
+        h[264 + 6] = 1;
+        let w = OpLay::FIRST.widen(&h);
+        assert_eq!(&w[2120..2128], &[0, 0, 0, 0, 1, 0, 1, 0]);
     }
 
     /// A muted knob of the grid plays as zero, and only that knob.

@@ -3011,12 +3011,6 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
             ui.horizontal(|ui| {
                 num(ui, &mut sets, at + 8, 0, 9600, 1.0, 0, "Pitch range", " cents");
                 num(ui, &mut sets, at + lay.noise, 0, 128, 100.0 / 128.0, 0, "Noise", " %");
-                if let Some(o) = lay.pluck {
-                    let mut pluck = d.get(at + o).copied().unwrap_or(0) != 0;
-                    if ui.checkbox(&mut pluck, "Plucked string").changed() {
-                        bytes.push((at + o, pluck as u8));
-                    }
-                }
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Wave").color(TEXT_DIM));
@@ -3027,8 +3021,8 @@ fn fm_panel(ui: &mut Ui, g: &mut cereal_engine::synth::Gen) -> bool {
                 num(ui, &mut sets, at + tail + 16, 0, 128, 100.0 / 128.0, 0, "Brightness", " %");
             });
             ui.horizontal(|ui| {
-                for (o, name) in [(Some(lay.flags), "Half wave"), (Some(lay.flags + 2), "Fold up"), (lay.centre, "Centre")] {
-                    let Some(o) = o else { continue };
+                let names = ["First half", "Squeeze", "Fold up", "Free running", "Centre", "Soft start", "Plucked string"];
+                for (o, name) in names.iter().enumerate().take(lay.switches).map(|(k, n)| (lay.flags + k, *n)) {
                     let mut on = d.get(at + o).copied().unwrap_or(0) != 0;
                     if ui.checkbox(&mut on, name).changed() {
                         bytes.push((at + o, on as u8));
