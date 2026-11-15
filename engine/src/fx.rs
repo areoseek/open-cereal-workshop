@@ -3823,30 +3823,38 @@ impl Unit {
                 }
             }
             Kind::Overdrive => {
-                // Levels measured against reference renders: the drive stage always lifts by
-                // 3.9 dB and clips hard at full scale, the pre amp adds up to 26 times more,
-                // the output level knob is squared. The tone shaping is an approximation.
+                // Measured against reference renders sample by sample. The colour stage comes first and
+                // stays clean: a state filter (damping 1, coefficient the cube of the knob) whose input
+                // plus scaled high output is blended with its band output by the band knob. The pre amp
+                // (1 + 25 r^3, the x100 switch multiplying the added part) feeds a second state filter
+                // with coefficient 1/4; its low, band and high outputs each pass a cubic soft clip
+                // and are summed. The squared output level and a hard limit at full scale come next,
+                // then two equal one-pole low-passes (present even with the knob down).
                 let band = (p[0] / 10000.0).clamp(0.0, 1.0);
-                let g_band = svf_g(400.0 * 5.5f32.powf(p[1] / 10000.0), sr);
+                let fc = (p[1] / 10000.0).clamp(0.0, 1.0).powi(3);
                 let r = p[2] / 10000.0;
-                // The x100 switch multiplies what the pre amp adds, not the whole signal: a project in
-                // the wild keeps it on the master with the pre amp barely open (to confirm by a render).
-                let amp = 1.5666 * (1.0 + 25.0 * r * r * r * if p[3] >= 0.5 { 100.0 } else { 1.0 });
-                let pf = (p[4] / 10000.0).clamp(0.0, 1.0);
-                let f_post = 20000.0 * 0.02f32.powf(pf);
-                let a1 = 1.0 - (-TAU * f_post / sr).exp();
-                let a2 = 1.0 - (-TAU * (f_post * 6.0).min(0.45 * sr) / sr).exp();
+                let amp = 1.5609 * (1.0 + 25.0 * r * r * r * if p[3] >= 0.5 { 100.0 } else { 1.0 });
+                let a = 0.8 - 0.7 * (p[4] / 10000.0).clamp(0.0, 1.0);
                 let post = (p[5] / 10000.0).powi(2);
+                let soft = |u: f32| {
+                    let u = u.clamp(-1.5, 1.5);
+                    u - u * u * u * (4.0 / 27.0)
+                };
                 for f in io.iter_mut() {
                     for ch in 0..2 {
+                        let z = &mut z[ch * 6..ch * 6 + 6];
                         let x = f[ch];
-                        let (_, bp, _) = svf(&mut z[ch * 4..], x, g_band, 1.15);
-                        let d = (x * (1.0 - band) + bp * band * 1.1) * amp;
-                        let y = d.clamp(-1.0, 1.0);
-                        // Two gentle low-pass stages, the second six times higher.
-                        z[ch * 4 + 2] += a1 * (y - z[ch * 4 + 2]);
-                        z[ch * 4 + 3] += a2 * (z[ch * 4 + 2] - z[ch * 4 + 3]);
-                        f[ch] = if pf > 0.0 { z[ch * 4 + 3] } else { y } * post;
+                        z[0] += fc * z[1];
+                        let hc = x - z[0] - z[1];
+                        z[1] += fc * hc;
+                        let v = ((1.0 - band) * (x + fc * hc) + band * z[1]) * amp;
+                        z[2] += 0.25 * z[3];
+                        let h = v - z[2] - z[3];
+                        z[3] += 0.25 * h;
+                        let y = ((soft(z[2]) + soft(h) + soft(z[3])) * post).clamp(-1.0, 1.0);
+                        z[4] += a * (y - z[4]);
+                        z[5] += a * (z[4] - z[5]);
+                        f[ch] = z[5];
                     }
                 }
             }
@@ -7337,6 +7345,28 @@ mod tests {
         let peak = |a: usize, b: usize| out[a..b].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak(16000, 16300) > 0.45, "{}", peak(16000, 16300));
         assert!(peak(17850, 18000) < 0.36, "{}", peak(17850, 18000));
+    }
+
+    #[test]
+    fn the_overdrive_follows_the_measured_step_and_limits_before_its_last_filter() {
+        // a step of 0.5 into the fully open pre amp with the output level at 20 %: figures read
+        // from a reference render (three clipped paths, then one, then the swing below zero)
+        let mut fx = Fx::new(Kind::Overdrive);
+        fx.p[2] = 10000.0;
+        fx.p[5] = 2000.0;
+        let out = run(fx, |_| [0.5, 0.5], 64);
+        for (i, want) in [(0, 0.0512), (3, 0.1184), (9, 0.04), (15, -0.04), (27, 0.0752)] {
+            assert!((out[i][0] - want).abs() < 0.0015, "frame {i}: {} for {want}", out[i][0]);
+        }
+        // a small click through the x100 switch at full output level: the limit sits before the
+        // two smoothing stages, so the first frame is 0.8 squared
+        let mut fx = Fx::new(Kind::Overdrive);
+        fx.p[2] = 5000.0;
+        fx.p[3] = 1.0;
+        let out = run(fx, |i| if i == 0 { [0.02, 0.02] } else { [0.0, 0.0] }, 16);
+        for (i, want) in [(0, 0.64), (1, 0.6643), (2, 0.7455), (6, -0.4666)] {
+            assert!((out[i][0] - want).abs() < 0.015, "frame {i}: {} for {want}", out[i][0]);
+        }
     }
 
     #[test]

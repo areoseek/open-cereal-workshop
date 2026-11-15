@@ -71,7 +71,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [x] Fruity Balance (pan and level laws measured against renders of the original)
 - [~] Fruity Bass Boost (built as Bass Lift; frequency and amount scales estimated)
 - [~] Fruity Big Clock (Big Clock: shows the song position as bar, beat and tick or minutes and seconds, a click changes between them; its saved display options are not read)
-- [~] Fruity Blood Overdrive (built, approximate)
+- [x] Fruity Blood Overdrive (built as Overdrive; every stage measured against renders of the original: colour filter, band blend, pre amp and x100, the three soft-clipped filter outputs, output level, limit and the two smoothing stages; renders agree within about 1 %)
 - [~] Fruity Center (built as Centre)
 - [~] Fruity Chorus (built, approximate)
 - [~] Fruity Compressor (built, approximate)
