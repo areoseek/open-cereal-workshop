@@ -1937,8 +1937,10 @@ impl Voice {
             }
             for k in 0..6 {
                 let o = &p.ops[k];
-                let bend = (p.pitch / 12.0 + s.val[k * 6 + 3] * o.pitch_cents / 1200.0).exp2();
-                s.inc[k] = (dphase * s.detune * bend * o.ratio + o.offset_hz / sr).clamp(-0.5, 0.5);
+                // (measured: the pitch output bends the fixed part of the frequency by the same interval)
+                let art = (s.val[k * 6 + 3] * o.pitch_cents / 1200.0).exp2();
+                let bend = (p.pitch / 12.0).exp2() * art;
+                s.inc[k] = (dphase * s.detune * bend * o.ratio + o.offset_hz * art / sr).clamp(-0.5, 0.5);
                 let pan = (p.pan[k] + s.val[k * 6]).clamp(-1.0, 1.0);
                 (s.pl[k], s.pr[k]) = pan_gains(pan);
                 if o.pluck && s.run[k] >= 1.0 {
@@ -2067,7 +2069,8 @@ impl Voice {
                         if f.drive > 0.0 {
                             // with any drive the ladder works on a scaled copy of the signal: how far it is
                             // pushed into the bend, and what brings it back out
-                            let lv = f.drive * 128.0;
+                            // (measured with a map on the drive output: it scales the knob)
+                            let lv = f.drive * 128.0 * s.val[b + 4].clamp(0.0, 1.0);
                             // (measured at seven settings with a quiet and a loud sine: what comes out of
                             // the bend flat out grows by `UP`, quiet sound by `MORE` on top of that)
                             let base = 1.692 * 17.9f32.powf((lv - 64.0) / 64.0);
@@ -2078,7 +2081,8 @@ impl Voice {
                             let db = UP[i] + (UP[i + 1] - UP[i]) * (at - i as f32);
                             let more = MORE[i] + (MORE[i + 1] - MORE[i]) * (at - i as f32);
                             // (three slopes measured since: each ladder is pushed and pulled on its own, by
-                            // half of what a pair showed, and comes out 3 dB lower flat out)
+                            // half of what a pair showed, and comes out 3 dB lower flat out. Tried since: starting
+                            // the bend later suits the overtones of a quiet sine but leaves real patches too loud)
                             plan[0][5] = 10f32.powf((db - 3.0) / 20.0) / base;
                             plan[0][4] = 10f32.powf((db + more) / 40.0) / plan[0][5];
                         }
