@@ -5083,48 +5083,51 @@ impl Unit {
                 }
             }
             Kind::Phaser => {
-                // fitted to one render (nine stages, feedback 0.4, half dry): the sweep is a sine in pitch that ran
-                // 1519 to 5971 Hz at 0.346 Hz with the sides 0.406 of a turn apart, the fed back part is one sample
-                // late and keeps its sign, and both parts came out 0.733 loud. How each knob bends is not measured
-                let top = 0.6914 * (1.0 + 4.0 * p[3] / 1024.0);
-                let inc = p[0] / 5000.0 * top / sr;
-                if z[62] == 0.0 {
-                    z[62] = 1.0;
-                    self.ph = 0.6245;
+                // measured with clicks and a tracked tone: the stages are plain first order all-pass sections
+                // whose coefficient is minus the depth, swept between the two depth knobs by a raised cosine
+                // that starts half way up. The sweep runs on a 24 bit counter, so its speed is a whole number
+                // of counts per frame: 2 Hz at the top of an exponential knob curve, five times that with
+                // the range switch. The right side runs up to half a turn ahead. The input is scaled so the
+                // fed back loop keeps its loudness, the fed back part is one frame late, and there is always
+                // one more stage than the knob says (three at least, 23 at most). The loop itself runs at 0.99 of
+                // the feedback knob.
+                const TURN: f32 = 16_777_216.0;
+                let x = (p[0] / 5000.0).clamp(0.0, 1.0);
+                let wide = if p[3] > 512.0 { 5.0 } else { 1.0 };
+                let step = (2.0 * TURN as f64 / sr as f64 * ((4.0 * x as f64).exp() - 1.0) / (4f64.exp() - 1.0) * wide).round() as f32;
+                if z[63] == 0.0 {
+                    z[63] = 1.0;
+                    z[62] = TURN / 4.0;
                 }
                 let (lo, hi) = (p[1] / 1000.0, p[2] / 1000.0);
-                let spread = p[4] / 512.0 * 0.4059;
-                let stages = (p[5] as usize).clamp(1, 23);
-                let fb = (p[6] / 1000.0).clamp(0.0, 0.98);
+                let spread = p[4] / 2048.0;
+                let stages = (p[5] as usize).clamp(2, 22) + 1;
+                let fb = (p[6] / 1000.0).clamp(0.0, 1.0);
+                let norm = (1.0 - fb * fb).sqrt();
                 let dry = (p[7] / 1024.0).clamp(0.0, 1.0);
-                let gain = (p[8] / 2500.0).max(0.0).powf(0.814);
-                let sign = 1.0;
-                let mut co = [0.0f32; 2];
-                for (i, f) in io.iter_mut().enumerate() {
-                    if i % 16 == 0 {
-                        self.ph += inc * 16.0;
-                        if self.ph >= 1.0 {
-                            self.ph -= 1.0;
-                        }
-                        for c in 0..2 {
-                            let l = 0.5 - 0.5 * ((self.ph + spread * c as f32) * TAU).cos();
-                            let t = (PI * 1249.2 * 7.0685f32.powf(lo + (hi - lo) * l) / sr).min(1.5).tan();
-                            co[c] = (t - 1.0) / (t + 1.0);
-                        }
+                let gain = (p[8] / 2500.0).max(0.0);
+                for f in io.iter_mut() {
+                    let ph = z[62] / TURN;
+                    z[62] += step;
+                    if z[62] >= TURN {
+                        z[62] -= TURN;
                     }
                     for c in 0..2 {
-                        let mut x = f[c] + sign * fb * z[60 + c];
+                        let l = 0.5 - 0.5 * ((ph + spread * c as f32) * TAU).cos();
+                        let co = -(lo + (hi - lo) * l).clamp(0.0, 1.0);
+                        let input = f[c] * norm;
+                        let mut x = input + 0.99 * fb * z[60 + c];
                         for s in 0..stages {
                             let k = c * 24 + s;
-                            let y = co[c] * x + z[k];
-                            z[k] = x - co[c] * y;
+                            let y = co * x + z[k];
+                            z[k] = x - co * y;
                             x = y;
                         }
                         if !x.is_finite() {
                             x = 0.0;
                         }
                         z[60 + c] = x.clamp(-8.0, 8.0);
-                        f[c] = (f[c] * dry + x * (1.0 - dry)) * gain;
+                        f[c] = (input * dry + x * (1.0 - dry)) * gain;
                     }
                 }
             }
@@ -7060,6 +7063,52 @@ mod tests {
         ph.p[7] = 512.0;
         let out = run(ph, sine, 44100);
         assert!(out.iter().all(|f| f[0].abs() < 4.0));
+    }
+
+    #[test]
+    fn the_phaser_matches_the_measured_clicks_and_sweep() {
+        let click = |i: usize| if i == 100 { [0.5f32, 0.5] } else { [0.0, 0.0] };
+        let set = |v: &[(usize, f32)]| {
+            let mut fx = Fx::new(Kind::Phaser);
+            for (k, x) in [(0, 0.0), (1, 500.0), (2, 500.0), (3, 0.0), (4, 0.0), (5, 1.0), (6, 0.0), (7, 0.0), (8, 2500.0)] {
+                fx.p[k] = x;
+            }
+            for &(k, x) in v {
+                fx.p[k] = x;
+            }
+            fx
+        };
+        let near = |got: &[[f32; 2]], want: &[f32]| {
+            for (k, w) in want.iter().enumerate() {
+                assert!((got[100 + k][0] - w).abs() < 2e-4, "frame {k}: {} for {w}", got[100 + k][0]);
+            }
+        };
+        // three stages at the least, coefficient minus the depth
+        near(&run(set(&[]), click, 400), &[-0.0625, 0.2812, -0.2812, -0.1406, 0.0352, 0.1230]);
+        near(&run(set(&[(5, 4.0)]), click, 400), &[-0.015625]);
+        near(&run(set(&[(8, 4000.0)]), click, 400), &[-0.1, 0.45, -0.45]);
+        near(&run(set(&[(7, 512.0)]), click, 400), &[0.2187, 0.1406, -0.1406]);
+        // the loop: scaled input, 0.99 of the knob fed back a frame late
+        near(&run(set(&[(6, 800.0)]), click, 400), &[-0.0375, 0.1725, -0.2025, 0.0292, -0.1405, 0.1505, 0.0413, 0.2068]);
+        assert!(run(set(&[(6, 1000.0)]), click, 400).iter().all(|f| f[0] == 0.0));
+        // the sweep: 33 counts a frame at 1500 (0.08674 Hz), five times that on the wide range, right side ahead
+        let tone = |i: usize| [(i as f32 * 0.1).sin() * 0.5; 2];
+        let sweep = run(set(&[(0, 1500.0), (1, 0.0), (2, 1000.0), (4, 512.0)]), tone, 44100 * 6);
+        let still = run(set(&[(0, 0.0), (1, 1000.0), (2, 1000.0)]), tone, 44100 * 6);
+        // a quarter of a turn takes 2^22 / 33 frames; there the left side is at full depth, where every stage only flips the sign
+        let at = (4_194_304.0f32 / 33.0) as usize;
+        for i in at - 20..at + 20 {
+            assert!((sweep[i][0] - still[i][0]).abs() < 0.002, "frame {i}: {} for {}", sweep[i][0], still[i][0]);
+        }
+        let wide = run(set(&[(0, 1500.0), (1, 0.0), (2, 1000.0), (3, 1024.0)]), tone, 44100);
+        let at = (4_194_304.0f32 / 165.0) as usize;
+        for i in at - 20..at + 20 {
+            assert!((wide[i][0] - still[i][0]).abs() < 0.004, "wide frame {i}");
+        }
+        // the right side with the stereo knob at 512 is a quarter turn ahead: it starts at full depth
+        for i in 3..40 {
+            assert!((sweep[i][1] - still[i][1]).abs() < 0.002, "right frame {i}: {} for {}", sweep[i][1], still[i][1]);
+        }
     }
 
     #[test]

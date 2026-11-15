@@ -101,7 +101,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Parametric EQ 2 (built, approximate)
 - [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas are read, run, edited in the link window and saved)
 - [~] Fruity Phase Inverter (built as Polarity Flip; no stored block seen, layout is a guess)
-- [~] Fruity Phaser (built as Phaser: up to 23 stages, stereo sweep, feedback; depth to frequency and output gain scales estimated)
+- [x] Fruity Phaser (measured: stage count, depth law, sweep counter and rates, range switch, stereo offset, feedback loop, dry and gain)
 - [x] Fruity Reeverb (built as Room Reverb (classic); the same network as the newer unit, with its own decay, level and predelay laws, measured against impulse renders of every knob)
 - [~] Fruity Reeverb 2 (measured against 71 renders: 67 match to the 16-bit floor; the four with modulation turned up do not, its wobble is not yet the same)
 - [~] Fruity Scratcher (built as Turntable; the record turns forwards, backwards or pauses, with speed, platter weight, hold and mute; scratching by dragging the platter or by moving the position from events, clips and controllers; which stored value is direction, speed, acceleration and sensitivity is read from their rest values, and the scales are estimates; the four smoothing values are kept only; no timecode records)
