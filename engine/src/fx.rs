@@ -3072,16 +3072,19 @@ fn echo_time(p: &[f32], cx: &Ctx) -> f32 {
 
 
 /// The tallest point of the three-part chorus sweep before it is scaled to 1.
-const CHORUS_PEAK: f32 = 4.0 / 3.0;
+const CHORUS_PEAK: f32 = 1.276_142_4;
 /// One cycle of a chorus sweep, -1 to 1, phase 0 to 1. The round wave is built from parabolas.
 fn chorus_wave(ph: f32, shape: f32) -> f32 {
-    let arc = |ph: f32| {
+    // four shapes, measured: a wave of two parabolas, that one cubed, a sine with two faster ones
+    // riding on it (brought back to full swing), and that one cubed
+    let which = (shape * 3.0 / 1024.0) as i32;
+    let w = if which >= 2 {
+        let a = ph.fract() * TAU;
+        (a.sin() + (2.0 * a).sin() / 3.0 + (3.0 * a).sin() / 3.0) / CHORUS_PEAK
+    } else {
         let t = ph.fract() * 2.0;
         if t < 1.0 { 4.0 * t * (1.0 - t) } else { -4.0 * (t - 1.0) * (2.0 - t) }
     };
-    // four shapes: round, round cubed, a round wave with two faster ones riding on it, and that one cubed
-    let which = (shape * 4.0 / 1025.0) as i32;
-    let w = if which >= 2 { (arc(ph) + arc(ph * 2.0) / 3.0 + arc(ph * 3.0) / 3.0) / CHORUS_PEAK } else { arc(ph) };
     if which == 1 || which >= 3 { w * w * w } else { w }
 }
 /// Echo time of the plain echo in frames: the song's steps, or steps of its own tempo.
@@ -6598,14 +6601,18 @@ impl Unit {
                 let depth = p[1] / 1000.0 * 0.001 * sr;
                 // the full turn of the stereo knob puts the right side half a cycle away
                 let stereo = p[2] / 2048.0;
-                let wet_only = p[11] >= 512.0;
-                let low_side = p[9] >= 512.0;
-                let a = 1.0 - (-TAU * (7.1608 * 2000f32.powf(p[10] / 5000.0)).min(sr * 0.45) / sr).exp();
+                // both switches already read as on at 300 of 1024 (and wet only still off at 100)
+                let wet_only = p[11] >= 256.0;
+                let low_side = p[9] >= 256.0;
+                // the split is a one-pole low-pass of the averaging kind, its corner 8.2 Hz to 10.8 kHz
+                let t = (std::f32::consts::PI * (8.216 * 1527f32.powf(p[10] / 5000.0)).min(10756.0) / sr).min(1.5).tan();
+                let pole = (1.0 - t) / (1.0 + t);
                 let dry = if wet_only { 0.0 } else { 0.7 };
                 for f in io.iter_mut() {
                     let mut x = *f;
                     for c in 0..2 {
-                        z[8 + c] += a * (x[c] - z[8 + c]);
+                        z[8 + c] = 0.5 * (1.0 - pole) * (x[c] + z[10 + c]) + pole * z[8 + c];
+                        z[10 + c] = x[c];
                         x[c] = if low_side { z[8 + c] } else { x[c] - z[8 + c] };
                     }
                     self.buf[self.pos] = x;
@@ -6613,7 +6620,7 @@ impl Unit {
                     for v in 0..3 {
                         let shape = p[6 + v];
                         for c in 0..2 {
-                            let ph = (z[v] + 0.0006 + stereo * c as f32).fract();
+                            let ph = (z[v] + 0.0012 + stereo * c as f32).fract();
                             let l = 0.5 + 0.5 * chorus_wave(ph, shape);
                             let d = base + depth * l;
                             let at = self.pos as f32 + n as f32 - d;
@@ -6622,13 +6629,14 @@ impl Unit {
                             out[c] += self.buf[i % n][c] * (1.0 - fr) + self.buf[(i + 1) % n][c] * fr;
                         }
                         let r = p[3 + v] / 5000.0;
-                        z[v] += 5.0 * r * r / sr;
+                        // the rate is 5 r^2 Hz with the step per frame cut to whole 2^-24ths of a turn
+                        z[v] += (5.0 * r * r / sr * 16_777_216.0).floor() / 16_777_216.0;
                         if z[v] >= 1.0 {
                             z[v] -= 1.0;
                         }
                     }
                     self.pos = (self.pos + 1) % n;
-                    *f = [f[0] * dry + out[0] * 0.43, f[1] * dry + out[1] * 0.43];
+                    *f = [f[0] * dry + out[0] * 0.42, f[1] * dry + out[1] * 0.42];
                 }
             }
             Kind::Spread => {
@@ -7345,6 +7353,27 @@ mod tests {
         let peak = |a: usize, b: usize| out[a..b].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak(16000, 16300) > 0.45, "{}", peak(16000, 16300));
         assert!(peak(17850, 18000) < 0.36, "{}", peak(17850, 18000));
+    }
+
+    #[test]
+    fn the_chorus_matches_the_measured_click_and_wave_shapes() {
+        // all three waves stopped, no delay or depth, wet only, low side of the split at its
+        // default corner: figures read from a reference render of a 0.5 click
+        let mut fx = Fx::new(Kind::Chorus);
+        for (i, v) in [(0, 0.0), (1, 0.0), (3, 0.0), (4, 0.0), (5, 0.0), (9, 1024.0), (11, 1024.0)] {
+            fx.p[i] = v;
+        }
+        let out = run(fx, |i| if i == 0 { [0.5, 0.5] } else { [0.0, 0.0] }, 16);
+        for (i, want) in [(1, 0.0), (2, 0.0112), (3, 0.0247), (4, 0.0265), (5, 0.0253), (9, 0.0211)] {
+            assert!((out[i][0] - want).abs() < 0.0004, "frame {i}: {} for {want}", out[i][0]);
+        }
+        // the wave knob picks one of four shapes in thirds of its travel
+        assert!((chorus_wave(0.125, 300.0) - 0.75).abs() < 1e-6);
+        assert!((chorus_wave(0.125, 342.0) - 0.421875).abs() < 1e-6);
+        let third = ((0.25f32 * TAU).sin() + (0.5f32 * TAU).sin() / 3.0 + (0.75f32 * TAU).sin() / 3.0) / CHORUS_PEAK;
+        assert!((chorus_wave(0.25, 700.0) - third).abs() < 1e-6);
+        assert!((chorus_wave(0.25, 1024.0) - third.powi(3)).abs() < 1e-6);
+        assert!((0..1000).all(|i| chorus_wave(i as f32 / 1000.0, 768.0).abs() <= 1.0001));
     }
 
     #[test]

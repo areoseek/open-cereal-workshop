@@ -73,7 +73,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity Big Clock (Big Clock: shows the song position as bar, beat and tick or minutes and seconds, a click changes between them; its saved display options are not read)
 - [x] Fruity Blood Overdrive (built as Overdrive; every stage measured against renders of the original: colour filter, band blend, pre amp and x100, the three soft-clipped filter outputs, output level, limit and the two smoothing stages; renders agree within about 1 %)
 - [~] Fruity Center (built as Centre)
-- [~] Fruity Chorus (built, approximate)
+- [x] Fruity Chorus (built as Chorus; delay, depth, stereo offset, the rate law with its step rounding, the four wave shapes, the split filter and its corner law, levels and both switches measured against renders of the original; the waves start within a thousandth of a turn of the original, which itself varies from render to render)
 - [~] Fruity Compressor (built, approximate)
 - [~] Fruity Convolver (ours: Impulse Reverb; convolution with the named or held impulse, dry/wet, separation, normalize, delay, self-convolution, stretch, the drawn pan/volume/separation envelopes and the equaliser curve read and applied; scales of delay and stretch and the place of each of the last settings are estimates, no shipped setting moves them; envelope and equaliser drawing, impulse recording and reported latency not yet)
 - [~] Fruity dB Meter (Level Meter: peak and average level of each side of the sound on its track; its saved display options are not read)
