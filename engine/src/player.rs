@@ -3335,9 +3335,14 @@ impl Player {
                         v.attack = 1.0;
                         v.release = ms(5.0);
                     }
-                    if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2 | crate::synth::Kind::Pocket) {
-                        // these fade in by their own knob
+                    if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2 | crate::synth::Kind::Pocket | crate::synth::Kind::Kick) {
+                        // these fade in by their own knob; the sweep drum starts at full level (measured)
                         v.attack = 1.0;
+                    }
+                    if g.kind == crate::synth::Kind::Kick {
+                        // (measured: let go, it fades over 10 ms along half a cosine)
+                        v.release = ms(10.0);
+                        v.ease = true;
                     }
                     v.tone = Some(tone);
                     v.step = 1.0;

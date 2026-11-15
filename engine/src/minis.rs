@@ -36,7 +36,7 @@ const C5: f32 = 261.6256;
 
 #[derive(Debug, Clone)]
 pub enum Voice {
-    Kick { sr: f32, t: u32, ph: f32, scale: f32, vel: f32, off: Option<u32> },
+    Kick { sr: f32, ph: f64, hz: f64, fall: f64, end: f64, level: f64, fade: f64, vel: f32 },
     Fm2(Box<Fm2>),
     Pluck(Box<Pluck>),
     Keys(Box<crate::keys::Voice>),
@@ -216,7 +216,18 @@ impl Voice {
             }
             Kind::Kit => Voice::Kit(Box::new(crate::drumkit::Voice::start(s, sr, key, vel, seed))),
             Kind::DrumBank => Voice::Bank(Box::new(crate::drumbank::Voice::start(s, sr, key, vel, seed))),
-            Kind::Kick => Voice::Kick { sr, t: 0, ph: s[4] / 64.0 * 0.25, scale: dphase * sr / C5, vel, off: None },
+            Kind::Kick => {
+                // (measured) both falls lose a fixed share every frame at 44.1 kHz; the share follows its knob
+                // along a curve that divides by 1001 over the knob's travel
+                let share = |knob: f32, most: f64, least: f64| {
+                    let per = least + (most - least) * (1001f64.powf(1.0 - (knob as f64 / 256.0).clamp(0.0, 1.0)) - 1.0) / 1000.0;
+                    (1.0 - per).powf(44100.0 / sr as f64)
+                };
+                // (measured) the start pitch is two octaves above the middle key and moves half as far as the
+                // key does; the end pitch does not follow the key
+                let top = 1046.502 * 2f64.powf(s[0] as f64 / 1200.0) * ((dphase * sr / C5) as f64).sqrt();
+                Voice::Kick { sr, ph: s[4] as f64 / 256.0, hz: top, fall: share(s[2], 0.01, 0.0003), end: 65.4064 * 2f64.powf(s[1] as f64 / 1200.0), level: 1.0, fade: share(s[3], 0.005, 0.00002), vel }
+            }
             Kind::Fm2 => {
                 let ifs = 1.0 / sr;
                 let u = |k: usize| s[k] / 65535.0;
@@ -308,11 +319,10 @@ impl Voice {
     /// The key was let go. Returns the seconds the sound still needs.
     pub fn release(&mut self, p: &Patch) -> f32 {
         match self {
-            Voice::Kick { off, .. } => {
-                // measured: letting go fades the drum out in a few thousandths of a second
+            // (measured) letting go leaves the drum as it is; the channel closes it over 10 ms
+            Voice::Kick { .. } => {
                 let _ = p;
-                off.get_or_insert(0);
-                KICK_FADE * 1.2
+                0.0
             }
             Voice::Fm2(v) => {
                 if !v.done {
@@ -453,28 +463,23 @@ impl Voice {
                 v.frame(set, dphase)
             }
             Voice::Quiet => [0.0; 2],
-            Voice::Kick { sr, t, ph, scale, vel, off } => {
-                let sec = *t as f32 / *sr;
-                *t += 1;
-                // the end pitch: key 36's pitch at zero, found from the step the block stores beside it
-                let end = 65.406 * 2f32.powf(s[1] / 1200.0);
-                // measured: the pitch starts two octaves above the middle key and falls by a steady share of
-                // itself until it meets the end pitch, where it stays
-                let top = 1046.5 * 2f32.powf(s[0] / 1200.0);
-                let sweep = 0.002 + (s[2] / 256.0).powi(2) * 0.148;
-                let hz = (top * (-sec / sweep).exp()).max(end) * *scale;
-                let x = (*ph * TAU).sin();
-                *ph += (hz / *sr).min(0.45);
+            Voice::Kick { sr, ph, hz, fall, end, level, fade, vel } => {
+                // (measured) the first frame is already at full level, at the phase the click knob sets
+                let mut x = ((*ph * std::f64::consts::TAU).sin() * *level) as f32;
+                *ph += (hz.max(*end) / *sr as f64).min(0.45);
                 *ph -= ph.floor();
-                let drive = 1.0 + s[5] / 128.0 * 7.0;
-                let x = (x * drive).clamp(-1.0, 1.0);
-                // measured: no fade in, a plain fall from the first frame
-                let mut a = (-sec / kick_amp_s(s)).exp() * 1.073 * *vel;
-                if let Some(n) = off {
-                    a *= (1.0 - *n as f32 / (KICK_FADE * *sr)).max(0.0);
-                    *n += 1;
+                *hz *= *fall;
+                *level *= *fade;
+                // (measured) the drive knob mixes in a bent copy: a straight rise up to a knee, a tenth power
+                // above it
+                let d = (s[5] / 128.0).clamp(0.0, 1.0);
+                if d > 0.0 {
+                    let a = x.abs();
+                    x = (1.0 - d) * x + d * (1.731_82 * a).min(0.716_18 * a.powf(0.1)).copysign(x);
                 }
-                [x * a; 2]
+                // the channel weighs the velocity; nothing of it is used here
+                let _ = vel;
+                [x * 1.060_66; 2]
             }
             Voice::Fm2(v) => {
                 if v.k == 0 {
@@ -531,14 +536,6 @@ impl Voice {
     }
 }
 
-/// Seconds for the drum's level to fall to about a third.
-fn kick_amp_s(s: &[f32]) -> f32 {
-    0.015 + (s[3] / 256.0).powi(2) * 0.467
-}
-
-/// Seconds the sweep drum takes to fade once its key is let go.
-const KICK_FADE: f32 = 0.0045;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,8 +562,11 @@ mod tests {
         let late = ups(&x[8820..11025]);
         assert!(early > late, "{early} {late}");
         let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak > 0.2 && peak <= 1.0, "{peak}");
+        // (measured) the voice itself peaks a little over one; the channel level brings it down
+        assert!(peak > 0.2 && peak <= 1.07, "{peak}");
         assert!(x[40000..].iter().all(|v| v.abs() < 0.03));
+        // the first frame is at the click knob's phase, an eighth of a cycle at its middle
+        assert!((x[0] / peak - 0.707).abs() < 0.01, "{}", x[0]);
     }
 
     #[test]
