@@ -2943,7 +2943,8 @@ fn band_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32) -> [f32; 5
 /// Band of the seven band unit, laws as measured: the bell spans 0.1 to 5 octaves between its half-gain points,
 /// band pass and notch use that width over and times root two, the passes run from sharp to heavily damped.
 fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, part: usize) -> [f32; 5] {
-    const FLAT: [[f32; 4]; 3] = [[0.5412, 1.3066, 0.0, 0.0], [0.5176, 0.7071, 1.9319, 0.0], [0.5098, 0.6013, 0.9, 2.5629]];
+    // sharpness of each section of a steep pass at the rest width, as measured
+    const FLAT: [[f32; 4]; 3] = [[0.5297, 1.4025, 0.0, 0.0], [0.4908, 0.7650, 1.8688, 0.0], [0.4629, 0.741, 0.805, 2.529]];
     // steep bells: narrower bells set side by side for a flat top, as (width factor, offset in widths)
     const STAGGER: [[(f32, f32); 4]; 3] = [
         [(0.5, 0.1248), (0.5, -0.1248), (0.0, 0.0), (0.0, 0.0)],
@@ -2970,12 +2971,17 @@ fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, 
     // the band widths stretch towards the top of the range the way the textbook bell does
     let warp = w / s.max(1e-6);
     let q_band = match kind {
-        2 => q_of(oct / std::f32::consts::SQRT_2 * warp),
-        4 => q_of(oct * std::f32::consts::SQRT_2 * warp),
+        // a band pass or notch of a higher order is that many more equal sections, the band pass ones
+        // wider and the notch ones narrower by the root of half their number (either sign of the order)
+        2 => q_of(oct * ((extra + 1) as f32 * 0.5).sqrt() * warp),
+        4 => q_of(oct / ((extra + 1) as f32 * 0.5).sqrt() * warp),
         _ => q_of(oct * warp),
     };
-    let mut q_res = q_of((-1.5930 + x * (3.3488 + x * (-1.8486 + x * (10.0978 + x * -7.9700)))).exp());
-    let mut q_shelf = (0.498 + x * (-1.78917 + x * (1.39575 - 1.16708 * x))).exp();
+    // the passes: a cube law from ten times the flat sharpness down to a tenth of it
+    let mut q_res = (0.1 + 9.9 * (1.0 - x).powi(3)) * std::f32::consts::FRAC_1_SQRT_2;
+    // the shelves are set by steepness, which runs in a straight line over the knob and is one at its rest place
+    let steep = 2.0539 - 1.7210 * x;
+    let mut q_shelf = 1.0 / ((a + 1.0 / a) * (1.0 / steep - 1.0) + 2.0).max(0.01).sqrt();
     // steeper passes and shelves: more sections, either all alike (gentle) or spread the maximally flat way (steep)
     if extra > 0 {
         let n = (extra + 1) as f32;
@@ -2984,10 +2990,32 @@ fn eq_coeffs(kind: i32, hz: f32, gain_db: f32, width: f32, sr: f32, order: i32, 
         } else {
             let flat = FLAT[extra - 1][part.min(extra)];
             q_res = flat * (q_res / 0.7071).powf(1.0 / n);
-            q_shelf = flat * (q_shelf / 0.7071).powf(1.0 / n);
+            // a steep shelf: every section has its own share of the steepness
+            const SHARE: [[f32; 4]; 3] = [[1.6244, 0.3805, 0.0, 0.0], [1.9739, 0.8965, 0.1940, 0.0], [1.7330, 1.5235, 0.6506, 0.0971]];
+            q_shelf = 1.0 / ((a + 1.0 / a) * (SHARE[extra - 1][part.min(extra)] / steep - 1.0) + 2.0).max(0.01).sqrt();
         }
     }
     band_raw(kind, s, c, a, q_band, q_res, q_shelf)
+}
+
+/// Level in dB that one band of the seven band unit gives a tone of `at_hz`: the same sections the sound runs
+/// through, so the drawn curve is the heard one. `freq` and `width` are the knobs from 0 to 1.
+pub fn eq_band_db(kind: i32, freq: f32, gain_db: f32, width: f32, order: i32, at_hz: f32) -> f32 {
+    if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain_db.abs() < 0.005) {
+        return 0.0;
+    }
+    let rate = 88200.0;
+    let w = TAU * (at_hz / rate).clamp(0.0, 0.5);
+    let (s1, c1) = w.sin_cos();
+    let (s2, c2) = (2.0 * w).sin_cos();
+    let mut db = 0.0;
+    for part in 0..=order.unsigned_abs().min(3) as usize {
+        let c = eq_coeffs(kind, knob_hz(freq), gain_db, width, rate, order, part);
+        let num = (c[0] + c[1] * c1 + c[2] * c2).powi(2) + (c[1] * s1 + c[2] * s2).powi(2);
+        let den = (1.0 + c[3] * c1 + c[4] * c2).powi(2) + (c[3] * s1 + c[4] * s2).powi(2);
+        db += 10.0 * (num.max(1e-12) / den.max(1e-12)).log10();
+    }
+    db
 }
 
 /// Three first-order sections of a two-path half-band filter; `st` holds four values.
@@ -6171,7 +6199,7 @@ impl Unit {
                     if kind == 0 || (matches!(kind, 5 | 6 | 7) && gain.abs() < 0.005) {
                         continue;
                     }
-                    let order = if !classic && matches!(kind, 1 | 3 | 5 | 6 | 7) { p[28 + b] as i32 } else { 0 };
+                    let order = if !classic { p[28 + b] as i32 } else { 0 };
                     let parts = 1 + order.unsigned_abs().min(3) as usize;
                     let mut c = [[0f32; 5]; 4];
                     for (k, c) in c.iter_mut().enumerate().take(parts) {
@@ -7189,6 +7217,27 @@ mod tests {
         let out = run(set(&[(1, 2500.0), (2, 2000.0)]), late, at + 400);
         let (peak, _) = (0..400).map(|k| (k, out[at + k][0])).fold((0, 0.0), |m, x| if x.1 > m.1 { x } else { m });
         assert!((146..=147).contains(&peak), "peak {peak} frames late");
+    }
+
+    #[test]
+    fn the_seven_band_unit_follows_the_measured_laws() {
+        // levels read off renders of the original, one band at the middle of the frequency knob:
+        // (kind, level dB, width, order, tone Hz, measured dB)
+        let rows = [
+            (1, 0.0, 0.0, 0, 632.5, 16.99),
+            (1, 0.0, 10000.0, -1, 632.5, 13.16),
+            (2, 0.0, 30000.0, 2, 1265.1, -4.49),
+            (2, 0.0, 30000.0, -2, 1265.1, -4.49),
+            (5, -12.0, 0.0, 0, 449.5, -12.09),
+            (5, -12.0, 10000.0, -2, 500.6, -13.12),
+            (5, -12.0, 60000.0, 2, 500.6, -7.30),
+        ];
+        for (kind, level, width, order, hz, want) in rows {
+            let got = eq_band_db(kind, 0.5, level, width / 65536.0, order, hz);
+            assert!((got - want).abs() < 0.1, "kind {kind} order {order}: {got} against {want}");
+        }
+        // a pass at its rest width is the flat one, three dB down at the corner
+        assert!((eq_band_db(3, 0.5, 0.0, 36068.0 / 65536.0, 0, 632.456) + 3.01).abs() < 0.02);
     }
 
     #[test]

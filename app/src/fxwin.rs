@@ -136,22 +136,6 @@ fn hint(kind: Kind, i: usize, name: &str, v: f32) -> String {
     }
 }
 
-/// Magnitude in dB of one equaliser band at `f` Hz (an analogue-prototype approximation, for the picture only).
-fn band_db(kind: i32, f0: f32, gain: f32, width: f32, f: f32) -> f32 {
-    let x = (f / f0).log2();
-    let bw = 0.2 * (width.clamp(0.0, 1.0) * 6.0).exp2();
-    match kind {
-        0 => 0.0,
-        1 => -12.0 * x.max(0.0),
-        3 => -12.0 * (-x).max(0.0),
-        2 => -6.0 * (x.abs() / bw.max(0.05)),
-        4 => -40.0 * (1.0 - (x.abs() / (bw * 0.25).max(0.02)).min(1.0)),
-        5 => gain / (1.0 + (x * 2.5).exp()),
-        7 => gain / (1.0 + (-x * 2.5).exp()),
-        _ => gain / (1.0 + (2.0 * x / bw.max(0.05)).powi(2)),
-    }
-}
-
 impl App {
     /// Show the editor of the open effect slot, if any.
     pub(crate) fn fx_window(&mut self, ctx: &egui::Context, frame: egui::Frame) {
@@ -2023,7 +2007,7 @@ fn eq_curve(ui: &mut Ui, f: &mut fx::Fx) -> bool {
             let fr = hz(n);
             let mut db = main;
             for b in 0..7 {
-                db += band_db(f.p[21 + b] as i32, hz(f.p[7 + b] / 65536.0), f.p[b] / 100.0, f.p[14 + b] / 65536.0, fr);
+                db += fx::eq_band_db(f.p[21 + b] as i32, f.p[7 + b] / 65536.0, f.p[b] / 100.0, f.p[14 + b] / 65536.0, f.p[28 + b] as i32, fr);
             }
             Pos2::new(x_of(n), y_of(db.clamp(-20.0, 20.0)))
         })

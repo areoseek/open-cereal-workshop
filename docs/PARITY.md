@@ -98,7 +98,7 @@ What the reference demo (26.1.7, installed 2026-11-10) contains, as a to-do list
 - [~] Fruity NoteBook 2 (Note Pages: pages are read, edited, added, deleted and saved byte-exact; page flips by automation not run)
 - [x] Fruity PanOMatic (pan with cross-feed, level, the three slow-wave shapes, both targets and the speed law measured against renders of the original, within one percent)
 - [x] Fruity Parametric EQ (built as Seven Band EQ (classic); measured against 42 renders, all within 0.0003)
-- [~] Fruity Parametric EQ 2 (built, approximate)
+- [x] Fruity Parametric EQ 2 (measured: peaks, shelves, passes, band pass and notch at every order and width, both quality modes; steep peaks at the widest setting within 1 %)
 - [~] Fruity Peak Controller (built as Level Follower; drives mixer levels, slot mix and effect settings; link mapping formulas are read, run, edited in the link window and saved)
 - [~] Fruity Phase Inverter (built as Polarity Flip; no stored block seen, layout is a guess)
 - [x] Fruity Phaser (measured: stage count, depth law, sweep counter and rates, range switch, stereo offset, feedback loop, dry and gain)
