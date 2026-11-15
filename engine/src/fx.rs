@@ -397,8 +397,8 @@ pub static DEFS: &[Def] = &[
             p("Gain", 16, 0, 160, 80),
             p("Attack shape", 20, 0, 2, 1),
             p("Release shape", 24, 0, 2, 1),
-            p("Split balance", 28, 0, 160, 80),
-            p("Split frequency", 32, 0, 160, 80),
+            p("Split frequency", 28, 0, 160, 80),
+            p("Split balance", 32, 0, 160, 80),
         ],
     },
     Def {
@@ -2791,6 +2791,28 @@ pub struct Unit {
 const PAD_MS: [f32; 6] = [29.7, 37.1, 41.1, 43.7, 5.0, 1.7];
 /// First two formants of the vowels A E I O U, in Hz.
 const VOWELS: [[f32; 2]; 5] = [[800.0, 1150.0], [400.0, 2000.0], [300.0, 2500.0], [450.0, 800.0], [325.0, 700.0]];
+
+/// The onset shaper's drive curve, read off a reference render in steps of 0.05: unit slope at rest, flat at
+/// one from an input of three.
+const TRANSIENT_BEND: [f32; 61] = [
+    0.00000, 0.04996, 0.09971, 0.14904, 0.19772, 0.24557, 0.29223, 0.33778, 0.38198, 0.42468,
+    0.46578, 0.50518, 0.54282, 0.57863, 0.61260, 0.64470, 0.67493, 0.70331, 0.72988, 0.75467,
+    0.77773, 0.79913, 0.81892, 0.83718, 0.85399, 0.86942, 0.88354, 0.89644, 0.90818, 0.91885,
+    0.92852, 0.93725, 0.94512, 0.95219, 0.95852, 0.96417, 0.96920, 0.97366, 0.97760, 0.98107,
+    0.98410, 0.98675, 0.98905, 0.99103, 0.99273, 0.99417, 0.99539, 0.99641, 0.99725, 0.99794,
+    0.99849, 0.99892, 0.99926, 0.99952, 0.99974, 0.99987, 0.99995, 0.99998, 1.00000, 1.00000,
+    1.00000,
+];
+
+fn transient_bend(x: f32) -> f32 {
+    let u = x.abs() * 20.0;
+    if !(u < 60.0) {
+        return x.signum();
+    }
+    let i = u as usize;
+    let y = TRANSIENT_BEND[i] + (TRANSIENT_BEND[i + 1] - TRANSIENT_BEND[i]) * (u - i as f32);
+    y.copysign(x)
+}
 
 pub(crate) fn db(x: f32) -> f32 {
     10f32.powf(x / 20.0)
@@ -6670,45 +6692,74 @@ impl Unit {
                 }
             }
             Kind::Transient => {
-                // the part above the split is shaped: a fast level follower is held against a slower one to find
-                // onsets, and against a lingering one to find tails; each knob turns that distance into gain
-                let law = |v: f32, up: f32, down: f32| {
-                    let r = ((v - 80.0) / 80.0).clamp(-1.0, 1.0);
-                    if r >= 0.0 { r * r * up } else { -r * r * down }
-                };
-                let att = law(p[0], 0.58, 0.87);
-                let rel = law(p[2], 0.65, 1.0);
-                let drive = (p[1] / 160.0).clamp(0.0, 1.0);
+                // every figure here was read from reference renders of steps and tone bursts. Only the part
+                // above the split is shaped. Both channels share one level, the sum of their sizes. Onsets are
+                // found by holding a peak follower against a slower riser, tails by holding a lingering peak
+                // against a quicker one; the knobs turn those two distances into one amount, which lifts the
+                // gain directly when positive and divides it when negative
+                let ta = ((p[0] - 80.0) / 80.0).clamp(-1.0, 1.0);
+                let tr = ((p[2] - 80.0) / 80.0).clamp(-1.0, 1.0);
+                let (ka, kr) = (ta * ta, tr * tr);
                 let gain = db((p[3] - 80.0) / 80.0 * 9.0);
-                let coef = |t: f32| 1.0 - (-1.0 / (t * sr)).exp();
-                let rise = coef([0.004f32, 0.0066, 0.011][(p[4] as usize).min(2)]);
-                let fall = coef([0.026f32, 0.041, 0.065][(p[5] as usize).min(2)]);
-                let (a_fast, r_fast, linger) = (coef(0.0003), coef(0.004), coef(1.77));
-                let (dry, wet) = if p[6] <= 80.0 { (p[6] / 80.0, 1.0) } else { (1.0, (160.0 - p[6]) / 80.0) };
-                let x = (p[7] - 80.0) / 80.0;
-                let hz = if x >= 0.0 { 260.0 * (1000.0f32 / 260.0).powf(x) } else { 260.0 * (5.0f32 / 260.0).powf(-x) };
-                let a = 1.0 - (-TAU * hz / sr).exp();
-                let d = 0.5 * 27f32.powf(drive);
+                // per sample figures were measured at 44.1 kHz
+                let k = 44100.0 / sr;
+                let per = |c: f32| 1.0 - (1.0 - c).powf(k);
+                let rise = per([0.0104f32, 0.0052, 0.0026][(p[4] as usize).min(2)]);
+                let shape = (p[5] as usize).min(2);
+                let fall = per([0.001052f32, 0.000526, 0.000263][shape]);
+                let smooth = per(1.0 / [195.0f32, 390.0, 780.0][shape]);
+                let (ebb, linger) = (per(2.612e-4), per(1.29e-5));
+                let hz = 5.0 + 995.0 * (p[6] / 160.0).clamp(0.0, 1.0).powi(2);
+                let t = (std::f32::consts::PI * hz / sr).tan();
+                let (pole, feed) = ((1.0 - t) / (1.0 + t), t / (1.0 + t));
+                let (low, high) = ((2.0 - p[7] / 80.0).clamp(0.0, 1.0), (p[7] / 80.0).clamp(0.0, 1.0));
+                let push = if p[1] <= 0.0 {
+                    0.0
+                } else {
+                    let x = (p[1] / 20.0).min(1.0);
+                    0.7387 * (0.01881 * p[1]).exp() * x * (2.0 - x)
+                };
+                let soft = |u: f32| {
+                    let u = u.min(1.5);
+                    u - 4.0 / 27.0 * u * u * u
+                };
                 for f in io.iter_mut() {
-                    z[0] += a * (f[0] - z[0]);
-                    z[1] += a * (f[1] - z[1]);
+                    z[0] = pole * z[0] + feed * (f[0] + z[2]);
+                    z[1] = pole * z[1] + feed * (f[1] + z[3]);
+                    z[2] = f[0];
+                    z[3] = f[1];
                     let (hl, hr) = (f[0] - z[0], f[1] - z[1]);
-                    let lv = hl.abs().max(hr.abs()) + 1e-6;
-                    z[2] += if lv > z[2] { a_fast } else { r_fast } * (lv - z[2]);
-                    let e = z[2];
-                    // the slow riser, the follower that falls at the release speed, and the one that lingers
-                    z[3] = if e > z[3] { z[3] + rise * (e - z[3]) } else { e };
-                    z[4] = e.max(z[4] * (1.0 - fall));
-                    z[5] = if e > z[5] { e } else { z[5] + linger * (e - z[5]) };
-                    let up = 20.0 * ((e + 1e-6) / (z[3] + 1e-6)).log10();
-                    let tail = 20.0 * ((z[5] + 1e-6) / (z[4] + 1e-6)).log10();
-                    let g = db(att * up + (rel * tail).clamp(-24.0, 18.0));
-                    let (mut wl, mut wr) = (hl * g, hr * g);
-                    if drive > 0.0 {
-                        wl = (wl * d).tanh() / d;
-                        wr = (wr * d).tanh() / d;
+                    let a = 0.5 * (hl.abs() + hr.abs());
+                    // z[4] the slow riser, z[5] its peak, z[6] the lingering peak, z[7] the quick one, z[8] the
+                    // quick one smoothed on the way down
+                    z[4] = if a > z[4] { z[4] + rise * (a - z[4]) } else { a.max(z[4] * (1.0 - ebb)) };
+                    z[5] = a.max(z[5] * (1.0 - ebb));
+                    z[6] = a.max(z[6] * (1.0 - linger));
+                    z[7] = a.max(z[7] * (1.0 - fall));
+                    z[8] = a.max(z[8] + smooth * (z[7] - z[8]));
+                    let mut amount = 0.0;
+                    if ka > 0.0 && z[4] > 1e-12 {
+                        let v = z[5] / z[4] - 1.0;
+                        if ta < 0.0 {
+                            amount -= ka * 0.6 * v;
+                        } else if v > 0.0 {
+                            amount += ka * (2.2563 * soft(v / 6.06) - 0.0171);
+                        }
                     }
-                    *f = [(z[0] * dry + wl * wet) * gain, (z[1] * dry + wr * wet) * gain];
+                    if kr > 0.0 && z[7] > 1e-9 {
+                        if tr < 0.0 {
+                            amount -= kr * (z[6] / z[7] - 1.0).min(1e3);
+                        } else {
+                            amount += kr * (6.65 * soft((z[6] / z[8] - 1.0).min(1e3) / 13.4) - 0.0957);
+                        }
+                    }
+                    let g = if amount >= 0.0 { 1.0 + amount } else { 1.0 / (1.0 - amount) };
+                    let (mut wl, mut wr) = (hl * g, hr * g);
+                    if push > 0.0 {
+                        wl = transient_bend(wl * push) / push;
+                        wr = transient_bend(wr * push) / push;
+                    }
+                    *f = [(z[0] * low + wl * high) * gain, (z[1] * low + wr * high) * gain];
                 }
             }
             Kind::Swarm => {
@@ -7353,6 +7404,44 @@ mod tests {
         let peak = |a: usize, b: usize| out[a..b].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak(16000, 16300) > 0.45, "{}", peak(16000, 16300));
         assert!(peak(17850, 18000) < 0.36, "{}", peak(17850, 18000));
+    }
+
+    #[test]
+    fn the_onset_shaper_matches_the_measured_tone_steps() {
+        // a 495 Hz tone stepping 0.05 -> 0.4 -> 0.05, split at its lowest and only the high side heard:
+        // peaks per 200 frames read from reference renders
+        let tone = |i: usize| {
+            let v = (i as f32 * TAU * 495.0 / 44100.0).sin() * if (22050..44100).contains(&i) { 0.4 } else { 0.05 };
+            [v, v]
+        };
+        let shaped = |knob: usize, v: f32| {
+            let mut fx = Fx::new(Kind::Transient);
+            fx.p[6] = 0.0;
+            fx.p[7] = 160.0;
+            fx.p[knob] = v;
+            run(fx, tone, 50000)
+        };
+        let peak = |out: &[[f32; 2]], at: usize| out[at..at + 200].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        let out = shaped(0, 0.0);
+        for (at, want) in [(22050, 0.2397), (22250, 0.2950), (22450, 0.3291), (22850, 0.3518), (25250, 0.3665)] {
+            assert!((peak(&out, at) - want).abs() < 0.003, "attack down at {at}: {} for {want}", peak(&out, at));
+        }
+        let out = shaped(0, 160.0);
+        for (at, want) in [(22250, 0.5460), (22450, 0.4760), (22850, 0.4341), (25250, 0.4164)] {
+            assert!((peak(&out, at) - want).abs() < 0.008, "attack up at {at}: {} for {want}", peak(&out, at));
+        }
+        let out = shaped(2, 0.0);
+        for (at, want) in [(44100, 0.0522), (44300, 0.0470), (44500, 0.0410), (44900, 0.0339), (45700, 0.0223)] {
+            assert!((peak(&out, at) - want).abs() < 0.0015, "release down at {at}: {} for {want}", peak(&out, at));
+        }
+        let out = shaped(2, 160.0);
+        for (at, want) in [(22250, 0.3691), (44300, 0.0497), (44900, 0.0565), (45700, 0.0721)] {
+            assert!((peak(&out, at) - want).abs() < 0.003, "release up at {at}: {} for {want}", peak(&out, at));
+        }
+        // drive bends the shaped part towards a ceiling of one fifteenth at full, and is out of the way at rest
+        assert!((transient_bend(1.0) - 0.7777).abs() < 1e-3 && transient_bend(-4.0) == -1.0);
+        let out = shaped(1, 160.0);
+        assert!((peak(&out, 30000) - 1.0 / 15.0).abs() < 1e-3, "{}", peak(&out, 30000));
     }
 
     #[test]

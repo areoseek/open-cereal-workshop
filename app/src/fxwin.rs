@@ -66,11 +66,9 @@ fn hint(kind: Kind, i: usize, name: &str, v: f32) -> String {
         (Kind::Spread, _) => pct(v / 10000.0),
         (Kind::Transient, n) if n.ends_with("shape") => format!("{name}: {}", ["sharp", "medium", "soft"][(v as usize).min(2)]),
         (Kind::Transient, "Drive") => pct(v / 160.0),
-        (Kind::Transient, "Split balance") => format!("Split balance: {:.0} % dry / {:.0} % wet", (v / 80.0).min(1.0) * 100.0, ((160.0 - v) / 80.0).min(1.0) * 100.0),
-        (Kind::Transient, "Split frequency") => {
-            let x = (v - 80.0) / 80.0;
-            format!("Split frequency: {:.0} Hz", if x >= 0.0 { 260.0 * (1000.0f32 / 260.0).powf(x) } else { 260.0 * (5.0f32 / 260.0).powf(-x) })
-        }
+        (Kind::Transient, "Split balance") => format!("Split balance: {:.0} % low / {:.0} % high", (2.0 - v / 80.0).clamp(0.0, 1.0) * 100.0, (v / 80.0).min(1.0) * 100.0),
+        (Kind::Transient, "Split frequency") => format!("Split frequency: {:.0} Hz", 5.0 + 995.0 * (v / 160.0).powi(2)),
+        (Kind::Transient, "Gain") => format!("Gain: {:+.1} dB", (v - 80.0) / 80.0 * 9.0),
         (Kind::Transient, _) => format!("{name}: {:+.0} %", (v - 80.0) / 0.8),
         (Kind::Swarm, "Low pass" | "High pass") => format!("{name}: {v:.0} Hz"),
         (Kind::Swarm, "Eight lines") => format!("Delay lines: {}", if v >= 0.5 { 8 } else { 4 }),
