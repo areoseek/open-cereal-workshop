@@ -11,7 +11,7 @@ fn main() {
     println!("volume {} pitch {} out {:?} uni {}", pt.volume, pt.pitch, pt.out, pt.uni);
     for (k, a) in pt.arts.iter().enumerate() {
         if a.env.live || a.lfo.live {
-            println!("art {k} on: env {} flags {} lfo {} flags {} bipolar {}", a.env.live, a.env.flags, a.lfo.live, a.lfo.flags, a.bipolar);
+            println!("art {k} on: env {} flags {} lfo {} flags {} bipolar {} switches at {} {}", a.env.live, a.env.flags, a.lfo.live, a.lfo.flags, a.bipolar, a.env.span.1.saturating_sub(16), a.lfo.span.1.saturating_sub(16));
         }
     }
     println!("x {} y {}", pt.modx, pt.mody);

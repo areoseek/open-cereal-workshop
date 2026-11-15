@@ -253,7 +253,7 @@ pub struct OpLay {
 
 impl OpLay {
     pub const NEW: OpLay = OpLay { len: 2128, noise: 48, mags: 52, harmonics: 256, tail: 2100, flags: 2120, centre: Some(2123), pluck: Some(2126), first: false };
-    pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 256, tail: 1076, flags: 1096, centre: Some(1099), pluck: Some(1102), first: false };
+    pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 128, tail: 1076, flags: 1096, centre: Some(1099), pluck: Some(1102), first: false };
     /// Which of the first layout's last switches are centre and plucked is not known, so they read as off.
     pub const FIRST: OpLay = OpLay { len: 271, noise: 260, mags: 48, harmonics: 24, tail: 240, flags: 264, centre: None, pluck: None, first: true };
 
@@ -263,9 +263,11 @@ impl OpLay {
         w[..48].copy_from_slice(&h[..48]);
         w[48..52].copy_from_slice(&h[self.noise..self.noise + 4]);
         w[52..52 + self.harmonics * 4].copy_from_slice(&h[self.mags..self.mags + self.harmonics * 4]);
-        if self.first {
-            // (the first layout holds two dozen harmonics and then their phases)
-            w[1076..1076 + 96].copy_from_slice(&h[self.mags + 96..self.mags + 192]);
+        if self.harmonics < 256 {
+            // (the older layouts hold fewer harmonics and then their phases: two dozen in the first, 128 in the
+            // middle one, seen as a drawn wave with its phases scattered)
+            let n = self.harmonics * 4;
+            w[1076..1076 + n].copy_from_slice(&h[self.mags + n..self.mags + n * 2]);
         }
         w[2100..2120].copy_from_slice(&h[self.tail..self.tail + 20]);
         w[2120..2123].copy_from_slice(&h[self.flags..self.flags + 3]);
@@ -1167,7 +1169,8 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
     } else {
         // (a bent sum is bent once, whole: its lighter tables are that wave with the top taken off)
         let mut whole: Option<Vec<f32>> = None;
-        for cap in [256usize, 64, 16, 4] {
+        // (measured: a low saw keeps every harmonic that fits under half the sample rate, so the steps are fine)
+        for cap in [256usize, 181, 128, 90, 64, 45, 32, 22, 16, 11, 8, 5, 4] {
             let n = top.min(cap);
             if caps.last() == Some(&(n as u32)) {
                 continue;
@@ -1436,18 +1439,24 @@ impl Patch {
         } else {
             d
         };
-        // (older blocks keep other things where the switch for a set in the middle now sits)
-        p.uni_mono = e.len() > 966 && e[966] != 0;
-        p.vel_vol = ver < 19 || e.len() <= 974 || e[974] != 0;
+        // the switches after the head were added at its end one layout at a time, so each sits at the same place in
+        // every layout that has it (measured: the set in the middle from layout 13 on at least, the velocity
+        // switch from 18)
+        p.uni_mono = ver >= 7 && d.len() > 966 && d[966] != 0;
+        p.vel_vol = ver < 18 || d.len() <= 974 || d[974] != 0;
+        // (measured: the byte after the unison one lets a standing level drain away)
+        let level = ver >= 7 && d.len() > 967 && d[967] != 0;
         if sent > 0.0 && e.len() >= 1137 {
             p.tail = effects(e);
             p.tail.split = true;
         } else {
+            p.tail = Default::default();
             for r in 0..9 {
                 p.out[r] += p.send[r].abs();
                 p.send[r] = 0.0;
             }
         }
+        p.tail.level = level;
         if e.len() >= 1137 {
             // the equaliser stands on the output, on the effects' share, or on both; here it is one filter
             // over the whole sound, so it runs unless it is meant for a share that is not the greater part
@@ -1578,7 +1587,7 @@ impl Patch {
             if !used[r] {
                 continue;
             }
-            fastest = fastest.max((dphase * self.ops[r].ratio + self.ops[r].offset_hz / sr).abs());
+            fastest = fastest.max((dphase * (self.pitch / 12.0).exp2() * self.ops[r].ratio + self.ops[r].offset_hz / sr).abs());
             bend = bend.max(self.fm[r].iter().map(|x| x.abs()).sum::<f32>());
             ring |= self.rm[r].iter().any(|&x| x != 0.0);
         }
@@ -1642,6 +1651,8 @@ struct Sub {
     ap: [[f32; 20]; 3],
     /// what takes each filter up to twice the rate and back
     twice: [Twice; 3],
+    /// what brings the filters' four outputs (out and send, left and right) back down together
+    mixd: [Twice; 4],
     fb: [f32; 3],
     fg: [f32; 3],
     fk: [f32; 3],
@@ -1802,7 +1813,8 @@ impl Voice {
             let (s, low) = (s2 % n, s2 >= n);
             let (down, share) = if low { (0.5, p.uni_sub) } else { (1.0, 1.0 - p.uni_sub) };
             let u = if n == 1 { 0.0 } else { 1.0 - s as f32 / (n - 1) as f32 * 2.0 };
-            let xs = [(key as f32 / 120.0).min(1.0), axes[0].clamp(0.0, 1.0), (axes[1] - 0.5 + p.modx).clamp(0.0, 1.0), (axes[2] - 0.5 + p.mody).clamp(0.0, 1.0), rand, (u + 1.0) * 0.5];
+            // (measured: the key axis counts the key after the patch's own transposing)
+            let xs = [((key as f32 + p.pitch) / 120.0).clamp(0.0, 1.0), axes[0].clamp(0.0, 1.0), (axes[1] - 0.5 + p.modx).clamp(0.0, 1.0), (axes[2] - 0.5 + p.mody).clamp(0.0, 1.0), rand, (u + 1.0) * 0.5];
             let mut stat = [0.0; ARTS];
             for (k, a) in p.arts.iter().enumerate().take(ARTS) {
                 stat[k] = a.stat(&xs);
@@ -1813,12 +1825,15 @@ impl Voice {
                 let o = &p.ops[k];
                 // measured: the voices' starts are spread evenly over the set share of one cycle
                 ph[k] = o.phase + s as f32 / n as f32 * p.uni_phase;
-                if o.free {
+                // (measured: an operator that stands still, at no pitch of its own, starts at its set place
+                // whatever this switch says)
+                if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
                     ph[k] += loose[k];
                 }
                 // the fullest table whose top harmonic still fits under half the sample rate
-                let f = (dphase * o.ratio + o.offset_hz / sr).abs().max(1e-6);
-                let fit = (0.45 / f) as u32;
+                // (the patch's own transposing counts: measured, a saw set two octaves down keeps its top)
+                let f = (dphase * (p.pitch / 12.0).exp2() * down * o.ratio + o.offset_hz / sr).abs().max(1e-6);
+                let fit = (0.499 / f) as u32;
                 tab[k] = o.caps.iter().position(|&c| c <= fit.max(1)).unwrap_or(o.caps.len() - 1) as u8;
             }
             subs.push(Sub {
@@ -1855,6 +1870,7 @@ impl Voice {
                 stages: [0; 3],
                 ap: [[0.0; 20]; 3],
                 twice: [Twice::new(); 3],
+                mixd: [Twice::new(); 4],
                 fb: [0.0; 3],
                 fg: [0.1; 3],
                 fk: [1.0; 3],
@@ -2252,15 +2268,20 @@ impl Voice {
                     sum[j] += s.out[j] * s.gain;
                 }
             }
-            let mut carry = 0.0;
+            // (measured: a filter mixed with the one it feeds meets it in step at every pitch, so the three
+            // filters sit together between one doubling and one halving, not each between its own)
+            let mut carry = [0.0f32; 2];
+            let mut bus = [[0.0f32; 4]; 2];
+            let mut ran = false;
             for k in 0..3 {
                 if !p.fused[k] || (merge && nth != end) {
-                    carry = 0.0;
+                    carry = [0.0; 2];
                     continue;
                 }
+                ran = true;
                 let f = &p.filts[k];
                 let b = 36 + k * 8;
-                let mut x = carry;
+                let mut x = 0.0;
                 for j in 0..6 {
                     let a = p.feed[k][j];
                     if a != 0.0 {
@@ -2283,9 +2304,9 @@ impl Voice {
                 // (measured with hiss: the curves are those of filters stepped at twice the rate, and nothing is
                 // lost at the very top, so at the plain rate every filter works between a doubling and a halving)
                 let fed = if self.fsteps == 2 { s.twice[k].up(x) } else { [x; 2] };
-                let mut made = [0.0f32; 2];
+                let mut next = [0.0f32; 2];
                 for step in 0..self.fsteps as usize {
-                x = fed[step];
+                x = fed[step] + carry[step];
                 if f.kind == 12 {
                     // phaser: a row of all-pass stages whose output comes back to its own input, solved
                     // without a sample of delay (the row is a straight line: gain times input plus memory)
@@ -2306,7 +2327,9 @@ impl Voice {
                         *z = y - a * o;
                         y = o;
                     }
-                    x = u;
+                    // (what leaves is the end of the row: as loud as its start at every pitch, but turned, which
+                    // shows once it is mixed with another path. Measured against the filter before it.)
+                    x = y;
                 } else if f.kind == 11 && s.plan[k][0][4] > 0.0 {
                     // the driven ladder: every stage bends what comes in and what it holds, and the resonance
                     // goes back in under the first bend
@@ -2398,9 +2421,6 @@ impl Voice {
                         x = m0 * x + m1 * v1 + m2 * v2;
                     }
                 }
-                made[step] = x;
-                }
-                x = if self.fsteps == 2 { s.twice[k].down(made) } else { made[0] };
                 // (measured with a sine and a closed filter: the shaper bends what comes out of the filter)
                 if f.ws_on {
                     x = bend(x);
@@ -2414,17 +2434,29 @@ impl Voice {
                 }
                 // a ringing stage after a hot shaper is kept inside sane bounds
                 x = (x * s.val[b + 1]).clamp(-8.0, 8.0);
-                carry = x * f.next;
+                next[step] = x * f.next;
                 let g = p.out[6 + k];
                 if g != 0.0 {
-                    fl += x * g * s.pl[6 + k];
-                    fr += x * g * s.pr[6 + k];
+                    bus[step][0] += x * g * s.pl[6 + k];
+                    bus[step][1] += x * g * s.pr[6 + k];
                 }
                 let g = p.send[6 + k];
                 if g != 0.0 {
-                    fsl += x * g * s.pl[6 + k];
-                    fsr += x * g * s.pr[6 + k];
+                    bus[step][2] += x * g * s.pl[6 + k];
+                    bus[step][3] += x * g * s.pr[6 + k];
                 }
+                }
+                carry = next;
+            }
+            if ran {
+                let mut down = [0.0f32; 4];
+                for (c, d) in down.iter_mut().enumerate() {
+                    *d = if self.fsteps == 2 { s.mixd[c].down([bus[0][c], bus[1][c]]) } else { bus[0][c] };
+                }
+                fl += down[0];
+                fr += down[1];
+                fsl += down[2];
+                fsr += down[3];
             }
             let th = (s.pan + 1.0) * std::f32::consts::FRAC_PI_4;
             let (ul, ur) = (th.cos() * std::f32::consts::SQRT_2 * s.gain, th.sin() * std::f32::consts::SQRT_2 * s.gain);
@@ -2937,6 +2969,23 @@ pub(crate) mod tests {
         let p = Patch::from_plain(&d, 25).unwrap();
         assert_eq!((p.out[0], p.feed[0][0]), (0.0, 0.0));
         assert!(p.out[6] > 0.0 && p.fm[0][1] > 0.0);
+    }
+
+    /// One switch byte lets a standing level drain away, and an operator at no pitch starts where it is set.
+    #[test]
+    fn a_standing_level_can_drain_away() {
+        let mut d = plain_block();
+        assert!(!Patch::from_plain(&d, 25).unwrap().tail.level);
+        d[967] = 1;
+        let t = Patch::from_plain(&d, 25).unwrap().tail;
+        assert!(t.level && t.any() && !t.split);
+        let mut st = crate::tailfx::State::new(44100.0);
+        let mut buf = vec![[1.0f32; 2]; 44100];
+        st.process(&t, &mut buf, 5512.0, None);
+        // a step falls to 1/e in a 3.8 Hz stage's time, 42 ms
+        let at = buf.iter().position(|f| f[0] < (-1.0f32).exp()).unwrap() as f32 / 44100.0;
+        assert!((at - 0.0419).abs() < 0.002, "{at}");
+        assert!(buf[44099][0].abs() < 1e-6 && buf[0][0] > 0.99, "{} {}", buf[44099][0], buf[0][0]);
     }
 
     /// Nothing sent to the effects leaves them out; a send brings in the echo, chorus and room that are switched on.

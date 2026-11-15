@@ -273,6 +273,7 @@ pub fn tail(p: &[f32]) -> tailfx::Set {
         split: false,
         tone_at: 0,
         op: None,
+        level: false,
         tone: None,
         more: [None; 2],
         rack: None,

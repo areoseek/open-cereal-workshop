@@ -166,18 +166,23 @@ pub struct Set {
     pub tone_at: u8,
     /// The effects section of the operator synth, which stands in for everything above but the equaliser.
     pub op: Option<crate::opfx::Set>,
+    /// Anything standing still in the sound is let drain away (the operator synth's own switch).
+    pub level: bool,
 }
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.split || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.split || self.level || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
     pub fn tail(&self, sr: f32, step: f32) -> usize {
         let mut n = 0.0;
         if let Some(o) = &self.op {
-            return o.tail(sr, step);
+            return o.tail(sr, step) + if self.level { (sr * 0.5) as usize } else { 0 };
+        }
+        if self.level {
+            n = sr * 0.5;
         }
         for d in self.delay.iter().chain(self.more.iter().flatten()) {
             let time = if d.free > 0.0 { d.free * sr } else { d.left.max(d.right) * step };
@@ -199,6 +204,7 @@ impl Set {
 
 pub struct State {
     sr: f32,
+    still: [[f32; 2]; 2],
     line: Vec<[f32; 2]>,
     at: usize,
     sweep: f32,
@@ -235,7 +241,7 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None }
+        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
@@ -243,6 +249,23 @@ impl State {
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32, song: Option<f64>) {
         self.tone(set, buf);
         self.rest(set, buf, step, song);
+        self.level(set, buf);
+    }
+
+    /// Measured on a note with a standing part: with the switch on, the standing part fades the way it does
+    /// through a single-stage high-pass at 3.8 Hz, and comes back the other way round when the note ends.
+    fn level(&mut self, set: &Set, buf: &mut [[f32; 2]]) {
+        if !set.level {
+            return;
+        }
+        let a = (-2.0 * std::f32::consts::PI * 3.8 / self.sr).exp();
+        for f in buf.iter_mut() {
+            for side in 0..2 {
+                let y = a * (self.still[side][1] + (f[side] - self.still[side][0]));
+                self.still[side] = [f[side], if y.abs() > 1e-20 { y } else { 0.0 }];
+                f[side] = y;
+            }
+        }
     }
 
     /// For an instrument that sends only a share of its sound to the effects: `sent` goes through them and
@@ -265,6 +288,7 @@ impl State {
         if set.tone_at < 2 {
             self.tone(set, plain);
         }
+        self.level(set, plain);
     }
 
     fn tone(&mut self, set: &Set, buf: &mut [[f32; 2]]) {
