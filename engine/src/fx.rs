@@ -4012,6 +4012,7 @@ impl Unit {
                 let ka = coef(p[3] as f64 / 10.0);
                 let kr = coef((p[4] as f64).max(1.0));
                 let kd = coef(1.0);
+                let tcr = (p[5] as i32).clamp(0, 7) >= 4;
                 let ty = (p[5] as i32).clamp(0, 7) % 4;
                 let half = match ty {
                     1 => 6.0,
@@ -4079,7 +4080,14 @@ impl Unit {
                     let target = 10f64.powf(red / 20.0);
                     // z[5] holds one minus the smoothed gain so silence starts at unity
                     let mut g = 1.0 - z[5] as f64;
-                    g += (target - g) * if target < g { ka } else { kr };
+                    // the second four types: a slow follower trails the gain downwards at the release pace and
+                    // jumps up with it; the release runs up to ten times faster the further the gain is under it
+                    // (measured), so short peaks let go quickly and long passages slowly
+                    let mut slow = 1.0 - z[10] as f64;
+                    let boost = if tcr { 1.0 + 9.0 * (slow - g).max(0.0) } else { 1.0 };
+                    g += (target - g) * if target < g { ka } else { (kr * boost).min(1.0) };
+                    slow = if g > slow { g } else { slow + (g - slow) * kr };
+                    z[10] = (1.0 - slow) as f32;
                     z[5] = (1.0 - g) as f32;
                     let c = [x[0] * g * makeup, x[1] * g * makeup];
                     // limiter: the peak is held, the gain drops ahead of it and comes back slowly at first
@@ -4787,7 +4795,15 @@ impl Unit {
                         continue;
                     }
                     let kind = if b == 0 { 5 } else if b == 6 { 7 } else { 6 };
-                    let co = band_coeffs(kind, HZ[b], p[b] / 100.0, 0.5, sr);
+                    // measured: textbook sections; the bells span two octaves up to 1.5 kHz and one above,
+                    // both shelves have half the steepest slope
+                    let w = TAU * (HZ[b] / sr).clamp(0.0002, 0.49);
+                    let (sn, cs) = w.sin_cos();
+                    let amp = 10f32.powf(p[b] / 4000.0);
+                    let oct = if b < 4 { 2.0 } else { 1.0 };
+                    let q_bell = 1.0 / (2.0 * (std::f32::consts::LN_2 / 2.0 * oct * w / sn.max(1e-6)).sinh());
+                    let q_shelf = 1.0 / (amp + 1.0 / amp + 2.0).sqrt();
+                    let co = band_raw(kind, sn, cs, amp, q_bell, 1.0, q_shelf);
                     let st = &mut z[b * 4..b * 4 + 4];
                     for f in io.iter_mut() {
                         f[0] = biquad(&co, &mut st[0..2], f[0]);
