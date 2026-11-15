@@ -1382,6 +1382,13 @@ impl ToneState {
         }
     }
 
+    /// Where in the song (seconds from its start) the note begins, for instruments whose voices drift with the clock.
+    pub fn set_start(&mut self, tone: &Tone, hz: f32, secs: f64) {
+        if let (Some(v), Some(p)) = (&mut self.fm, &tone.fm) {
+            v.started_at(p, hz, secs);
+        }
+    }
+
     /// Tell the voice about its note; the additive instrument needs this before the first frame.
     pub fn note(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, dphase: f32) {
         self.note_at(tone, sr, key, vel, [vel, 0.5, 0.5], dphase)

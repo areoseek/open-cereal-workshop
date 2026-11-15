@@ -449,7 +449,7 @@ impl Motion {
                         lfo_on: int(d, l - 16)? != 0,
                         env,
                         lfo,
-                        lfo_hz: 0.05 * (speed.clamp(0, 65536) as f32 / 65536.0 * 11.0).exp2(),
+                        lfo_hz: crate::fm::lfo_hz(speed),
                     };
                     while a.parts.len() <= part {
                         a.parts.push(MotionPart { base: if a.parts.is_empty() { 0.0 } else { 0.5 }, amount: 1.0, wave: 1.0, env: crate::fm::Curve::flat(0.5), env_on: false, lfo: crate::fm::Curve::flat(0.5), lfo_on: false, lfo_hz: 5.0 });
@@ -513,7 +513,7 @@ impl Motion {
                 }
                 let clock = |c: &crate::fm::Curve| if c.flags & 1 != 0 { 1.0 / beat_s.max(1e-3) } else { 1.0 };
                 let (ce, cl) = (clock(&p.env), clock(&p.lfo));
-                let l = if p.lfo_on { (std::f32::consts::TAU * p.lfo_hz * t).sin() * (p.lfo.env(t * cl, rel.map(|r| r * cl)) - 0.5) * 2.0 * p.wave } else { 0.0 };
+                let l = if p.lfo_on { crate::fm::lfo_wave(p.lfo_hz * t, [0.0; 3]) * (p.lfo.env(t * cl, rel.map(|r| r * cl)) - 0.5) * 2.0 * p.wave } else { 0.0 };
                 if i == 0 {
                     let e = if p.env_on { p.env.env(t * ce, rel.map(|r| r * ce)) } else { 1.0 };
                     m.gain *= (p.base + p.amount * e * (1.0 + l)).clamp(0.0, 1.0);

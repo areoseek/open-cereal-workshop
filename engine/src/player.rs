@@ -2907,7 +2907,10 @@ impl Player {
             // a wrapper whose plug-in is not on this machine stays silent
             ChannelKind::Plugin if ch.gen.is_none() && ch.ext.is_none() && ch.bay().is_none() && ch.plugin.eq_ignore_ascii_case(crate::song::WRAPPER) => {}
             ChannelKind::Plugin | ChannelKind::Other(_) => {
-                let note_gain = law::velocity_gain(n.vel);
+                // (measured) the operator synth has a switch that keeps the usual velocity law out of it
+                let own_vel = ch.gen.as_ref().and_then(|g| g.fm.as_ref()).is_some_and(|f| !f.vel_vol);
+                let vel_gain = |v: f32| if own_vel { 1.0 } else { law::velocity_gain(v) };
+                let note_gain = vel_gain(n.vel);
                 let gain = chan_vol * note_gain;
                 let (pl, pr) = law::pan((chan_pan + n.pan).clamp(-1.0, 1.0));
                 let hz = 440.0 * 2f32.powf((n.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + n.fine_cents) / 1200.0);
@@ -3022,7 +3025,7 @@ impl Player {
                 for ev in evs {
                 let shaped = ev != plain;
                 let (note_gain, gain, pl, pr, hz) = if shaped {
-                    let note_gain = law::velocity_gain(ev.vel) * ev.gain;
+                    let note_gain = vel_gain(ev.vel) * ev.gain;
                     let (pl, pr) = law::pan((chan_pan + ev.pan).clamp(-1.0, 1.0));
                     (note_gain, chan_vol * note_gain, pl, pr, 440.0 * 2f32.powf((ev.key as f32 - 69.0) / 12.0 + (ch.pitch_cents + ev.fine_cents) / 1200.0))
                 } else {
@@ -3075,6 +3078,9 @@ impl Player {
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.note_at(&tone, sr, key, note_gain.min(1.0), [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
                     v.tstate.set_bpm(self.ov.tempo.unwrap_or(song.tempo));
+                    if self.was_playing && self.tpf > 0.0 {
+                        v.tstate.set_start(&tone, hz, self.pos / self.tpf / self.sr as f64 + delay as f64 / self.sr as f64);
+                    }
                     // the three-oscillator instrument starts at full level on its first sample (measured)
                     let osc3 = g.kind == crate::synth::Kind::Osc3;
                     v.attack = if osc3 { 1.0 } else { ms(1.5) };

@@ -1,7 +1,8 @@
 //! Write a new project: one instrument channel with notes in pattern 1, laid on the playlist. Used to measure
 //! an instrument against the reference.
 //! mkgen <out.flp> <instrument identifier> [setting=value ...]   (setting counted from 0)
-//! MKGEN_NOTES="pos:len:key[:vel] ..." in ticks (default one two-beat C5); MKFX_TEMPO sets the tempo.
+//! MKGEN_PRESET=<preset file> takes the settings from a preset instead.
+//! MKGEN_NOTES="pos:len:key[:vel[:x[:y]]] ..." in ticks, x and y -100..100 (default one two-beat C5); MKFX_TEMPO sets the tempo.
 use cereal_engine::song::{Chan, Clip, ClipSrc, Note, Song};
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -9,15 +10,36 @@ fn main() {
     if let Some(t) = std::env::var("MKFX_TEMPO").ok().and_then(|v| v.parse().ok()) {
         song.tempo = t;
     }
-    let def = cereal_engine::synth::DEFS.iter().find(|d| d.ident == a[2]).expect("no such instrument");
-    let mut c = Chan::instrument(def.kind);
-    c.plugin = a[2].clone();
+    // MKGEN_PRESET names a preset file to take the instrument's settings from instead of a fresh instance
+    let mut c = match std::env::var("MKGEN_PRESET") {
+        Ok(p) => {
+            let bytes = std::fs::read(&p).expect("preset file");
+            match cereal_engine::preset::channel(&bytes, None, None) {
+                Ok(c) => c,
+                Err(_) => {
+                    // a plug-in preset: only the settings block
+                    let pr = cereal_engine::preset::parse(&bytes).expect("preset");
+                    let g = cereal_engine::synth::Gen::decode(&pr.ident, &pr.state).expect("settings");
+                    let mut c = Chan::instrument(g.kind);
+                    c.plugin = pr.ident.clone();
+                    c.gen = Some(g);
+                    c
+                }
+            }
+        }
+        Err(_) => {
+            let def = cereal_engine::synth::DEFS.iter().find(|d| d.ident == a[2]).expect("no such instrument");
+            let mut c = Chan::instrument(def.kind);
+            c.plugin = a[2].clone();
+            c
+        }
+    };
     if let Some(g) = &mut c.gen {
         for kv in &a[3..] {
             let (k, v) = kv.split_once('=').expect("setting=value");
             g.p[k.parse::<usize>().expect("index")] = v.parse().expect("value");
         }
-        println!("{:?}", g.p);
+        println!("{:?}", &g.p[..g.p.len().min(40)]);
     }
     song.channels.clear();
     song.channels.push(c);
@@ -27,7 +49,7 @@ fn main() {
         let p: Vec<f32> = w.split(':').filter_map(|x| x.parse().ok()).collect();
         if p.len() >= 3 {
             let vel = p.get(3).copied().unwrap_or(100.0) / 100.0;
-            song.patterns[0].notes.push(Note { pos: p[0] as u32, len: p[1] as u32, chan: 0, key: p[2] as u8, vel, ..Default::default() });
+            song.patterns[0].notes.push(Note { pos: p[0] as u32, len: p[1] as u32, chan: 0, key: p[2] as u8, vel, mod_x: p.get(4).copied().unwrap_or(0.0) / 100.0, mod_y: p.get(5).copied().unwrap_or(0.0) / 100.0, ..Default::default() });
             far = far.max(p[0] as u32 + p[1] as u32);
         }
     }
