@@ -10,7 +10,9 @@ pub const BANKS: usize = 8;
 pub const HEAD: usize = 4;
 /// Settings of one bank, in the order of `NAMES`.
 pub const PER: usize = 17;
-pub const LISTED: usize = HEAD + BANKS * PER;
+/// The two settings listed behind the banks: the unit's volume and how far the slow waves swing.
+pub const TAIL: usize = 2;
+pub const LISTED: usize = HEAD + BANKS * PER + TAIL;
 /// Drawn lines in one bank: the shaper, then for each of eight targets ten patterns, a slow oscillator and
 /// three mappings (pad X, pad Y, input follower).
 pub const LINES: usize = 113;
@@ -18,17 +20,24 @@ const TARGETS: usize = 8;
 const WS_N: usize = 257;
 const PAT_N: usize = 257;
 const MAP_N: usize = 65;
-/// Table space of one target: pattern length in beats (0 = unused), the slow wave's depth, speed and
-/// tempo switch, the pattern, three mappings.
-const ART: usize = 4 + PAT_N + 3 * MAP_N;
+/// Table space of one target: pattern length in beats (0 = unused), the slow wave's swing, turns per beat
+/// and tension, the pattern, three mappings, where the pattern's loop starts and ends in beats (-1: none),
+/// and where the loop's first stretch ends.
+pub const ART: usize = 4 + PAT_N + 3 * MAP_N + 3;
 const TABLES: usize = WS_N + TARGETS * ART;
+/// How hard a slow wave's tension bends its triangle.
+const WAVE_BEND: f32 = 4.88;
 /// Frames between two readings of the drawn lines.
-const CHUNK: usize = 32;
+const CHUNK: usize = 8;
+/// The half-band all-pass pair both doubling steps use.
+const HALF: [f32; 6] = [0.039_151_598, 0.147_377_114, 0.302_646_848, 0.482_468_543, 0.674_615_919, 0.883_005_026];
 
 /// Where the bank knobs sit in front of the bank's first line: 14 numbers, then three switch bytes.
 const KNOBS_BACK: usize = 59;
 /// Header offsets of the four settings in front.
 const HEAD_OFF: [usize; HEAD] = [24, 28, 12, 16];
+/// Header offsets of the two settings listed last.
+const TAIL_OFF: [usize; TAIL] = [0, 4];
 /// Switch bytes behind the 14 numbers, in our order: on, shaper on, shaper two-sided.
 const SWITCH_OFF: [usize; 3] = [57, 58, 56];
 
@@ -102,27 +111,60 @@ pub fn decode(state: &[u8]) -> Option<Vec<f32>> {
             p.push(d[at + o] as f32);
         }
     }
+    for o in TAIL_OFF {
+        p.push(int(o)? as f32);
+    }
     for b in 0..BANKS {
         let first = b * LINES;
         drawn_table_n(&d, l[first].0, WS_N, &mut p)?;
         for a in 0..TARGETS {
             let k = first + 1 + a * 14;
             let (head, n, span, _) = l[k];
-            p.push(if n > 1 && span > 1e-4 { span } else { 0.0 });
-            // the slow wave: its first point says how deep it goes (the top is none), scaled by the unit's
-            // slow-wave slider; behind the line sits its speed
+            // a pattern runs when its live switch is on; without the tempo switch its beats are half seconds
+            // (kept here as a negative length)
+            let timed = int(l[k].3 - 20)? & 1 != 0;
+            // (a live pattern of one point just holds that point's height)
+            p.push(if int(l[k].3 - 16)? == 0 {
+                0.0
+            } else if n > 1 && span > 1e-4 {
+                if timed { span } else { -span }
+            } else {
+                1e-3
+            });
+            // the slow wave: its first point says how far it swings and which way (the middle is none); behind
+            // the line sit its speed and how far its triangle is bent. It runs while its live switch is on.
             let (lh, ln, _, lend) = l[k + 10];
             let size = (lend - 20 - lh - 12) / ln;
             let y = if size == 24 { f64::from_le_bytes(d[lh + 20..lh + 28].try_into().ok()?) as f32 } else { f32::from_le_bytes(d[lh + 16..lh + 20].try_into().ok()?) };
-            let level = int(4)? as f32 / 128.0;
-            let flags = int(lend - 20)?;
-            p.push(if flags & 1 != 0 { (1.0 - y).clamp(0.0, 1.0) * level * level.abs() } else { 0.0 });
-            p.push(int(lend)? as f32);
-            p.push((flags >> 1 & 1) as f32);
+            let live = int(lend - 16)? != 0;
+            p.push(if live { (2.0 * y - 1.0).clamp(-1.0, 1.0) } else { 0.0 });
+            // turns per beat (a free wave counts half seconds as beats and is kept negative)
+            let turns = 16.0 * (1e4f32.powf(int(lend)?.clamp(0, 65535) as f32 / 65535.0) - 1.0) / 9999.0;
+            p.push(if int(lend - 20)? & 1 != 0 { turns } else { -turns });
+            p.push((int(lend + 4)? as f32 / 100.0).clamp(-1.0, 1.0));
             drawn_table_n(&d, head, PAT_N, &mut p)?;
             for m in 11..14 {
                 drawn_table_n(&d, l[k + m].0, MAP_N, &mut p)?;
             }
+            // the pattern's loop: point numbers behind the line, turned into beats
+            let (from, to) = (int(l[k].3 - 8)?, int(l[k].3 - 4)?);
+            let size = (l[k].3 - 20 - head - 12) / n;
+            let at = |i: i32| -> f32 {
+                (1..=(i.max(0) as usize).min(n - 1))
+                    .map(|j| {
+                        let o = head + 12 + j * size;
+                        if size == 24 {
+                            f64::from_le_bytes(d[o..o + 8].try_into().unwrap()) as f32
+                        } else {
+                            f32::from_le_bytes(d[o..o + 4].try_into().unwrap())
+                        }
+                    })
+                    .sum()
+            };
+            let looped = from >= 0 && to > from;
+            p.push(if looped { at(from) } else { -1.0 });
+            p.push(if looped { at(to) } else { -1.0 });
+            p.push(if looped { at(from + 1) } else { -1.0 });
         }
     }
     Some(p)
@@ -147,6 +189,9 @@ pub fn encode(p: &[f32], base: Option<&[u8]>) -> Vec<u8> {
     let mut put = |o: usize, v: f32| d[o..o + 4].copy_from_slice(&(v.round() as i32).to_le_bytes());
     for (k, o) in HEAD_OFF.into_iter().enumerate() {
         put(o, p[k]);
+    }
+    for (k, o) in TAIL_OFF.into_iter().enumerate() {
+        put(o, p[HEAD + BANKS * PER + k]);
     }
     for b in 0..BANKS {
         let at = l[b * LINES].0 - KNOBS_BACK;
@@ -195,11 +240,63 @@ pub fn line(state: &[u8], k: usize) -> Option<crate::fm::Curve> {
 pub fn set_line(state: &[u8], k: usize, c: &crate::fm::Curve) -> Option<Vec<u8>> {
     let mut d = inflate(state.get(4..)?)?;
     let head = lines(&d)?.get(k)?.0;
+    let int = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let (kind, layout) = (int(&d, head)?, int(&d, head + 4)?);
     if !crate::fm::Curve::replace_at(&mut d, head, c) {
         return None;
     }
+    // a slow wave's record carries one more number behind it once its line is in the current layout
+    if kind == 2 && layout < 3 && int(&d, head + 4)? == 3 {
+        let end = lines(&d)?.get(k)?.3;
+        if end + 16 > d.len() {
+            return None;
+        }
+        d.splice(end + 16..end + 16, [0u8; 4]);
+    }
     // the block still has to read as a whole
     lines(&d)?;
+    let mut out = state[..4].to_vec();
+    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
+    Some(out)
+}
+
+/// The four numbers stored behind line `k` (a pattern's or slow wave's own settings).
+pub fn after(state: &[u8], k: usize) -> Option<[i32; 4]> {
+    let d = inflate(state.get(4..)?)?;
+    let end = lines(&d)?.get(k)?.3;
+    let mut out = [0; 4];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = i32::from_le_bytes(d.get(end + i * 4..end + i * 4 + 4)?.try_into().ok()?);
+    }
+    Some(out)
+}
+
+/// The stored bytes of line `k` with the numbers behind it, for looking at the layout.
+pub fn raw_line(state: &[u8], k: usize) -> Option<Vec<u8>> {
+    let d = inflate(state.get(4..)?)?;
+    let (head, _, _, end) = *lines(&d)?.get(k)?;
+    d.get(head..end + 16).map(|b| b.to_vec())
+}
+
+/// The block with the four numbers behind line `k` replaced.
+pub fn set_after(state: &[u8], k: usize, v: [i32; 4]) -> Option<Vec<u8>> {
+    let mut d = inflate(state.get(4..)?)?;
+    let end = lines(&d)?.get(k)?.3;
+    for (i, x) in v.iter().enumerate() {
+        d.get_mut(end + i * 4..end + i * 4 + 4)?.copy_from_slice(&x.to_le_bytes());
+    }
+    let mut out = state[..4].to_vec();
+    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
+    Some(out)
+}
+
+/// The block with the whole number at header offset `o` replaced (for trying out the settings in front).
+pub fn set_head(state: &[u8], o: usize, v: i32) -> Option<Vec<u8>> {
+    let mut d = inflate(state.get(4..)?)?;
+    if o + 4 > 64 {
+        return None;
+    }
+    d.get_mut(o..o + 4)?.copy_from_slice(&v.to_le_bytes());
     let mut out = state[..4].to_vec();
     out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&d, 6));
     Some(out)
@@ -263,16 +360,29 @@ pub struct State {
     pos: [[f32; TARGETS]; BANKS],
     /// Where each target's slow wave is in its turn (0..1).
     wave: [[f32; TARGETS]; BANKS],
-    /// Filter memory: bank, stage, channel, two integrators.
-    svf: [[[[f32; 2]; 2]; 3]; BANKS],
+    /// How far off the drawn line each pattern was when it last went round.
+    off: [[f32; TARGETS]; BANKS],
+    /// Filter memory: bank, stage, channel.
+    mem: [[[[f64; 12]; 2]; 3]; BANKS],
     /// Output gains in use, left and right.
     gain: [[f32; 2]; BANKS],
+    /// Shaper share in use.
+    wmix: [f32; BANKS],
+    /// Shaper drive in use, where it is heading, and the steps left to get there.
+    drive: [(f32, f32, u32); BANKS],
+    /// The same for the shaper's mix knob and the cutoff knob.
+    mixk: [(f32, f32, u32); BANKS],
+    cutk: [(f32, f32, u32); BANKS],
     follow: f32,
+    late: f32,
+    /// The two doubling steps up and the two halving steps down, per channel.
+    up: [[[f32; 12]; 2]; 2],
+    down: [[[f32; 12]; 2]; 2],
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { pos: [[0.0; TARGETS]; BANKS], wave: [[0.0; TARGETS]; BANKS], svf: [[[[0.0; 2]; 2]; 3]; BANKS], gain: [[-1.0; 2]; BANKS], follow: 0.0 }
+        Self { pos: [[0.0; TARGETS]; BANKS], wave: [[0.0; TARGETS]; BANKS], off: [[0.0; TARGETS]; BANKS], mem: [[[[0.0; 12]; 2]; 3]; BANKS], gain: [[-1.0; 2]; BANKS], wmix: [0.0; BANKS], drive: [(1.0, 1.0, 0); BANKS], mixk: [(0.0, 0.0, 0); BANKS], cutk: [(CUT0, CUT0, 0); BANKS], follow: 0.0, late: 0.0, up: [[[0.0; 12]; 2]; 2], down: [[[0.0; 12]; 2]; 2] }
     }
 }
 
@@ -282,140 +392,454 @@ fn look(t: &[f32], x: f32) -> f32 {
     t[i] + (t[i + 1] - t[i]) * (f - i as f32)
 }
 
+/// The knob curve the unit uses everywhere: 0 at 0, 1 at 1, bent by `k`.
+fn cur(x: f32, k: f32) -> f32 {
+    ((1.0 + k).powf(x) - 1.0) / k
+}
+
+/// One of the two all-pass chains of a half-band pair (the same pair the morphing equaliser uses).
+fn chain(z: &mut [f32; 12], x: f32, odd: usize) -> f32 {
+    let mut v = x;
+    for j in (odd..6).step_by(2) {
+        let y = HALF[j] * (v - z[j * 2 + 1]) + z[j * 2];
+        z[j * 2] = v;
+        z[j * 2 + 1] = y;
+        v = y;
+    }
+    v
+}
+
+/// One filter stage as it runs at four times the rate.
+#[derive(Clone, Copy)]
+enum Stage {
+    /// State-variable loop with its three outputs mixed.
+    Mix { f: f64, d: f64, lo: f64, bd: f64, hi: f64 },
+    /// Two-integrator low-pass, or what it leaves over.
+    Pole { f: f64, d: f64, rest: bool },
+    Biquad { b: [f64; 3], a: [f64; 2] },
+    /// Four one-pole steps with feedback around them.
+    Ladder { g: f64, k: f64, gain: f64, post: f64 },
+}
+
+impl Stage {
+    #[inline]
+    fn run(&self, m: &mut [f64; 12], x: f64) -> f64 {
+        match *self {
+            Stage::Mix { f, d, lo, bd, hi } => {
+                m[0] += f * m[1];
+                let high = x - m[0] - d * m[1];
+                m[1] += f * high;
+                lo * m[0] + bd * m[1] + hi * high
+            }
+            Stage::Pole { f, d, rest } => {
+                m[1] += f * (x - m[0] - d * m[1]);
+                m[0] += f * m[1];
+                if rest {
+                    x - m[0]
+                } else {
+                    m[0]
+                }
+            }
+            Stage::Biquad { b, a } => {
+                let y = b[0] * x + m[0];
+                m[0] = b[1] * x - a[0] * y + m[1];
+                m[1] = b[2] * x - a[1] * y;
+                y
+            }
+            Stage::Ladder { g, k, gain, post } => {
+                // four one-pole stages in a loop that hears its own output one frame late. Each stage leans a
+                // little on its previous input, more so towards the top of the cutoff. `gain` is the drive over
+                // the knee: the stages bend at the input's own level, so nothing has to be scaled back after
+                let sat = |d: f64| if gain <= 0.0 { d } else { d / (1.0 + (d * gain).abs().powf(LADDER_BEND)).powf(1.0 / LADDER_BEND) };
+                let a = 0.145 + 0.117 * g * g;
+                let mut v = sat(x - k * m[3]);
+                for i in 0..4 {
+                    let vin = (v + a * m[4 + i]) / (1.0 + a);
+                    m[4 + i] = v;
+                    m[i] += g * (vin - sat(m[i]));
+                    v = if i == 3 { m[i] } else { sat(m[i]) };
+                }
+                post * m[3]
+            }
+        }
+    }
+}
+
+/// Peak width against the resonance knob, at eighth steps (measured).
+const PEAK_Q: [f32; 9] = [100.0, 27.08, 15.1, 5.61, 2.275, 0.909, 0.388, 0.179, 0.100];
+/// How long the shaper's drive takes to reach a new setting, in frames.
+const DRIVE_RAMP: u32 = 104;
+const CUT0: f32 = 1.0;
+
+/// Move a gliding knob one step on towards `to`.
+fn glide(k: &mut (f32, f32, u32), to: f32, steps: u32, by: u32) -> f32 {
+    if k.1 != to {
+        *k = (k.0, to, steps);
+    }
+    if k.2 > by {
+        k.0 += (k.1 - k.0) * by as f32 / k.2 as f32;
+        k.2 -= by;
+    } else {
+        k.0 = k.1;
+        k.2 = 0;
+    }
+    k.0
+}
+
+fn steps(t: &[f32; 9], r: f32) -> f32 {
+    let f = r.clamp(0.0, 1.0) * 8.0;
+    let i = (f as usize).min(7);
+    (t[i].ln() + (t[i + 1].ln() - t[i].ln()) * (f - i as f32)).exp()
+}
+
+/// How sharply the ladder's stages bend when driven (fitted).
+const LADDER_BEND: f64 = 2.152;
+/// The ladder's per-stage turn (natural log) at these cutoff knob positions (measured).
+const LADDER_CUT: [f64; 10] = [0.0, 32.0, 64.0, 96.0, 128.0, 160.0, 192.0, 224.0, 240.0, 256.0];
+const LADDER_TURN: [f64; 10] = [-5.543741, -4.669523, -3.919280, -3.225103, -2.567073, -1.943882, -1.367171, -0.851061, -0.614876, -0.378475];
+/// The ladder's loop strength with the resonance knob at its top, at the same positions (measured).
+const LADDER_LOOP: [f64; 10] = [3.7953, 3.8058, 3.8317, 3.8760, 3.9605, 4.1063, 4.3400, 4.6002, 4.6536, 4.3380];
+/// The ladder's make-up level (natural log) at these low knob positions (measured).
+const LADDER_LOW: [f64; 14] = [0.0, 32.0, 48.0, 64.0, 72.0, 80.0, 88.0, 96.0, 104.0, 112.0, 120.0, 136.0, 160.0, 192.0];
+const LADDER_MADE: [f64; 14] = [0.0, 0.0015, 0.00322, 0.0212, 0.08732, 0.22638, 0.44008, 0.71089, 1.01819, 1.34121, 1.67698, 2.35973, 3.39982, 4.77785];
+
+/// A smooth line through measured points (`xs` rising), never overshooting between them; straight on past
+/// either end.
+fn curve(xs: &[f64], ys: &[f64], x: f64) -> f64 {
+    let n = xs.len();
+    let rise = |i: usize| (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+    let lean = |i: usize| {
+        if i == 0 {
+            rise(0)
+        } else if i == n - 1 {
+            rise(n - 2)
+        } else {
+            let (a, b) = (rise(i - 1), rise(i));
+            if a * b <= 0.0 {
+                0.0
+            } else {
+                // weighted harmonic mean of the two sides
+                let (ha, hb) = (xs[i] - xs[i - 1], xs[i + 1] - xs[i]);
+                let (wa, wb) = (2.0 * hb + ha, hb + 2.0 * ha);
+                (wa + wb) / (wa / a + wb / b)
+            }
+        }
+    };
+    if x <= xs[0] {
+        return ys[0] + (x - xs[0]) * lean(0);
+    }
+    if x >= xs[n - 1] {
+        return ys[n - 1] + (x - xs[n - 1]) * lean(n - 1);
+    }
+    let i = (0..n - 1).rfind(|&i| xs[i] <= x).unwrap_or(0);
+    let h = xs[i + 1] - xs[i];
+    let t = (x - xs[i]) / h;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * ys[i] + (t3 - 2.0 * t2 + t) * h * lean(i) + (-2.0 * t3 + 3.0 * t2) * ys[i + 1] + (t3 - t2) * h * lean(i + 1)
+}
+
+/// The stages of one bank for a cutoff and resonance position (both 0..1 on the knob's own scale; the cutoff may
+/// be pushed past the top). `n` stages, `alt` for the spread-out slopes. `mix` is the low, band and high share
+/// of the first type; `lift` is how far the shelves and the peak raise or lower their band (the low knob sets it:
+/// flat in the middle, eight times at the top).
+fn plan(kind: i32, n: usize, alt: bool, cut: f32, res: f32, mix: [f32; 3], lift: f32) -> [Option<Stage>; 3] {
+    let mut out = [None; 3];
+    let res = res.clamp(0.0, 1.0);
+    let cut = cut.max(0.0);
+    let root = 1.0 / n.max(1) as f32;
+    for (s, slot) in out.iter_mut().enumerate().take(n) {
+        // the spread-out slopes move every further stage up towards the top (fitted roughly, three cutoffs each)
+        let x = if alt && s > 0 { cut + (1.0 - cut).max(0.0) * if n == 2 { 0.5 } else { 0.2 * s as f32 } } else { cut };
+        // cutoff as a share of the song's rate
+        let share = |lo: f32, top: f32, k: f32, cap: f32| (lo + (top - lo) * cur(x, k)).min(cap) as f64;
+        let turn = |share: f64| 2.0 * (std::f64::consts::PI * share / 4.0).sin();
+        *slot = Some(match kind {
+            0 => {
+                let last = s + 1 == n;
+                // measured oddity: with the knob at its very top the loop is damped more again
+                let d = if !last { 1.0 } else if res > 0.998 { 0.2 } else { 1.0 - 0.9 * res };
+                let (lo, bd, hi) = if last { (mix[0], mix[1], mix[2]) } else { (1.0, 0.0, 0.0) };
+                Stage::Mix { f: turn(share(0.001_587_3, 0.254_63, 50.0, 0.42)), d: d as f64, lo: lo as f64, bd: bd as f64, hi: hi as f64 }
+            }
+            1 | 2 => {
+                let q = 1.0 + 49.0 * cur(res, 1000.0);
+                Stage::Pole { f: turn(share(0.001_748_3, 0.25, 75.0, 0.401_75)), d: (1.0 / q).powf(root) as f64, rest: kind == 2 }
+            }
+            11 => {
+                let at = x as f64 * 256.0;
+                let g = curve(&LADDER_CUT, &LADDER_TURN, at).exp().min(0.95);
+                // the low knob drives the stages: none at the bottom (clean, level in = level out), doubling
+                // every sixteenth of the way up
+                let low = ((lift as f64).log2() / 3.0 + 1.0) * 64.0;
+                let drive = 7.683 * ((low / 16.0).exp2() - 1.0).max(0.0) / 255.0;
+                let gain = drive / 0.259;
+                // drive up to the knee strengthens the resonance
+                let r = res as f64 * (1.0 + 0.316_23 * gain.min(1.0));
+                // more stages each loop less, and less again towards the top of the knob (measured at three settings)
+                let each = match n {
+                    2 => 0.7977 - 0.1284 * r + 0.0389 * r * r,
+                    3 => 0.6611 - 0.1672 * r + 0.0512 * r * r,
+                    _ => 1.0,
+                };
+                let k = r * each * curve(&LADDER_CUT, &LADDER_LOOP, at).max(3.0);
+                // the level is made up after the stages: nothing while clean, as much as the drive far up
+                let top = LADDER_LOW[LADDER_LOW.len() - 1];
+                let made = if low > top { LADDER_MADE[LADDER_MADE.len() - 1] + (low - top) / 16.0 * std::f64::consts::LN_2 } else { curve(&LADDER_LOW, &LADDER_MADE, low) };
+                Stage::Ladder { g, k, gain, post: (1.0 + 0.5 * k) * made.exp() }
+            }
+            _ => {
+                let sh = if kind == 3 { share(0.003, 1.0, 1500.0, 1.0) } else { share(0.0001, 0.6, 1500.0, 1.0) };
+                let w = 2.0 * std::f64::consts::PI * sh / 4.0;
+                let (sn, cs) = w.sin_cos();
+                let q = (0.1 + 49.9 * cur(res, 2000.0)).powf(root) as f64;
+                // the band-pass widths add up over the stages, the notch's width is shared out over them
+                let bw = (0.01 + 11.99 * cur(res, 100.0)) as f64 * if kind == 5 { root as f64 } else { n as f64 };
+                let wide = sn * (std::f64::consts::LN_2 / 2.0 * bw * w / sn).sinh();
+                // the lift of the shelves and the peak is shared out over the stages
+                let big = (lift.max(1e-3) as f64).powf(root as f64);
+                let (b, a0, a) = match kind {
+                    3 => {
+                        let al = sn / (2.0 * q);
+                        ([(1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0], 1.0 + al, [-2.0 * cs, 1.0 - al])
+                    }
+                    6 => {
+                        let al = sn / (2.0 * q);
+                        ([(1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0], 1.0 + al, [-2.0 * cs, 1.0 - al])
+                    }
+                    7 => {
+                        let al = sn / (2.0 * q);
+                        ([1.0 - al, -2.0 * cs, 1.0 + al], 1.0 + al, [-2.0 * cs, 1.0 - al])
+                    }
+                    4 => ([wide, 0.0, -wide], 1.0 + wide, [-2.0 * cs, 1.0 - wide]),
+                    5 => ([1.0, -2.0 * cs, 1.0], 1.0 + wide, [-2.0 * cs, 1.0 - wide]),
+                    9 => {
+                        let al = sn / (2.0 * steps(&PEAK_Q, res) as f64);
+                        ([1.0 + al * big, -2.0 * cs, 1.0 - al * big], 1.0 + al / big, [-2.0 * cs, 1.0 - al / big])
+                    }
+                    _ => {
+                        // the resonance knob sets the shelf's slope, from the gentlest overshoot-free one down to a
+                        // tenth of it (measured, single and stacked stages)
+                        let slope = 1.35 * 3f64.powf(-(res as f64)) - 0.35;
+                        let al = sn / 2.0 * ((big + 1.0 / big) * (1.0 / slope - 1.0) + 2.0).sqrt();
+                        let r = 2.0 * big.sqrt() * al;
+                        // low shelf; the high shelf is its mirror
+                        let c = if kind == 8 { cs } else { -cs };
+                        let b = [big * ((big + 1.0) - (big - 1.0) * c + r), 2.0 * big * ((big - 1.0) - (big + 1.0) * c), big * ((big + 1.0) - (big - 1.0) * c - r)];
+                        let a = [(big + 1.0) + (big - 1.0) * c + r, -2.0 * ((big - 1.0) + (big + 1.0) * c), (big + 1.0) + (big - 1.0) * c - r];
+                        let flip = if kind == 8 { 1.0 } else { -1.0 };
+                        ([b[0], b[1] * flip, b[2]], a[0], [a[1] * flip, a[2]])
+                    }
+                };
+                Stage::Biquad { b: [b[0] / a0, b[1] / a0, b[2] / a0], a: [a[0] / a0, a[1] / a0] }
+            }
+        });
+    }
+    out
+}
+
 pub fn process(p: &[f32], st: &mut State, io: &mut [[f32; 2]], cx: &Ctx) {
     if p.len() < LISTED + BANKS * TABLES {
         return;
     }
     let sr = cx.sr;
-    let (pad_x, pad_y) = (p[0] / 1024.0, p[1] / 1024.0);
-    let rise = 1.0 - (-(CHUNK as f32) / ((0.010 * p[2] / 4096.0).max(0.0005) * sr)).exp();
-    let fall = 1.0 - (-(CHUNK as f32) / ((0.100 * p[3] / 8192.0).max(0.0005) * sr)).exp();
-    let smooth = 1.0 - (-1.0 / (0.002 * sr)).exp();
+    // the pad reads its maps a little short of their far end (measured: full travel lands at 0.96)
+    let (pad_x, pad_y) = (p[0] * 0.96 / 1024.0, p[1] * 0.96 / 1024.0);
+    // follower times: both knobs share one curve, a quarter of a second at the top
+    let rate = |v: f32| {
+        let t = 0.2192 * cur((v / 16384.0).clamp(0.0, 1.0), 80.0);
+        if t * sr < 0.05 {
+            1.0
+        } else {
+            1.0 - (-1.0 / (t * sr)).exp()
+        }
+    };
+    let (rise, fall) = (rate(p[2]), rate(p[3]));
+    let master = cur(p[HEAD + BANKS * PER].max(0.0) / 128.0, 10.0);
+    let swing = cur(p[HEAD + BANKS * PER + 1].max(0.0) / 128.0, 10.0);
+    #[derive(Clone, Copy)]
+    struct Bank {
+        on: bool,
+        stages: [Option<Stage>; 3],
+        input: f32,
+        send: f32,
+        shaper: bool,
+        pre: f32,
+        wmix: f32,
+        wknob: f32,
+        want: [f32; 2],
+    }
     for chunk in io.chunks_mut(CHUNK) {
         let n = chunk.len();
-        let top = chunk.iter().fold(0f32, |m, f| m.max(f[0].abs()).max(f[1].abs())).min(1.0);
-        st.follow += (top - st.follow) * if top > st.follow { rise } else { fall };
-        let mut dry = [[0f32; 2]; CHUNK];
-        dry[..n].copy_from_slice(chunk);
-        let mut sent = [[0f32; 2]; CHUNK];
-        let mut send_level = 0f32;
-        for f in chunk.iter_mut() {
-            *f = [0.0; 2];
+        // the level reaches the settings one step late (measured against the reference)
+        let follow = st.late;
+        st.late = st.follow;
+        for f in chunk.iter() {
+            let top = f[0].abs().max(f[1].abs());
+            st.follow += (top - st.follow) * if top > st.follow { rise } else { fall };
         }
+        let mut banks = [Bank { on: false, stages: [None; 3], input: 0.0, send: 0.0, shaper: false, pre: 1.0, wmix: 0.0, wknob: 0.0, want: [0.0; 2] }; BANKS];
         for b in 0..BANKS {
             let q = &p[HEAD + b * PER..HEAD + (b + 1) * PER];
             let tables = &p[LISTED + b * TABLES..LISTED + (b + 1) * TABLES];
             if q[14] < 0.5 {
-                send_level = 0.0;
                 continue;
             }
-            // the eight targets: pan, volume, cutoff, resonance, low, band, high, shaper mix
-            let mut drawn = [0f32; TARGETS];
+            // the eight targets: pan, volume, cutoff, resonance, low, band, high, shaper mix. Each gets an offset
+            // (pan, cutoff, resonance: lines rest at the middle) or a factor (the others: lines rest at the top).
             let mut steady = [0f32; TARGETS];
-            let mut swing = 0f32;
+            let mut led = [0f32; TARGETS];
             for a in 0..TARGETS {
                 let art = &tables[WS_N + a * ART..WS_N + (a + 1) * ART];
                 let len = art[0];
                 let maps = &art[4 + PAT_N..];
-                let (mx, my, mf) = (look(&maps[..MAP_N], pad_x), look(&maps[MAP_N..2 * MAP_N], pad_y), look(&maps[2 * MAP_N..], st.follow));
-                let pat = if len > 0.0 {
-                    let v = look(&art[4..4 + PAT_N], st.pos[b][a] / len);
-                    st.pos[b][a] = (st.pos[b][a] + n as f32 / (cx.step * 4.0).max(1.0)) % len;
+                let (mx, my, mf) = (look(&maps[..MAP_N], pad_x), look(&maps[MAP_N..2 * MAP_N], pad_y), look(&maps[2 * MAP_N..3 * MAP_N], follow));
+                let pat = if len != 0.0 {
+                    let (free, len) = (len < 0.0, len.abs());
+                    let (from, to, first) = (art[ART - 3], art[ART - 2], art[ART - 1]);
+                    let at = st.pos[b][a];
+                    let mut v = look(&art[4..4 + PAT_N], at / len);
+                    // going round does not jump back to the drawn height: the first stretch of the loop
+                    // starts from wherever the line had got to
+                    if st.off[b][a] != 0.0 && at < first && first > from {
+                        v += st.off[b][a] * (first - at) / (first - from);
+                    }
+                    let mut next = at + if free { n as f32 / (sr * 0.5) } else { n as f32 / (cx.step * 4.0).max(1.0) };
+                    if from >= 0.0 && to > from + 1e-4 {
+                        if next >= to {
+                            let end = look(&art[4..4 + PAT_N], to / len) + if at < first && first > to { st.off[b][a] * (first - to) / (first - from) } else { 0.0 };
+                            next = from + (next - to) % (to - from);
+                            st.off[b][a] = end - look(&art[4..4 + PAT_N], from / len);
+                            if st.off[b][a] == 0.0 {
+                                st.off[b][a] = 1e-9;
+                            }
+                        }
+                    } else {
+                        next = next.min(len);
+                    }
+                    st.pos[b][a] = next;
                     Some(v)
                 } else {
                     None
                 };
-                // the slow wave: free speeds run on an estimated scale (the one measured setting barely moved in half
-                // a second), tempo speeds double every 4850 units around one turn a bar
                 let wave = if art[1].abs() > 1e-4 {
-                    let per_frame = if art[3] >= 0.5 { 0.25 * ((art[2] - 31102.0) / 4850.0).exp2() / (cx.step * 4.0).max(1.0) } else { 0.002 * (art[2].clamp(0.0, 65536.0) / 65536.0 * 11.0).exp2() / sr };
+                    let per_frame = if art[2] >= 0.0 { art[2] / (cx.step * 4.0).max(1.0) } else { -art[2] / (sr * 0.5) };
                     let ph = &mut st.wave[b][a];
+                    let at = *ph;
                     *ph = (*ph + per_frame * n as f32).fract();
-                    Some((*ph * 2.0 * PI).sin())
+                    // a triangle from the middle upwards, each quarter bent by the tension
+                    let q = at * 4.0;
+                    let (u, sign) = if q < 1.0 { (q, 1.0) } else if q < 3.0 { ((2.0 - q).abs(), if q < 2.0 { 1.0 } else { -1.0 }) } else { (4.0 - q, -1.0) };
+                    let t = art[3];
+                    let v = if t >= 0.999 {
+                        if u > 0.0 { 1.0 } else { 0.0 }
+                    } else if t <= -0.999 {
+                        if u >= 1.0 { 1.0 } else { 0.0 }
+                    } else if t.abs() < 1e-3 {
+                        u
+                    } else {
+                        let k = WAVE_BEND * t / (1.0 - t.abs());
+                        (1.0 - (-k * u).exp()) / (1.0 - (-k).exp())
+                    };
+                    Some(art[1] * swing * sign * v)
                 } else {
                     None
                 };
-                if a == 2 {
-                    // the cutoff's pattern goes through the envelope knob; its slow wave does not
-                    drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5;
-                    swing = wave.map_or(0.0, |w| 0.5 * art[1] * w);
-                    steady[a] = 2.0 * (mx - 0.5 + my - 0.5);
-                } else if matches!(a, 0 | 3) {
-                    drawn[a] = pat.map_or(0.0, |v| v - 0.5) + mf - 0.5 + wave.map_or(0.0, |w| 0.5 * art[1] * w);
+                if matches!(a, 0 | 2 | 3) {
                     steady[a] = mx - 0.5 + my - 0.5;
+                    led[a] = mf - 0.5 + pat.map_or(0.0, |v| v - 0.5) + wave.map_or(0.0, |w| 0.5 * w);
                 } else {
-                    drawn[a] = pat.unwrap_or(1.0) * mf * wave.map_or(1.0, |w| 1.0 - art[1] * (0.5 - 0.5 * w));
-                    steady[a] = mx * my;
+                    steady[a] = mx * my * mf * pat.unwrap_or(1.0) * wave.map_or(1.0, |w| 1.0 + w);
                 }
             }
-            let depth = 0.65 * q[0] / 128.0;
-            let cut = q[1] / 256.0 + steady[2] + depth * drawn[2] + swing + 0.02;
-            let hz = (20.0 * 1000f32.powf(cut.clamp(0.0, 1.0))).min(sr * 0.45).min(8450.0);
             let kind = q[13].round() as i32;
-            let res = (q[2] / 256.0 + 0.56 * steady[3] + drawn[3]).clamp(0.0, 1.0);
-            let quality = 0.5 * 9.55f32.powf(res) * if kind == 11 { 2.0 } else { 1.0 };
-            let stages = [0usize, 1, 2, 3, 2, 3][(q[12].round() as usize).min(5)];
-            let g = (PI * hz / sr).tan();
-            let k = 1.0 / quality;
-            let a1 = 1.0 / (1.0 + g * (g + k));
-            let (a2, a3) = (g * a1, g * g * a1);
-            let (low, band, high) = (q[3] / 128.0 * drawn[4] * steady[4], q[4] / 128.0 * drawn[5] * steady[5], q[5] / 128.0 * drawn[6] * steady[6]);
-            let shaper = q[15] >= 0.5;
-            let pre = ((q[6] - 128.0) / 32.0).exp2();
-            let wmix = (q[7] / 128.0 * drawn[7] * steady[7]).clamp(0.0, 1.0);
-            let two_sided = q[16] >= 0.5;
-            let ws = &tables[..WS_N];
-            let pan = (q[8] / 64.0 + 2.0 * (steady[0] + drawn[0])).clamp(-1.0, 1.0);
-            let vol = (0.6 * q[9] / 128.0 * drawn[1] * steady[1]).max(0.0);
-            let want = [vol * (1.0 - pan).min(1.0), vol * (1.0 + pan).min(1.0)];
-            if st.gain[b][0] < 0.0 {
-                st.gain[b] = want;
+            let slope = (q[12].round() as usize).min(5);
+            let cut = glide(&mut st.cutk[b], q[1] / 256.0, DRIVE_RAMP, n as u32) + steady[2] + led[2] * q[0] / 128.0;
+            let res = q[2] / 256.0 + steady[3] + led[3];
+            let mix = [cur(q[3] / 128.0, 10.0) * steady[4], cur(q[4] / 128.0, 10.0) * steady[5], cur(q[5] / 128.0, 10.0) * steady[6]];
+            let pan = q[8] / 128.0 + 2.0 * (steady[0] + led[0]);
+            let vol = (cur(q[9] / 128.0, 10.0) * steady[1]).max(0.0) * master;
+            let turn = (1.0 + pan.clamp(-3.0, 3.0)) * PI / 4.0;
+            let send = q[11] / 128.0;
+            banks[b] = Bank {
+                on: true,
+                stages: plan(kind, [0, 1, 2, 3, 2, 3][slope], slope > 3, cut, res, mix, 8f32.powf(2.0 * q[3] / 128.0 * steady[4] - 1.0)),
+                input: cur(q[10] / 128.0, 10.0),
+                send: send.signum() * cur(send.abs(), 10.0),
+                shaper: q[15] >= 0.5,
+                pre: q[6] / 128.0,
+                wmix: steady[7],
+                wknob: q[7] / 128.0,
+                want: [vol * 2f32.sqrt() * turn.cos(), vol * 2f32.sqrt() * turn.sin()],
+            };
+            if st.gain[b][0] < -0.5 {
+                st.gain[b] = banks[b].want;
+                st.wmix[b] = banks[b].wmix;
             }
-            let input = q[10] / 128.0;
-            for i in 0..n {
-                let mut x = [dry[i][0] * input + sent[i][0] * send_level, dry[i][1] * input + sent[i][1] * send_level];
-                for (s, mem) in st.svf[b].iter_mut().enumerate().take(stages) {
-                    let _ = s;
+        }
+        let ramp = 1.0 / (4 * n) as f32;
+        let from = st.gain;
+        let from_mix = st.wmix;
+        let mut t = 0f32;
+        for f in chunk.iter_mut() {
+            // up to four times the rate
+            let mut sub = [[0f32; 4]; 2];
+            for c in 0..2 {
+                let two = [chain(&mut st.up[0][c], f[c], 0), chain(&mut st.up[0][c], f[c], 1)];
+                for (h, v) in two.into_iter().enumerate() {
+                    sub[c][h * 2] = chain(&mut st.up[1][c], v, 0);
+                    sub[c][h * 2 + 1] = chain(&mut st.up[1][c], v, 1);
+                }
+            }
+            let mut out = [[0f32; 4]; 2];
+            for k in 0..4 {
+                t += ramp;
+                let mut sent = [0f32; 2];
+                let mut level = 0f32;
+                for b in 0..BANKS {
+                    let bank = &banks[b];
+                    if !bank.on {
+                        level = 0.0;
+                        continue;
+                    }
+                    let wmix = from_mix[b] + (bank.wmix - from_mix[b]) * t;
+                    let pre = glide(&mut st.drive[b], bank.pre, DRIVE_RAMP * 4, 1);
+                    let wmix = (wmix * glide(&mut st.mixk[b], bank.wknob, DRIVE_RAMP * 4, 1)).clamp(0.0, 1.0);
                     for c in 0..2 {
-                        let z = &mut mem[c];
-                        let v3 = x[c] - z[1];
-                        let v1 = a1 * z[0] + a2 * v3;
-                        let v2 = z[1] + a2 * z[0] + a3 * v3;
-                        z[0] = 2.0 * v1 - z[0];
-                        z[1] = 2.0 * v2 - z[1];
-                        let (lo, bp, hi) = (v2, v1, x[c] - k * v1 - v2);
-                        x[c] = match kind {
-                            0 => low * lo + band * bp + high * hi,
-                            2 | 6 => hi,
-                            4 => k * bp,
-                            5 => lo + hi,
-                            7 => lo - k * bp + hi,
-                            8 => x[c] + lo,
-                            9 => x[c] + 3.0 * k * bp,
-                            10 => x[c] + hi,
-                            _ => lo,
-                        };
+                        let mut x = (sub[c][k] * bank.input + sent[c] * level) as f64;
+                        for (s, stage) in bank.stages.iter().enumerate() {
+                            if let Some(stage) = stage {
+                                x = stage.run(&mut st.mem[b][s][c], x);
+                            }
+                        }
+                        let mut x = x as f32;
+                        if bank.shaper {
+                            let d = (x * pre).clamp(-1.0, 1.0);
+                            let w = look(&p[LISTED + b * TABLES..LISTED + b * TABLES + WS_N], d.abs()) * d.signum();
+                            x += (w - x) * wmix;
+                        }
+                        sent[c] = x;
+                        out[c][k] += x * (from[b][c] + (bank.want[c] - from[b][c]) * t);
                     }
-                }
-                if shaper {
-                    for v in x.iter_mut() {
-                        let d = *v * pre;
-                        let w = if two_sided { look(ws, d * 0.5 + 0.5) * 2.0 - 1.0 } else { look(ws, d.abs()) * d.signum() };
-                        *v += (w - *v) * wmix;
-                    }
-                }
-                sent[i] = x;
-                for c in 0..2 {
-                    st.gain[b][c] += (want[c] - st.gain[b][c]) * smooth;
-                    chunk[i][c] += x[c] * st.gain[b][c];
+                    level = bank.send;
                 }
             }
-            send_level = q[11] / 128.0;
+            // and back down
+            for c in 0..2 {
+                let a = 0.5 * (chain(&mut st.down[1][c], out[c][1], 0) + chain(&mut st.down[1][c], out[c][0], 1));
+                let b = 0.5 * (chain(&mut st.down[1][c], out[c][3], 0) + chain(&mut st.down[1][c], out[c][2], 1));
+                f[c] = 0.5 * (chain(&mut st.down[0][c], b, 0) + chain(&mut st.down[0][c], a, 1));
+            }
+        }
+        for b in 0..BANKS {
+            if banks[b].on {
+                st.gain[b] = banks[b].want;
+                st.wmix[b] = banks[b].wmix;
+            }
             // keep the memory finite whatever the settings were
-            for mem in st.svf[b].iter_mut() {
+            for mem in st.mem[b].iter_mut() {
                 for z in mem.iter_mut() {
-                    if !(z[0].is_finite() && z[1].is_finite()) {
-                        *z = [0.0; 2];
+                    if !z.iter().all(|v| v.is_finite() && v.abs() < 1e6) {
+                        *z = [0.0; 12];
                     }
                 }
             }
@@ -492,6 +916,7 @@ mod tests {
         let k = 1 + 14 + 10;
         let mut c = line(&block, k).unwrap();
         c.pts[0].y = 0.0;
+        c.live = true;
         let wobbly = decode(&set_line(&block, k, &c).unwrap()).unwrap();
         let steady = decode(&block).unwrap();
         let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };

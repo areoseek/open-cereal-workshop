@@ -1188,6 +1188,8 @@ pub static DEFS: &[Def] = &[
             p("8 On", 548, 0, 1, 0),
             p("8 Shaper on", 552, 0, 1, 0),
             p("8 Shaper two-sided", 556, 0, 1, 0),
+            p("Volume", 560, 0, 160, 128),
+            p("Wave level", 564, 0, 160, 128),
         ],
     },
     Def {
@@ -2562,6 +2564,34 @@ impl Fx {
             return crate::fxbank::line(&block, k);
         }
         crate::fm::Curve::read_at(&block, *self.line_heads(&block).get(k)?)
+    }
+    /// The four numbers a filter bank keeps behind line `k` (pattern and slow-wave settings).
+    pub fn line_after(&self, k: usize) -> Option<[i32; 4]> {
+        (self.kind == Kind::Bank).then(|| crate::fxbank::after(&self.encode(None), k)).flatten()
+    }
+    pub fn set_bank_head(&mut self, o: usize, v: i32) -> bool {
+        if self.kind != Kind::Bank {
+            return false;
+        }
+        match crate::fxbank::set_head(&self.encode(None), o, v).and_then(|b| Self::decode(def(self.kind).ident, &b)) {
+            Some(new) => {
+                *self = new;
+                true
+            }
+            None => false,
+        }
+    }
+    pub fn set_line_after(&mut self, k: usize, v: [i32; 4]) -> bool {
+        if self.kind != Kind::Bank {
+            return false;
+        }
+        match crate::fxbank::set_after(&self.encode(None), k, v).and_then(|b| Self::decode(def(self.kind).ident, &b)) {
+            Some(new) => {
+                *self = new;
+                true
+            }
+            None => false,
+        }
     }
     /// Put an edited (or newly drawn) line in place of line `k`.
     pub fn set_line(&mut self, k: usize, c: &crate::fm::Curve) -> bool {

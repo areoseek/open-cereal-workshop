@@ -100,6 +100,15 @@ fn hint(kind: Kind, i: usize, name: &str, v: f32) -> String {
         (Kind::Shaper, "Right to left" | "Left" | "Right" | "Left to right") => pct(v / 12800.0),
         (Kind::Overdrive, "x100") | (Kind::Filter, "x2") => format!("{name}: {}", if v >= 0.5 { "on" } else { "off" }),
         (Kind::Overdrive, _) => pct(v / 10000.0),
+        (Kind::Bank, n) if n.ends_with(" Type") => format!(
+            "{name}: {}",
+            ["low/band/high blend", "low-pass, soft", "low-pass, held", "low-pass", "band-pass", "notch", "high-pass", "all-pass", "low shelf", "peak", "high shelf", "ladder low-pass"][(v as usize).min(11)]
+        ),
+        (Kind::Bank, n) if n.ends_with(" Slope") => format!("{name}: {}", ["off", "one stage", "two stages", "three stages", "two stages, spread", "three stages, spread"][(v as usize).min(5)]),
+        (Kind::Bank, n) if n.ends_with(" On") || n.ends_with(" Shaper on") || n.ends_with("two-sided") => format!("{name}: {}", if v >= 0.5 { "on" } else { "off" }),
+        (Kind::Bank, n) if n.ends_with(" Pan") => format!("{name}: {:+.0} %", v / 0.64),
+        (Kind::Bank, n) if n == "Volume" || n == "Wave level" || n.ends_with(" Volume") || n.ends_with(" Input") || n.ends_with(" To next") || n.ends_with(" Shaper mix") || n.ends_with(" Low") || n.ends_with(" Band") || n.ends_with(" High") => pct(v / 128.0),
+        (Kind::Bank, n) if n.ends_with(" Cutoff") || n.ends_with(" Resonance") || n.ends_with(" Envelope") || n.ends_with(" Shaper drive") => pct(v / 256.0),
         (Kind::Filter | Kind::FastLp, "Cutoff") => format!("Cutoff: {:.0} Hz", hz(v / 1024.0)),
         (Kind::Filter | Kind::FastLp, _) => pct(v / 1024.0),
         _ => {

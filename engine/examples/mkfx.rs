@@ -125,6 +125,41 @@ fn main() {
         if let Some(f) = &mut slot.fx {
             for kv in &a[5..] {
                 let (k, v) = kv.split_once('=').expect("setting=value");
+                // line:K=x:y,x:y,...[,flags:N]  redraws drawn line K (x = distance from the point before)
+                if let Some(k) = k.strip_prefix("line:") {
+                    let k: usize = k.parse().expect("line number");
+                    let mut c = f.line(k).expect("no such line");
+                    c.pts.clear();
+                    for pt in v.split(',') {
+                        let (x, y) = pt.split_once(':').expect("x:y");
+                        if x == "flags" {
+                            c.flags = y.parse().expect("flags");
+                        } else if x == "live" {
+                            c.live = y != "0";
+                        } else if x == "loop" {
+                            c.loop_start = y.parse().expect("loop");
+                        } else if x == "sus" {
+                            c.sustain = y.parse().expect("sus");
+                        } else if x == "decay" {
+                            c.decay = y.parse().expect("decay");
+                        } else {
+                            c.pts.push(cereal_engine::fm::Pt { x: x.parse().expect("x"), y: y.parse().expect("y"), ..Default::default() });
+                        }
+                    }
+                    assert!(f.set_line(k, &c), "line {k} not set");
+                    continue;
+                }
+                // after:K=a:b:c:d  the four numbers behind line K
+                if let Some(o) = k.strip_prefix("head:") {
+                    assert!(f.set_bank_head(o.parse().unwrap(), v.parse().unwrap()), "header number {o} not set");
+                    continue;
+                }
+                if let Some(k) = k.strip_prefix("after:") {
+                    let k: usize = k.parse().expect("line number");
+                    let n: Vec<i32> = v.split(':').map(|x| x.parse().expect("number")).collect();
+                    assert!(f.set_line_after(k, [n[0], n[1], n[2], n[3]]), "numbers behind line {k} not set");
+                    continue;
+                }
                 f.p[k.parse::<usize>().expect("index")] = v.parse().expect("value");
             }
             println!("{:?}", f.p);
