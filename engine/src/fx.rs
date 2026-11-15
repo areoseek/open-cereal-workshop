@@ -1537,6 +1537,11 @@ fn drawn_table(state: &[u8], head: usize, p: &mut Vec<f32>) -> Option<usize> {
 
 /// The same with a table of `count` entries.
 pub(crate) fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec<f32>) -> Option<usize> {
+    drawn_table_side(state, head, count, false, p)
+}
+
+/// The same, choosing which side of a jump an entry standing right on it takes: the far side when `after`.
+fn drawn_table_side(state: &[u8], head: usize, count: usize, after: bool, p: &mut Vec<f32>) -> Option<usize> {
     let int = |o: usize| state.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     if !(1..=3).contains(&int(head)?) {
         return None;
@@ -1572,7 +1577,7 @@ pub(crate) fn drawn_table_n(state: &[u8], head: usize, count: usize, p: &mut Vec
     let mut seg = 1;
     for i in 0..count {
         let at = i as f32 / (count - 1) as f32 * span;
-        while seg + 1 < n && at > pts[seg].0 {
+        while seg + 1 < n && (at > pts[seg].0 || (after && at >= pts[seg].0)) {
             seg += 1;
         }
         let v = if n == 1 {
@@ -2180,7 +2185,7 @@ impl Fx {
         }
         if d.kind == Kind::Warp {
             for head in warp_lines(state)? {
-                drawn_table_n(state, head, WARP_N, &mut p)?;
+                drawn_table_side(state, head, WARP_N, true, &mut p)?;
             }
         }
         let mut ir = None;
@@ -5341,8 +5346,9 @@ impl Unit {
                 // everything heard goes into a two-bar ring; the time line says how far back to read at each
                 // moment of the bar (top = now, bottom = two bars ago) and the volume line gates the result
                 let n = self.buf.len();
+                let k = sr / 44100.0;
                 let bar = (cx.step * 16.0).max(1.0);
-                let span = (cx.step * 32.0).min(n as f32 - 4.0);
+                let span = (cx.step * 32.0).min(n as f32 - 64.0);
                 let table = |slot: f32, second: bool| {
                     let k = (slot.round().clamp(0.0, WARP_SLOTS as f32 - 1.0)) as usize + if second { WARP_SLOTS } else { 0 };
                     let from = 7 + k * WARP_N;
@@ -5350,82 +5356,128 @@ impl Unit {
                 };
                 let (Some(time), Some(vol)) = (table(p[0], false), table(p[1], true)) else { return };
                 let (tmix, vmix) = ((p[2] / 256.0).clamp(0.0, 1.0), (p[3] / 256.0).clamp(0.0, 1.0));
-                let coef = |v: f32| {
-                    let ms = 500.0 * (v / 8192.0).clamp(0.0, 1.0).powi(2);
-                    1.0 - (-1.0 / ((ms / 1000.0 * sr).max(1.0))).exp()
+                // attack and release each run two smoothing stages in a row; a time of nothing follows at once
+                let coef = |v: f32, twice: f32| {
+                    let tau = twice * 6.7719 * ((5.0926 * (v / 8192.0).clamp(0.0, 1.0)).exp() - 1.0) * k;
+                    if tau < 1e-6 { 1.0 } else { 1.0 - (-1.0 / tau).exp() }
                 };
-                let (up, down) = (coef(p[4]), coef(p[5]));
-                // a jump in time is smoothed over a moment that straddles it, and what was sounding is held at its
-                // last value and let fall away under the new place; a slow low cut ends the chain
-                let turn = (0.00093 * sr).round().max(2.0);
-                let early = 17.0 / 44100.0 * sr;
-                let held = (-1.0 / (0.00544 * sr)).exp();
-                let low = 5.13e-4 * 44100.0 / sr;
+                let (up, down) = (coef(p[4], 1.0), coef(p[5], 2.0));
+                let tension = (p[6] / 256.0).clamp(0.0, 1.0);
+                let bend = |v: f32| {
+                    if tension < 1e-4 { v } else { (1.0 - 1000f32.powf(-v * tension)) / (1.0 - 1000f32.powf(-tension)) }
+                };
+                // a drawn jump stays a jump; a slope is followed smoothly
+                let line = |t: &[f32], ph: f32| {
+                    let x = ph * (WARP_N - 1) as f32;
+                    let i = (x as usize).min(WARP_N - 2);
+                    let w = x - i as f32;
+                    let (a, b) = (t[i], t[i + 1]);
+                    let d = (b - a).abs();
+                    let near = (a - t[i.saturating_sub(1)]).abs().max((t[(i + 2).min(WARP_N - 1)] - b).abs());
+                    if d > 1.0 / 64.0 || (d > 1e-4 && d > 4.0 * near) {
+                        // the jump sits at the far edge; up to it the line carries on as it came
+                        let came = if i > 0 { a - t[i - 1] } else { 0.0 };
+                        if came.abs() < d / 4.0 { (a + came * w).clamp(0.0, 1.0) } else { a }
+                    } else {
+                        a + (b - a) * w
+                    }
+                };
+                // the signal always runs a few frames late; unless the line lies flat along the top, a fraction more
+                let late = 15.0 * k;
+                let more = if time.iter().all(|v| *v >= 1.0) { 0.0 } else { 15.0 / 64.0 * k };
+                let fall = (-1.0 / (239.4 * k)).exp();
+                let calm = 0.9006f32.powf(1.0 / k);
                 let buf = &mut self.buf;
-                let read = |buf: &Vec<[f32; 2]>, pos: usize, back: f32| {
-                    let at = pos as f32 - back.clamp(0.0, span);
-                    let at = if at < 0.0 { at + n as f32 } else { at };
-                    let i = at as usize % n;
-                    let w = at - at.floor();
-                    let (a, b) = (buf[i], buf[(i + 1) % n]);
-                    [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w]
+                // a short reader, six neighbours either side; when the place being read moves faster than the
+                // music it listens more dully and more quietly, by an amount fitted to renders
+                let i0 = |x: f32| {
+                    let (mut sum, mut term, q) = (1f32, 1f32, x * x / 4.0);
+                    for m in 1..18 {
+                        term *= q / (m * m) as f32;
+                        sum += term;
+                    }
+                    sum
+                };
+                let top = i0(7.0);
+                let read = |buf: &Vec<[f32; 2]>, pos: usize, behind: f32, rho: f32| {
+                    let bi = behind.ceil();
+                    let f = bi - behind;
+                    let bi = bi as isize;
+                    let mut o = [0f32; 2];
+                    let mut sum = 0f32;
+                    for t in -5isize..=6 {
+                        let x = t as f32 - f;
+                        let a = PI * rho * x;
+                        let g = if a.abs() < 1e-5 { 1.0 } else { a.sin() / a } * i0(7.0 * (1.0 - (x / 6.0).powi(2)).max(0.0).sqrt()) / top;
+                        sum += g;
+                        let far = bi - t;
+                        if far < 0 || far as usize >= n {
+                            continue;
+                        }
+                        let s = buf[(pos + n - far as usize) % n];
+                        o[0] += s[0] * g;
+                        o[1] += s[1] * g;
+                    }
+                    if rho >= 1.0 {
+                        return o;
+                    }
+                    let mut level = 0f32;
+                    for t in -15isize..=16 {
+                        let x = t as f32 - f;
+                        let (a, c) = (PI * rho * x, PI * x / 16.0);
+                        level += rho * if a.abs() < 1e-5 { 1.0 } else { a.sin() / a } * (0.42 + 0.5 * c.cos() + 0.08 * (2.0 * c).cos());
+                    }
+                    let g = level / sum.max(1e-6);
+                    [o[0] * g, o[1] * g]
                 };
                 for f in io.iter_mut() {
-                    if z[11] == 0.0 {
-                        // nothing has been heard yet: the ring starts out resting at the first value
-                        z[11] = 1.0;
-                        buf.fill(*f);
-                    }
                     buf[self.pos] = *f;
                     // the place in the bar is counted in whole frames so it cannot creep
                     self.ph = z[7] / bar;
-                    let x = (self.ph + early / bar).fract() * (WARP_N - 1) as f32;
-                    let i = (x as usize).min(WARP_N - 2);
-                    let w = x - i as f32;
-                    // a drawn jump stays a jump; a slope is followed smoothly
-                    let (a, b) = (time[i], time[i + 1]);
-                    let d = (b - a).abs();
-                    let near = (a - time[i.saturating_sub(1)]).abs().max((time[(i + 2).min(WARP_N - 1)] - b).abs());
-                    let y = if d > 1.0 / 64.0 || (d > 1e-4 && d > 4.0 * near) { a } else { a + (b - a) * w };
-                    let back = (1.0 - y) * span;
-                    // z[1] is the distance in use, z[2] the one being left, z[3] the frames of the turn still to
-                    // go, z[4..6] the held value and z[6] how much of it is left
-                    if (back - z[1]).abs() > 48.0 {
-                        z[2] = z[1];
-                        z[3] = turn;
+                    let ph = ((z[7] + 1.0) / bar).fract();
+                    let back = ((1.0 - line(time, ph)) * span).clamp(0.0, span);
+                    let want = bend(line(vol, ph).clamp(0.0, 1.0));
+                    if z[11] == 0.0 {
+                        z[11] = 1.0;
+                        z[0] = want;
+                        z[1] = want;
+                        z[2] = back;
                         z[6] = 1.0;
                     }
-                    z[1] = back;
-                    let fresh = if back < 0.5 { *f } else { read(buf, self.pos, back) };
-                    let mut wet = fresh;
-                    if z[3] > 0.0 {
-                        let old = if z[2] < 0.5 { *f } else { read(buf, self.pos, z[2]) };
-                        let u = 1.0 - z[3] / turn;
-                        if u < 0.12 {
-                            z[4] = old[0];
-                            z[5] = old[1];
-                        } else {
-                            z[6] *= held;
-                        }
-                        let s = (0.5 - 0.5 * (u * PI).cos()).powf(1.6);
-                        wet = [old[0] + (fresh[0] + z[4] * z[6] - old[0]) * s, old[1] + (fresh[1] + z[5] * z[6] - old[1]) * s];
-                        z[3] -= 1.0;
-                    } else if z[6] > 0.0 {
-                        z[6] = if z[6] < 1e-5 { 0.0 } else { z[6] * held };
-                        wet = [fresh[0] + z[4] * z[6], fresh[1] + z[5] * z[6]];
+                    // z[2] is the distance last used, z[6] how fast the place read moves along a slope, z[3] the
+                    // rush left over from a jump, z[4..6] what is left of the sound a jump cut off
+                    let step = back - z[2];
+                    let jump = step.abs() > 48.0 * k;
+                    if jump {
+                        z[3] += 0.1235 * step.abs();
+                    } else {
+                        z[6] = (1.0 - step).abs();
                     }
-                    let x = self.ph * (WARP_N - 1) as f32;
-                    let i = (x as usize).min(WARP_N - 2);
-                    let w = x - i as f32;
-                    // z[0] holds how far the gate is closed, so a fresh unit starts open
-                    let want = 1.0 - (vol[i] + (vol[i + 1] - vol[i]) * w);
-                    z[0] += (want - z[0]) * if want < z[0] { up } else { down };
-                    let g = (1.0 - vmix * z[0]) * 1.00887;
-                    let o = [(f[0] + (wet[0] - f[0]) * tmix) * g, (f[1] + (wet[1] - f[1]) * tmix) * g];
-                    for c in 0..2 {
-                        z[9 + c] += (o[c] - z[9 + c]) * low;
-                        f[c] = o[c] - z[9 + c];
+                    z[2] = back;
+                    let rho = 1.0 / (z[6] + z[3]).max(1.0);
+                    let dry = buf[(self.pos + n - late.round() as usize) % n];
+                    let mut wet = if more == 0.0 && rho >= 1.0 && k == 1.0 {
+                        dry
+                    } else {
+                        read(buf, self.pos, back + late + more, rho)
+                    };
+                    if jump {
+                        z[4] += z[8] - wet[0];
+                        z[5] += z[9] - wet[1];
                     }
+                    wet[0] += z[4];
+                    wet[1] += z[5];
+                    z[8] = wet[0];
+                    z[9] = wet[1];
+                    z[3] = if z[3] < 1e-4 { 0.0 } else { z[3] * calm };
+                    for c in 4..6 {
+                        z[c] = if z[c].abs() < 1e-9 { 0.0 } else { z[c] * fall };
+                    }
+                    // z[0] and z[1] are the two stages of the gate
+                    z[0] += (want - z[0]) * if want > z[0] { up } else { down };
+                    z[1] += (z[0] - z[1]) * if z[0] > z[1] { up } else { down };
+                    let g = 1.0 - vmix * (1.0 - z[1]);
+                    *f = [(dry[0] + (wet[0] - dry[0]) * tmix) * g, (dry[1] + (wet[1] - dry[1]) * tmix) * g];
                     self.pos = (self.pos + 1) % n;
                     z[7] += 1.0;
                     if z[7] >= bar {
@@ -6800,14 +6852,12 @@ mod tests {
                 assert!(worst < 5e-3, "{} changes the signal by {worst}", d.title);
                 continue;
             }
-            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Stack | Kind::OldFlanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive) {
+            if matches!(d.kind, Kind::Eq | Kind::OldEq | Kind::Finisher | Kind::Split | Kind::Delay | Kind::Reverb | Kind::Loud | Kind::Flanger | Kind::Stack | Kind::OldFlanger | Kind::Chorus | Kind::Echo | Kind::Spread | Kind::Swarm | Kind::EchoBank | Kind::MultiComp | Kind::Maxi | Kind::BucketChorus | Kind::GrainShift | Kind::OldReverb | Kind::Plush | Kind::Pad | Kind::Tuner | Kind::Peak | Kind::Bank | Kind::Rack | Kind::Voc | Kind::Multi | Kind::OldVoc | Kind::OldDelay | Kind::Squeeze | Kind::DcBlock | Kind::StonePhaser | Kind::Amp | Kind::Relooper | Kind::Deck | Kind::BassBoost | Kind::Phaser | Kind::FreqShift | Kind::FreeFilter | Kind::LowLift | Kind::MorphEq | Kind::FastDist | Kind::Overdrive | Kind::Warp) {
                 continue;
             }
             let out = run(Fx::new(d.kind), sine, 8192);
             let worst = out.iter().enumerate().skip(4096).map(|(i, f)| (f[0] - sine(i)[0]).abs()).fold(0.0, f32::max);
-            // the beat juggler lifts by a hair and has a slow low cut, as measured
-            let most = if d.kind == Kind::Warp { 2e-2 } else { 2e-3 };
-            assert!(worst < most, "{} changes the signal by {worst}", d.title);
+            assert!(worst < 2e-3, "{} changes the signal by {worst}", d.title);
         }
     }
 
@@ -7013,16 +7063,27 @@ mod tests {
         }
         fx.p[4] = 0.0;
         fx.p[5] = 0.0;
-        let cx = Ctx { sr: 48000.0, step: 6000.0, clock: Default::default() };
+        let cx = Ctx { sr: 44100.0, step: 6000.0, clock: Default::default() };
+        let src = |i: f32| 0.4 * (i * std::f32::consts::TAU / 400.0).sin();
+        // left alone it only runs fifteen frames late
+        let mut u = Unit::new(fresh, cx.sr);
+        let mut io: Vec<[f32; 2]> = (0..4096).map(|i| [src(i as f32); 2]).collect();
+        u.process(&mut io, &cx);
+        assert!(io[..15].iter().all(|f| f[0] == 0.0));
+        assert!((15..4096).all(|i| io[i][0] == src((i - 15) as f32)));
+        // with a line drawn it runs a fraction later still
+        let late = 15.0 + 15.0 / 64.0;
         let mut u = Unit::new(fx, cx.sr);
-        let src = |i: usize| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5;
-        let mut io: Vec<[f32; 2]> = (0..96000).map(|i| [src(i); 2]).collect();
+        let mut io: Vec<[f32; 2]> = (0..96000).map(|i| [src(i as f32); 2]).collect();
         for c in io.chunks_mut(512) {
             u.process(c, &cx);
         }
-        assert!((io[1000][0] - src(1000)).abs() < 2e-2);
-        assert!((io[60000][0] - src(60000 - 48000)).abs() < 2e-2, "beat 2.5 replays beat 0.5");
+        assert!((io[1000][0] - src(1000.0 - late)).abs() < 2e-3, "{}", io[1000][0] - src(1000.0 - late));
+        assert!((io[60000][0] - src(60000.0 - 48000.0 - late)).abs() < 2e-3, "beat 2.5 replays beat 0.5");
         assert!(io[80000][0].abs() < 1e-3, "the gate is shut in the last beat");
+        // a jump in time never clicks: the output moves no faster than the sound itself does
+        let most = io.windows(2).take(70000).map(|w| (w[1][0] - w[0][0]).abs()).fold(0.0, f32::max);
+        assert!(most < 0.02, "{most}");
     }
 
     #[test]
