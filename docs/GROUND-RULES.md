@@ -18,7 +18,7 @@ Every sound and preset shipped here is made by us (synthesized or recorded) or c
 
 Feature notes go in docs/features/ as plain descriptions of behaviour ("the step button toggles a note at that 16th"), never as copied text or screenshots of the original.
 
-## Compatibility target (Devin, 2026-11-10)
+## Compatibility target (2026-11-10)
 
 An experienced FL Studio user must be able to sit down and work from muscle memory.
 - Same behaviour and workflow for every feature, same keyboard and mouse bindings, same window roles and layout logic.
@@ -26,7 +26,7 @@ An experienced FL Studio user must be able to sit down and work from muscle memo
 - Our own drawing of the interface: same places and same behaviour, our own artwork, icons and colours.
 - Stock sounds are ours. A project that points at the original's stock samples plays them only from the user's own installed copy.
 
-## User-supplied content (Devin, 2026-11-10)
+## User-supplied content (2026-11-10)
 
 The first-run setup (app/src/setup.rs, app/src/unpack.rs) asks the user for the installer file they downloaded
 themselves and reads the content files out of it on their machine. An installed copy can be used in place instead.
