@@ -245,6 +245,30 @@ fn timbre(kind: u8, k: usize) -> f32 {
     }
 }
 
+/// Where the voices of a stack sit in pitch, lowest first, as shares of the detune amount, for the
+/// first and the third kind of stack (measured on rendered notes; the second kind is an even spread).
+/// The places are in voice order, which is not always pitch order at the top.
+const UNI_CLASSIC: [[f32; 9]; 8] = [
+    [-1.0690, 0.8770, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-0.9290, 0.0, 0.8770, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-1.1807, -0.3563, 0.3097, 0.8770, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-1.0310, -0.5345, 0.0, 0.5905, 0.8768, 0.0, 0.0, 0.0, 0.0],
+    [-1.1290, -0.6413, -0.2362, 0.1858, 0.6186, 0.8770, 0.0, 0.0, 0.0],
+    [-0.8870, -0.7127, -0.3437, 0.0, 0.3097, 0.7527, 0.8770, 0.0, 0.0],
+    [-1.1170, -0.7636, -0.4839, -0.1687, 0.1473, 0.3981, 0.6338, 0.8770, 0.0],
+    [-0.9770, -0.8018, -0.4435, -0.2952, 0.0, 0.2822, 0.4645, 0.8377, 0.8770],
+];
+const UNI_SMEARED: [[f32; 9]; 8] = [
+    [-1.0764, 0.8905, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-0.9116, 0.0, 0.8905, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-1.1025, -0.3588, 0.3036, 0.8905, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [-1.0341, -0.5383, 0.0, 0.5513, 0.8904, 0.0, 0.0, 0.0, 0.0],
+    [-1.1669, -0.6459, -0.2205, 0.1823, 0.6205, 0.8905, 0.0, 0.0, 0.0],
+    [-0.8540, -0.7175, -0.3447, 0.0, 0.3039, 0.7779, 0.8905, 0.0, 0.0],
+    [-1.2063, -0.7689, -0.5001, -0.1575, 0.1477, 0.3907, 0.6100, 0.8906, 0.0],
+    [-1.0000, -0.8073, -0.4270, -0.2756, 0.0, 0.2917, 0.4558, 0.9047, 0.8905],
+];
+
 /// A patch, ready for voices: the settings in table order plus an analysed wave if the block carries one.
 #[derive(Debug, Clone, Default)]
 pub struct Patch {
@@ -352,6 +376,7 @@ pub struct Voice {
     vel: f32,
     /// The note's velocity as written, 0..1 (a default note is 0.78).
     pub touch: f32,
+    free: f32,
     /// seconds of the song gone by at the note's start
     pub at: f64,
     /// beats a second
@@ -421,6 +446,7 @@ impl Voice {
             key: key as f32,
             vel,
             touch: 0.78 * vel.max(0.0).sqrt(),
+            free: 0.0,
             seed,
             m,
             tab: [vec![0.0; m + 1], vec![0.0; m + 1]],
@@ -467,22 +493,60 @@ impl Voice {
             v.hphase = (0..m / 4).map(|_| rnd(&mut seed) * amt).collect();
         }
         let free = if phase > 0.0 { rnd(&mut seed) * phase / 1000.0 } else { 0.0 };
-        let pan = patch.v(ix::UNI_PAN) / 128.0;
-        let det = patch.v(ix::UNI_PITCH) / 128.0 * 22.0;
-        let uph = patch.v(ix::UNI_PHASE) / 128.0;
-        let g = 1.0 / (order as f32).sqrt();
-        for u in 0..order {
-            let s = if order > 1 { u as f32 / (order - 1) as f32 * 2.0 - 1.0 } else { 0.0 };
-            v.ratio[u] = 2f32.powf(s * det / 1200.0);
-            // neighbours go to opposite sides so the detuned pairs spread across the field
-            let side = if u % 2 == 0 { s.abs() } else { -s.abs() } * pan;
-            v.gl[u] = g * (1.0 - side.max(0.0));
-            v.gr[u] = g * (1.0 + side.min(0.0));
-            // measured: a note starts half a cycle in, at the middle of the saw's ramp (the table holds two cycles)
-            v.ph[u] = (0.25 + free + if u > 0 { rnd(&mut seed) * uph } else { 0.0 }).fract() as f64;
-        }
+        v.free = free;
+        v.stack(patch);
         v.seed = seed;
         v
+    }
+
+    /// Lay the voices of the stack out: pitch, side and starting point of each.
+    fn stack(&mut self, patch: &Patch) {
+        let order = self.order;
+        // Measured on rendered notes: voice `u` sits at an even step across the field from left to right,
+        // the pairs take the outer pitches inward with the left one high, then low, in turn; each voice
+        // starts a share of a cycle ahead of the one before.
+        let pan = patch.v(ix::UNI_PAN) / 128.0;
+        let mut det = 1.875 * (41f32.powf(patch.v(ix::UNI_PITCH) / 256.0) - 1.0);
+        if patch.v(ix::VEL_UNI) != 0.0 {
+            det *= self.touch;
+        }
+        let uph = patch.v(ix::UNI_PHASE) / 128.0;
+        let kind = patch.v(ix::UNI_TYPE) as usize;
+        let g = if order > 1 { std::f32::consts::SQRT_2 / (0.370 + 0.6036 * order as f32) } else { 1.0 };
+        for u in 0..order {
+            let (mut s, mut x) = (0.0, 0.0);
+            if order > 1 {
+                x = u as f32 / (order - 1) as f32 * 2.0 - 1.0;
+                let j = u.min(order - 1 - u);
+                let high = (u == j) == (j % 2 == 0);
+                let pos = if high { order - 1 - j } else { j };
+                s = match kind {
+                    0 => UNI_CLASSIC[order - 2][pos],
+                    1 => pos as f32 / (order - 1) as f32 * 2.0 - 1.0,
+                    _ => UNI_SMEARED[order - 2][pos],
+                };
+            }
+            let ratio = 2f64.powf((s * det) as f64 / 1200.0);
+            self.ratio[u] = ratio as f32;
+            let (sn, cs) = (std::f32::consts::FRAC_PI_4 * (1.0 + x * pan)).sin_cos();
+            self.gl[u] = if order > 1 { g * cs } else { 1.0 };
+            self.gr[u] = if order > 1 { g * sn } else { 1.0 };
+            // measured: a note starts half a cycle in, at the middle of the saw's ramp (the table holds two cycles)
+            // the third kind instead starts every voice as if it had already run a while (measured: the
+            // knob's eighth power, a hundred thousand cycles at the top), which smears the voices apart
+            let ahead = if order < 2 {
+                0.0
+            } else if kind >= 2 { 1e5 * (uph as f64).powi(8) * ratio } else { (uph * u as f32 / order as f32) as f64 };
+            self.ph[u] = (0.25 + self.free as f64 + 0.5 * ahead.fract()).fract();
+        }
+    }
+
+    /// The note's velocity over 128, once known; the stack's detune may follow it.
+    pub fn set_touch(&mut self, patch: &Patch, touch: f32) {
+        self.touch = touch;
+        if patch.v(ix::VEL_UNI) != 0.0 && self.order > 1 && self.frames == 0 {
+            self.stack(patch);
+        }
     }
 
     /// The slow oscillator, -1..1 (measured through its pull on the pitch).

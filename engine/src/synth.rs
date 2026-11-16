@@ -1458,7 +1458,7 @@ impl ToneState {
     pub fn note_at(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, axis: [f32; 3], dphase: f32) {
         if let Some(p) = &tone.add {
             let mut v = crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed);
-            v.touch = axis[0];
+            v.set_touch(p, axis[0]);
             v.at = self.at as f64;
             self.add = Some(Box::new(v));
         }
