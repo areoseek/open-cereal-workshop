@@ -31,6 +31,27 @@ pub fn tempo() -> f32 {
     if t > 1.0 { t } else { 120.0 }
 }
 
+static NOTE_FRAC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The player notes how far past its first frame a note's exact place lies (under a frame either way) just
+/// before it starts the note, for voices that keep time with the song's ticks.
+pub fn set_note_frac(frames: f32) {
+    NOTE_FRAC.store(frames.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+pub fn note_frac() -> f32 {
+    f32::from_bits(NOTE_FRAC.load(std::sync::atomic::Ordering::Relaxed))
+}
+static TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The player notes the length of a song tick in frames here, for voices that end on the tick.
+pub fn set_tick(frames: f32) {
+    TICK.store(frames.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tick() -> f32 {
+    let t = f32::from_bits(TICK.load(std::sync::atomic::Ordering::Relaxed));
+    if t >= 1.0 { t } else { 44100.0 * 60.0 / 120.0 / 96.0 }
+}
+
 /// Cycles per second of key 60.
 const C5: f32 = 261.6256;
 
@@ -53,6 +74,7 @@ pub enum Voice {
     Triple(Box<(crate::triple::Voice, crate::triple::Set)>),
     Hybrid(Box<(crate::hybrid::Voice, crate::hybrid::Set)>),
     KickD(Box<(crate::kickd::Voice, crate::kickd::Set)>),
+    Trio(Box<(crate::trio::Voice, crate::trio::Set)>),
     Skin(Box<(crate::membrane::Voice, crate::membrane::Set)>),
     Morph(Box<(crate::morph::Voice, crate::morph::Set)>),
     Quiet,
@@ -174,10 +196,9 @@ impl Voice {
                 Voice::String(Box::new(Ks { line: [a, b], pos: 0, frac: len - len.floor(), last: [0.0; 2], keep, fade: 1.0, fade_by: 1.0, wide, vel }))
             }
             Kind::Guitar => Voice::Guitar(Box::new(crate::guitar::Voice::start(s, sr, key, vel, dphase, seed))),
-            Kind::Buzz | Kind::BuzzXt | Kind::Pocket | Kind::Trio | Kind::SawSyn | Kind::Poly | Kind::Poly2 | Kind::Acid => {
+            Kind::Buzz | Kind::BuzzXt | Kind::Pocket | Kind::SawSyn | Kind::Poly | Kind::Poly2 | Kind::Acid => {
                 let set = match p.kind {
                     Kind::Pocket => crate::analog::pocket(s),
-                    Kind::Trio => crate::analog::trio(s),
                     Kind::SawSyn => crate::analog::saw(s),
                     Kind::Poly => crate::analog::poly(s),
                     Kind::Poly2 => crate::analog::poly2(s),
@@ -197,6 +218,10 @@ impl Voice {
             Kind::Skin => {
                 let set = crate::membrane::set(s);
                 Voice::Skin(Box::new((crate::membrane::Voice::start(&set, sr, vel, dphase * sr / C5, seed), set)))
+            }
+            Kind::Trio => {
+                let set = crate::trio::set(s);
+                Voice::Trio(Box::new((crate::trio::Voice::start(&set, sr, key, vel, seed), set)))
             }
             Kind::KickD => {
                 let set = crate::kickd::set(s);
@@ -379,6 +404,10 @@ impl Voice {
                 let (v, set) = &mut **v;
                 v.release(set)
             }
+            Voice::Trio(v) => {
+                let (v, set) = &mut **v;
+                v.release(set)
+            }
             Voice::Skin(v) => {
                 let (v, set) = &mut **v;
                 v.release(set)
@@ -449,6 +478,10 @@ impl Voice {
             Voice::KickD(v) => {
                 let (v, set) = &mut **v;
                 v.frame(set)
+            }
+            Voice::Trio(v) => {
+                let (v, set) = &mut **v;
+                v.frame(set, dphase)
             }
             Voice::Skin(v) => {
                 let (v, set) = &mut **v;

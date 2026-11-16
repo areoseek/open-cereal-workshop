@@ -64,7 +64,7 @@ pub enum Kind {
     Morph,
     KickD,
     Skin,
-    /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`analog::trio`).
+    /// The three-oscillator analogue: seventy stored values, 0 to 1, in file order, then the switch word (`trio::set`).
     Trio,
     /// The electric guitar (`guitar.rs`).
     Guitar,
@@ -605,6 +605,11 @@ fn trio_values(state: &[u8]) -> Vec<f32> {
     }
     let mut p: Vec<f32> = state[..560].chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap()) as f32).collect();
     p.push(u32::from_le_bytes([state[560], state[561], state[562], state[563]]) as f32);
+    // nineteen on/off words sit where numbers 54 to 63 would be
+    for k in 0..19 {
+        let o = 436 + k * 4;
+        p.push(u32::from_le_bytes([state[o], state[o + 1], state[o + 2], state[o + 3]]).min(1) as f32);
+    }
     p
 }
 
@@ -1099,8 +1104,19 @@ impl Gen {
             if out.len() >= 564 && self.p.len() >= 71 {
                 for (i, &v) in self.p[..70].iter().enumerate() {
                     let o = i * 8;
+                    if (54..64).contains(&i) {
+                        continue;
+                    }
                     if f64::from_le_bytes(out[o..o + 8].try_into().unwrap()) as f32 != v {
-                        out[o..o + 8].copy_from_slice(&(v as f64).to_le_bytes());
+                        // the stored numbers are long ones; a short one is written as its nearest decimal
+                        out[o..o + 8].copy_from_slice(&(((v as f64) * 1e6).round() / 1e6).to_le_bytes());
+                    }
+                }
+                for (k, &v) in self.p.iter().skip(71).take(19).enumerate() {
+                    let o = 436 + k * 4;
+                    let word = u32::from(v >= 0.5);
+                    if u32::from_le_bytes(out[o..o + 4].try_into().unwrap()).min(1) != word {
+                        out[o..o + 4].copy_from_slice(&word.to_le_bytes());
                     }
                 }
                 let word = self.p[70] as u32;
@@ -1169,6 +1185,7 @@ impl Gen {
             Kind::Additive => crate::additive::tail(&self.p),
             Kind::Fm => self.fm.as_ref().map(|f| f.tail).unwrap_or_default(),
             Kind::SawSyn => crate::analog::saw_tail(&self.p),
+            Kind::Trio => crate::tailfx::Set { wide: self.p.get(89).is_some_and(|v| *v >= 0.5), ..Default::default() },
             Kind::StrModel => crate::strmodel::tail(&self.p),
             Kind::Triple => crate::triple::tail(&self.p),
             Kind::Hybrid => crate::hybrid::tail(&self.p),
@@ -1724,8 +1741,10 @@ mod tests {
             v[39] = 0.5;
             let mut b: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
             b.extend_from_slice(&4u32.to_le_bytes());
+            // the switches as a fresh one has them
+            b[436..512].copy_from_slice(&Gen::new(Kind::Trio).raw[436..512]);
             let g = Gen::decode("SimSynth", &b).unwrap();
-            assert_eq!(g.p.len(), 71);
+            assert_eq!(g.p.len(), 90);
             assert_eq!(g.encode(None), b);
             let tone = g.tone();
             let patch = tone.mini.as_ref().unwrap();

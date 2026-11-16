@@ -629,89 +629,6 @@ pub fn buzz(p: &[f32]) -> Set {
     }
 }
 
-/// The small touch-screen synth's stored values as a voice set. The places of the values were worked out from
-/// how they move between presets: wave choice, modifier and noise at 4 to 6, the filter and its envelope at 7 to
-/// 14, fine tune at 19, the level envelope at 20 to 23. The rest (play mode, slow oscillator, effects) is not read.
-/// Settings of the three-oscillator analogue from its stored values (seventy numbers 0 to 1, then the switch
-/// word). Per oscillator, seven numbers: pulse width, coarse, fine, level, slow-wave bend, envelope bend, wave
-/// (tenths: sine, saw, pulse, triangle, noise). Then: 21 slow-wave delay, 22 its rate, 24 its wave, 26 cutoff,
-/// 27 emphasis, 28 envelope to cutoff, 29 slow wave to cutoff, 30 key follow, 32 high-pass share, 33 band-pass
-/// share, 35-38 level envelope, 39 volume, 41-44 filter envelope. The wave order and the envelopes were read off
-/// the preset names; 23, 31, 34 and 40 are not placed, and of the switches only the ensemble (guess: bit 2).
-pub fn trio(p: &[f32]) -> Set {
-    const PLAIN: [f32; 7] = [0.5, 0.5, 0.5, 0.6, 0.5, 0.5, 0.1];
-    let full = p.len() >= 71;
-    let v = |i: usize| -> f32 {
-        if full {
-            return p[i];
-        }
-        match i {
-            0..=20 => PLAIN[i % 7],
-            26 | 28 | 29 | 39 => 0.5,
-            37 => 1.0,
-            _ => 0.0,
-        }
-    };
-    let mut width = 0.0;
-    let mut osc = [Osc::default(); 3];
-    let mut bend = 0.0f32;
-    for (i, o) in osc.iter_mut().enumerate() {
-        let b = i * 7;
-        let shape = match (v(b + 6) * 10.0).round() as u8 {
-            1 => Shape::Saw,
-            2 => Shape::Pulse,
-            3 => Shape::Triangle,
-            4 => Shape::Noise,
-            _ => Shape::Sine,
-        };
-        if shape == Shape::Pulse && width == 0.0 {
-            width = (2.0 * v(b) - 1.0).abs().min(0.95);
-        }
-        *o = Osc { shape, semis: ((v(b + 1) - 0.5) * 48.0).round() + (v(b + 2) - 0.5) * 2.0, level: v(b + 3).min(2.5) };
-        let x = (v(b + 4) - 0.5) * 2.0;
-        if x.abs() > bend.abs() {
-            bend = x;
-        }
-    }
-    let time = |i: usize| 0.002 + v(i) * v(i) * 6.0;
-    let env = |i: usize| Adsr { a: time(i), d: time(i + 1), s: v(i + 2).min(1.0), r: time(i + 3) };
-    let hz = 0.1 * 2f32.powf(v(22) * 8.0);
-    let delay = v(21) * v(21) * 4.0;
-    let shape = match (v(24) * 10.0).round() as u8 {
-        0 => Shape::Sine,
-        1 => Shape::Triangle,
-        2 => Shape::Saw,
-        3 => Shape::Square,
-        _ => Shape::Noise,
-    };
-    let slow = |dest: Dest, amount: f32| Lfo { shape, dest: if amount > 0.004 { dest } else { Dest::None }, amount, hz, reset: false, delay };
-    let to_cut = (v(29) - 0.5).abs() * 2.0;
-    let filter = if v(33) > 0.5 {
-        Filter::Band
-    } else if v(32) > 0.75 {
-        Filter::High
-    } else if v(32) > 0.25 {
-        Filter::LowNotch
-    } else {
-        Filter::Low12
-    };
-    Set {
-        osc,
-        width,
-        amp: env(35),
-        fenv: env(41),
-        filter,
-        cutoff_hz: 25.0 * 2f32.powf(v(26) * 9.7),
-        res: v(27).min(1.0) * 0.95,
-        env_oct: (v(28) - 0.5) * 2.0 * 9.0,
-        track: v(30).min(1.0),
-        lfo: [slow(Dest::Pitch, bend.abs()), slow(Dest::Cutoff, to_cut), Lfo::default()],
-        chorus: if full && (p[70] as u32) & 4 != 0 { 1 } else { 0 },
-        gain: 0.1 + v(39).min(1.0) * 0.5,
-        ..Default::default()
-    }
-}
-
 /// Settings of the saw synth from its stored values (0 to 1 each, in file order). Placed with fair confidence
 /// from how the presets use them and what they are called: 0 level, 2-5 level envelope, 6 transpose (four
 /// octaves), 7 fine, 14 unison voices, 15 unison detune, 17 main level, 18 sub phase, 19 sub level, 21 sub
@@ -802,6 +719,9 @@ pub fn saw_tail(p: &[f32]) -> crate::tailfx::Set {
     }
 }
 
+/// The small touch-screen synth's stored values as a voice set. The places of the values were worked out from
+/// how they move between presets: wave choice, modifier and noise at 4 to 6, the filter and its envelope at 7 to
+/// 14, fine tune at 19, the level envelope at 20 to 23. The rest (play mode, slow oscillator, effects) is not read.
 pub fn pocket(p: &[f32]) -> Set {
     const PLAIN: [f32; 24] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.68, 0.0, 0.0, 0.37, 0.5, 0.0, 1.0, 1.0, 0.0];
     let v = |i: usize| if p.len() >= 24 { p[i] } else { PLAIN[i] };
@@ -880,11 +800,12 @@ const SAW_GROUPS: [&str; 10] = ["Oscillator", "Sub", "Filter", "Filter envelope"
 pub fn plain(kind: crate::synth::Kind) -> Vec<f32> {
     use crate::synth::Kind;
     match kind {
-        Kind::Trio => (0..71)
+        Kind::Trio => (0..90)
             .map(|i| match i {
                 0..=20 => [0.5, 0.5, 0.5, 0.6, 0.5, 0.5, 0.1][i % 7],
                 26 | 28 | 29 | 39 => 0.5,
                 37 => 1.0,
+                71 | 84 | 85 | 87 => 1.0,
                 _ => 0.0,
             })
             .collect(),
@@ -926,12 +847,21 @@ pub fn page(kind: crate::synth::Kind) -> (&'static [&'static str], Vec<crate::du
         Kind::Trio => {
             for o in 0..3 {
                 let (b, g) = (o * 7, o as u8);
-                placed.push((b + 6, e("Wave", Ctl::Tenths(&["Sine", "Saw", "Pulse", "Triangle", "Noise"]), g)));
+                placed.push((b + 6, e("Wave", Ctl::Tenths(&["Triangle", "Saw", "Pulse", "Sine", "Noise"]), g)));
+                for (j, name) in ["On", "Octave up", "Two octaves up", "Warm"].into_iter().enumerate() {
+                    placed.push((71 + o * 4 + j, e(name, Ctl::Switch, g)));
+                }
                 for (j, name) in ["Width", "Coarse", "Fine", "Level", "Slow bend", "Envelope bend"].into_iter().enumerate() {
                     placed.push((b + j, k(name, g)));
                 }
             }
-            placed.push((24, e("Wave", Ctl::Tenths(&["Sine", "Triangle", "Saw", "Square", "Noise"]), 3)));
+            placed.push((24, e("Wave", Ctl::Tenths(&["Triangle", "Ramp", "Square", "Triangle", "Random"]), 3)));
+            placed.push((83, e("On", Ctl::Switch, 3)));
+            placed.push((84, e("Restart each note", Ctl::Switch, 3)));
+            placed.push((85, e("On", Ctl::Switch, 4)));
+            placed.push((87, e("Follow the level envelope", Ctl::Switch, 5)));
+            placed.push((88, e("Ring 1 x 2", Ctl::Switch, 6)));
+            placed.push((89, e("Wide", Ctl::Switch, 6)));
             placed.push((22, k("Rate", 3)));
             placed.push((21, k("Delay", 3)));
             for (i, name) in [(26, "Cutoff"), (27, "Emphasis"), (28, "Envelope"), (29, "Slow osc"), (30, "Key follow"), (32, "High pass"), (33, "Band pass")] {
@@ -940,7 +870,7 @@ pub fn page(kind: crate::synth::Kind) -> (&'static [&'static str], Vec<crate::du
             adsr(&mut placed, 41, 5);
             adsr(&mut placed, 35, 6);
             placed.push((39, k("Volume", 6)));
-            (&TRIO_GROUPS, fill(71, &placed, &defs))
+            (&TRIO_GROUPS, fill(90, &placed, &defs))
         }
         Kind::Pocket => {
             const MODES: &[&str] = &["Saw and pulse", "Two saws", "Pulse width", "Pulse and saw", "Two pulses", "Saw stack", "Saw and bells", "Doubled saw", "Octaves", "Fifths"];
@@ -998,6 +928,9 @@ pub fn fresh(kind: crate::synth::Kind) -> Vec<u8> {
                 v.extend_from_slice(&(*x as f64).to_le_bytes());
             }
             v.extend_from_slice(&0u32.to_le_bytes());
+            for (k, x) in p[71..90].iter().enumerate() {
+                v[436 + k * 4..440 + k * 4].copy_from_slice(&u32::from(*x >= 0.5).to_le_bytes());
+            }
         }
         Kind::Pocket => {
             let name: Vec<u16> = "New sound".encode_utf16().collect();

@@ -275,6 +275,7 @@ pub fn tail(p: &[f32]) -> tailfx::Set {
         op: None,
         zone: None,
         level: false,
+        wide: false,
         tone: None,
         more: [None; 2],
         rack: None,

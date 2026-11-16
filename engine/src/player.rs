@@ -2811,7 +2811,7 @@ impl Player {
                     let tone = crate::synth::Tone { add: Some(patch.clone()), ..Default::default() };
                     let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: to, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
-                    v.tstate.note(&tone, sr, key, note_gain.min(1.0), hz / sr);
+                    v.tstate.note(&tone, sr, key, if tone.mini.as_ref().is_some_and(|m| m.kind == crate::synth::Kind::Trio) { note_gain } else { note_gain.min(1.0) }, hz / sr);
                     v.tone = Some(tone);
                     self.start(v);
                 }
@@ -3289,7 +3289,7 @@ impl Player {
                         g.tone()
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
-                    v.tstate.note_at(&tone, sr, key, if touch { ev.vel * ev.gain } else { note_gain.min(1.0) }, [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
+                    v.tstate.note_at(&tone, sr, key, if touch { ev.vel * ev.gain } else if g.kind == crate::synth::Kind::Trio { note_gain } else { note_gain.min(1.0) }, [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
                     v.tstate.set_bpm(self.ov.tempo.unwrap_or(song.tempo));
                     if self.was_playing && self.tpf > 0.0 {
                         let at = self.pos / self.tpf / self.sr as f64 + delay as f64 / self.sr as f64;
@@ -3338,6 +3338,11 @@ impl Player {
                     if matches!(g.kind, crate::synth::Kind::Travel | crate::synth::Kind::Fm2 | crate::synth::Kind::Pocket | crate::synth::Kind::Kick) {
                         // these fade in by their own knob; the sweep drum starts at full level (measured)
                         v.attack = 1.0;
+                    }
+                    if g.kind == crate::synth::Kind::Trio {
+                        // rises and falls by its own envelope, and stops dead a tick after that has run out
+                        v.attack = 1.0;
+                        v.release = 1.0;
                     }
                     if g.kind == crate::synth::Kind::Kick {
                         // (measured: let go, it fades over 10 ms along half a cosine)
@@ -3709,7 +3714,9 @@ impl Player {
                 };
                 Some((end.saturating_sub(n.pos) as f64 / tpf) as u64)
             };
+            crate::minis::set_note_frac((((at + shift) - t0) / tpf - delay as f64) as f32);
             self.note_on(song, n, delay, len, false);
+            crate::minis::set_note_frac(0.0);
         }
     }
 
@@ -4159,6 +4166,7 @@ impl Player {
         let tempo = self.ov.tempo.unwrap_or(song.tempo).max(1.0);
         tr.tempo.store(tempo.to_bits(), Relaxed);
         crate::minis::set_tempo(tempo);
+        crate::minis::set_tick((self.sr as f64 * 60.0 / tempo.max(1.0) as f64 / song.ppq.max(1) as f64) as f32);
         let tpf = (tempo as f64 * song.beat_ticks() as f64 / 60.0 / self.sr as f64).max(1e-9);
         self.tpf = tpf;
         let loop_len = if song_mode { song.length() } else { song.pattern_length(pat) } as f64;

@@ -170,11 +170,14 @@ pub struct Set {
     pub zone: Option<crate::zonefx::Set>,
     /// Anything standing still in the sound is let drain away (the operator synth's own switch).
     pub level: bool,
+    /// The analogue trio's widener, which stands in for everything above: the left side comes a swaying
+    /// fiftieth of a second late.
+    pub wide: bool,
 }
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.split || self.level || self.zone.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.split || self.level || self.wide || self.zone.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
@@ -185,6 +188,9 @@ impl Set {
         }
         if let Some(z) = &self.zone {
             return z.tail(sr, step);
+        }
+        if self.wide {
+            return (sr * 0.021) as usize + 64;
         }
         if self.level {
             n = sr * 0.5;
@@ -231,6 +237,7 @@ pub struct State {
     dry: Vec<[f32; 2]>,
     op: Option<Box<crate::opfx::State>>,
     zone: Option<Box<crate::zonefx::State>>,
+    wide: (Vec<f32>, usize, f64),
 }
 
 /// What one of the further echoes remembers.
@@ -247,7 +254,7 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None }
+        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None, wide: (Vec::new(), 0, 0.0) }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
@@ -257,9 +264,44 @@ impl State {
             self.zone.get_or_insert_with(|| Box::new(crate::zonefx::State::new(self.sr))).process(z, buf, step, song);
             return;
         }
+        if set.wide {
+            self.wide(buf);
+            return;
+        }
         self.tone(set, buf);
         self.rest(set, buf, step, song);
         self.level(set, buf);
+    }
+
+    /// Measured on a steady tone and on noise: the right side passes untouched; the left is the same sound
+    /// 895.413 samples late (at 44.1 kHz), give or take 13.418, swaying once in 14906 samples along two
+    /// parabolas (a sine drawn with squares), nearest when the first sound arrives, and waiting through silence.
+    fn wide(&mut self, buf: &mut [[f32; 2]]) {
+        let k = self.sr as f64 / 44100.0;
+        let (line, at, ph) = &mut self.wide;
+        let n = (1024.0 * k) as usize + 8;
+        for f in buf.iter_mut() {
+            if line.is_empty() {
+                // the sway starts with the first sound
+                if f[0] == 0.0 {
+                    continue;
+                }
+                *line = vec![0.0; n];
+            }
+            line[*at] = f[0];
+            let v = (2.0 * *ph + 1.5).rem_euclid(2.0) - 1.0;
+            let d = (895.413 - 13.418 * 4.0 * v * (1.0 - v.abs())) * k;
+            let (whole, part) = (d.floor() as usize, d.fract() as f32);
+            let a = line[(*at + n - whole) % n];
+            let b = line[(*at + n - whole - 1) % n];
+            let dry = f[0];
+            f[0] = a + (b - a) * part;
+            *at = (*at + 1) % n;
+            // the sway stands still while nothing sounds (measured: it picks up where the last tail ended)
+            if dry.abs() > 1e-9 || f[0].abs() > 1e-9 {
+                *ph = (*ph + 1.0 / (14906.0 * k)).fract();
+            }
+        }
     }
 
     /// Measured on a note with a standing part: with the switch on, the standing part fades the way it does

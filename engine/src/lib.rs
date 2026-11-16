@@ -37,6 +37,7 @@ pub mod hybrid;
 pub mod morph;
 pub mod drumkit;
 pub mod kickd;
+pub mod trio;
 pub mod membrane;
 pub mod triple;
 pub mod fm;
