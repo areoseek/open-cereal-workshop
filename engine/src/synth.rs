@@ -1352,6 +1352,8 @@ pub struct ToneState {
     mini: Option<crate::minis::Voice>,
     /// played live, not rendered: instruments with a quality setting for each use the live one
     pub live: bool,
+    /// seconds of the song gone by when the note starts (free-running wobbles keep their place by it)
+    pub at: f32,
     /// the key the channel played before this note (the operator synth slides in from it)
     pub from: Option<u8>,
 }
@@ -1418,6 +1420,9 @@ impl ToneState {
         if let Some(v) = &mut self.fm {
             v.beat = (bpm / 60.0).clamp(0.1, 20.0);
         }
+        if let Some(v) = &mut self.add {
+            v.beat = (bpm / 60.0).clamp(0.1, 20.0);
+        }
     }
 
     /// Where in the song (seconds from its start) the note begins, for instruments whose voices drift with the clock.
@@ -1454,6 +1459,7 @@ impl ToneState {
         if let Some(p) = &tone.add {
             let mut v = crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed);
             v.touch = axis[0];
+            v.at = self.at as f64;
             self.add = Some(Box::new(v));
         }
         if let Some(p) = &tone.fm {

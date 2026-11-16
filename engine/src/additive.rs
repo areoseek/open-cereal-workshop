@@ -352,6 +352,10 @@ pub struct Voice {
     vel: f32,
     /// The note's velocity as written, 0..1 (a default note is 0.78).
     pub touch: f32,
+    /// seconds of the song gone by at the note's start
+    pub at: f64,
+    /// beats a second
+    pub beat: f32,
     seed: u32,
     /// Wave length in frames of the table; the table holds two cycles of the note so the sub harmonics fit.
     m: usize,
@@ -431,6 +435,8 @@ impl Voice {
             fade: 0.0,
             count: 0,
             frames: 0,
+            at: 0.0,
+            beat: 140.0 / 60.0,
             re: vec![0.0; m],
             im: vec![0.0; m],
             hphase: Vec::new(),
@@ -571,8 +577,9 @@ impl Voice {
         let trem = patch.v(ix::TREMOLO) / 1000.0;
         self.trem = trem;
         // measured: six swings a second, 75 cents either way at the top of the knob, growing in over the
-        // first third of a second
-        let vib = patch.v(ix::VIBRATO) / 1000.0 * 75.0 * (t / 0.332).min(1.0).powi(2) * ((t * 6.0 + 0.3782) * TAU).sin();
+        // first third of a second of each note; the swing itself runs on with the song, so notes share it
+        let vib_ph = (((self.at + t as f64) * 6.0 + 0.1475).fract() as f32) * TAU;
+        let vib = patch.v(ix::VIBRATO) / 1000.0 * 75.0 * (t / 0.332).min(1.0).powi(2) * vib_ph.sin();
         let cents = patch.v(ix::PITCH) + vib + patch.v(ix::PITCH_LFO) / 1000.0 * 1200.0 * lfo;
         self.pitch_mul = 2f32.powf(cents / 1200.0);
 
@@ -622,13 +629,20 @@ impl Voice {
         let mask_mix = (patch.v(ix::MASK_MIX) / 1000.0 + patch.v(ix::MASK_LFO) / 1000.0 * (lfo * 0.5 + 0.5)).clamp(0.0, 1.0);
         let ph_amt = patch.v(ix::PH_AMOUNT) / 1000.0;
         let ph_speed = patch.v(ix::PH_SPEED);
-        let ph_hz = (ph_speed.abs() / 8000.0).powi(2) * 8.0 * ph_speed.signum();
-        let ph_pos = if ph_amt > 0.0 { patch.v(ix::PH_OFFSET) / 1000.0 + ph_hz * t + patch.v(ix::PH_OFFSET_LFO) / 1000.0 * lfo } else { 0.0 };
-        let ph_width = if ph_amt > 0.0 { (patch.v(ix::PH_WIDTH) / 5000.0 * (1.0 + patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo)).max(0.02) } else { 0.0 };
+        // measured: the comb sweeps in time with the song, four teeth a beat at eight tenths of the knob and
+        // twice as fast for every tenth more; it runs on with the song, so notes share its place
+        let ph_hz = if ph_speed == 0.0 { 0.0 } else { self.beat * 2f32.powf(ph_speed.abs() / 1000.0 - 6.0) * ph_speed.signum() };
+        let ph_run = (ph_hz as f64 * (self.at + t as f64)).fract() as f32;
+        let ph_pos = if ph_amt > 0.0 { patch.v(ix::PH_OFFSET) / 1000.0 + ph_run + patch.v(ix::PH_OFFSET_LFO) / 1000.0 * lfo } else { 0.0 };
+        // the width knob as tenths: every quarter of the knob makes the comb four times as dense (twice, when
+        // it counts in harmonics)
+        let ph_width = if ph_amt > 0.0 { patch.v(ix::PH_WIDTH) / 1000.0 * (1.0 + patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo) } else { 0.0 };
+        // the comb follows the key by this share, around middle C
+        let ph_track = patch.v(ix::PH_KEY) / 1000.0 * (f0 / 256.0).log2();
         let hz_amt = (patch.v(ix::HZ_AMOUNT) / 1000.0 * (1.0 + patch.v(ix::HZ_LFO) / 1000.0 * lfo)).clamp(0.0, 1.0);
 
         // grit shakes each harmonic by letting its phase wander, so the wave is redrawn on every tick while
-        // it is on. How far the knob reaches is an estimate.
+        // it is on.
         let grit = patch.v(ix::GRIT) / 1000.0;
         let moving = grit != 0.0;
         // harmonics that rise on their own: looked at often while the fast ones come in, and each wave is the
@@ -645,6 +659,13 @@ impl Voice {
         }
         // a wave is fully in one tick after it is drawn
         // the count starts half a cycle in, like the note itself
+        // the harmonics run steadily off their places in the original; drawing the wave often enough keeps
+        // the blend from one drawing to the next from thinning them
+        let grit_reach = (65f32.powf(grit.abs()) - 1.0) / 80.0;
+        if moving && rise <= 0.0 {
+            let want = 0.03 * self.sr / (grit_reach * f0).max(1e-3);
+            self.tick_len = if want >= TICK as f32 { TICK } else { (want.max(8.0) as u32).next_power_of_two() / 2 }.max(8);
+        }
         let grit_t = 0.5 / f0 + if first { 0.0 } else { t + self.tick_len as f32 / self.sr };
         let key = [n as f32, cut, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }, rise_t];
         if self.primed && key.iter().zip(&self.last).all(|(a, b)| (a - b).abs() < 1e-4) {
@@ -761,12 +782,18 @@ impl Voice {
                 a *= 1.0 - (-rise * kf * f0 * rise_t).exp();
             }
             if ph_amt > 0.0 {
+                // measured: a comb of raised-cosine teeth, silent at the bottom and 1.633 times up at the top, mixed
+                // with the plain sound by the amount. Counted in octaves it has three teeth every four
+                // octaves at the middle of the width knob, in Hz one every 3214 Hz, in harmonics one every
+                // two; the offset slides it by whole teeth
                 let pos = match scale {
-                    1 => kf * f0 / 1000.0,
-                    2 => kf / 8.0,
-                    _ => kf.log2(),
+                    1 => kf * f0 / 2f32.powf(ph_track) / 3214.0 * 4f32.powf((ph_width - 5.0) / 2.5),
+                    2 => kf / 2.0 * 2f32.powf((ph_width - 5.0) / 2.5),
+                    _ => ((kf * f0).log2() - ph_track) * 0.75 * 4f32.powf((ph_width - 5.0) / 2.5),
                 };
-                a *= 1.0 - ph_amt * (0.5 - 0.5 * ((pos * ph_width - ph_pos) * TAU).cos());
+                // the lowest harmonics are spared by the protection, as from the filter
+                let g = 1.0 - ph_amt + ph_amt * 1.633 * (0.5 - 0.5 * ((pos - ph_pos) * TAU).cos());
+                a *= g + (1.0 - g) * keep;
             }
             if a == 0.0 {
                 continue;
@@ -782,8 +809,9 @@ impl Voice {
             } + self.hphase.get(k - 1).copied().unwrap_or(0.0);
             let phi = if moving {
                 // measured: each harmonic sits a little off its place, by an amount that swings once every
-                // fifteen harmonics, so it runs ahead or behind steadily
-                let off = -grit * 0.177 * ((kf - 1.0) * TAU / 15.0).sin();
+                // fifteen harmonics, so it runs ahead or behind steadily; the reach grows with the knob as
+                // (65^knob - 1) / 80 of the note's pitch
+                let off = -grit.signum() * grit_reach * ((kf - 1.0) * TAU / 15.0).sin();
                 phi + (off as f64 * f0 as f64 * grit_t as f64).fract() as f32
             } else {
                 phi
@@ -920,7 +948,8 @@ impl Voice {
         }
         let t = self.frames as f32 / self.sr;
         let d = self.trem * (t * 10.0).min(1.0);
-        let (s, c) = ((t * 5.0 + 0.4225) * std::f32::consts::PI).sin_cos();
+        // the swing runs on with the song, so notes share it
+        let (s, c) = ((((self.at + t as f64) * 5.0 + 0.7302).fract() as f32) * std::f32::consts::PI).sin_cos();
         (1.0 - d + d * 1.255 * s.abs(), 1.0 - d + d * 1.255 * c.abs())
     }
 }

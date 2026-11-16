@@ -2210,6 +2210,12 @@ impl Player {
 
     /// A channel's envelopes (volume, cutoff, resonance, pitch) and wobbles as a note starting `delay` frames
     /// from now gets them: those that follow the tempo are as set at 120 and scale with it.
+    /// Seconds of the song gone by for a note starting `delay` frames into the block (nothing while stopped).
+    fn song_secs(&self, song: &Song, delay: u32) -> f32 {
+        let tpf = self.now_tpf(song);
+        if self.was_playing && tpf > 0.0 { (self.pos / tpf / self.sr as f64) as f32 + delay as f32 / self.sr } else { 0.0 }
+    }
+
     fn voice_mods(&self, song: &Song, ch: &crate::song::Chan, delay: u32) -> VoiceMods {
         let f = &ch.smp;
         let tpf = self.now_tpf(song);
@@ -2815,6 +2821,7 @@ impl Player {
                     let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: to, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.live = !self.offline;
+                    v.tstate.at = self.song_secs(song, delay);
                     v.tstate.note(&tone, sr, key, if tone.mini.as_ref().is_some_and(|m| m.kind == crate::synth::Kind::Trio) { note_gain } else { note_gain.min(1.0) }, hz / sr);
                     v.tone = Some(tone);
                     self.start(v);
@@ -3294,6 +3301,7 @@ impl Player {
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
                     v.tstate.live = !self.offline;
+                    v.tstate.at = self.song_secs(song, delay);
                     if tone.fm.is_some() {
                         v.tstate.from = self.fm_last.iter().find(|e| e.0 == n.chan).map(|e| e.1);
                         self.fm_last.retain(|e| e.0 != n.chan);
