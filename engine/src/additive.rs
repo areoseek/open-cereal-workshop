@@ -431,6 +431,9 @@ pub struct Voice {
     /// Frames between two looks at the settings, and frames since the note was let go.
     tick_len: u32,
     gone: u32,
+    /// The pluck's clock when last looked at, and how much of it the mask has held back so far.
+    pluck_seen: f32,
+    pluck_held: f32,
     /// When the key was let go, in seconds from the note's start.
     left: Option<f32>,
     so_ph: f32,
@@ -492,6 +495,8 @@ impl Voice {
             held: true,
             tick_len: TICK,
             gone: 0,
+            pluck_seen: 0.0,
+            pluck_held: 0.0,
             left: None,
             so_ph: 0.0,
             so_inc: 0.0,
@@ -718,6 +723,14 @@ impl Voice {
         };
 
         let mask_mix = (patch.v(ix::MASK_MIX) / 1000.0 + patch.v(ix::MASK_LFO) / 1000.0 * (lfo * 0.5 + 0.5)).clamp(0.0, 1.0);
+        // a moving mask holds the pluck back by what it was at each moment (measured: the fall adds up)
+        if pluck_t < self.pluck_seen {
+            self.pluck_held = 0.0;
+            self.pluck_seen = 0.0;
+        }
+        self.pluck_held += mask_mix * (pluck_t - self.pluck_seen);
+        self.pluck_seen = pluck_t;
+        let pluck_held = self.pluck_held;
         let ph_amt = patch.v(ix::PH_AMOUNT) / 1000.0;
         let ph_speed = patch.v(ix::PH_SPEED);
         // measured: the comb sweeps in time with the song, four teeth a beat at eight tenths of the knob and
@@ -872,14 +885,17 @@ impl Voice {
                 };
                 let mval = taper(patch.v(ix::MASK + (k - 1) % 12) / 1000.0);
                 let bare = a;
-                if mask_mix > 0.0 && parts & 1 != 0 {
+                // with the pluck set to go by the mask, the mask leaves the levels alone (even with the pluck off)
+                if mask_mix > 0.0 && parts & 1 != 0 && !masked_pluck {
                     a *= 1.0 - mask_mix * (1.0 - mval);
                 }
                 if pluck_on && parts & 4 != 0 {
-                    // the alternative pluck spares what the equaliser lifts and hurries what it cuts (measured at
-                    // one lift and one cut); how the mask steers it is an estimate
-                    let steer = if alt_pluck { eq_gain.max(1e-3).powf(-0.85) } else if masked_pluck { 1.0 + mask_mix * (0.5 - mval) } else { 1.0 };
-                    a *= 10f32.powf(-pluck_t * kf * steer / 20.0);
+                    // the alternative pluck spares what the equaliser lifts: the fall slows by very nearly the lift
+                    // itself (measured at five lifts). Going by the mask, the fall is slowed by what the mask
+                    // would have taken from the level: a harmonic the mask shuts out does not fall at all (measured)
+                    let steer = if alt_pluck { eq_gain.max(1e-3).powf(-0.97) } else { 1.0 };
+                    let clock = if masked_pluck { pluck_t - pluck_held * (1.0 - mval) } else { pluck_t };
+                    a *= 10f32.powf(-clock * kf * steer / 20.0);
                 }
                 if !open && parts & 1 != 0 {
                     // the filter goes by each harmonic's place in the series, wherever detune has put it
