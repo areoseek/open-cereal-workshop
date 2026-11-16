@@ -1212,6 +1212,16 @@ impl Gen {
         }
     }
 
+    /// For an instrument whose slides close in on the goal instead of running straight to it: the time
+    /// constant in seconds for a note of this velocity over 128, whether fresh notes slide in too, and
+    /// whether a bent note takes the new note's loudness.
+    pub fn slide_law(&self, touch: f32) -> Option<(f32, bool, bool)> {
+        match self.kind {
+            Kind::Additive => Some(crate::additive::Patch::new(&self.p, &[]).slide(touch)),
+            _ => None,
+        }
+    }
+
     /// For an instrument set to one voice at a time: the seconds a held note takes to slide to the next.
     pub fn mono(&self) -> Option<f32> {
         match self.kind {

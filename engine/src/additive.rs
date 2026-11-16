@@ -302,10 +302,23 @@ impl Patch {
         self.p.get(i).copied().unwrap_or(0.0)
     }
 
-    /// With legato on, one note sounds at a time; the seconds a held note takes to reach the next
-    /// (none unless portamento is on too). The time scale is an estimate.
+    /// With legato on, one note sounds at a time and a held note bends to the next.
     pub fn mono(&self) -> Option<f32> {
-        (self.v(ix::LEGATO) != 0.0).then(|| if self.v(ix::PORTAMENTO) != 0.0 { 0.005 + (self.v(ix::SLIDE_TIME) / 1000.0).powi(2) * 2.0 } else { 0.0 })
+        (self.v(ix::LEGATO) != 0.0).then_some(0.0)
+    }
+
+    /// How notes slide (measured on rendered notes): the pitch closes in on its goal with this time
+    /// constant in seconds, for a note of this velocity over 128; the second value says whether every
+    /// fresh note starts from the pitch of the one before (a bent held note always slides), the third
+    /// whether a bent note also moves to the loudness of the new one, at the same pace.
+    pub fn slide(&self, touch: f32) -> (f32, bool, bool) {
+        let mut tau = 0.008144 * (41f32.powf(self.v(ix::SLIDE_TIME) / 1000.0) - 1.0);
+        if self.v(ix::VEL_SLIDE) != 0.0 {
+            // harder notes slide faster; this curve is a fit through seven velocities
+            let u = touch.clamp(0.0, 1.0);
+            tau *= (1.0 - u) * (1.0 - 0.68 * u);
+        }
+        (tau, self.v(ix::PORTAMENTO) != 0.0, self.v(ix::VEL_VOLUME) != 0.0)
     }
 
     /// Seconds for the level to rise at the start of a note.

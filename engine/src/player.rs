@@ -725,6 +725,7 @@ impl Handle {
             midi_ran: false,
             seed: 0x2545_f491,
             shape_turn: Vec::new(),
+            last_pitch: Vec::new(),
             ring: vec![],
             chan_fx: vec![],
             scratch: Vec::with_capacity(BLOCK),
@@ -1070,6 +1071,10 @@ struct Voice {
     slide: f32,
     slide_to: f32,
     slide_inc: f32,
+    /// Not zero: the slide closes this share of the remaining way each control step instead of running straight.
+    slide_k: f32,
+    /// While a bent note moves to the loudness of the new one: the note gain it is heading for.
+    gain_goal: Option<f32>,
     color: u8,
     /// A note mover on the way to this voice's instrument, the length of a beat for it, and what it last asked
     /// for: loudness taken off, octaves and pan.
@@ -1396,7 +1401,22 @@ impl Voice {
         if wob[0] + lf[4] + zcents != 0.0 {
             self.step_now *= ((wob[0] + lf[4] + zcents) as f64 / 1200.0).exp2();
         }
-        if self.slide != self.slide_to {
+        if let Some(goal) = self.gain_goal {
+            let old = self.note_gain;
+            let new = if (goal - old).abs() < 1e-5 { goal } else { old + (goal - old) * self.slide_k };
+            if old > 1e-9 {
+                self.gl *= new / old;
+                self.gr *= new / old;
+            }
+            self.note_gain = new;
+            if new == goal {
+                self.gain_goal = None;
+            }
+        }
+        if self.slide != self.slide_to && self.slide_k > 0.0 {
+            let d = self.slide_to - self.slide;
+            self.slide = if d.abs() < 1e-6 { self.slide_to } else { self.slide + d * self.slide_k };
+        } else if self.slide != self.slide_to {
             let d = self.slide_inc * CTL as f32;
             self.slide = if (self.slide_to - self.slide).abs() <= d { self.slide_to } else { self.slide + d * (self.slide_to - self.slide).signum() };
         }
@@ -2085,6 +2105,8 @@ pub struct Player {
     seed: u32,
     /// Whose turn it is at the note units that hand their targets out one at a time.
     shape_turn: crate::noteshape::Turns,
+    /// Per channel, the pitch (octaves) of the last note of an instrument whose notes can slide in from it.
+    last_pitch: Vec<(u16, f32)>,
     /// Frames an insert keeps running after its input stops, for effect tails.
     ring: Vec<usize>,
     /// The patch bay of each channel whose generator is one, with the sound its notes made this block.
@@ -3142,6 +3164,16 @@ impl Player {
                 // a script ends its own notes
                 let remaining = if live || emit.is_some() { len_frames } else { Some(len_frames.unwrap_or(min_len).max(1)) };
                 let layers = ch.bay().map_or(&[][..], |b| &b.layers[..]);
+                let law = ch.gen.as_ref().filter(|_| layers.is_empty()).and_then(|g| g.slide_law(n.vel / 1.28));
+                // (measured) with its portamento on, a fresh note starts from the pitch of the one before
+                let came_from = law.filter(|l| l.1).and_then(|_| self.last_pitch.iter().find(|l| l.0 == n.chan).map(|l| l.1));
+                if law.is_some() {
+                    let at = n.key as f32 / 12.0 + n.fine_cents / 1200.0;
+                    match self.last_pitch.iter_mut().find(|l| l.0 == n.chan) {
+                        Some(l) => l.1 = at,
+                        None => self.last_pitch.push((n.chan, at)),
+                    }
+                }
                 if let Some(glide) = ch.gen.as_ref().filter(|_| layers.is_empty()).and_then(|g| g.mono()) {
                     // one voice at a time: a note that arrives while another is held bends that one to its
                     // own pitch; anything already fading is cut short
@@ -3163,6 +3195,12 @@ impl Player {
                         v.slide = now - n.key as f32 / 12.0;
                         v.slide_to = 0.0;
                         v.slide_inc = if glide <= 0.0 { f32::MAX } else { v.slide.abs() / (glide * sr) };
+                        if let Some((tau, _, loud)) = law {
+                            if loud && v.note_gain > 1e-9 {
+                                v.gain_goal = Some(note_gain);
+                            }
+                            v.slide_k = if tau * sr > 1.0 { 1.0 - (-(CTL as f32) / (tau * sr)).exp() } else { 1.0 };
+                        }
                         v.remaining = remaining.map(|r| r + delay as u64);
                         v.live = live;
                         held = true;
@@ -3258,6 +3296,11 @@ impl Player {
                 let key = ev.key.clamp(0, 131) as u8;
                 // the voice goes by the key that was pressed, so that letting go of it finds the voice
                 let mut v = Voice { dphase: hz / sr, level: 0.0, attack: ms(4.0), release: ms(90.0), remaining, gl: gain * pl, gr: gain * pr, insert: ch.insert, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: ev.pan, follow: true, ..Default::default() };
+                if let (Some(from), Some((tau, _, _))) = (came_from, law) {
+                    v.slide = from - (ev.key as f32 / 12.0 + ev.fine_cents / 1200.0);
+                    v.slide_to = 0.0;
+                    v.slide_k = if tau * sr > 1.0 { 1.0 - (-(CTL as f32) / (tau * sr)).exp() } else { 1.0 };
+                }
                 if let Some((from, steps)) = ev.glide {
                     v.slide = (from - ev.key) as f32 / 12.0;
                     v.slide_to = 0.0;
@@ -3577,6 +3620,7 @@ impl Player {
     fn silence(&mut self, fast: bool) {
         self.arps.clear();
         self.fm_last.clear();
+        self.last_pitch.clear();
         self.hush_scripts();
         self.midi_hush();
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });
