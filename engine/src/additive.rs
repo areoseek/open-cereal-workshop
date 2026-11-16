@@ -136,29 +136,25 @@ pub fn choices(i: usize) -> Option<&'static [(u8, &'static str)]> {
 }
 
 /// The chorus, echo and room after the voices. Each one's type at 0 is off (a fresh one plays dry against
-/// the reference, and the first type of each is the only one that does), as is a knob at nothing. The
-/// chorus styles and room sizes are our own (the reference names none); the echo is measured
-/// and lives in `stackfx`.
+/// the reference, and the first type of each is the only one that does), as is a knob at nothing. All of
+/// them are measured and live in `stackfx`.
 pub fn tail(p: &[f32]) -> crate::tailfx::Set {
-    use crate::tailfx::{Chorus, Reverb, Set};
+    use crate::tailfx::Set;
     if p.len() < ix::COUNT {
         return Set::default();
     }
     let u = |i: usize| (p[i] / 1000.0).clamp(0.0, 1.0);
-    const STYLES: [(f32, f32); 10] = [(0.5, 0.6), (0.3, 0.3), (0.7, 0.4), (0.4, 1.2), (0.8, 0.8), (0.2, 2.5), (0.6, 0.15), (0.9, 0.25), (0.35, 4.0), (1.0, 0.5)];
-    const ROOMS: [f32; 7] = [0.5, 0.9, 1.4, 2.0, 2.8, 4.0, 6.0];
     let kind = |i: usize| p[i].max(0.0) as usize;
-    let style = STYLES[kind(ix::CHORUS_TYPE).clamp(1, 10) - 1];
     Set {
-        chorus: (kind(ix::CHORUS_TYPE) > 0 && u(ix::CHORUS_MIX) > 0.0).then(|| Chorus { depth: style.0, hz: style.1, wet: u(ix::CHORUS_MIX) }),
         // the echo is measured: the time counts 192 to a beat, the feedback knob is the share each repeat keeps
         // and the volume knob follows the curve of the level knobs
         stack: Some(crate::stackfx::Set {
+            chorus: (kind(ix::CHORUS_TYPE) > 0 && u(ix::CHORUS_MIX) > 0.0).then(|| crate::stackfx::Chorus { kind: kind(ix::CHORUS_TYPE).min(9) as u8, mix: u(ix::CHORUS_MIX) }),
+            room: (kind(ix::REVERB_TYPE) > 0 && u(ix::REVERB_VOL) > 0.0).then(|| crate::stackfx::Room { kind: kind(ix::REVERB_TYPE).min(6) as u8, vol: u(ix::REVERB_VOL) }),
             echo: (kind(ix::DELAY_TYPE) > 0 && u(ix::DELAY_VOL) > 0.0).then(|| crate::stackfx::Echo { kind: kind(ix::DELAY_TYPE) as u8, wet: taper(u(ix::DELAY_VOL)), fb: u(ix::DELAY_FB), steps: p[ix::DELAY_TIME].max(1.0) / 48.0 }),
             squash: (kind(ix::COMP_TYPE) > 0 && u(ix::COMP_MIX) > 0.0).then(|| crate::stackfx::Squash { kind: kind(ix::COMP_TYPE).min(4) as u8, mix: u(ix::COMP_MIX) }),
         })
         .filter(|k| k.any()),
-        reverb: (kind(ix::REVERB_TYPE) > 0 && u(ix::REVERB_VOL) > 0.0).then(|| Reverb { secs: ROOMS[kind(ix::REVERB_TYPE).clamp(1, 7) - 1], high_hz: 6000.0, wet: u(ix::REVERB_VOL) * u(ix::REVERB_VOL) }),
         ..Default::default()
     }
 }
@@ -1140,7 +1136,7 @@ mod tests {
         let t = g.tail();
         // the echo of a fresh one is three quarters of a beat long
         assert_eq!(t.stack.unwrap().echo.unwrap().steps, 3.0);
-        assert!(t.chorus.is_some() && t.reverb.is_some());
+        assert!(t.stack.unwrap().chorus.is_some() && t.stack.unwrap().room.is_some());
         for i in [ix::CHORUS_MIX, ix::DELAY_VOL, ix::REVERB_VOL] {
             g.p[i] = 0.0;
         }
@@ -1149,6 +1145,14 @@ mod tests {
         g.p[ix::COMP_TYPE] = 3.0;
         g.p[ix::COMP_MIX] = 500.0;
         assert_eq!(g.tail().stack.unwrap().squash, Some(crate::stackfx::Squash { kind: 3, mix: 0.5 }));
+        // the room and the chorus carry their kind and their knob
+        g.p[ix::REVERB_TYPE] = 4.0;
+        g.p[ix::REVERB_VOL] = 250.0;
+        g.p[ix::CHORUS_TYPE] = 8.0;
+        g.p[ix::CHORUS_MIX] = 750.0;
+        let k = g.tail().stack.unwrap();
+        assert_eq!(k.room, Some(crate::stackfx::Room { kind: 4, vol: 0.25 }));
+        assert_eq!(k.chorus, Some(crate::stackfx::Chorus { kind: 8, mix: 0.75 }));
     }
 
     fn render(p: &Patch, hz: f32, frames: usize) -> Vec<f32> {

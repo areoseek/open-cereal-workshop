@@ -243,6 +243,8 @@ pub struct State {
     op: Option<Box<crate::opfx::State>>,
     zone: Option<Box<crate::zonefx::State>>,
     stack: Option<Box<crate::stackfx::State>>,
+    /// How far the song has run in frames, set by the player before each block.
+    pub frame: Option<u64>,
     wide: (Vec<f32>, usize, f64),
 }
 
@@ -260,7 +262,7 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None, stack: None, wide: (Vec::new(), 0, 0.0) }
+        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None, stack: None, frame: None, wide: (Vec::new(), 0, 0.0) }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
@@ -275,7 +277,7 @@ impl State {
             return;
         }
         if let Some(k) = &set.stack {
-            self.stack.get_or_insert_with(|| Box::new(crate::stackfx::State::new(self.sr))).process(k, buf, step);
+            self.stack.get_or_insert_with(|| Box::new(crate::stackfx::State::new(self.sr))).process(k, buf, step, self.frame);
         }
         self.tone(set, buf);
         self.rest(set, buf, step, song);

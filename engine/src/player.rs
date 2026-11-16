@@ -734,6 +734,7 @@ impl Handle {
             comp: Comp::default(),
             inbuf: Vec::new(),
             blockno: 0,
+            run: 0,
             dirty: vec![],
             pos: 0.0,
             was_playing: false,
@@ -2123,6 +2124,8 @@ pub struct Player {
     /// This block's share of the sound card inputs.
     inbuf: Vec<f32>,
     blockno: u64,
+    /// Frames mixed since this player began.
+    run: u64,
     dirty: Vec<bool>,
     pos: f64,
     was_playing: bool,
@@ -4553,6 +4556,7 @@ impl Player {
                 }
             }
             if let Some((set, st)) = &mut cf.tail {
+                st.frame = Some(self.run);
                 if set.split {
                     st.split(set, &mut cf.buf[..n], &mut cf.send[..n], cx.step, at_step);
                 } else {
@@ -4730,6 +4734,7 @@ impl Player {
 
         let master = self.transport.master();
         self.blockno += 1;
+        self.run += n as u64;
         if self.cap.len() != ni {
             self.cap = vec![Vec::new(); ni];
             self.cap_at = vec![0; ni];

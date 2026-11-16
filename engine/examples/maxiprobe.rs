@@ -7,8 +7,13 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut lib = cereal_engine::Library::default();
     let smp = lib.load_path(std::path::Path::new(&a[1])).expect("sound");
-    let pre = cereal_engine::preset::read(std::path::Path::new(&a[3])).expect("preset");
-    let mut fx = Fx::decode(&pre.ident, &pre.state).expect("a unit we know");
+    // @room stands for a fresh room unit instead of a stored one
+    let mut fx = if a[3] == "@room" {
+        Fx::new(cereal_engine::fx::Kind::Reverb)
+    } else {
+        let pre = cereal_engine::preset::read(std::path::Path::new(&a[3])).expect("preset");
+        Fx::decode(&pre.ident, &pre.state).expect("a unit we know")
+    };
     for kv in &a[4..] {
         let (k, v) = kv.split_once('=').expect("setting=value");
         let (k, v): (usize, f32) = (k.parse().expect("index"), v.parse().expect("number"));
