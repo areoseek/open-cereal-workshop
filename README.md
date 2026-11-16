@@ -132,7 +132,7 @@ render, or within a stated small margin:
 - Instruments: Triple Osc and Sweep Kick match; Analog Trio agrees on most test renders (564 of 640 within a
   hundredth of the level); the electric piano unit, Sound Bank Player and the multi-sample player are measured
   for most of their laws; Harmonic Stack is measured for its voice (filter, envelopes, timbres, pluck, detune,
-  grit, tremolo, vibrato, phaser) but not yet for its harmonizer, unison and built-in effects.
+  grit, tremolo, vibrato, phaser, harmonizer) but not yet for its unison, slow oscillator and built-in effects.
 - Effects: Seven Band EQ (both versions), the parametric EQ, Bass Lift, Overdrive, Chorus, Plain Echo, the
   second delay, Three Band Compressor, Band Maximiser, Loudener, Room Reverb (classic), the limiter, flanger,
   phaser, soft clipper, stereo enhancer, stereo shaper, transient processor, panning units and fast distortion

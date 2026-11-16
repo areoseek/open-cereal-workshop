@@ -712,88 +712,135 @@ impl Voice {
         let alt_pluck = patch.v(ix::PLUCK_ALT) != 0.0;
         self.re[..m].fill(0.0);
         self.im[..m].fill(0.0);
-        let hz_type = patch.v(ix::HZ_TYPE) as usize;
-        let hz_mul = [2usize, 3, 4, 5, 2][hz_type.min(4)];
-        let hz_reach = 1 + (patch.v(ix::HZ_WIDTH) / 1000.0 * 4.0) as usize;
-        let hz_str = patch.v(ix::HZ_STRENGTH) / 1024.0;
-        for k in 1..=n {
-            let kf = k as f32;
-            let mut a = match custom {
+        // the harmonizer: copies of lower harmonics laid on higher ones (measured). Step j of the octave kinds
+        // takes the harmonic 2^j times lower (the +1 and +2 kinds land that many places higher); the harmonic
+        // kinds take the one 2, 3, 4... times lower, or 2, 4, 6... times lower landing one place higher. Each
+        // step's share falls off as a cube along the width, doubles with every quarter of the strength knob,
+        // never passes the full source level, and the whole is scaled back by the sum of the shares
+        let hz_type = (patch.v(ix::HZ_TYPE) as usize).min(4);
+        let hz_pos = patch.v(ix::HZ_POS) as usize;
+        // with the velocity link a soft note reaches less far (measured at one velocity)
+        let hz_vel = if patch.v(ix::VEL_HZ) != 0.0 { self.touch } else { 1.0 };
+        let hz_len = 1.0 + patch.v(ix::HZ_WIDTH) / 1000.0 * hz_vel * if hz_type >= 3 { 10.0 } else { 5.0 };
+        let hz_lift = 2f32.powf(patch.v(ix::HZ_STRENGTH) / 256.0);
+        let mut hz_share = [0f32; 12];
+        let mut hz_steps = 0;
+        if hz_amt > 0.0 {
+            for j in 1..=11usize {
+                let c = hz_amt * hz_amt * (hz_lift * (1.1 * (1.0 - j as f32 / hz_len)).max(0.0).powi(3)).min(1.0);
+                if c <= 0.0 {
+                    break;
+                }
+                hz_share[j] = c;
+                hz_steps = j;
+            }
+        }
+        let hz_norm = 1.0 / (1.0 + hz_share.iter().sum::<f32>());
+        // where step j finds its source for harmonic k
+        let hz_src = |k: usize, j: usize| -> Option<usize> {
+            let (mul, up) = match hz_type {
+                0 => (1usize << j, 0),
+                1 => (1 << j, 1),
+                2 => (1 << j, 2),
+                3 => (j + 1, 0),
+                _ => (2 * j, 1),
+            };
+            (k > up && (k - up) % mul == 0).then(|| (k - up) / mul)
+        };
+        let plain = |k: usize| -> f32 {
+            match custom {
                 Some((amp, _)) => amp.get(k - 1).copied().unwrap_or(0.0),
                 None => timbre(kind, k),
-            };
-            if hz_amt > 0.0 {
-                // clones of the lower harmonics, moved up by the chosen ratio
-                let mut src = k;
-                let mut g = hz_amt;
-                for _ in 0..hz_reach {
-                    if src % hz_mul != 0 {
-                        break;
-                    }
-                    src /= hz_mul;
-                    g *= 0.5 + hz_str * 0.5;
-                    a += g * match custom {
-                        Some((amp, _)) => amp.get(src - 1).copied().unwrap_or(0.0),
-                        None => timbre(kind, src),
-                    };
+            }
+        };
+        // what the equaliser, mask and filter (1), the phaser (2) and the pluck (4) make of harmonic k
+        let stage = |k: usize, parts: u8| -> (f32, f32) {
+            let kf = k as f32;
+            let mut a = 1.0f32;
+                // floating equaliser: bands sit on harmonics 1, 2, 4, 8, 16, 32
+                let x = kf.log2().min(5.0);
+                let b = (x as usize).min(4);
+                let w = x - b as f32;
+                let eq_gain = eq[b] + (eq[b + 1] - eq[b]) * w * w * (3.0 - 2.0 * w);
+                if parts & 1 != 0 {
+                    a *= eq_gain;
                 }
-            }
-            // floating equaliser: bands sit on harmonics 1, 2, 4, 8, 16, 32
-            let x = kf.log2().min(5.0);
-            let b = (x as usize).min(4);
-            let w = x - b as f32;
-            let eq_gain = eq[b] + (eq[b + 1] - eq[b]) * w * w * (3.0 - 2.0 * w);
-            a *= eq_gain;
-            // what the mask, the pluck and the filter take away, the protection gives back to the first three
-            // harmonics: all of it to the first with the knob full, a twelfth of that a step up, then far less
-            let keep = match k {
-                1 => lhp,
-                2 => lhp * 0.0827,
-                3 => lhp * 0.000566,
-                _ => 0.0,
-            };
-            let mval = taper(patch.v(ix::MASK + (k - 1) % 12) / 1000.0);
-            let bare = a;
-            if mask_mix > 0.0 {
-                a *= 1.0 - mask_mix * (1.0 - mval);
-            }
-            if pluck_on {
-                // the alternative pluck spares what the equaliser lifts and hurries what it cuts (measured at
-                // one lift and one cut); how the mask steers it is an estimate
-                let steer = if alt_pluck { eq_gain.max(1e-3).powf(-0.85) } else if masked_pluck { 1.0 + mask_mix * (0.5 - mval) } else { 1.0 };
-                a *= 10f32.powf(-pluck_t * kf * steer / 20.0);
-            }
-            if !open {
-                // the filter goes by each harmonic's place in the series, wherever detune has put it
-                let f = kf * f0;
-                let oct = (f / fc).log2();
-                a *= if in_hz { filter_gain(ftype, (f - fc) / hz_span, hz_lead / hz_span) } else { filter_gain(ftype, oct / span, lead / span) };
-                let d = if res_adaptive { (f - res_hz) / (if res_in_hz { 12.8 } else { 7.4 } * f0) } else if res_in_hz { (f - res_hz) / 2650.0 } else { oct - res_at };
-                if keep > 0.0 {
+                // what the mask, the pluck and the filter take away, the protection gives back to the first three
+                // harmonics: all of it to the first with the knob full, a twelfth of that a step up, then far less
+                let keep = match k {
+                    1 => lhp,
+                    2 => lhp * 0.0827,
+                    3 => lhp * 0.000566,
+                    _ => 0.0,
+                };
+                let mval = taper(patch.v(ix::MASK + (k - 1) % 12) / 1000.0);
+                let bare = a;
+                if mask_mix > 0.0 && parts & 1 != 0 {
+                    a *= 1.0 - mask_mix * (1.0 - mval);
+                }
+                if pluck_on && parts & 4 != 0 {
+                    // the alternative pluck spares what the equaliser lifts and hurries what it cuts (measured at
+                    // one lift and one cut); how the mask steers it is an estimate
+                    let steer = if alt_pluck { eq_gain.max(1e-3).powf(-0.85) } else if masked_pluck { 1.0 + mask_mix * (0.5 - mval) } else { 1.0 };
+                    a *= 10f32.powf(-pluck_t * kf * steer / 20.0);
+                }
+                if !open && parts & 1 != 0 {
+                    // the filter goes by each harmonic's place in the series, wherever detune has put it
+                    let f = kf * f0;
+                    let oct = (f / fc).log2();
+                    a *= if in_hz { filter_gain(ftype, (f - fc) / hz_span, hz_lead / hz_span) } else { filter_gain(ftype, oct / span, lead / span) };
+                    let d = if res_adaptive { (f - res_hz) / (if res_in_hz { 12.8 } else { 7.4 } * f0) } else if res_in_hz { (f - res_hz) / 2650.0 } else { oct - res_at };
+                    if keep > 0.0 {
+                        a += (bare - a) * keep;
+                    }
+                    if res_g > 0.0 && d.abs() < 0.5 {
+                        a *= 1.0 + res_g * (kf.log2() - res_floor).max(0.0) * (d * std::f32::consts::PI).cos().powi(6);
+                    }
+                } else if keep > 0.0 {
                     a += (bare - a) * keep;
                 }
-                if res_g > 0.0 && d.abs() < 0.5 {
-                    a *= 1.0 + res_g * (kf.log2() - res_floor).max(0.0) * (d * std::f32::consts::PI).cos().powi(6);
+                if rise_t >= 0.0 && rise > 0.0 && parts & 1 != 0 {
+                    a *= 1.0 - (-rise * kf * f0 * rise_t).exp();
                 }
-            } else if keep > 0.0 {
-                a += (bare - a) * keep;
-            }
-            if rise_t >= 0.0 && rise > 0.0 {
-                a *= 1.0 - (-rise * kf * f0 * rise_t).exp();
-            }
-            if ph_amt > 0.0 {
-                // measured: a comb of raised-cosine teeth, silent at the bottom and 1.633 times up at the top, mixed
-                // with the plain sound by the amount. Counted in octaves it has three teeth every four
-                // octaves at the middle of the width knob, in Hz one every 3214 Hz, in harmonics one every
-                // two; the offset slides it by whole teeth
-                let pos = match scale {
-                    1 => kf * f0 / 2f32.powf(ph_track) / 3214.0 * 4f32.powf((ph_width - 5.0) / 2.5),
-                    2 => kf / 2.0 * 2f32.powf((ph_width - 5.0) / 2.5),
-                    _ => ((kf * f0).log2() - ph_track) * 0.75 * 4f32.powf((ph_width - 5.0) / 2.5),
-                };
-                // the lowest harmonics are spared by the protection, as from the filter
-                let g = 1.0 - ph_amt + ph_amt * 1.633 * (0.5 - 0.5 * ((pos - ph_pos) * TAU).cos());
-                a *= g + (1.0 - g) * keep;
+                if ph_amt > 0.0 && parts & 2 != 0 {
+                    // measured: a comb of raised-cosine teeth, silent at the bottom and 1.633 times up at the top, mixed
+                    // with the plain sound by the amount. Counted in octaves it has three teeth every four
+                    // octaves at the middle of the width knob, in Hz one every 3214 Hz, in harmonics one every
+                    // two; the offset slides it by whole teeth
+                    let pos = match scale {
+                        1 => kf * f0 / 2f32.powf(ph_track) / 3214.0 * 4f32.powf((ph_width - 5.0) / 2.5),
+                        2 => kf / 2.0 * 2f32.powf((ph_width - 5.0) / 2.5),
+                        _ => ((kf * f0).log2() - ph_track) * 0.75 * 4f32.powf((ph_width - 5.0) / 2.5),
+                    };
+                    // the lowest harmonics are spared by the protection, as from the filter
+                    let g = 1.0 - ph_amt + ph_amt * 1.633 * (0.5 - 0.5 * ((pos - ph_pos) * TAU).cos());
+                    a *= g + (1.0 - g) * keep;
+                }
+            (a, keep)
+        };
+        // the parts that work before the copies are made and those that work after
+        let (hz_before, hz_after) = match hz_pos {
+            0 => (0u8, 7u8),
+            1 => (1, 6),
+            2 => (3, 4),
+            _ => (7, 0),
+        };
+        let hz_pre: Vec<f32> = if hz_steps > 0 && hz_before != 0 { (0..=n).map(|k| if k == 0 { 0.0 } else { stage(k, hz_before).0 }).collect() } else { Vec::new() };
+        for k in 1..=n {
+            let kf = k as f32;
+            let (whole, keep) = stage(k, 7);
+            let mut a = plain(k) * whole;
+            if hz_steps > 0 {
+                let pre = |k: usize| if hz_pre.is_empty() { 1.0 } else { hz_pre[k] };
+                let mut sum = plain(k) * pre(k);
+                for j in 1..=hz_steps {
+                    if let Some(src) = hz_src(k, j) {
+                        sum += hz_share[j] * plain(src) * pre(src);
+                    }
+                }
+                let made = hz_norm * sum * if hz_after == 0 { 1.0 } else { stage(k, hz_after).0 };
+                // the protection spares the lowest harmonics here too
+                a = made + (a - made) * keep;
             }
             if a == 0.0 {
                 continue;
