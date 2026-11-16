@@ -343,7 +343,11 @@ impl State {
             _ => {}
         }
         match &set.op {
-            Some(o) => self.op.get_or_insert_with(|| Box::new(crate::opfx::State::new(self.sr))).process(o, sent, step),
+            Some(o) => {
+                let st = self.op.get_or_insert_with(|| Box::new(crate::opfx::State::new(self.sr)));
+                st.frame = self.frame.unwrap_or(0);
+                st.process(o, sent, step)
+            }
             None => self.rest(set, sent, step, song),
         }
         for (o, f) in plain.iter_mut().zip(sent.iter_mut()) {

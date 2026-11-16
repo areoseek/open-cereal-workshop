@@ -74,7 +74,7 @@ impl Set {
     pub fn tail(&self, sr: f32, step: f32) -> usize {
         let mut n = 0.0;
         if let Some(c) = &self.chorus {
-            n += (c.base_ms() + c.swing_ms()) * 0.001 * sr;
+            n += (c.base() + c.swing()) * sr / 44100.0;
         }
         for e in self.echoes.iter().flatten() {
             let time = e.frames(sr, step);
@@ -90,39 +90,35 @@ impl Set {
 }
 
 impl Chorus {
-    /// Shortest delay of a voice.
-    pub fn base_ms(&self) -> f32 {
-        100.0 * grid(self.delay.clamp(0.0, 1.0))
+    /// Shortest delay of the deepest voice, in frames at 44.1 kHz.
+    pub fn base(&self) -> f32 {
+        4410.0 * grid(self.delay.clamp(0.0, 1.0))
     }
 
-    /// How far the slow sweep moves the delay.
-    pub fn swing_ms(&self) -> f32 {
-        0.452 + 49.6 * grid(self.depth.clamp(0.0, 1.0))
+    /// How far the slow sweep moves the delay of the deepest voice, in the same frames.
+    pub fn swing(&self) -> f32 {
+        20.0 + 2185.0 * grid(self.depth.clamp(0.0, 1.0))
     }
 
-    /// Sweeps per second of the first voice. The speed knob sets how fast the delay moves, so a deeper sweep
+    /// Sweeps per second of the deepest voice. The speed knob sets how fast the delay moves, so a deeper sweep
     /// takes longer.
     pub fn hz(&self) -> f32 {
-        pace(self.speed) / self.swing_ms()
+        pace(self.speed) / (2.0 * self.swing())
     }
 }
 
 /// Frames the room's answer trails what it hears.
 const ROOM_LATE: usize = 18;
 
-/// Milliseconds of delay travelled per second, over four, for a place on the speed knob (measured points).
+/// Frames of delay (at 44.1 kHz) a voice travels per second for a place on the speed knob. The time a frame
+/// takes falls a hundredfold over the knob (fitted to eighteen measured places, all within 0.02 %).
 fn pace(speed: f32) -> f32 {
-    const PTS: [(f32, f32); 8] = [(0.0, 0.0664), (0.125, 0.1182), (0.25, 0.2122), (0.5, 0.6869), (0.625, 1.2591), (0.75, 2.356), (0.875, 4.61), (1.0, 10.03)];
-    let s = speed.clamp(0.0, 1.0);
-    let k = PTS.windows(2).position(|w| s <= w[1].0).unwrap_or(PTS.len() - 2);
-    let (a, b) = (PTS[k], PTS[k + 1]);
-    let f = (s - a.0) / (b.0 - a.0);
-    (a.1.ln() + (b.1.ln() - a.1.ln()) * f).exp()
+    88.2 / (15.1488 * 100.98f32.powf(-speed.clamp(0.0, 1.0)) - 0.05002)
 }
 
 /// A sweep made of two parabolas: 0 at the start of the cycle, 1 in the middle.
-fn sweep(phase: f64) -> f32 {
-    let u = phase.rem_euclid(1.0) as f32;
+fn sweep(phase: f64) -> f64 {
+    let u = phase.rem_euclid(1.0);
     let u = if u > 0.5 { 1.0 - u } else { u };
     if u < 0.25 {
         8.0 * u * u
@@ -134,24 +130,19 @@ fn sweep(phase: f64) -> f32 {
 /// One over the level of a voice when `n` voices land on a side (a curve through the measured levels of one
 /// to nine voices; voices crossing over from the other side count for the share that crosses).
 fn crowd(n: f32) -> f32 {
-    0.595 + 0.283 * n + 0.437 * 2.84f32.powf(-n)
+    0.580 + 0.2842 * n + 0.4017 * 2.4f32.powf(-n)
 }
 
-/// How much faster (and later) a voice runs at full spread than its share of the depth alone gives, by order,
-/// side and voice. One voice of each order all but stands still. Measured for one to four voices.
-fn drift(order: usize, side: usize, voice: usize) -> f32 {
-    const STILL: f32 = -0.989;
-    const T: [[[f32; 4]; 2]; 4] = [
-        [[-0.0652, 0.0, 0.0, 0.0], [0.0795, 0.0, 0.0, 0.0]],
-        [[0.015, -0.065, 0.0, 0.0], [0.01, STILL, 0.0, 0.0]],
-        [[-0.03, 0.06, -0.065, 0.0], [STILL, -0.06, 0.08, 0.0]],
-        [[STILL, 0.0, 0.06, -0.06], [-0.15, 0.03, 0.0, -0.06]],
-    ];
-    match order {
-        1..=4 => T[order - 1][side][voice],
-        _ if voice + 1 == order => [-0.0652, 0.0795][side],
-        _ => 0.0,
-    }
+/// How much faster (and later) each voice runs at full spread than its share alone gives. Every order draws
+/// from the same row: the left side takes the first `order` backwards (its deepest voice is always the first
+/// entry), the right side the next `order` forwards. Two entries all but stand still. Measured on nine voices.
+const PULL: [f32; 18] = [
+    0.93509, 1.07952, 1.04246, 0.0102, 0.95454, 1.0671, 0.99399, 0.94284, 1.12571, 0.89681, 1.06295, 0.0102, 1.12995, 0.90822, 0.98205, 1.10044,
+    0.96626, 1.10457,
+];
+
+fn pull(order: usize, side: usize, voice: usize) -> f32 {
+    if side == 0 { PULL[order - 1 - voice] } else { PULL[order + voice] }
 }
 
 /// How far the spread knob pulls the voices apart: nothing for most of its travel, everything at the end.
@@ -192,6 +183,8 @@ pub struct State {
     cho: Line,
     phase: [[f64; VOICES]; 2],
     started: bool,
+    /// How far the song had run in frames when this block began (set by the caller).
+    pub frame: u64,
     /// The room answers a little late.
     late: std::collections::VecDeque<[f32; 2]>,
     echo: [Line; 3],
@@ -204,7 +197,7 @@ pub struct State {
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
+        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
     }
 
     /// Turn what was sent to the effects (`buf`) into what they put out. `step` is frames per sixteenth note.
@@ -234,31 +227,38 @@ impl State {
     fn chorus(&mut self, c: &Chorus, n: usize) {
         let sr = self.sr;
         let order = (c.order as usize).clamp(1, VOICES);
-        let ms = 0.001 * sr;
-        let deep = c.swing_ms() - 0.452;
+        let fr = sr / 44100.0;
+        let (base, full, travel) = (c.base(), c.swing(), pace(c.speed));
         self.cho.fit(((0.16 * sr) as usize).next_power_of_two());
         let mask = self.cho.buf.len() - 1;
         let w = apart(c.spread);
-        if !self.started {
-            self.started = true;
-            for k in 0..order {
-                let ahead = 0.5 * w as f64 * (k + 1) as f64 / order as f64;
-                self.phase[0][k] = ahead;
-                self.phase[1][k] = 0.5 + ahead;
-            }
-        }
-        let hz = c.hz();
         let cross = c.cross.clamp(-1.0, 1.0);
         let own = c.vol / crowd(order as f32 + cross.abs() * (order + 1) as f32 * 0.5);
         let over = cross * own;
-        // per side and voice: lowest delay, sweep, cycles per frame, share that crosses over
-        let mut v = [[(0.0f32, 0.0f32, 0.0f32, 0.0f32); VOICES]; 2];
+        // per side and voice: lowest delay, sweep, share that crosses over; and cycles per frame
+        let mut v = [[(0.0f32, 0.0f32, 0.0f32); VOICES]; 2];
+        let mut rate = [[0.0f64; VOICES]; 2];
         for side in 0..2 {
             for k in 0..order {
                 let part = (k + 1) as f32 / order as f32;
-                let pull = (1.0 + drift(order, side, k) * w * w).max(0.0);
-                let low = c.base_ms() * (1.0 - w + w * part) * pull;
-                v[side][k] = (low * ms, (0.452 + deep * part) * ms, hz * (1.0 - w + w / part) * pull / sr, over * part);
+                let p = 1.0 + (pull(order, side, k) - 1.0) * w;
+                let deep = 20.0 + (full - 20.0) * part;
+                // no delay gets under eight frames
+                let low = (base * (1.0 - w + w * part * p)).max(8.0);
+                let moved = travel * ((1.0 - w) * deep / full + w * p);
+                v[side][k] = (low * fr, deep * fr, over * part);
+                rate[side][k] = moved as f64 / (2.0 * deep as f64) / sr as f64;
+            }
+        }
+        // the sweeps turn from the moment the song starts, not from the first note (measured: a note five
+        // seconds in finds every voice that much further round)
+        if !self.started {
+            self.started = true;
+            for side in 0..2 {
+                for k in 0..order {
+                    let ahead = 0.5 * w as f64 * (k + 1) as f64 / order as f64 + 0.5 * side as f64;
+                    self.phase[side][k] = (ahead + self.frame as f64 * rate[side][k]).rem_euclid(1.0);
+                }
             }
         }
         for i in 0..n {
@@ -267,22 +267,19 @@ impl State {
             self.cho.buf[at] = x;
             let mut o = [0.0f32; 2];
             for side in 0..2 {
-                for (k, &(low, swing, rate, over)) in v[side].iter().enumerate().take(order) {
+                for (k, &(low, swing, over)) in v[side].iter().enumerate().take(order) {
                     let ph = &mut self.phase[side][k];
-                    let d = low.max(2.0) + swing * sweep(*ph);
-                    *ph += rate as f64;
+                    let d = low as f64 + swing as f64 * sweep(*ph);
+                    *ph += rate[side][k];
                     if *ph >= 1.0 {
                         *ph -= 1.0;
                     }
                     let whole = d as usize;
-                    let f = d - whole as f32;
-                    // four-point curve through the samples around the place read
-                    let r = |j: usize| self.cho.buf[(at + mask + 2 - whole - j) & mask][side];
-                    let (m, b, cc, dd) = (r(0), r(1), r(2), r(3));
-                    let c1 = 0.5 * (cc - m);
-                    let c2 = m - 2.5 * b + 2.0 * cc - 0.5 * dd;
-                    let c3 = 0.5 * (dd - m) + 1.5 * (b - cc);
-                    let y = ((c3 * f + c2) * f + c1) * f + b;
+                    let f = (d - whole as f64) as f32;
+                    // a straight line between the two samples around the place read
+                    let a = self.cho.buf[(at + mask + 1 - whole) & mask][side];
+                    let b = self.cho.buf[(at + mask - whole) & mask][side];
+                    let y = a + (b - a) * f;
                     o[side] += own * y;
                     o[1 - side] += over * y;
                 }
@@ -452,7 +449,12 @@ mod tests {
     #[test]
     fn the_chorus_sweeps_between_its_delays() {
         let c = Chorus { order: 1, depth: 0.5, speed: 0.75, delay: 0.0625, spread: 0.0, cross: 0.0, vol: 1.0 };
-        assert!((c.base_ms() - 1.617).abs() < 0.01 && (c.swing_ms() - 11.96).abs() < 0.05 && (1.0 / c.hz() - 5.08).abs() < 0.05);
+        assert!((c.base() - 71.3).abs() < 0.1 && (c.swing() - 526.18).abs() < 0.05 && (1.0 / c.hz() - 5.075).abs() < 0.01, "{} {} {}", c.base(), c.swing(), 1.0 / c.hz());
+        // measured places on the speed knob (frames a second)
+        for (knob, want) in [(0.0, 5.8407), (0.25, 18.649), (0.5, 60.512), (0.75, 207.26), (1.0, 881.92)] {
+            assert!((pace(knob) / want - 1.0).abs() < 0.001, "{knob} {}", pace(knob));
+        }
+        assert!(pull(1, 0, 0) == PULL[0] && pull(4, 0, 0) == PULL[3] && pull(4, 1, 0) == PULL[4] && pull(9, 1, 8) == PULL[17]);
         assert!((sweep(0.0), sweep(0.5), sweep(0.25)) == (0.0, 1.0, 0.5) && (sweep(0.75) - 0.5).abs() < 1e-6);
         let mut s = State::new(44100.0);
         let mut b: Vec<[f32; 2]> = (0..44100).map(|i| [(i as f32 * 0.05).sin(); 2]).collect();
@@ -460,8 +462,8 @@ mod tests {
         let rms = (b[22050..].iter().map(|f| f[0] * f[0]).sum::<f32>() / 22050.0).sqrt();
         assert!((rms - 0.9694 * 0.7071).abs() < 0.02, "{rms}");
         // measured levels of a voice: alone, among four, among nine, and with everything crossing over
-        for (n, want) in [(1.0, 0.9694), (2.0, 0.8231), (4.0, 0.5782), (9.0, 0.3175), (14.0, 0.219)] {
-            assert!((1.0 / crowd(n) - want).abs() < 0.004, "{n}");
+        for (n, want) in [(1.0, 0.9686), (2.0, 0.8222), (4.0, 0.5783), (6.5, 0.4123), (9.0, 0.3187)] {
+            assert!((1.0 / crowd(n) - want).abs() < 0.002, "{n}");
         }
         // a hard left sound crossed all the way comes out the same on both sides, quieter than uncrossed
         let run = |cross: f32| {
