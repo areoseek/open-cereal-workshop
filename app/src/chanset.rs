@@ -2359,61 +2359,7 @@ fn instrument_panel(ui: &mut Ui, ci: usize, g: &mut cereal_engine::synth::Gen) -
             }
         }
         Kind::Additive => {
-            use cereal_engine::additive::{ix, LFO_SHAPES, TIMBRES};
-            let d = def(g.kind);
-            // (heading, settings shown as knobs, on/off settings)
-            let groups: [(&str, &[usize], &[usize]); 9] = [
-                ("TIMBRE", &[ix::PHASE, ix::LHP, ix::SUB, ix::SUB + 1, ix::SUB + 2, ix::MASK_MIX, ix::MASK_LFO, ix::TREMOLO], &[]),
-                ("EQ", &[5, 6, 7, 8, 9, 10], &[]),
-                ("MASK", &[11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22], &[]),
-                ("AMP", &[ix::ATTACK, ix::DECAY, ix::RELEASE, ix::PLUCK, ix::VOLUME, ix::PITCH, 36, 37, ix::VIBRATO, ix::PITCH_LFO, 42], &[30, 31, 32, 34, 40, 41]),
-                ("FILTER", &[ix::CUTOFF, ix::F_ATTACK, ix::F_DECAY, 46, 47, ix::F_AMOUNT, 52, ix::KEY_TRACK, ix::CUTOFF_LFO, ix::RESONANCE, ix::RES_OFFSET, 58], &[ix::FILTER_ON, 49, 51, 56, 59, 60]),
-                ("UNISON", &[ix::UNI_ORDER, ix::UNI_PAN, ix::UNI_PITCH, ix::UNI_PHASE, 65, 66], &[]),
-                ("PHASER", &[ix::PH_AMOUNT, 96, ix::PH_SCALE, ix::PH_WIDTH, ix::PH_WIDTH_LFO, ix::PH_OFFSET, ix::PH_OFFSET_LFO, ix::PH_SPEED, 74], &[]),
-                ("HARMONIZER", &[ix::HZ_AMOUNT, ix::HZ_WIDTH, ix::HZ_LFO, ix::HZ_STRENGTH, ix::HZ_TYPE, 81], &[78]),
-                ("LFO AND EFFECTS", &[ix::LFO_ATTACK, ix::LFO_SPEED, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95], &[83]),
-            ];
-            ui.horizontal(|ui| {
-                for (label, idx, names) in [("Timbre", ix::TIMBRE, &TIMBRES[..]), ("LFO", ix::LFO_SHAPE, &LFO_SHAPES[..])] {
-                    ui.label(RichText::new(label).color(TEXT_DIM));
-                    let cur = (g.p[idx] as usize).min(names.len() - 1);
-                    egui::ComboBox::from_id_salt(("additive", idx)).width(120.0).selected_text(names[cur]).show_ui(ui, |ui| {
-                        for (i, n) in names.iter().enumerate() {
-                            if ui.selectable_label(i == cur, *n).clicked() && i != cur {
-                                g.p[idx] = i as f32;
-                                changed = true;
-                            }
-                        }
-                    });
-                    ui.add_space(10.0);
-                }
-            });
-            for (title, knobs, toggles) in groups {
-                ui.add_space(3.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(title).strong());
-                    for &i in toggles {
-                        let on = g.p[i] != 0.0;
-                        if ui.selectable_label(on, d.params[i].name).clicked() {
-                            g.p[i] = if on { 0.0 } else { 1.0 };
-                            changed = true;
-                        }
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    for &i in knobs {
-                        let p = &d.params[i];
-                        let mut v = g.p[i];
-                        // a short cap from the setting's name: the last word, or its number
-                        let cap: String = p.name.rsplit(' ').next().unwrap_or(p.name).chars().take(7).collect::<String>().to_uppercase();
-                        let name = p.name;
-                        if cap_knob_for(ui, &cap, &mut v, p.min as f32, p.max as f32, p.def as f32, &|v| format!("{name}: {v:.0}"), Some(cereal_engine::song::Target::ChanParam(ci, i as u16))) {
-                            g.p[i] = v.round();
-                            changed = true;
-                        }
-                    }
-                });
-            }
+            changed |= crate::additive_ui::panel(ui, ci, g);
         }
         Kind::Fm => {
             changed |= fm_panel(ui, g);

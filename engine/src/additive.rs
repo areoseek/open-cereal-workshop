@@ -13,7 +13,7 @@ const TICK: u32 = 128;
 /// The larger instrument's way out: seconds a let go note holds on, and seconds of its half cosine fall.
 const HOLD: f32 = 245.0 / 44100.0;
 const LEAVE: f32 = 420.0 / 44100.0;
-const MAX_M: usize = 2048;
+const MAX_M: usize = 8192;
 const MAX_UNISON: usize = 9;
 
 /// Index of each setting in the instrument's table (`synth::DEFS`).
@@ -29,62 +29,111 @@ pub mod ix {
     pub const ATTACK: usize = 26;
     pub const DECAY: usize = 27;
     pub const RELEASE: usize = 28;
-    pub const PLUCK: usize = 29;
-    pub const PLUCK_MASKED: usize = 30;
-    pub const VOLUME: usize = 33;
-    pub const VEL_VOLUME: usize = 34;
-    pub const PITCH: usize = 35;
-    pub const DETUNE: usize = 36;
-    pub const GRIT: usize = 37;
-    pub const VIBRATO: usize = 38;
-    pub const PITCH_LFO: usize = 39;
-    pub const PORTAMENTO: usize = 40;
-    pub const LEGATO: usize = 41;
-    pub const SLIDE_TIME: usize = 42;
-    pub const FILTER_ON: usize = 43;
-    pub const F_ATTACK: usize = 44;
-    pub const F_DECAY: usize = 45;
-    pub const F_AMOUNT: usize = 48;
-    pub const CUTOFF: usize = 50;
-    pub const KEY_TRACK: usize = 53;
-    pub const CUTOFF_LFO: usize = 54;
-    pub const RESONANCE: usize = 55;
-    pub const RES_OFFSET: usize = 57;
-    pub const UNI_ORDER: usize = 61;
-    pub const UNI_PAN: usize = 62;
-    pub const UNI_PITCH: usize = 63;
-    pub const UNI_PHASE: usize = 64;
-    pub const PH_AMOUNT: usize = 67;
-    pub const PH_SCALE: usize = 68;
-    pub const PH_WIDTH: usize = 69;
-    pub const PH_WIDTH_LFO: usize = 70;
-    pub const PH_OFFSET: usize = 71;
-    pub const PH_OFFSET_LFO: usize = 72;
-    pub const PH_SPEED: usize = 73;
-    pub const HZ_AMOUNT: usize = 75;
-    pub const HZ_WIDTH: usize = 76;
-    pub const HZ_LFO: usize = 77;
-    pub const HZ_STRENGTH: usize = 79;
-    pub const HZ_TYPE: usize = 80;
-    pub const LFO_SHAPE: usize = 82;
-    pub const LFO_ATTACK: usize = 84;
-    pub const LFO_SPEED: usize = 85;
-    pub const CHORUS_TYPE: usize = 86;
-    pub const CHORUS_MIX: usize = 87;
-    pub const DELAY_TYPE: usize = 88;
-    pub const DELAY_VOL: usize = 89;
-    pub const DELAY_FB: usize = 90;
-    pub const DELAY_TIME: usize = 91;
-    pub const REVERB_TYPE: usize = 92;
-    pub const REVERB_VOL: usize = 93;
-    pub const FILTER_TYPE: usize = 98;
-    pub const TIMBRE: usize = 99;
-    pub const COUNT: usize = 100;
+    pub const PLUCK: usize = 31;
+    pub const PLUCK_MASKED: usize = 34;
+    pub const VOLUME: usize = 36;
+    pub const VEL_VOLUME: usize = 37;
+    pub const PITCH: usize = 38;
+    pub const DETUNE: usize = 39;
+    pub const GRIT: usize = 40;
+    pub const VIBRATO: usize = 41;
+    pub const PITCH_LFO: usize = 42;
+    pub const PORTAMENTO: usize = 43;
+    pub const LEGATO: usize = 44;
+    pub const SLIDE_TIME: usize = 45;
+    pub const F_ADAPTIVE: usize = 47;
+    pub const F_ATTACK: usize = 48;
+    pub const F_DECAY: usize = 49;
+    pub const F_AMOUNT: usize = 52;
+    pub const CUTOFF: usize = 54;
+    pub const KEY_TRACK: usize = 57;
+    pub const CUTOFF_LFO: usize = 58;
+    pub const RESONANCE: usize = 59;
+    pub const RES_OFFSET: usize = 61;
+    pub const UNI_ORDER: usize = 65;
+    pub const UNI_PAN: usize = 66;
+    pub const UNI_PITCH: usize = 67;
+    pub const UNI_PHASE: usize = 68;
+    pub const PH_AMOUNT: usize = 71;
+    pub const PH_SCALE: usize = 72;
+    pub const PH_WIDTH: usize = 73;
+    pub const PH_WIDTH_LFO: usize = 74;
+    pub const PH_OFFSET: usize = 75;
+    pub const PH_OFFSET_LFO: usize = 76;
+    pub const PH_SPEED: usize = 77;
+    pub const HZ_AMOUNT: usize = 79;
+    pub const HZ_WIDTH: usize = 80;
+    pub const HZ_LFO: usize = 81;
+    pub const HZ_STRENGTH: usize = 83;
+    pub const HZ_TYPE: usize = 84;
+    pub const LFO_SHAPE: usize = 86;
+    pub const LFO_ATTACK: usize = 88;
+    pub const LFO_SPEED: usize = 89;
+    pub const CHORUS_TYPE: usize = 90;
+    pub const CHORUS_MIX: usize = 91;
+    pub const DELAY_TYPE: usize = 92;
+    pub const DELAY_VOL: usize = 93;
+    pub const DELAY_FB: usize = 94;
+    pub const DELAY_TIME: usize = 95;
+    pub const REVERB_TYPE: usize = 96;
+    pub const REVERB_VOL: usize = 97;
+    pub const FILTER_TYPE: usize = 100;
+    pub const TIMBRE: usize = 104;
+    pub const VEL_ATTACK: usize = 29;
+    pub const VEL_RELEASE: usize = 30;
+    pub const VEL_PLUCK: usize = 32;
+    pub const PLUCK_ALT: usize = 33;
+    pub const PLUCK_RELEASE: usize = 35;
+    pub const VEL_SLIDE: usize = 46;
+    pub const F_ATT_SLOPE: usize = 50;
+    pub const F_DEC_SLOPE: usize = 51;
+    pub const VEL_ENV: usize = 53;
+    pub const CUT_HZ: usize = 55;
+    pub const F_WIDTH: usize = 56;
+    pub const RES_HZ: usize = 60;
+    pub const SELF_OSC: usize = 62;
+    pub const RES_ADAPTIVE: usize = 63;
+    pub const MOTION: usize = 64;
+    pub const UNI_VAR: usize = 69;
+    pub const UNI_TYPE: usize = 70;
+    pub const PH_KEY: usize = 78;
+    pub const VEL_HZ: usize = 82;
+    pub const HZ_POS: usize = 85;
+    pub const LFO_GLOBAL: usize = 87;
+    pub const COMP_MIX: usize = 98;
+    pub const VEL_UNI: usize = 99;
+    pub const PH_TYPE: usize = 101;
+    pub const RES_TYPE: usize = 102;
+    pub const COMP_TYPE: usize = 103;
+    pub const COUNT: usize = 106;
 }
 
-pub const TIMBRES: [&str; 12] = ["Saw", "Square", "Soft saw", "Triangle", "Pulse", "Even", "Stairs", "Bell", "Felt", "Organ", "Drawbars", "Custom"];
-pub const LFO_SHAPES: [&str; 14] =
-    ["Sine", "Triangle", "Saw up", "Saw down", "Square", "Random", "Smooth random", "Half sine", "Filter envelope", "Filter frequency", "Voice random", "Velocity", "Key", "Pitch"];
+/// The lists behind the settings that pick one of several kinds, as (stored value, our title) in the order
+/// a chooser shows them. `None` for a setting that is a plain amount or a switch.
+pub fn choices(i: usize) -> Option<&'static [(u8, &'static str)]> {
+    Some(match i {
+        ix::TIMBRE => &[(0, "Saw"), (1, "Bright saw"), (2, "Brighter saw"), (3, "Shifted saw"), (4, "Shifted saw 2"), (5, "Square saw"), (6, "Square saw 2"), (7, "Burrow"), (8, "Double saw"), (9, "Triple saw"), (10, "Triple saw 2"), (11, "Custom")],
+        ix::FILTER_TYPE => &[
+            (0, "Classic low pass"), (1, "Classic band pass"), (2, "Classic band stop"), (3, "Classic high pass"), (4, "Coarse low pass"), (5, "Coarse band pass"), (6, "Coarse band stop"), (7, "Coarse high pass"),
+            (8, "Mound low pass"), (9, "Stepped low pass"), (10, "Mixed low pass"), (11, "Winding low pass"), (12, "Ridge low pass"), (13, "Seeping low pass"), (14, "Phase sweep"), (15, "Band phase sweep"), (16, "Level band pass"),
+        ],
+        ix::RES_TYPE => &[(0, "Classic"), (1, "Coil"), (2, "Plinth"), (4, "Reed cap"), (3, "Broad bump"), (5, "Twin cone"), (6, "Pit"), (7, "Tunnel"), (8, "Noise")],
+        ix::PH_TYPE => &[(0, "Classic"), (1, "Triangle"), (2, "Ovals"), (4, "Deep"), (3, "Deeper"), (5, "Sheath"), (6, "Pair"), (7, "Falls"), (8, "Box"), (9, "Frequency")],
+        ix::UNI_TYPE => &[(0, "Classic"), (1, "Even"), (2, "Smeared")],
+        ix::HZ_TYPE => &[(0, "Octave up"), (1, "Octave up +1"), (2, "Octave up +2"), (3, "Harmonic up"), (4, "Harmonic up +1")],
+        ix::HZ_POS => &[(0, "Before filter"), (1, "Before phaser"), (2, "Before pluck"), (3, "Last")],
+        ix::PH_SCALE => &[(0, "Octaves"), (1, "Hz"), (2, "Harmonics")],
+        ix::LFO_SHAPE => &[
+            (0, "Sine"), (1, "Smooth saw"), (2, "Smooth pulse"), (3, "Saw"), (4, "Pulse"), (5, "Stairs"), (6, "Triangle"), (7, "Crescent"), (8, "Many sines"),
+            (9, "Filter envelope"), (10, "Filter frequency"), (11, "Voice random"), (12, "Velocity"), (13, "Pitch"),
+        ],
+        ix::CHORUS_TYPE => &[(0, "Off"), (1, "Classic"), (2, "Thick"), (3, "Deep"), (4, "Flanger"), (5, "Flanger 2"), (6, "Stereo"), (7, "Modulation"), (8, "Surround"), (9, "Vibration")],
+        ix::DELAY_TYPE => &[(0, "Off"), (1, "Classic"), (2, "Ping-pong"), (3, "Stereo")],
+        ix::REVERB_TYPE => &[(0, "Off"), (1, "Classic"), (2, "Large hall"), (3, "Cathedral"), (4, "Venue"), (5, "Drum room"), (6, "Small studio")],
+        ix::COMP_TYPE => &[(0, "Off"), (1, "Limiting"), (2, "Warming"), (3, "Heating"), (4, "Distortion")],
+        _ => return None,
+    })
+}
 
 /// The chorus, echo and room after the voices. Each one's type at 0 is off (a fresh one plays dry against
 /// the reference, and the first type of each is the only one that does), as is a knob at nothing. The
@@ -109,37 +158,89 @@ pub fn tail(p: &[f32]) -> crate::tailfx::Set {
     }
 }
 
+/// A reading of a measured curve (decibels on an even grid from `from` in steps of 1/80) as a gain.
+fn curve(tab: &[f32], from: f32, at: f32) -> f32 {
+    let x = ((at - from) * 80.0).clamp(0.0, (tab.len() - 1) as f32);
+    let i = (x as usize).min(tab.len() - 2);
+    let db = tab[i] + (tab[i + 1] - tab[i]) * (x - i as f32);
+    if db <= -119.0 { 0.0 } else { 10f32.powf(db / 20.0) }
+}
+
+/// What the filter of the given kind leaves of a partial. `x` is the partial's distance from the filter's
+/// nominal frequency and `shift` how far a slope's start sits below it, both in slope widths (octaves over
+/// the width in octaves, or the same in plain frequency when the filter is set to work that way).
+///
+/// All measured on renders of single low notes, one setting at a time: the first kinds fall in a straight
+/// line of 36 dB a width, the coarse ones along the fourth power of a quarter cosine wave that reaches
+/// nothing after one width; the band kinds sit on the nominal frequency itself.
+pub fn filter_gain(kind: u8, x: f32, shift: f32) -> f32 {
+    use crate::additive_shapes as t;
+    use std::f32::consts::FRAC_PI_2;
+    let line = |p: f32| 10f32.powf(-1.8 * p.max(0.0));
+    let cos4 = |p: f32| (p.clamp(0.0, 1.0) * FRAC_PI_2).cos().powi(4);
+    let (lp, hp, q) = (x + shift, shift - x, x.abs());
+    match kind {
+        0 => line(lp),
+        1 => line(q),
+        2 => 1.0 - line(q),
+        3 => line(hp),
+        4 => cos4(lp),
+        5 => cos4(q),
+        6 => 1.0 - 2.0 * cos4(q).sqrt() + cos4(q),
+        7 => cos4(hp),
+        8 => if lp < 2.0 / 3.0 { (lp.max(0.0) * 1.5 * FRAC_PI_2).cos() } else { 0.0 },
+        9 => if lp <= -0.1 { 1.0 } else { curve(&t::LEG, -0.1, lp) },
+        10 => if lp <= -0.1 { 1.0 } else { curve(&t::MIXED, -0.1, lp) },
+        11 => if lp <= -0.1 { 1.0 } else { curve(&t::WINDING, -0.1, lp) },
+        12 => if lp >= 0.1 { line(lp) } else { curve(&t::RIDGE, -1.7, lp) },
+        13 => 10f32.powf(-0.9 * (lp.clamp(0.0, 1.0) * FRAC_PI_2).sin().powi(2)),
+        14 => if x < -1.0 { 1.0 } else { (x * std::f32::consts::PI).cos().powi(4) },
+        15 => curve(&t::BAND_SWEEP, 0.0, q),
+        _ => cos4((q - 1.0 / 3.0) * 1.5),
+    }
+}
+
+/// The gain of a knob that cuts and lifts (equaliser bands, volume), `v` -1..1. Measured: silent at the bottom,
+/// 0.37 half way down, 2.14 half way up, 4 at the top.
+fn boost(v: f32) -> f32 {
+    (1.0 + 1.691 * v + 1.015 * v * v + 0.324 * v * v * v).max(0.0)
+}
+
+/// The curve the level-like knobs follow (mask steps, harmonic protection): half way is 0.23, a quarter 0.082.
+fn taper(x: f32) -> f32 {
+    ((2.4 * x.clamp(0.0, 1.0)).exp() - 1.0) / (2.4f32.exp() - 1.0)
+}
+
+/// A fall from 1 to 0 over `u` 0..1, bent by `slope` (-1..1): a straight line at 0, an exponential fall that
+/// is quick at first when negative, one that holds on and drops at the end when positive.
+fn bend(u: f32, slope: f32) -> f32 {
+    let k = 13.7 * slope.abs();
+    if k < 1e-3 {
+        return 1.0 - u;
+    }
+    let fall = |u: f32| ((-k * u).exp() - (-k).exp()) / (1.0 - (-k).exp());
+    if slope < 0.0 { fall(u) } else { 1.0 - fall(1.0 - u) }
+}
+
+/// The width of a filter slope in octaves for the width knob (0..1000): half an octave to eight.
+pub fn filter_width(knob: f32) -> f32 {
+    2.0 * 2f32.powf((knob - 500.0) / 250.0)
+}
+
 /// Level of harmonic `k` (1 is the note itself) for the built-in timbres.
 fn timbre(kind: u8, k: usize) -> f32 {
     let kf = k as f32;
     let odd = k % 2 == 1;
+    // levels measured harmonic by harmonic on each shape; 3 and 4 differ from the plain one in phase only
     match kind {
-        1 => if odd { 1.0 / kf } else { 0.0 },
-        2 => 1.0 / kf.powf(1.5),
-        3 => if odd { 1.0 / (kf * kf) } else { 0.0 },
-        4 => (kf * std::f32::consts::PI * 0.25).sin().abs() / kf * 1.4,
-        5 => if k == 1 || !odd { 1.0 / kf } else { 0.0 },
-        6 => if k % 4 == 1 { 1.0 / kf } else if odd { 0.5 / kf } else { 0.0 },
-        7 => match k {
-            1 => 1.0,
-            3 => 0.5,
-            4 => 0.35,
-            7 => 0.3,
-            9 => 0.2,
-            13 => 0.12,
-            _ => 0.02 / kf,
-        },
-        8 => 1.0 / (kf * kf),
-        9 => if k.is_power_of_two() && k <= 16 { 1.0 / kf.sqrt() } else { 0.0 },
-        10 => match k {
-            1 => 1.0,
-            2 => 0.8,
-            3 => 0.7,
-            4 => 0.5,
-            6 => 0.35,
-            8 => 0.3,
-            _ => 0.0,
-        },
+        1 => 1.414 / (kf + 1.0),
+        2 => 2.0 / (kf + 3.0),
+        5 => if odd || k == 2 { 1.1 / kf } else { 1.1 / (kf * (kf - 1.0)) },
+        6 => if odd || k == 2 { 1.1 / kf } else { 1.1 / (kf * (kf - 1.0).powf(0.2)) },
+        7 => 0.566 * (1.0 / kf + 0.79 / (kf * kf) + 1.3 / (kf * kf * kf)),
+        8 => if odd { 0.5 / kf } else { 1.49 / (kf + 0.55) },
+        9 => if odd { 0.339 / kf } else if k % 4 == 0 { 2.31 / (kf + 1.7) } else { 0.955 / (kf + 0.43) },
+        10 => if odd { 0.5 / kf } else if k % 4 == 0 { 1.51 / (kf + 1.1) } else { 0.977 / (kf + 0.3) },
         _ => 1.0 / kf,
     }
 }
@@ -185,13 +286,17 @@ impl Patch {
 
     /// Seconds for the level to rise at the start of a note.
     pub fn attack_s(&self) -> f32 {
-        3.0 * (self.v(ix::ATTACK) / 1000.0).powi(3)
+        // measured at four places on the knob: a straight rise, 0.45 s long at the middle
+        let k = self.v(ix::ATTACK);
+        let x = (k - 500.0) / 250.0;
+        if k <= 0.0 { 0.0 } else { (-0.799 + 1.1793 * x + 0.103 * x * x - 0.0453 * x * x * x).exp() }
     }
 
-    /// Time constant, in seconds, of the fall once the note is let go. Measured on the factory test: a
-    /// quarter of the knob falls 613 dB a second.
+    /// Time constant, in seconds, of the fall once the note is let go. Measured at four places on the knob:
+    /// 613, 170, 51.5 and 16 dB a second from a quarter of its travel to the end.
     pub fn release_s(&self) -> f32 {
-        (0.2267 * (self.v(ix::RELEASE) / 1000.0).powi(2)).max(0.001)
+        let x = (self.v(ix::RELEASE) - 500.0) / 250.0;
+        (8.686 / (5.136 - 1.238 * x + 0.03 * x * x).exp()).max(0.001)
     }
 }
 
@@ -245,10 +350,17 @@ pub struct Voice {
     sr: f32,
     key: f32,
     vel: f32,
+    /// The note's velocity as written, 0..1 (a default note is 0.78).
+    pub touch: f32,
     seed: u32,
     /// Wave length in frames of the table; the table holds two cycles of the note so the sub harmonics fit.
     m: usize,
     tab: [Vec<f32>; 2],
+    /// The same waves a quarter turn on, filled only while harmonic detune is in use.
+    tabq: [Vec<f32>; 2],
+    /// The gap between harmonics against the note's pitch, and how far each unison voice has been moved along.
+    spread: f32,
+    sh: [f64; MAX_UNISON],
     cur: usize,
     blend: bool,
     fade: f32,
@@ -258,11 +370,9 @@ pub struct Voice {
     im: Vec<f32>,
     /// Random start phase per harmonic, in cycles.
     hphase: Vec<f32>,
-    /// How far each harmonic has run ahead of its place, in cycles (harmonic detune and grit).
-    drift: Vec<f32>,
     last: [f32; 9],
     primed: bool,
-    ph: [f32; MAX_UNISON],
+    ph: [f64; MAX_UNISON],
     ratio: [f32; MAX_UNISON],
     gl: [f32; MAX_UNISON],
     gr: [f32; MAX_UNISON],
@@ -279,7 +389,12 @@ pub struct Voice {
     /// Frames between two looks at the settings, and frames since the note was let go.
     tick_len: u32,
     gone: u32,
+    /// When the key was let go, in seconds from the note's start.
+    left: Option<f32>,
     lfo_ph: f32,
+    so_ph: f32,
+    so_inc: f32,
+    so_amp: f32,
     lfo_hold: f32,
     lfo_prev: f32,
     vrand: f32,
@@ -297,15 +412,20 @@ impl Voice {
     pub fn start(patch: &Patch, sr: f32, key: u8, vel: f32, dphase: f32, seed: u32) -> Self {
         let mut seed = seed | 1;
         let n0 = (0.45 / dphase.max(1e-6)) as usize;
-        let m = if n0 > 128 { MAX_M } else { MAX_M / 2 };
+        // a dozen table points or more for the highest harmonic's cycle
+        let m = (12 * n0).next_power_of_two().clamp(1024, MAX_M);
         let order = (patch.v(ix::UNI_ORDER) as usize).clamp(1, MAX_UNISON);
         let mut v = Self {
             sr,
             key: key as f32,
             vel,
+            touch: 0.78 * vel.max(0.0).sqrt(),
             seed,
             m,
             tab: [vec![0.0; m + 1], vec![0.0; m + 1]],
+            tabq: [Vec::new(), Vec::new()],
+            spread: 1.0,
+            sh: [0.0; MAX_UNISON],
             cur: 0,
             blend: false,
             fade: 0.0,
@@ -314,7 +434,6 @@ impl Voice {
             re: vec![0.0; m],
             im: vec![0.0; m],
             hphase: Vec::new(),
-            drift: Vec::new(),
             last: [f32::NAN; 9],
             primed: false,
             ph: [0.0; MAX_UNISON],
@@ -331,7 +450,11 @@ impl Voice {
             held: true,
             tick_len: TICK,
             gone: 0,
+            left: None,
             lfo_ph: 0.0,
+            so_ph: 0.0,
+            so_inc: 0.0,
+            so_amp: 0.0,
             lfo_hold: 0.0,
             lfo_prev: 0.0,
             vrand: 0.0,
@@ -356,7 +479,7 @@ impl Voice {
             v.gl[u] = g * (1.0 - side.max(0.0));
             v.gr[u] = g * (1.0 + side.min(0.0));
             // measured: a note starts half a cycle in, at the middle of the saw's ramp (the table holds two cycles)
-            v.ph[u] = (0.25 + free + if u > 0 { rnd(&mut seed) * uph } else { 0.0 }).fract();
+            v.ph[u] = (0.25 + free + if u > 0 { rnd(&mut seed) * uph } else { 0.0 }).fract() as f64;
         }
         v.seed = seed;
         v
@@ -397,42 +520,104 @@ impl Voice {
     fn tick(&mut self, patch: &Patch, dphase: f32) {
         let t = self.frames as f32 / self.sr;
         let m = self.m;
-        let n = ((0.45 / dphase.max(1e-6)) as usize).clamp(1, m / 4 - 1);
+        // harmonic detune stretches the gaps between the harmonics: the second one sits `spread` times the
+        // note's pitch above the first, and so on up (measured: 1200 cents doubles the gap, -1200 halves it).
+        // That is the plain wave played `spread` times as fast and then moved along by a fixed number of Hz,
+        // which is how it is made here: the wave's quarter-turned twin comes out of the same transform.
+        let spread = 2f32.powf(patch.v(ix::DETUNE) / 1200.0);
+        if !self.primed && spread != 1.0 {
+            // the harmonics line up where the wave's own cycle begins
+            for u in 0..MAX_UNISON {
+                let turn = 2.0 * self.ph[u];
+                self.ph[u] = (spread as f64 * turn * 0.5).rem_euclid(1.0);
+                self.sh[u] = ((1.0 - spread as f64) * turn).rem_euclid(1.0);
+            }
+        }
+        self.spread = spread;
+        let n = ((((0.45 / dphase.max(1e-6)) - 1.0) / spread + 1.0) as usize).clamp(1, m / 4 - 1);
         let f0 = dphase * self.sr;
 
         // filter envelope
-        let fa = 3.0 * (patch.v(ix::F_ATTACK) / 1000.0).powi(3);
-        // measured on the factory test: the fall is a straight line in octaves, two a second at the rest settings
-        let fd = (10.9 * (patch.v(ix::F_DECAY) / 1000.0).powi(3)).max(0.002);
-        let fenv = if t < fa { t / fa } else { (1.0 - (t - fa) / fd).max(0.0) };
+        // measured: both stages last 3.66 s at the middle of their knobs and about six times as long for
+        // each quarter turn (a little less towards the top); the slope knobs bend the line into an exponential one way or the other
+        let stage = |knob: f32| {
+            let x = (knob - 500.0) / 250.0;
+            if knob <= 0.0 { 0.0 } else { 3.655 * (1.82 * x - 0.091 * x * x).exp() }
+        };
+        let (fa, fd) = (stage(patch.v(ix::F_ATTACK)), stage(patch.v(ix::F_DECAY)));
+        let fenv = if t < fa {
+            1.0 - bend(t / fa, -patch.v(ix::F_ATT_SLOPE) / 1000.0)
+        } else if fd > 0.0 {
+            bend(((t - fa) / fd).min(1.0), patch.v(ix::F_DEC_SLOPE) / 1000.0)
+        } else {
+            0.0
+        };
         let lfo = self.lfo(patch, t, fenv);
 
         // level and pitch movement
         let dec = patch.v(ix::DECAY);
-        self.level = if dec < 1000.0 { (-t / (10.0 * (dec / 1000.0).powi(3) + 0.004)).exp() } else { 1.0 } * patch.v(ix::VOLUME) / 1000.0;
+        self.level = if dec < 1000.0 {
+            // measured: 495, 66, 10.7 and 1.87 dB a second from the start of the knob to three quarters, after a
+            // short wait
+            let x = (dec - 500.0) / 250.0;
+            10f32.powf(-(t - 0.012).max(0.0) * (2.373 - 1.7655 * x + 0.035 * x * x - 0.0165 * x * x * x).exp() / 20.0)
+        } else {
+            1.0
+        } * boost(patch.v(ix::VOLUME) / 1000.0 - 1.0);
         if patch.v(ix::VEL_VOLUME) == 0.0 && self.vel > 0.0 {
             // the link from velocity is off: every note is as loud as a full one
             self.level *= (1.0 / self.vel).min(16.0);
         }
         let trem = patch.v(ix::TREMOLO) / 1000.0;
-        self.trem = if trem > 0.0 { (t * 5.5 * TAU).sin() * trem * 0.8 } else { 0.0 };
-        let vib = patch.v(ix::VIBRATO) / 1000.0 * 60.0 * (t * 6.0 * TAU).sin();
+        self.trem = trem;
+        // measured: six swings a second, 75 cents either way at the top of the knob, growing in over the
+        // first third of a second
+        let vib = patch.v(ix::VIBRATO) / 1000.0 * 75.0 * (t / 0.332).min(1.0).powi(2) * ((t * 6.0 + 0.3782) * TAU).sin();
         let cents = patch.v(ix::PITCH) + vib + patch.v(ix::PITCH_LFO) / 1000.0 * 1200.0 * lfo;
         self.pitch_mul = 2f32.powf(cents / 1200.0);
 
-        // filter position, in octaves above 20 Hz
-        let filter_on = patch.v(ix::FILTER_ON) != 0.0;
-        let cut = patch.v(ix::CUTOFF) / 8192.0 * 10.0
-            + patch.v(ix::F_AMOUNT) / 1000.0 * 5.343 * fenv
+        // filter position, in octaves above the C two octaves under middle C (measured: the knob counts
+        // thousandths of an octave from there); key tracking turns about 128 Hz
+        let cut = patch.v(ix::CUTOFF) / 1000.0
+            + {
+                // the envelope either swings the cutoff 4.1 octaves both ways around the knob, or (adaptive)
+                // starts as far towards the end of the knob's travel as the amount says and comes back to it
+                let amt = patch.v(ix::F_AMOUNT) / 1000.0 * if patch.v(ix::VEL_ENV) != 0.0 { self.touch } else { 1.0 };
+                let knob = patch.v(ix::CUTOFF) / 1000.0;
+                if patch.v(ix::F_ADAPTIVE) == 0.0 {
+                    amt * 4.096 * (2.0 * fenv - 1.0)
+                } else if amt > 0.0 {
+                    amt * (8.192 - knob) * fenv
+                } else {
+                    amt * knob * fenv
+                }
+            }
             + patch.v(ix::CUTOFF_LFO) / 1000.0 * 4.0 * lfo
-            + patch.v(ix::KEY_TRACK) / 1000.0 * (self.key - 60.0) / 12.0;
+            + patch.v(ix::KEY_TRACK) / 1000.0 * (f0 / self.pitch_mul / 128.0).max(1e-3).log2();
         let res = patch.v(ix::RESONANCE) / 1000.0;
-        let open = !filter_on || (cut >= 9.99 && res == 0.0);
+        // the bell voice shares this engine and has no filter
+        let open = patch.rise > 0.0;
 
         let pluck = patch.v(ix::PLUCK);
-        let pt = 6.0 * (pluck / 1000.0).powi(3) + 0.01;
         let pluck_on = pluck < 1000.0;
-        let pluck_t = if pluck_on { (t / pt).min(12.0) } else { 0.0 };
+        if !self.held && self.left.is_none() {
+            self.left = Some(t);
+        }
+        // the pluck takes the same number of dB a second off each harmonic for every step up the series
+        // (measured: 160, 49, 10.1, 1.86 a second from the start of the knob to three quarters); a softer note
+        // plucks faster when velocity is linked, and it can wait for the key to be let go
+        let pluck_t = if pluck_on {
+            let knob = pluck * if patch.v(ix::VEL_PLUCK) != 0.0 { (self.touch / 0.78).min(1.0) } else { 1.0 };
+            let x = (knob - 500.0) / 250.0;
+            let since = if patch.v(ix::PLUCK_RELEASE) != 0.0 { self.left.map_or(0.0, |l| t - l) } else { t };
+            // the rate's logarithm at the knob's quarters and at nine tenths, lines drawn between
+            const KNOTS: [(f32, f32); 5] = [(-2.0, 5.075), (-1.0, 3.896), (0.0, 2.3125), (1.0, 0.6206), (1.6, -0.409)];
+            let i = KNOTS.iter().rposition(|k| k.0 <= x).unwrap_or(0).min(KNOTS.len() - 2);
+            let ln = KNOTS[i].1 + (KNOTS[i + 1].1 - KNOTS[i].1) * (x - KNOTS[i].0) / (KNOTS[i + 1].0 - KNOTS[i].0);
+            (since.max(0.0) * ln.exp()).min(400.0)
+        } else {
+            0.0
+        };
 
         let mask_mix = (patch.v(ix::MASK_MIX) / 1000.0 + patch.v(ix::MASK_LFO) / 1000.0 * (lfo * 0.5 + 0.5)).clamp(0.0, 1.0);
         let ph_amt = patch.v(ix::PH_AMOUNT) / 1000.0;
@@ -442,15 +627,10 @@ impl Voice {
         let ph_width = if ph_amt > 0.0 { (patch.v(ix::PH_WIDTH) / 5000.0 * (1.0 + patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo)).max(0.02) } else { 0.0 };
         let hz_amt = (patch.v(ix::HZ_AMOUNT) / 1000.0 * (1.0 + patch.v(ix::HZ_LFO) / 1000.0 * lfo)).clamp(0.0, 1.0);
 
-        // harmonic detune spreads the harmonics apart (or draws them together) the higher they lie, and
-        // grit shakes each one; both are done by letting the harmonics' phases run, so the wave is redrawn
-        // on every tick while either is on. How far the knobs reach is an estimate.
-        let detune = patch.v(ix::DETUNE);
+        // grit shakes each harmonic by letting its phase wander, so the wave is redrawn on every tick while
+        // it is on. How far the knob reaches is an estimate.
         let grit = patch.v(ix::GRIT) / 1000.0;
-        let moving = detune != 0.0 || grit != 0.0;
-        if moving && self.drift.len() < n {
-            self.drift.resize(n, 0.0);
-        }
+        let moving = grit != 0.0;
         // harmonics that rise on their own: looked at often while the fast ones come in, and each wave is the
         // one for the end of its fade in
         let first = !self.primed;
@@ -463,7 +643,10 @@ impl Voice {
                 rise_t = -1.0;
             }
         }
-        let key = [n as f32, if open { 99.0 } else { cut }, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }, rise_t];
+        // a wave is fully in one tick after it is drawn
+        // the count starts half a cycle in, like the note itself
+        let grit_t = 0.5 / f0 + if first { 0.0 } else { t + self.tick_len as f32 / self.sr };
+        let key = [n as f32, cut, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }, rise_t];
         if self.primed && key.iter().zip(&self.last).all(|(a, b)| (a - b).abs() < 1e-4) {
             self.blend = false;
             return;
@@ -473,17 +656,39 @@ impl Voice {
         // harmonic levels
         let kind = patch.v(ix::TIMBRE) as u8;
         let custom = patch.custom.as_ref().filter(|_| kind == 11);
-        let lhp = patch.v(ix::LHP) / 256.0;
-        let ftype = (patch.v(ix::FILTER_TYPE) as usize).min(4);
-        let slope = [8.0f32, 4.0, 3.0, 2.0, 1.0][ftype];
-        let fc = 20.0 * 2f32.powf(cut.clamp(-2.0, 11.0));
-        let res_at = (fc * 2f32.powf(patch.v(ix::RES_OFFSET) / 1200.0)).max(1.0);
+        let lhp = taper(patch.v(ix::LHP) / 1024.0);
+        let ftype = patch.v(ix::FILTER_TYPE) as u8;
+        let fc = 65.406 * 2f32.powf(cut.clamp(-4.0, 10.0));
+        let span = filter_width(patch.v(ix::F_WIDTH));
+        // wide slopes start a little under the nominal frequency
+        let lead = (span.max(1.5) - 1.5) / 3.0;
+        let in_hz = patch.v(ix::CUT_HZ) != 0.0;
+        // set to plain frequency, a slope is about as many nominal frequencies wide as it was octaves
+        // (measured at two widths, a power law drawn through them)
+        let (hz_span, hz_lead) = (1.0465 * span.powf(0.918) * fc, 0.0572 * span.powf(0.93) * fc);
+        // the resonance: a bump (sixth power of a cosine) by which the filtered level is raised, sitting where
+        // the slope starts, or on the nominal frequency for the band kinds. It is an octave wide; set to plain
+        // frequency 1325 Hz to either side; the adaptive kind is a little taller and seven or so of the note's
+        // harmonics wide. Its height grows as a power of the knob and with the octaves a harmonic lies above the
+        // note. All measured.
+        let res_off = patch.v(ix::RES_OFFSET) / 1200.0;
+        let res_at = res_off + match ftype { 3 | 7 => lead, 1 | 2 | 5 | 6 | 14 | 15 | 16 => 0.0, _ => -lead };
+        let res_hz = fc * 2f32.powf(res_at);
+        let res_adaptive = patch.v(ix::RES_ADAPTIVE) != 0.0;
+        let res_in_hz = patch.v(ix::RES_HZ) != 0.0;
+        let res_power = if res > 0.0 { 1.781 * ((2.389 * res).exp() - 1.0) } else { 0.0 };
+        let res_g = res_power / 4.786 * match (res_adaptive, res_in_hz) { (true, false) => 1.215, (true, true) => 1.097, _ => 1.0 };
+        let res_floor = if res_in_hz && !res_adaptive { 1.5 } else { 0.143 };
+        // self oscillation: a sine on the resonance, as loud as the knob and the resonance make it
+        self.so_inc = (res_hz / self.sr).min(0.45);
+        self.so_amp = 0.0597 * patch.v(ix::SELF_OSC) / 1024.0 * res_power;
         let eq: [f32; 6] = std::array::from_fn(|b| {
             let v = patch.v(ix::EQ + b) / 1024.0;
-            if v < 0.0 { (1.0 + v).powi(2) } else { 1.0 + 3.0 * v }
+            boost(v)
         });
         let scale = patch.v(ix::PH_SCALE) as u8;
         let masked_pluck = patch.v(ix::PLUCK_MASKED) != 0.0;
+        let alt_pluck = patch.v(ix::PLUCK_ALT) != 0.0;
         self.re[..m].fill(0.0);
         self.im[..m].fill(0.0);
         let hz_type = patch.v(ix::HZ_TYPE) as usize;
@@ -515,22 +720,42 @@ impl Voice {
             // floating equaliser: bands sit on harmonics 1, 2, 4, 8, 16, 32
             let x = kf.log2().min(5.0);
             let b = (x as usize).min(4);
-            a *= eq[b] + (eq[b + 1] - eq[b]) * (x - b as f32);
-            let keep = (lhp - (kf - 1.0)).clamp(0.0, 1.0);
-            let mval = patch.v(ix::MASK + (k - 1) % 12) / 1000.0;
+            let w = x - b as f32;
+            let eq_gain = eq[b] + (eq[b + 1] - eq[b]) * w * w * (3.0 - 2.0 * w);
+            a *= eq_gain;
+            // what the mask, the pluck and the filter take away, the protection gives back to the first three
+            // harmonics: all of it to the first with the knob full, a twelfth of that a step up, then far less
+            let keep = match k {
+                1 => lhp,
+                2 => lhp * 0.0827,
+                3 => lhp * 0.000566,
+                _ => 0.0,
+            };
+            let mval = taper(patch.v(ix::MASK + (k - 1) % 12) / 1000.0);
+            let bare = a;
             if mask_mix > 0.0 {
-                a *= 1.0 - mask_mix * (1.0 - mval) * (1.0 - keep);
+                a *= 1.0 - mask_mix * (1.0 - mval);
             }
             if pluck_on {
-                let rate = if masked_pluck { (kf - 1.0).powf(0.6) * (1.5 - mval) } else { (kf - 1.0).powf(0.6) };
-                a *= (-pluck_t * rate).exp();
+                // the alternative pluck spares what the equaliser lifts and hurries what it cuts (measured at
+                // one lift and one cut); how the mask steers it is an estimate
+                let steer = if alt_pluck { eq_gain.max(1e-3).powf(-0.85) } else if masked_pluck { 1.0 + mask_mix * (0.5 - mval) } else { 1.0 };
+                a *= 10f32.powf(-pluck_t * kf * steer / 20.0);
             }
             if !open {
+                // the filter goes by each harmonic's place in the series, wherever detune has put it
                 let f = kf * f0;
-                // the first type measured as a straight 18 dB an octave from a sharp corner
-                let low = if ftype == 0 { (fc / f).powi(3).min(1.0) } else { 1.0 / (1.0 + (f / fc).powf(2.0 * slope)).sqrt() };
-                let d = (f / res_at).log2() / 0.18;
-                a *= low + res * 5.0 * (-d * d).exp();
+                let oct = (f / fc).log2();
+                a *= if in_hz { filter_gain(ftype, (f - fc) / hz_span, hz_lead / hz_span) } else { filter_gain(ftype, oct / span, lead / span) };
+                let d = if res_adaptive { (f - res_hz) / (if res_in_hz { 12.8 } else { 7.4 } * f0) } else if res_in_hz { (f - res_hz) / 2650.0 } else { oct - res_at };
+                if keep > 0.0 {
+                    a += (bare - a) * keep;
+                }
+                if res_g > 0.0 && d.abs() < 0.5 {
+                    a *= 1.0 + res_g * (kf.log2() - res_floor).max(0.0) * (d * std::f32::consts::PI).cos().powi(6);
+                }
+            } else if keep > 0.0 {
+                a += (bare - a) * keep;
             }
             if rise_t >= 0.0 && rise > 0.0 {
                 a *= 1.0 - (-rise * kf * f0 * rise_t).exp();
@@ -548,40 +773,46 @@ impl Voice {
             }
             let phi = match custom {
                 Some((_, ph)) => ph.get(k - 1).copied().unwrap_or(0.0),
-                None => 0.0,
+                None => match (kind, k % 4) {
+                    (3 | 5 | 6, 0 | 2) => 0.25,
+                    (7, 0 | 2) => -0.25,
+                    (4, 2) => 0.5,
+                    _ => 0.0,
+                },
             } + self.hphase.get(k - 1).copied().unwrap_or(0.0);
             let phi = if moving {
-                let d = &mut self.drift[k - 1];
-                if detune != 0.0 {
-                    // the sixteenth harmonic moves by the knob's own cents, lower ones by less
-                    let ratio = 2f32.powf(detune * kf.log2() / 4800.0) - 1.0;
-                    *d += (kf * dphase * ratio * self.tick_len as f32).clamp(-0.45, 0.45);
-                }
-                if grit != 0.0 {
-                    // turned left, the shaking grows with the harmonic number
-                    let reach = if grit < 0.0 { (kf / 16.0).min(1.0) } else { 1.0 };
-                    *d += (rnd(&mut self.seed) - 0.5) * grit.abs() * 0.5 * reach;
-                }
-                *d = d.fract();
-                phi + *d
+                // measured: each harmonic sits a little off its place, by an amount that swings once every
+                // fifteen harmonics, so it runs ahead or behind steadily
+                let off = -grit * 0.177 * ((kf - 1.0) * TAU / 15.0).sin();
+                phi + (off as f64 * f0 as f64 * grit_t as f64).fract() as f32
             } else {
                 phi
             };
+            // make up what reading the table along straight lines takes from the high harmonics
+            let u = std::f32::consts::PI * 2.0 * kf / m as f32;
+            let a = a * (u / u.sin()).powi(2).min(2.0);
             let (s, c) = (phi * TAU).sin_cos();
             self.re[2 * k] = a * s;
             self.im[2 * k] = -a * c;
         }
-        // the three sub sliders: an octave under the note, then its third and fourth harmonics
-        for (i, bin) in [1usize, 3, 4].into_iter().enumerate() {
-            let a = patch.v(ix::SUB + i) / 1024.0;
-            if a > 0.0 && bin < m / 2 {
-                self.im[bin] -= a;
+        // the three sub sliders: an octave under the note, then that tone's third and fifth harmonics
+        for (i, (bin, level)) in [(1usize, -1.0), (3, 0.667), (5, -0.4)].into_iter().enumerate() {
+            let a = patch.v(ix::SUB + i) / 1024.0 * level;
+            if a != 0.0 && bin < m / 2 {
+                self.re[bin] += a;
             }
         }
         synth_fft(&mut self.re[..m], &mut self.im[..m]);
         let next = if self.primed { 1 - self.cur } else { self.cur };
         self.tab[next][..m].copy_from_slice(&self.re[..m]);
         self.tab[next][m] = self.re[0];
+        if spread != 1.0 {
+            for q in &mut self.tabq {
+                q.resize(m + 1, 0.0);
+            }
+            self.tabq[next][..m].copy_from_slice(&self.im[..m]);
+            self.tabq[next][m] = self.im[0];
+        }
         self.blend = self.primed;
         if self.primed {
             // `cur` stays the wave being left until the fade is done
@@ -619,26 +850,44 @@ impl Voice {
             self.count = 0;
         }
         self.frames += 1;
-        let m = self.m as f32;
+        let m = self.m as f64;
         let (a, b) = (&self.tab[self.cur], &self.tab[1 - self.cur]);
-        let inc = dphase * self.pitch_mul * 0.5;
+        let inc = dphase as f64 * self.pitch_mul as f64 * 0.5;
         let mut out = [0.0f32; 2];
         for u in 0..self.order {
             let x = self.ph[u] * m;
             let i = (x as usize).min(self.m - 1);
-            let fr = x - i as f32;
+            let fr = (x - i as f64) as f32;
             let mut s = a[i] + (a[i + 1] - a[i]) * fr;
             if self.blend {
                 let s2 = b[i] + (b[i + 1] - b[i]) * fr;
                 s += (s2 - s) * self.fade;
             }
+            let step = (inc * self.ratio[u] as f64 * self.spread as f64).min(0.24);
+            if self.spread != 1.0 && self.tabq[0].len() > i + 1 {
+                let (qa, qb) = (&self.tabq[self.cur], &self.tabq[1 - self.cur]);
+                let mut q = qa[i] + (qa[i + 1] - qa[i]) * fr;
+                if self.blend {
+                    let q2 = qb[i] + (qb[i + 1] - qb[i]) * fr;
+                    q += (q2 - q) * self.fade;
+                }
+                let (sn, cs) = ((self.sh[u] as f32) * TAU).sin_cos();
+                s = s * cs - q * sn;
+                self.sh[u] = (self.sh[u] + inc * 2.0 * self.ratio[u] as f64 * (1.0 - self.spread as f64)).rem_euclid(1.0);
+            }
             out[0] += s * self.gl[u];
             out[1] += s * self.gr[u];
-            let p = self.ph[u] + (inc * self.ratio[u]).min(0.24);
+            let p = self.ph[u] + step;
             self.ph[u] = if p >= 1.0 { p - 1.0 } else { p };
         }
         if self.blend {
             self.fade = (self.fade + 1.0 / self.tick_len as f32).min(1.0);
+        }
+        if self.so_amp > 0.0 {
+            let s = self.so_amp * (self.so_ph * TAU).sin();
+            out[0] += s;
+            out[1] += s;
+            self.so_ph = (self.so_ph + self.so_inc).fract();
         }
         if self.held {
             let a = patch.attack_s() * self.sr;
@@ -652,12 +901,27 @@ impl Voice {
                 self.gone += 1;
             }
             let g = self.level * 0.5304 * (0.5 + 0.5 * (x * std::f32::consts::PI).cos());
-            return [out[0] * g * (1.0 - self.trem.max(0.0)), out[1] * g * (1.0 + self.trem.min(0.0))];
+            let (tl, tr) = self.sides();
+            return [out[0] * g * tl, out[1] * g * tr];
         }
         let lag = if self.held { 0.00215 } else { 0.006 };
         self.env_out += (self.env - self.env_out) * (1.0 - (-1.0 / (lag * self.sr)).exp());
         let g = self.level * 0.5304 * self.env_out;
-        [out[0] * g * (1.0 - self.trem.max(0.0)), out[1] * g * (1.0 + self.trem.min(0.0))]
+        let (tl, tr) = self.sides();
+        [out[0] * g * tl, out[1] * g * tr]
+    }
+
+    /// The tremolo's hold on the two sides. Measured: the sound swings from side to side five times a second,
+    /// each side following the arch of a half sine down to silence at full depth, the knob mixing that with
+    /// the steady sound, and the depth coming in over the first tenth of a second.
+    fn sides(&self) -> (f32, f32) {
+        if self.trem <= 0.0 {
+            return (1.0, 1.0);
+        }
+        let t = self.frames as f32 / self.sr;
+        let d = self.trem * (t * 10.0).min(1.0);
+        let (s, c) = ((t * 5.0 + 0.4225) * std::f32::consts::PI).sin_cos();
+        (1.0 - d + d * 1.255 * s.abs(), 1.0 - d + d * 1.255 * c.abs())
     }
 }
 
@@ -708,13 +972,14 @@ mod tests {
     #[test]
     fn harmonic_detune_moves_the_upper_harmonics_and_grit_roughens_them() {
         let mut p = patch();
-        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::CUTOFF] = 8192.0;
+        p.p[ix::F_AMOUNT] = 0.0;
         p.p[ix::PHASE] = 0.0;
         let x = render(&p, 200.0, 48_000);
         p.p[ix::DETUNE] = 240.0;
         let y = render(&p, 200.0, 48_000);
-        // the fourth harmonic goes up by 120 cents, the first stays
-        let moved = 800.0 * 2f32.powf(120.0 / 1200.0);
+        // the gaps between the harmonics all widen by 240 cents, the first stays
+        let moved = 200.0 * (1.0 + 3.0 * 2f32.powf(240.0 / 1200.0));
         assert!(level_at(&y, moved) > 4.0 * level_at(&y, 800.0), "{} {}", level_at(&y, moved), level_at(&y, 800.0));
         assert!(level_at(&y, moved) > 0.5 * level_at(&x, 800.0));
         assert!((level_at(&y, 200.0) / level_at(&x, 200.0) - 1.0).abs() < 0.05);
@@ -722,13 +987,14 @@ mod tests {
         p.p[ix::GRIT] = 600.0;
         let z = render(&p, 200.0, 48_000);
         assert!(level_at(&z, 800.0) < 0.8 * level_at(&x, 800.0));
-        assert!(level_at(&z, 730.0) > 3.0 * level_at(&x, 730.0));
+        assert!(level_at(&z, 779.8) > 3.0 * level_at(&x, 779.8));
     }
 
     #[test]
     fn an_open_saw_has_harmonics_falling_as_one_over_k() {
         let mut p = patch();
-        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::CUTOFF] = 8192.0;
+        p.p[ix::F_AMOUNT] = 0.0;
         p.p[ix::PHASE] = 0.0;
         let x = render(&p, 220.0, 48_000);
         let (h1, h2, h3) = (level_at(&x, 220.0), level_at(&x, 440.0), level_at(&x, 660.0));
@@ -749,7 +1015,8 @@ mod tests {
         // the default mask keeps odd harmonics; fully mixed in, the even ones go
         let mut p = patch();
         p.p[ix::PHASE] = 0.0;
-        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::CUTOFF] = 8192.0;
+        p.p[ix::F_AMOUNT] = 0.0;
         p.p[ix::MASK_MIX] = 1000.0;
         let x = render(&p, 220.0, 48_000);
         assert!(level_at(&x, 440.0) < level_at(&x, 660.0) * 0.05);
@@ -763,13 +1030,15 @@ mod tests {
     fn a_pluck_darkens_the_note_over_time_and_unison_widens_it() {
         let mut p = patch();
         p.p[ix::PHASE] = 0.0;
-        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::CUTOFF] = 8192.0;
+        p.p[ix::F_AMOUNT] = 0.0;
         p.p[ix::PLUCK] = 400.0;
         let x = render(&p, 220.0, 96_000);
         let early = level_at(&x[..9_600], 1100.0);
         let late = level_at(&x[86_400..], 1100.0);
         assert!(late < early * 0.3, "early {early} late {late}");
-        assert!(level_at(&x[86_400..], 220.0) > 0.1, "the note itself stays");
+        let (first, last) = (level_at(&x[..9_600], 220.0), level_at(&x[86_400..], 220.0));
+        assert!(last / first > 3.0 * late / early, "the note itself fades slower");
 
         let mut p = patch();
         p.p[ix::UNI_ORDER] = 5.0;
@@ -797,7 +1066,8 @@ mod tests {
         }
         let mut p = Patch::new(&g.p, &raw);
         p.p[ix::TIMBRE] = 11.0;
-        p.p[ix::FILTER_ON] = 0.0;
+        p.p[ix::CUTOFF] = 8192.0;
+        p.p[ix::F_AMOUNT] = 0.0;
         let x = render(&p, 220.0, 48_000);
         assert!(level_at(&x, 660.0) > 0.2);
         assert!(level_at(&x, 220.0) < 0.01);

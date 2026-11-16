@@ -4,6 +4,7 @@
 // no console window behind the program on Windows
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod additive_ui;
 mod browser;
 mod chanset;
 mod curve;

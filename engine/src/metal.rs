@@ -40,7 +40,6 @@ pub fn patch(state: &[u8]) -> Option<Patch> {
     let (volume, pitch, decay, release, full, morph) = (at(0), at(4), at(24), at(28), at(32), at(36));
     let (seed1, seed2) = (at(40) as i32, at(44) as i32);
     let mut p: Vec<f32> = crate::synth::def(crate::synth::Kind::Additive).params.iter().map(|p| p.def as f32).collect();
-    p[ix::FILTER_ON] = 0.0;
     p[ix::F_AMOUNT] = 0.0;
     p[ix::CUTOFF] = 8192.0;
     p[ix::VOLUME] = (volume / 128.0 * 1000.0).clamp(0.0, 2000.0);

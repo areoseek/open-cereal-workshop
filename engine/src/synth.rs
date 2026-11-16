@@ -326,10 +326,13 @@ pub static DEFS: &[Def] = &[Def {
         p("Attack", 108, 0, 1000, 0),
         p("Decay", 112, 0, 1000, 1000),
         p("Release", 116, 0, 1000, 250),
+        p("Velocity to attack", 120, 0, 1, 0),
+        p("Velocity to release", 124, 0, 1, 0),
         p("Pluck", 128, 0, 1000, 1000),
-        p("Pluck masked", 132, 0, 1, 0),
+        p("Velocity to pluck", 132, 0, 1, 0),
         p("Pluck alternative", 136, 0, 1, 0),
-        p("Pluck on release", 140, 0, 1, 0),
+        p("Pluck masked", 140, 0, 1, 0),
+        p("Pluck on release", 144, 0, 1, 0),
         p("Volume", 148, 0, 2000, 1000),
         p("Velocity to volume", 152, 0, 1, 1),
         p("Pitch", 156, -2400, 2400, 0),
@@ -339,8 +342,9 @@ pub static DEFS: &[Def] = &[Def {
         p("Pitch LFO", 172, -1000, 1000, 0),
         p("Portamento", 176, 0, 1, 0),
         p("Legato", 180, 0, 1, 0),
-        p("Slide time", 184, 0, 1000, 400),
-        p("Filter on", 192, 0, 1, 1),
+        p("Slide time", 184, -1000, 1000, 400),
+        p("Velocity to slide", 188, 0, 1, 0),
+        p("Adaptive envelope", 192, 0, 1, 1),
         p("Filter attack", 196, 0, 1000, 0),
         p("Filter decay", 200, 0, 1000, 500),
         p("Attack slope", 204, -1000, 1000, 0),
@@ -348,16 +352,16 @@ pub static DEFS: &[Def] = &[Def {
         p("Envelope amount", 212, -1000, 1000, 500),
         p("Velocity to envelope", 216, 0, 1, 0),
         p("Cutoff", 220, 0, 8192, 4096),
-        p("Adaptive envelope", 224, 0, 1, 0),
+        p("Cutoff in Hz", 224, 0, 1, 0),
         p("Filter width", 228, 0, 1000, 500),
-        p("Key tracking", 232, -1000, 1000, 0),
+        p("Key tracking", 232, -2000, 2000, 0),
         p("Cutoff LFO", 236, -1000, 1000, 0),
         p("Resonance", 240, 0, 1000, 0),
         p("Resonance in Hz", 244, 0, 1, 0),
         p("Resonance offset", 248, -2400, 2400, 0),
         p("Self oscillation", 252, 0, 2048, 0),
-        p("Motion only", 256, 0, 1, 0),
-        p("Adaptive width", 260, 0, 1, 0),
+        p("Adaptive width", 256, 0, 1, 0),
+        p("Motion only", 260, 0, 1, 0),
         p("Unison order", 264, 1, 9, 1),
         p("Unison pan", 268, 0, 128, 128),
         p("Unison pitch", 272, 0, 256, 128),
@@ -388,15 +392,17 @@ pub static DEFS: &[Def] = &[Def {
         p("Delay type", 372, 0, 3, 0),
         p("Delay volume", 376, 0, 1000, 500),
         p("Delay feedback", 380, 0, 1000, 300),
-        p("Delay time", 384, 1, 384, 144),
+        p("Delay time", 384, 0, 384, 144),
         p("Reverb type", 388, 0, 6, 0),
         p("Reverb volume", 392, 0, 1000, 500),
         p("Compressor mix", 396, 0, 1000, 500),
-        p("Compressor type", 404, 0, 16, 4),
-        p("Phaser type", 408, 0, 8, 0),
+        p("Velocity to unison pitch", 400, 0, 1, 0),
+        p("Filter type", 404, 0, 16, 4),
+        p("Phaser type", 408, 0, 9, 0),
         p("Resonance type", 412, 0, 9, 0),
-        p("Filter type", 416, 0, 4, 0),
+        p("Compressor type", 416, 0, 4, 0),
         p("Timbre", 420, 0, 11, 0),
+        p("High quality", 428, 0, 1, 0),
     ],
 }, Def {
     kind: Kind::Fm,
@@ -1019,7 +1025,6 @@ impl Gen {
         p[ix::UNI_PHASE] = v(9).abs() / 1000.0 * 128.0;
         // the lower of the two filters is the one heard; no envelope moves it yet
         let (cut, res) = if v(14) < v(10) { (v(14), v(15)) } else { (v(10), v(13)) };
-        p[ix::FILTER_ON] = 1.0;
         p[ix::F_AMOUNT] = 0.0;
         // a low setting is nearly always opened by a drawn envelope we cannot read yet, so it is kept from closing fully
         p[ix::CUTOFF] = if cut >= 4096.0 { cut + 321.0 } else { 2048.0 + cut * 0.75 };
@@ -1096,6 +1101,18 @@ impl Gen {
                     v[off..off + 4].copy_from_slice(&val.to_le_bytes());
                 }
                 v.extend_from_slice(d.tail);
+                // a setting that cannot be nothing starts at its rest value (left at nothing, the original
+                // falls over on a voice count of none)
+                if Self::shift(self.kind, &v) == 0 {
+                    let len = v.len();
+                    for q in d.params.iter().filter(|q| q.min > 0 && q.off + q.width as usize <= len) {
+                        if q.width == 1 {
+                            v[q.off] = q.def as u8;
+                        } else {
+                            v[q.off..q.off + 4].copy_from_slice(&q.def.to_le_bytes());
+                        }
+                    }
+                }
                 v
             }
         };
@@ -1435,7 +1452,9 @@ impl ToneState {
     /// sit in the middle whatever the instrument's own settings say, so only the note can move them).
     pub fn note_at(&mut self, tone: &Tone, sr: f32, key: u8, vel: f32, axis: [f32; 3], dphase: f32) {
         if let Some(p) = &tone.add {
-            self.add = Some(Box::new(crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed)));
+            let mut v = crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed);
+            v.touch = axis[0];
+            self.add = Some(Box::new(v));
         }
         if let Some(p) = &tone.fm {
             self.fm = Some(Box::new(crate::fm::Voice::start_as(p, sr, key, axis, dphase, self.seed, self.live, self.from)));

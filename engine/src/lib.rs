@@ -27,6 +27,7 @@ pub mod pitchedit;
 pub mod player;
 pub mod psola;
 pub mod additive;
+mod additive_shapes;
 pub mod analog;
 pub mod duo;
 pub mod opfx;
