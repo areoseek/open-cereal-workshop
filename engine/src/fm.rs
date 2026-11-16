@@ -10,7 +10,7 @@
 use std::f32::consts::{PI, TAU};
 use std::sync::{Arc, OnceLock};
 
-const TN: usize = 2048;
+const TN: usize = 16384;
 /// Frames between two looks at the envelopes.
 const TICK: u32 = 16;
 /// Phase swing, in cycles, of a full-scale modulator at 100 %.
@@ -645,6 +645,9 @@ pub struct Patch {
     pub uni_sub: f32,
     /// The voices of a unison set all sit in the middle (measured: one switch byte takes the width away).
     pub uni_mono: bool,
+    /// how many times over the voice is worked out, as a power of two: for a render and for live play
+    /// (measured on renders: none means the plain samples with nothing filtered at all)
+    pub over: [u8; 2],
     /// Notes play louder the harder they are hit, by the usual law (measured: with the switch off every
     /// velocity is as loud as the default one, and only the instrument's own maps can tell them apart).
     pub vel_vol: bool,
@@ -1251,7 +1254,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1454,6 +1457,9 @@ impl Patch {
         // every layout that has it (measured: the set in the middle from layout 13 on at least, the velocity
         // switch from 18)
         p.uni_mono = ver >= 7 && d.len() > 966 && d[966] != 0;
+        if d.len() > 788 {
+            p.over = [d[784].min(6), d[780].min(6)];
+        }
         p.vel_vol = ver < 18 || d.len() <= 974 || d[974] != 0;
         // (measured: the byte after the unison one lets a standing level drain away)
         let level = ver >= 7 && d.len() > 967 && d[967] != 0;
@@ -1589,33 +1595,6 @@ impl Patch {
         self.any_moving = self.arts.iter().any(|a| a.moving());
     }
 
-    /// How many times over a note at this pitch must be worked out so that what its operators do to each
-    /// other stays clean: 1 when nothing reaches past the top of the range, else 2 or 4.
-    pub fn oversampling(&self, dphase: f32, sr: f32) -> u32 {
-        let used = self.used();
-        let (mut fastest, mut bend, mut ring) = (0.0f32, 0.0f32, false);
-        for r in 0..6 {
-            if !used[r] {
-                continue;
-            }
-            fastest = fastest.max((dphase * (self.pitch / 12.0).exp2() * self.ops[r].ratio + self.ops[r].offset_hz / sr).abs());
-            bend = bend.max(self.fm[r].iter().map(|x| x.abs()).sum::<f32>());
-            ring |= self.rm[r].iter().any(|&x| x != 0.0);
-        }
-        if bend == 0.0 && !ring {
-            return 1;
-        }
-        // a full knob spreads partials to some forty times the bending operator's pitch
-        let top = fastest * (2.0 + 20.0 * bend);
-        if top < 0.5 {
-            1
-        } else if top < 1.5 {
-            2
-        } else {
-            4
-        }
-    }
-
     /// Seconds the sound needs after the key is let go `t` seconds into the note: until every volume
     /// envelope that is on has ended (measured: one on a filter nothing feeds still holds the note open).
     pub fn tail_s(&self, t: f32, beat: f32) -> f32 {
@@ -1646,12 +1625,15 @@ struct Sub {
     detune: f32,
     pan: f32,
     gain: f32,
-    ph: [f32; 6],
+    /// (kept finer than the sound itself: measured, a long note stays in step to the sample)
+    ph: [f64; 6],
     out: [f32; 6],
     prev: [f32; 6],
     /// Each operator's last value before its level was applied.
     raw: [f32; 6],
     amp: [f32; 6],
+    /// the softened start of each operator
+    soft: [f32; 6],
     inc: [f32; 6],
     tab: [u8; 6],
     pl: [f32; 9],
@@ -1687,6 +1669,11 @@ struct Halver {
     z: [[[f32; 4]; 2]; 12],
     late: [f32; 2],
 }
+
+/// The stage factors of one halving of a voice worked out above the rate asked for, first row then second
+/// (fitted to renders of a narrow pulse at every setting: all the steps are alike, each passes everything up
+/// to its new top and is three decibels down right at it).
+const HALF: [f32; 6] = [0.039_185, 0.302_594, 0.674_638, 0.147_348, 0.482_520, 0.882_997];
 
 /// The stage factors of the two halving steps, first row then second row (the first step works at four times
 /// the rate, where what matters is far below the edge, and can be short).
@@ -1785,9 +1772,12 @@ pub struct Voice {
     over: u32,
     /// steps each filter takes per frame
     fsteps: u8,
-    halvers: [Halver; 2],
+    /// the slide in from the note before, for each operator: how far (in the pitch output's own measure) and
+    /// for how many seconds (beats, when below nothing)
+    glide: [(f32, f32); 6],
+    halvers: Vec<Halver>,
     /// the same for what goes to the effects, and that share of the last frame made
-    send_halvers: [Halver; 2],
+    send_halvers: Vec<Halver>,
     sent: [f32; 2],
     sr: f32,
     t: u32,
@@ -1811,8 +1801,14 @@ fn rnd(seed: &mut u32) -> f32 {
 impl Voice {
     /// `axes` places the note on the velocity, X and Y axes of the maps (each 0 to 1).
     pub fn start(p: &Patch, sr: f32, key: u8, axes: [f32; 3], dphase: f32, seed: u32) -> Self {
+        Self::start_as(p, sr, key, axes, dphase, seed, false, None)
+    }
+
+    /// The same; `live` picks the patch's setting for live play over the one for renders.
+    /// `from` is the key of the note the channel played before this one.
+    pub fn start_as(p: &Patch, sr: f32, key: u8, axes: [f32; 3], dphase: f32, seed: u32, live: bool, from: Option<u8>) -> Self {
         let mut seed = seed | 1;
-        let over = p.oversampling(dphase, sr);
+        let over = 1u32 << p.over[if live { 1 } else { 0 }];
         let (sr, dphase) = (sr * over as f32, dphase / over as f32);
         let n = p.uni.clamp(1, 9) as usize;
         let rand = rnd(&mut seed) * 0.5 + 0.5;
@@ -1830,16 +1826,16 @@ impl Voice {
             for (k, a) in p.arts.iter().enumerate().take(ARTS) {
                 stat[k] = a.stat(&xs);
             }
-            let mut ph = [0.0; 6];
+            let mut ph = [0.0f64; 6];
             let mut tab = [0u8; 6];
             for k in 0..6 {
                 let o = &p.ops[k];
                 // measured: the voices' starts are spread evenly over the set share of one cycle
-                ph[k] = o.phase + s as f32 / n as f32 * p.uni_phase;
+                ph[k] = (o.phase + s as f32 / n as f32 * p.uni_phase) as f64;
                 // (measured: an operator that stands still, at no pitch of its own, starts at its set place
                 // whatever this switch says)
                 if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
-                    ph[k] += loose[k];
+                    ph[k] += loose[k] as f64;
                 }
                 // the fullest table whose top harmonic still fits under half the sample rate
                 // (the patch's own transposing counts: measured, a saw set two octaves down keeps its top)
@@ -1856,11 +1852,11 @@ impl Voice {
                 stat,
                 val: [0.0; ARTS],
                 // measured against renders: the voices run from the left to the right, each as far off pitch as
-                // it is off the middle, sharp and flat by turns; the spread grows as a power of the knob (13
-                // cents at the middle, 56 at the top) and every voice has a fixed share of it, the same on every
-                // note; the level knob fades in the outer voices of three or more and the whole set is scaled
+                // it is off the middle, sharp and flat by turns (a voice in the very middle takes no turn); the
+                // spread grows as a power of the knob (3.2 cents at a quarter, 11.5 at the middle, 32 at three
+                // quarters, 85 at the top) and every voice has a fixed share of it, the same on every note; the level knob fades in the outer voices of three or more and the whole set is scaled
                 // by 1 / (0.621 n + 0.34)
-                detune: (u.abs() * if s % 2 == 0 { 1.0 } else { -1.0 } * 5.646 * (11f32.powf(p.uni_pitch) - 1.0) * UNI_SHARE[s % 9] / 1200.0).exp2() * down,
+                detune: (u.abs() * if (if n % 2 == 1 && s > n / 2 { s - 1 } else { s }) % 2 == 0 { 1.0 } else { -1.0 } * 2.128 * (40.8f32.powf(p.uni_pitch) - 1.0) * UNI_SHARE[s % 9] / 1200.0).exp2() * down,
                 pan: if p.uni_mono { 0.0 } else { -u * p.uni_pan },
                 gain: share * match n {
                     1 => 1.0,
@@ -1872,6 +1868,7 @@ impl Voice {
                 prev: [0.0; 6],
                 raw: [0.0; 6],
                 amp: [0.0; 6],
+                soft: [0.0; 6],
                 inc: [0.0; 6],
                 tab,
                 pl: [1.0; 9],
@@ -1889,7 +1886,22 @@ impl Voice {
                 hseed: 3_099_528_473u32,
             });
         }
-        let mut v = Self { over, fsteps: if over == 1 { 2 } else { 1 }, halvers: [Halver::new(), Halver::new()], send_halvers: [Halver::new(), Halver::new()], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, subs, main_l: 1.0, main_r: 1.0 };
+        // an operator whose pitch envelope has an attack part slides in from the note before over that part
+        // (measured: straight in pitch, from no further than a sixth of the envelope's reach, on top of
+        // whatever the envelope itself does; no attack marker or no envelope, no slide)
+        let mut glide = [(0.0f32, 0.0f32); 6];
+        if let Some(from) = from.filter(|f| *f != key) {
+            for (k, g) in glide.iter_mut().enumerate() {
+                let (Some(a), reach) = (p.arts.get(k * 6 + 3), p.ops[k].pitch_cents) else { continue };
+                let at = a.env.decay;
+                if a.env.on() && at > 0 && reach > 0.0 {
+                    if let Some(len) = a.env.t.get(at as usize).copied().filter(|l| *l > 0.0) {
+                        *g = (((from as f32 - key as f32) * 100.0 / reach).clamp(-1.0 / 6.0, 1.0 / 6.0), if a.env.flags & 1 != 0 { -len } else { len * 0.5 });
+                    }
+                }
+            }
+        }
+        let mut v = Self { glide, over, fsteps: if over == 1 { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -1917,7 +1929,7 @@ impl Voice {
             let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
             let off = (s.detune / low) as f64 - 1.0;
             for k in 0..6 {
-                s.ph[k] += (off * (hz * low * p.ops[k].ratio) as f64 * secs).fract() as f32;
+                s.ph[k] += (off * (hz * low * p.ops[k].ratio) as f64 * secs).fract();
             }
         }
     }
@@ -1938,7 +1950,10 @@ impl Voice {
             for k in 0..6 {
                 let o = &p.ops[k];
                 // (measured: the pitch output bends the fixed part of the frequency by the same interval)
-                let art = (s.val[k * 6 + 3] * o.pitch_cents / 1200.0).exp2();
+                let (far, len) = self.glide[k];
+                let len = if len < 0.0 { -len / beat.max(1e-3) } else { len };
+                let slide = if t < len { far * (1.0 - t / len) } else { 0.0 };
+                let art = ((s.val[k * 6 + 3] + slide) * o.pitch_cents / 1200.0).exp2();
                 let bend = (p.pitch / 12.0).exp2() * art;
                 s.inc[k] = (dphase * s.detune * bend * o.ratio + o.offset_hz * art / sr).clamp(-0.5, 0.5);
                 let pan = (p.pan[k] + s.val[k * 6]).clamp(-1.0, 1.0);
@@ -2097,7 +2112,8 @@ impl Voice {
                             (4, _) => [0.0, 0.521 - 0.1 * (c - 0.375), 0.0],
                             _ => [0.0, 0.769 - 0.106 * (c - 0.375), 0.582 - 0.18 * (c - 0.375)],
                         };
-                        let spread = f.slope >= 4;
+                        // (the wide kind does not: its two widest slopes measured the same as two and three plain steps)
+                        let spread = f.slope >= 4 && kind != 3;
                         let ringer = if spread { n - 1 } else { 0 };
                         let lv = [f.levels[0] * s.val[b + 4], f.levels[1] * s.val[b + 5], f.levels[2] * s.val[b + 6]];
                         for (st, slot) in plan.iter_mut().enumerate().take(count) {
@@ -2145,34 +2161,21 @@ impl Voice {
 
     pub fn frame(&mut self, p: &Patch, dphase: f32) -> [f32; 2] {
         let any = p.send.iter().any(|&g| g != 0.0);
-        match self.over {
-            1 => self.one(p, dphase),
-            2 => {
-                let d = dphase * 0.5;
-                let (a, sa) = (self.one(p, d), self.sent);
-                let (b, sb) = (self.one(p, d), self.sent);
-                if any {
-                    self.sent = self.send_halvers[1].push(sa, sb, &half_taps()[1]);
-                }
-                self.halvers[1].push(a, b, &half_taps()[1])
-            }
-            _ => {
-                let d = dphase * 0.25;
-                let t = half_taps();
-                let (a, sa) = (self.one(p, d), self.sent);
-                let (b, sb) = (self.one(p, d), self.sent);
-                let x = self.halvers[0].push(a, b, &t[0]);
-                let (c, sc) = (self.one(p, d), self.sent);
-                let (e, se) = (self.one(p, d), self.sent);
-                let y = self.halvers[0].push(c, e, &t[0]);
-                if any {
-                    let sx = self.send_halvers[0].push(sa, sb, &t[0]);
-                    let sy = self.send_halvers[0].push(sc, se, &t[0]);
-                    self.sent = self.send_halvers[1].push(sx, sy, &t[1]);
-                }
-                self.halvers[1].push(x, y, &t[1])
-            }
+        let n = self.halvers.len();
+        let out = self.halved(p, dphase / self.over as f32, n, any);
+        self.sent = out.1;
+        out.0
+    }
+
+    /// One frame at the rate left after `level` halvings, with its share for the effects.
+    fn halved(&mut self, p: &Patch, d: f32, level: usize, any: bool) -> ([f32; 2], [f32; 2]) {
+        if level == 0 {
+            return (self.one(p, d), self.sent);
         }
+        let a = self.halved(p, d, level - 1, any);
+        let b = self.halved(p, d, level - 1, any);
+        let sent = if any { self.send_halvers[level - 1].push(a.1, b.1, &HALF) } else { [0.0; 2] };
+        (self.halvers[level - 1].push(a.0, b.0, &HALF), sent)
     }
 
     /// The share of the last frame that goes to the effects.
@@ -2191,12 +2194,17 @@ impl Voice {
         let mut smix = [0.0f32; 2];
         // noise is drawn once per frame of the rate asked for, so that it is as bright however far up we work
         let fresh = self.t % self.over == 0;
+        // the soft start is a one-pole smoother that opens in a straight line (measured: 96 frames at 44.1 kHz,
+        // and the same corner at any moment however far up we work)
         let fade = {
-            let x = self.t as f32 / (self.sr * 0.00052);
-            if x < 1.0 { 0.5 - 0.5 * (PI * x).cos() } else { 1.0 }
+            let o = self.over as f32;
+            // (our rate here is already the raised one)
+            let k = self.sr / 44_100.0;
+            ((self.t as f32 - 1.0) / (96.0 * k * o)).min(1.0)
         };
         // with the voices merged, the whole unison set goes through one run of the filters (measured: no width,
         // and a shaper in the filter is driven by the sum)
+        let ease = if self.over == 1 { 0.02 } else { 1.0 - 0.98f32.powf(1.0 / self.over as f32) };
         let merge = p.uni_mono && self.subs.len() > 1;
         let end = self.subs.len() - 1;
         let mut sum = [0.0f32; 6];
@@ -2219,7 +2227,7 @@ impl Voice {
                         pm += a * if j > i { s.out[j] } else { last[j] };
                     }
                 }
-                let ph = s.ph[i] + s.val[b + 4] * 0.5;
+                let ph = s.ph[i] as f32 + s.val[b + 4] * 0.5;
                 let mut y = if o.pluck {
                     // a plucked string: the first cycle made (wave and noise) is kept and goes round and round,
                     // losing its top as it goes (see `control`); it cannot be phase modulated
@@ -2273,11 +2281,16 @@ impl Voice {
                         y *= 1.0 - a.abs() + a * if j > i { s.out[j] } else if j == i { s.raw[i] } else { last[j] };
                     }
                 }
-                s.amp[i] += (s.val[b + 1] * o.vol - s.amp[i]) * 0.02;
+                s.amp[i] += (s.val[b + 1] * o.vol - s.amp[i]) * ease;
                 s.prev[i] = last[i];
                 s.raw[i] = y;
-                s.out[i] = y * s.amp[i] * if o.declick { fade } else { 1.0 };
-                s.ph[i] += s.inc[i];
+                s.out[i] = if o.declick && fade < 1.0 {
+                    s.soft[i] += (y * s.amp[i] - s.soft[i]) * fade;
+                    s.soft[i]
+                } else {
+                    y * s.amp[i]
+                };
+                s.ph[i] += s.inc[i] as f64;
                 s.ph[i] -= s.ph[i].floor();
                 let g = p.out[i];
                 if g != 0.0 {
@@ -2965,8 +2978,9 @@ pub(crate) mod tests {
         p.uni_phase = 0.0;
         let v = Voice::start(&p, 48000.0, 57, [0.8, 0.5, 0.5], 440.0 / 48000.0, 1);
         let cents: Vec<f32> = v.subs.iter().map(|s| s.detune.log2() * 1200.0).collect();
-        // 13.08 cents of spread at the middle of the knob
-        assert!((cents[0] - 13.08 * UNI_SHARE[0]).abs() < 0.02 && cents[1] == 0.0 && (cents[2] - 13.08 * UNI_SHARE[2]).abs() < 0.02, "{cents:?}");
+        // 11.46 cents of spread at the middle of the knob, the voices either side of the middle one going opposite ways
+        assert!((cents[0].abs() - 11.46 * UNI_SHARE[0].abs()).abs() < 0.02 && cents[1] == 0.0 && (cents[2].abs() - 11.46 * UNI_SHARE[2].abs()).abs() < 0.02, "{cents:?}");
+        assert!(cents[0] * cents[2] < 0.0 || UNI_SHARE[0] * UNI_SHARE[2] < 0.0, "{cents:?}");
         assert!(v.subs[0].pan == -1.0 && v.subs[1].pan == 0.0 && v.subs[2].pan == 1.0);
         p.uni = 2;
         let mut v = Voice::start(&p, 48000.0, 57, [0.8, 0.5, 0.5], 440.0 / 48000.0, 1);
@@ -2974,7 +2988,7 @@ pub(crate) mod tests {
         let before = [v.subs[0].ph[0], v.subs[1].ph[0]];
         v.started_at(&p, 440.0, 2.0);
         let want = ((v.subs[0].detune as f64 - 1.0) * (440.0 * p.ops[0].ratio) as f64 * 2.0).fract() as f32;
-        assert!((v.subs[0].ph[0] - before[0] - want).abs() < 1e-4 && want.abs() > 0.01);
+        assert!(((v.subs[0].ph[0] - before[0]) as f32 - want).abs() < 1e-4 && want.abs() > 0.01);
         assert!(v.subs[1].ph[0] < before[1], "the flat voice falls behind");
     }
 

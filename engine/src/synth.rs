@@ -1333,6 +1333,10 @@ pub struct ToneState {
     add: Option<Box<crate::additive::Voice>>,
     fm: Option<Box<crate::fm::Voice>>,
     mini: Option<crate::minis::Voice>,
+    /// played live, not rendered: instruments with a quality setting for each use the live one
+    pub live: bool,
+    /// the key the channel played before this note (the operator synth slides in from it)
+    pub from: Option<u8>,
 }
 
 /// One plain reading of a shape at `t` of its cycle (measured from single readings of low notes).
@@ -1434,7 +1438,7 @@ impl ToneState {
             self.add = Some(Box::new(crate::additive::Voice::start(p, sr, key, vel, dphase, self.seed)));
         }
         if let Some(p) = &tone.fm {
-            self.fm = Some(Box::new(crate::fm::Voice::start(p, sr, key, axis, dphase, self.seed)));
+            self.fm = Some(Box::new(crate::fm::Voice::start_as(p, sr, key, axis, dphase, self.seed, self.live, self.from)));
         }
         if let Some(p) = &tone.mini {
             self.mini = Some(crate::minis::Voice::start(p, sr, key, vel, dphase, self.seed));

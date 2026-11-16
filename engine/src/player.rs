@@ -744,6 +744,7 @@ impl Handle {
             perf_rng: 0x9e37_79b9,
             count_in: 0.0,
             keys_from: Vec::new(),
+            fm_last: Vec::new(),
             born: 0,
             ov: Overrides::default(),
             burn: None,
@@ -2114,6 +2115,8 @@ pub struct Player {
     /// The slow swing clock of each sampled keys instrument: (channel, song seconds it was last
     /// read at, seconds it has run, song seconds until which a note of it still sounds).
     keys_from: Vec<(u16, f64, f64, f64)>,
+    /// the key each operator synth channel played last
+    fm_last: Vec<(u16, u8)>,
     born: u64,
     ov: Overrides,
     /// When set, every note this channel really starts (arpeggio steps, echoes and all) is written down
@@ -2811,6 +2814,7 @@ impl Player {
                     let tone = crate::synth::Tone { add: Some(patch.clone()), ..Default::default() };
                     let mut v = Voice { dphase: hz / sr, level: 0.0, attack: 1.0, release: ms(5.0), remaining: held, gl: gain * pl, gr: gain * pr, insert: to, delay, chan: n.chan, key: n.key, live, note_gain, note_pan: n.pan, follow: true, step: 1.0, step_to: 1.0, step_now: 1.0, ..Default::default() };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
+                    v.tstate.live = !self.offline;
                     v.tstate.note(&tone, sr, key, if tone.mini.as_ref().is_some_and(|m| m.kind == crate::synth::Kind::Trio) { note_gain } else { note_gain.min(1.0) }, hz / sr);
                     v.tone = Some(tone);
                     self.start(v);
@@ -3289,6 +3293,12 @@ impl Player {
                         g.tone()
                     };
                     v.tstate = crate::synth::ToneState::start(&tone, (self.born as u32).wrapping_mul(2654435761).wrapping_add(key as u32));
+                    v.tstate.live = !self.offline;
+                    if tone.fm.is_some() {
+                        v.tstate.from = self.fm_last.iter().find(|e| e.0 == n.chan).map(|e| e.1);
+                        self.fm_last.retain(|e| e.0 != n.chan);
+                        self.fm_last.push((n.chan, key));
+                    }
                     v.tstate.note_at(&tone, sr, key, if touch { ev.vel * ev.gain } else if g.kind == crate::synth::Kind::Trio { note_gain } else { note_gain.min(1.0) }, [ev.vel / 1.28, 0.5 + ev.mod_x * 0.5, 0.5 + ev.mod_y * 0.5], hz / sr);
                     v.tstate.set_bpm(self.ov.tempo.unwrap_or(song.tempo));
                     if self.was_playing && self.tpf > 0.0 {
@@ -3324,11 +3334,9 @@ impl Player {
                     v.ease = osc3;
                     if tone.fm.is_some() {
                         // (measured: the operator instrument starts at once and, let go with its own envelopes
-                        // off, falls in a straight line over 390 frames at 44.1 kHz; everything it plays comes two
-                        // frames late)
+                        // off, falls in a straight line over 390 frames at 44.1 kHz)
                         v.attack = 1.0;
                         v.release = ms(8.84);
-                        v.delay += 2;
                     }
                     if tone.add.is_some() {
                         // this instrument brings its own rise and fall; ours only closes what is left of the tail
@@ -3560,6 +3568,7 @@ impl Player {
 
     fn silence(&mut self, fast: bool) {
         self.arps.clear();
+        self.fm_last.clear();
         self.hush_scripts();
         self.midi_hush();
         let rel = 1.0 / (self.sr * if fast { 0.004 } else { 0.03 });

@@ -15,6 +15,7 @@ fn main() {
                         }
                     }
                     let t = &pt.tail;
+                    if let Some(d) = cereal_engine::fm::Patch::unpack(&g.raw) { if d.len() > 788 { println!("OS {} {} ver {}", d[784], d[780], g.raw[0]); } }
                     for (i, o) in pt.ops.iter().enumerate() { if pt.used()[i] && o.noise > 0.0 { println!("noise"); } if pt.used()[i] && o.pluck { println!("pluck"); } }
                     for x in &f { println!("F {x}"); }
                     println!("ver {} uni {} filt {} fx c{} d{} r{} send {} ops {}", g.raw[0], pt.uni, f.join(","), t.chorus.is_some() as u8, t.delay.is_some() as u8, t.reverb.is_some() as u8, pt.send.iter().any(|&x| x != 0.0) as u8, pt.used().iter().filter(|&&u| u).count());
