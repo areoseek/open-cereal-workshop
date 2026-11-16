@@ -155,6 +155,7 @@ pub fn tail(p: &[f32]) -> crate::tailfx::Set {
         // and the volume knob follows the curve of the level knobs
         stack: Some(crate::stackfx::Set {
             echo: (kind(ix::DELAY_TYPE) > 0 && u(ix::DELAY_VOL) > 0.0).then(|| crate::stackfx::Echo { kind: kind(ix::DELAY_TYPE) as u8, wet: taper(u(ix::DELAY_VOL)), fb: u(ix::DELAY_FB), steps: p[ix::DELAY_TIME].max(1.0) / 48.0 }),
+            squash: (kind(ix::COMP_TYPE) > 0 && u(ix::COMP_MIX) > 0.0).then(|| crate::stackfx::Squash { kind: kind(ix::COMP_TYPE).min(4) as u8, mix: u(ix::COMP_MIX) }),
         })
         .filter(|k| k.any()),
         reverb: (kind(ix::REVERB_TYPE) > 0 && u(ix::REVERB_VOL) > 0.0).then(|| Reverb { secs: ROOMS[kind(ix::REVERB_TYPE).clamp(1, 7) - 1], high_hz: 6000.0, wet: u(ix::REVERB_VOL) * u(ix::REVERB_VOL) }),
@@ -1144,6 +1145,10 @@ mod tests {
             g.p[i] = 0.0;
         }
         assert!(!g.tail().any());
+        // the compressor is the fourth: its kind and how much of it
+        g.p[ix::COMP_TYPE] = 3.0;
+        g.p[ix::COMP_MIX] = 500.0;
+        assert_eq!(g.tail().stack.unwrap().squash, Some(crate::stackfx::Squash { kind: 3, mix: 0.5 }));
     }
 
     fn render(p: &Patch, hz: f32, frames: usize) -> Vec<f32> {

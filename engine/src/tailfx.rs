@@ -280,6 +280,9 @@ impl State {
         self.tone(set, buf);
         self.rest(set, buf, step, song);
         self.level(set, buf);
+        if let (Some(k), Some(st)) = (&set.stack, &mut self.stack) {
+            st.last(k, buf, step);
+        }
     }
 
     /// Measured on a steady tone and on noise: the right side passes untouched; the left is the same sound

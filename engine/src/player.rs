@@ -1882,6 +1882,10 @@ impl Comp {
         for (c, ch) in song.channels.iter().enumerate() {
             #[allow(unused_mut)]
             let mut own = ch.ext.as_ref().map_or(0, |h| h.0.latency() as usize);
+            // a built-in instrument whose own effects look ahead
+            if ch.kind == ChannelKind::Plugin {
+                own += ch.gen.as_ref().and_then(|g| g.tail().stack).map_or(0, |k| k.late(rate as f32));
+            }
             #[cfg(test)]
             {
                 own += self.fake_inst.iter().filter(|f| f.0 == c).map(|f| f.1).sum::<usize>();
@@ -4557,6 +4561,12 @@ impl Player {
                 ring = set.tail(cx.sr, cx.step);
             }
             cf.ring = if cf.dirty { ring } else { cf.ring.saturating_sub(n) };
+            // one whose own effects look ahead is lined up apart from the rest of its track
+            if self.comp.take(c, &mut cf.buf[..n], [1.0; 2], true) {
+                cf.buf[..n].fill([0.0; 2]);
+                cf.dirty = false;
+                continue;
+            }
             let i = song.channels[c].insert as usize;
             let i = if i < ni { i } else { 0 };
             for (o, f) in self.buses[i][..n].iter_mut().zip(&mut cf.buf[..n]) {
