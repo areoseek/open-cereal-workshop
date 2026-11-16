@@ -206,9 +206,9 @@ pub fn filter_gain(kind: u8, x: f32, shift: f32) -> f32 {
 }
 
 /// The gain of a knob that cuts and lifts (equaliser bands, volume), `v` -1..1. Measured: silent at the bottom,
-/// 0.37 half way down, 2.14 half way up, 4 at the top.
+/// 0.366 half way down, 2.098 half way up, 4 at the top, which is a power of three on a straight line.
 fn boost(v: f32) -> f32 {
-    (1.0 + 1.691 * v + 1.015 * v * v + 0.324 * v * v * v).max(0.0)
+    ((3f32.powf(v + 1.0) - 1.0) * 0.5).max(0.0)
 }
 
 /// The curve the level-like knobs follow (mask steps, harmonic protection): half way is 0.23, a quarter 0.082.
