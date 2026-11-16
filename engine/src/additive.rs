@@ -395,12 +395,9 @@ pub struct Voice {
     gone: u32,
     /// When the key was let go, in seconds from the note's start.
     left: Option<f32>,
-    lfo_ph: f32,
     so_ph: f32,
     so_inc: f32,
     so_amp: f32,
-    lfo_hold: f32,
-    lfo_prev: f32,
     vrand: f32,
 }
 
@@ -457,16 +454,13 @@ impl Voice {
             tick_len: TICK,
             gone: 0,
             left: None,
-            lfo_ph: 0.0,
             so_ph: 0.0,
             so_inc: 0.0,
             so_amp: 0.0,
-            lfo_hold: 0.0,
-            lfo_prev: 0.0,
             vrand: 0.0,
         };
         v.vrand = rnd(&mut seed) * 2.0 - 1.0;
-        v.lfo_hold = rnd(&mut seed) * 2.0 - 1.0;
+        let _ = rnd(&mut seed);
         let phase = patch.v(ix::PHASE);
         if phase < 0.0 {
             let amt = -phase / 1000.0;
@@ -491,35 +485,52 @@ impl Voice {
         v
     }
 
+    /// The slow oscillator, -1..1 (measured through its pull on the pitch).
     fn lfo(&mut self, patch: &Patch, t: f32, fenv: f32) -> f32 {
         let shape = patch.v(ix::LFO_SHAPE) as u8;
         let speed = patch.v(ix::LFO_SPEED);
-        let hz = (speed.abs() / 8000.0).powi(2) * 32.0 * speed.signum();
-        let was = self.lfo_ph;
-        self.lfo_ph = (self.lfo_ph + hz * self.tick_len as f32 / self.sr).rem_euclid(1.0);
-        let x = self.lfo_ph;
+        // it keeps time with the song: one cycle every eight beats at three tenths of the knob, twice as fast
+        // for every tenth more; shared by the notes it follows the song, on its own it starts with the note
+        let hz = if speed == 0.0 { 0.0 } else { self.beat as f64 * 2f64.powf(speed.abs() as f64 / 1000.0 - 6.0) * speed.signum() as f64 };
+        let clock = if patch.v(ix::LFO_GLOBAL) != 0.0 { self.at + t as f64 } else { t as f64 };
+        let x = (hz * clock).rem_euclid(1.0) as f32;
         let raw = match shape {
-            1 => 1.0 - 4.0 * ((x + 0.25).fract() - 0.5).abs(),
-            2 => 2.0 * x - 1.0,
-            3 => 1.0 - 2.0 * x,
-            4 => if x < 0.5 { 1.0 } else { -1.0 },
-            5 | 6 => {
-                if (hz >= 0.0 && x < was) || (hz < 0.0 && x > was) {
-                    self.lfo_prev = self.lfo_hold;
-                    self.lfo_hold = rnd(&mut self.seed) * 2.0 - 1.0;
-                }
-                if shape == 5 { self.lfo_hold } else { self.lfo_prev + (self.lfo_hold - self.lfo_prev) * x }
+            // a saw that turns round in a soft half-swing
+            1 => {
+                let d = x - 0.5;
+                if d.abs() <= 0.43 { d / 0.43 } else { d.signum() * (std::f32::consts::PI * (0.5 - d.abs()) / 0.14).sin() }
             }
-            7 => (x * std::f32::consts::PI).sin(),
-            8 => fenv,
-            9 => patch.v(ix::CUTOFF) / 4096.0 - 1.0,
-            10 => self.vrand,
-            11 => self.vel * 2.0 - 1.0,
-            12 | 13 => ((self.key - 60.0) / 36.0).clamp(-1.0, 1.0),
-            _ => (x * TAU).sin(),
+            2 => {
+                let s = -(x * TAU).sin();
+                s.signum() * (1.0 - (1.0 - s.abs()).powi(6))
+            }
+            3 => 2.0 * x - 1.0,
+            4 => if x < 0.5 { -1.0 } else { 1.0 },
+            5 => if x < 1.0 / 3.0 { -1.0 } else if x < 2.0 / 3.0 { 0.0 } else { 1.0 },
+            6 => 4.0 * ((x + 0.25).fract() - 0.5).abs() - 1.0,
+            7 => 2.0 * x * x * x - 1.0,
+            // measured: two sines of equal size, the second five times slower
+            8 => {
+                let c = hz * clock;
+                (-0.5 * (c * TAU as f64).sin() + 0.5 * ((c * 0.2 + 0.323) * TAU as f64).sin()) as f32
+            }
+            9 => fenv,
+            10 => patch.v(ix::CUTOFF) / 8192.0,
+            11 => self.vrand,
+            12 => self.touch,
+            // measured: nothing at the F sharp below middle C, all the way three octaves either side
+            13 => ((self.key - 42.0) / 36.0).clamp(-1.0, 1.0),
+            _ => -(x * TAU).sin(),
         };
-        let att = 4.0 * (patch.v(ix::LFO_ATTACK) / 1000.0).powi(2);
-        if att > 0.0 && shape < 8 { raw * (t / att).min(1.0) } else { raw }
+        // the fade-in: a squared rise, 0.11 s at a quarter of the knob, 0.455 s at half, 5 s at the top
+        let knob = patch.v(ix::LFO_ATTACK);
+        if knob > 0.0 && shape < 9 {
+            let k = (knob - 500.0) / 250.0;
+            let att = (-0.787 + 1.348 * k - 0.072 * k * k).exp();
+            raw * (t / att).min(1.0).powi(2)
+        } else {
+            raw
+        }
     }
 
     /// Work out the harmonic levels for this moment and, if they moved, build the next wave.
@@ -580,7 +591,9 @@ impl Voice {
         // first third of a second of each note; the swing itself runs on with the song, so notes share it
         let vib_ph = (((self.at + t as f64) * 6.0 + 0.1475).fract() as f32) * TAU;
         let vib = patch.v(ix::VIBRATO) / 1000.0 * 75.0 * (t / 0.332).min(1.0).powi(2) * vib_ph.sin();
-        let cents = patch.v(ix::PITCH) + vib + patch.v(ix::PITCH_LFO) / 1000.0 * 1200.0 * lfo;
+        // measured: the slow oscillator bends the pitch evenly both ways, by (100^knob - 1) / 99 of an octave
+        let pl = patch.v(ix::PITCH_LFO) / 1000.0;
+        let cents = patch.v(ix::PITCH) + vib + 1200.0 * (100f32.powf(pl.abs()) - 1.0) / 99.0 * pl.signum() * lfo;
         self.pitch_mul = 2f32.powf(cents / 1200.0);
 
         // filter position, in octaves above the C two octaves under middle C (measured: the knob counts
@@ -599,7 +612,8 @@ impl Voice {
                     amt * knob * fenv
                 }
             }
-            + patch.v(ix::CUTOFF_LFO) / 1000.0 * 4.0 * lfo
+            // measured: one-sided, nothing at the bottom of the swing and six octaves a full knob at the top
+            + patch.v(ix::CUTOFF_LFO) / 1000.0 * 3.0 * (lfo + 1.0)
             + patch.v(ix::KEY_TRACK) / 1000.0 * (f0 / self.pitch_mul / 128.0).max(1e-3).log2();
         let res = patch.v(ix::RESONANCE) / 1000.0;
         // the bell voice shares this engine and has no filter
@@ -633,13 +647,19 @@ impl Voice {
         // twice as fast for every tenth more; it runs on with the song, so notes share its place
         let ph_hz = if ph_speed == 0.0 { 0.0 } else { self.beat * 2f32.powf(ph_speed.abs() / 1000.0 - 6.0) * ph_speed.signum() };
         let ph_run = (ph_hz as f64 * (self.at + t as f64)).fract() as f32;
-        let ph_pos = if ph_amt > 0.0 { patch.v(ix::PH_OFFSET) / 1000.0 + ph_run + patch.v(ix::PH_OFFSET_LFO) / 1000.0 * lfo } else { 0.0 };
+        let ph_pos = if ph_amt > 0.0 { patch.v(ix::PH_OFFSET) / 1000.0 + ph_run + patch.v(ix::PH_OFFSET_LFO) / 1000.0 * 0.5 * lfo } else { 0.0 };
         // the width knob as tenths: every quarter of the knob makes the comb four times as dense (twice, when
         // it counts in harmonics)
-        let ph_width = if ph_amt > 0.0 { patch.v(ix::PH_WIDTH) / 1000.0 * (1.0 + patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo) } else { 0.0 };
+        let ph_width = if ph_amt > 0.0 { patch.v(ix::PH_WIDTH) / 1000.0 } else { 0.0 };
+        // measured: the slow oscillator makes the comb twice as dense, or half, at a full knob (the offset
+        // moves it half a tooth either way)
+        let ph_swing = if ph_amt > 0.0 { 2f32.powf(patch.v(ix::PH_WIDTH_LFO) / 1000.0 * lfo) } else { 1.0 };
         // the comb follows the key by this share, around middle C
         let ph_track = patch.v(ix::PH_KEY) / 1000.0 * (f0 / 256.0).log2();
-        let hz_amt = (patch.v(ix::HZ_AMOUNT) / 1000.0 * (1.0 + patch.v(ix::HZ_LFO) / 1000.0 * lfo)).clamp(0.0, 1.0);
+        let hz_amt = (patch.v(ix::HZ_AMOUNT) / 1000.0).clamp(0.0, 1.0);
+        // measured: the slow oscillator widens the harmonizer, one-sided like the filter's link: nothing at the
+        // bottom of the swing, the whole knob's worth of width at the top
+        let hz_wide = patch.v(ix::HZ_LFO) / 1000.0 * (lfo * 0.5 + 0.5);
 
         // grit shakes each harmonic by letting its phase wander, so the wave is redrawn on every tick while
         // it is on.
@@ -667,7 +687,7 @@ impl Voice {
             self.tick_len = if want >= TICK as f32 { TICK } else { (want.max(8.0) as u32).next_power_of_two() / 2 }.max(8);
         }
         let grit_t = 0.5 / f0 + if first { 0.0 } else { t + self.tick_len as f32 / self.sr };
-        let key = [n as f32, cut, pluck_t, mask_mix, ph_pos, ph_width, hz_amt, if moving { t } else { 0.0 }, rise_t];
+        let key = [n as f32, cut, pluck_t, mask_mix, ph_pos, ph_width * ph_swing, hz_amt + hz_wide, if moving { t } else { 0.0 }, rise_t];
         if self.primed && key.iter().zip(&self.last).all(|(a, b)| (a - b).abs() < 1e-4) {
             self.blend = false;
             return;
@@ -721,7 +741,7 @@ impl Voice {
         let hz_pos = patch.v(ix::HZ_POS) as usize;
         // with the velocity link a soft note reaches less far (measured at one velocity)
         let hz_vel = if patch.v(ix::VEL_HZ) != 0.0 { self.touch } else { 1.0 };
-        let hz_len = 1.0 + patch.v(ix::HZ_WIDTH) / 1000.0 * hz_vel * if hz_type >= 3 { 10.0 } else { 5.0 };
+        let hz_len = 1.0 + (patch.v(ix::HZ_WIDTH) / 1000.0 * hz_vel + hz_wide).max(0.0) * if hz_type >= 3 { 10.0 } else { 5.0 };
         let hz_lift = 2f32.powf(patch.v(ix::HZ_STRENGTH) / 256.0);
         let mut hz_share = [0f32; 12];
         let mut hz_steps = 0;
@@ -812,6 +832,7 @@ impl Voice {
                         2 => kf / 2.0 * 2f32.powf((ph_width - 5.0) / 2.5),
                         _ => ((kf * f0).log2() - ph_track) * 0.75 * 4f32.powf((ph_width - 5.0) / 2.5),
                     };
+                    let pos = pos * ph_swing;
                     // the lowest harmonics are spared by the protection, as from the filter
                     let g = 1.0 - ph_amt + ph_amt * 1.633 * (0.5 - 0.5 * ((pos - ph_pos) * TAU).cos());
                     a *= g + (1.0 - g) * keep;
