@@ -168,6 +168,8 @@ pub struct Set {
     pub op: Option<crate::opfx::Set>,
     /// The effects section of the zone player, which stands in for everything above.
     pub zone: Option<crate::zonefx::Set>,
+    /// The measured effects of the additive synth, which run ahead of the rest.
+    pub stack: Option<crate::stackfx::Set>,
     /// Anything standing still in the sound is let drain away (the operator synth's own switch).
     pub level: bool,
     /// The analogue trio's widener, which stands in for everything above: the left side comes a swaying
@@ -177,7 +179,7 @@ pub struct Set {
 
 impl Set {
     pub fn any(&self) -> bool {
-        self.split || self.level || self.wide || self.zone.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
+        self.split || self.level || self.wide || self.zone.is_some() || self.stack.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
 
     /// Frames the effects still sound after their input stops.
@@ -194,6 +196,9 @@ impl Set {
         }
         if self.level {
             n = sr * 0.5;
+        }
+        if let Some(k) = &self.stack {
+            n += k.tail(sr, step) as f32;
         }
         for d in self.delay.iter().chain(self.more.iter().flatten()) {
             let time = if d.free > 0.0 { d.free * sr } else { d.left.max(d.right) * step };
@@ -237,6 +242,7 @@ pub struct State {
     dry: Vec<[f32; 2]>,
     op: Option<Box<crate::opfx::State>>,
     zone: Option<Box<crate::zonefx::State>>,
+    stack: Option<Box<crate::stackfx::State>>,
     wide: (Vec<f32>, usize, f64),
 }
 
@@ -254,7 +260,7 @@ const PASSES: [usize; 2] = [225, 556];
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None, wide: (Vec::new(), 0, 0.0) }
+        Self { sr, still: [[0.0; 2]; 2], line: Vec::new(), at: 0, sweep: 0.0, lp: [0.0; 2], hp: [0.0; 2], time: [0.0; 2], cho: Vec::new(), cat: 0, cph: 0.0, open: 1.0, clock: 0.0, body: [[[0.0; 2]; 2]; 8], combs: Vec::new(), passes: Vec::new(), rack: Box::default(), tone: [[[0.0; 2]; 2]; 3], more: Default::default(), dry: Vec::new(), op: None, zone: None, stack: None, wide: (Vec::new(), 0, 0.0) }
     }
 
     /// Run the effects over `buf`. `step` is frames per sixteenth note; `song` is where the song stands in
@@ -267,6 +273,9 @@ impl State {
         if set.wide {
             self.wide(buf);
             return;
+        }
+        if let Some(k) = &set.stack {
+            self.stack.get_or_insert_with(|| Box::new(crate::stackfx::State::new(self.sr))).process(k, buf, step);
         }
         self.tone(set, buf);
         self.rest(set, buf, step, song);

@@ -31,6 +31,7 @@ mod additive_shapes;
 pub mod analog;
 pub mod duo;
 pub mod opfx;
+pub mod stackfx;
 pub mod tailfx;
 pub mod zonefx;
 pub mod strmodel;
