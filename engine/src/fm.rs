@@ -636,6 +636,8 @@ pub struct Patch {
     /// 36 operator settings, 24 filter settings, then pan and volume of the whole instrument.
     pub arts: Vec<Art>,
     pub uni: u32,
+    /// Left and right level of what goes to the effects (the effects pan, turned before they hear it).
+    pub send_side: [f32; 2],
     pub uni_pan: f32,
     pub uni_vol: f32,
     pub uni_pitch: f32,
@@ -1254,7 +1256,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1430,6 +1432,9 @@ impl Patch {
         p.uni_pitch = at(d, 704).clamp(0, 256) as f32 / 256.0;
         p.uni_phase = at(d, 712).clamp(0, 128) as f32 / 128.0;
         p.uni_sub = at(d, 708).clamp(0, 128) as f32 / 128.0;
+        // measured: centre leaves both sides alone, either end gives one side 3 dB more and silences the other
+        let turn = (1.0 + at(d, 720).clamp(-128, 128) as f32 / 128.0) * std::f32::consts::FRAC_PI_4;
+        p.send_side = [std::f32::consts::SQRT_2 * turn.cos(), std::f32::consts::SQRT_2 * turn.sin()];
         p.modx = at(d, 760).clamp(0, 512) as f32 / 512.0;
         p.mody = at(d, 764).clamp(0, 512) as f32 / 512.0;
         // the patch notes: where they start moved between layouts. Newer blocks hold a one-byte length and two
@@ -2163,7 +2168,7 @@ impl Voice {
         let any = p.send.iter().any(|&g| g != 0.0);
         let n = self.halvers.len();
         let out = self.halved(p, dphase / self.over as f32, n, any);
-        self.sent = out.1;
+        self.sent = [out.1[0] * p.send_side[0], out.1[1] * p.send_side[1]];
         out.0
     }
 
@@ -3125,6 +3130,12 @@ pub(crate) mod tests {
         d[1083] = 1;
         assert!(!Patch::from_plain(&d, 25).unwrap().tail.any(), "no send, no effects");
         put(&mut d, 12 + 7 * 4, 128);
+        // the effects pan: centre leaves the send alone, half left gives 1.3066 and 0.5412 (measured)
+        assert_eq!(Patch::from_plain(&d, 25).unwrap().send_side.map(|g| (g * 1000.0).round()), [1000.0, 1000.0]);
+        put(&mut d, 720, -64);
+        let side = Patch::from_plain(&d, 25).unwrap().send_side;
+        assert!((side[0] - 1.3066).abs() < 1e-3 && (side[1] - 0.5412).abs() < 1e-3, "{side:?}");
+        put(&mut d, 720, 0);
         let t = Patch::from_plain(&d, 25).unwrap().tail;
         assert!(t.split && t.delay.is_none() && t.reverb.is_none());
         let o = t.op.expect("the effects section");

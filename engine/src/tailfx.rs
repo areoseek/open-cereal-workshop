@@ -345,7 +345,7 @@ impl State {
         match &set.op {
             Some(o) => {
                 let st = self.op.get_or_insert_with(|| Box::new(crate::opfx::State::new(self.sr)));
-                st.frame = self.frame.unwrap_or(0);
+                st.frame = self.frame.unwrap_or(st.next);
                 st.process(o, sent, step)
             }
             None => self.rest(set, sent, step, song),

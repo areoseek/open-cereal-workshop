@@ -183,6 +183,8 @@ pub struct State {
     cho: Line,
     phase: [[f64; VOICES]; 2],
     started: bool,
+    /// The song frame the next block should start on if nothing was skipped.
+    pub next: u64,
     /// How far the song had run in frames when this block began (set by the caller).
     pub frame: u64,
     /// The room answers a little late.
@@ -197,7 +199,7 @@ pub struct State {
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
+        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, next: 0, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
     }
 
     /// Turn what was sent to the effects (`buf`) into what they put out. `step` is frames per sixteenth note.
@@ -260,7 +262,16 @@ impl State {
                     self.phase[side][k] = (ahead + self.frame as f64 * rate[side][k]).rem_euclid(1.0);
                 }
             }
+        } else if self.frame != self.next {
+            // the section rested while nothing sounded (or the song jumped): the sweeps went on turning
+            let gap = self.frame as f64 - self.next as f64;
+            for side in 0..2 {
+                for k in 0..order {
+                    self.phase[side][k] = (self.phase[side][k] + gap * rate[side][k]).rem_euclid(1.0);
+                }
+            }
         }
+        self.next = self.frame + n as u64;
         for i in 0..n {
             let x = self.feed[i];
             let at = self.cho.at;
