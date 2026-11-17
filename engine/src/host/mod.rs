@@ -522,12 +522,22 @@ both! {
     idle(stalled: bool) -> ();
 }
 
+/// Files and folders the original program installs for itself (its own bridge plug-ins and program folders):
+/// never loaded, scanned or listed here.
+fn not_ours_to_open(p: &Path) -> bool {
+    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    name.starts_with("fl studio") || name == "image-line" || name.starts_with("flengine") || name.starts_with("fl64") || name.starts_with("ilbridge")
+}
+
 /// Every plug-in file under the install folders.
 pub fn files() -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
+            if not_ours_to_open(&p) {
+                continue;
+            }
             if is_vst3(&p) {
                 // a folder of this name is one plug-in, with its code inside
                 out.push(p);
@@ -790,6 +800,9 @@ impl std::fmt::Debug for Instance {
 impl Instance {
     /// Make one plug-in out of a file. `id` picks among several in the file; empty takes the first.
     pub fn open(path: &Path, id: &str) -> Option<Arc<Instance>> {
+        if path.ancestors().any(not_ours_to_open) {
+            return None;
+        }
         let inst = Self::open_raw(path, id)?;
         inst.params();
         Some(inst)

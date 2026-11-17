@@ -287,7 +287,7 @@ impl App {
                         if (!filled && resp.clicked()) || resp.secondary_clicked() {
                             ui.memory_mut(|m| m.toggle_popup(popup));
                         }
-                        egui::popup::popup_below_widget(ui, popup, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                        egui::popup::popup_below_widget(ui, popup, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
                             ui.set_min_width(170.0);
                             if filled {
                                 if ui.button("Delete").clicked() {
@@ -322,6 +322,10 @@ impl App {
                                 }
                             });
                         });
+                        // (the menu stays up for its Plug-ins list to open, and goes once something is picked)
+                        if act.is_some() && ui.memory(|m| m.is_popup_open(popup)) {
+                            ui.memory_mut(|m| m.close_popup());
+                        }
                         if filled {
                             resp.hint("Click to open, click the light to switch on or off, right-click for more");
                         }

@@ -100,12 +100,20 @@ pub fn menu(ui: &mut Ui, instruments: bool) -> Option<Arc<Instance>> {
     list.sort_by_key(|f| f.name.to_lowercase());
     let mut got = None;
     if list.is_empty() {
-        ui.label(RichText::new("None installed. Plug-ins in the CLAP format are\nlooked for in the usual folders and in your search folders.").small().color(TEXT_DIM));
+        ui.label(RichText::new("None installed. CLAP, VST3 and VST plug-ins are\nlooked for in the usual folders and in your search folders.").small().color(TEXT_DIM));
     }
     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
         for f in list {
-            let r = ui.button(&f.name);
-            let r = if f.vendor.is_empty() { r } else { r.hint(&f.vendor) };
+            // the same plug-in installed in two formats shows which is which
+            let twice = known.iter().filter(|o| o.instrument == instruments && o.name.eq_ignore_ascii_case(&f.name)).count() > 1;
+            let ext = f.path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let format = match ext.as_str() {
+                "clap" => "CLAP",
+                "vst3" => "VST3",
+                _ => "VST",
+            };
+            let r = if twice { ui.button(format!("{}  ({format})", f.name)) } else { ui.button(&f.name) };
+            let r = if f.vendor.is_empty() { r.hint(format) } else { r.hint(format!("{}, {format}", f.vendor)) };
             if r.clicked() {
                 got = Instance::open(&f.path, &f.id);
                 ui.close_menu();
