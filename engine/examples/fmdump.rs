@@ -17,7 +17,7 @@ fn main() {
         }
     }
     for (k, a) in pt.arts.iter().enumerate() {
-        if a.env.live || a.lfo.live {
+        if a.env.live || a.lfo.live || std::env::var("ALLSW").is_ok() {
             println!("art {k} on: env {} flags {} lfo {} flags {} bipolar {} switches at {} {}", a.env.live, a.env.flags, a.lfo.live, a.lfo.flags, a.bipolar, a.env.span.1.saturating_sub(16), a.lfo.span.1.saturating_sub(16));
         }
     }

@@ -608,6 +608,8 @@ pub struct Op {
     pub free: bool,
     /// The first millisecond of a note is faded in (measured).
     pub declick: bool,
+    /// Its standing level is drained away as it plays.
+    pub centre: bool,
     /// One cycle, for all harmonics and for fewer of them (used on high notes).
     tables: Vec<Arc<Vec<f32>>>,
     caps: Vec<u32>,
@@ -1229,11 +1231,6 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
         if absolute {
             t.iter_mut().for_each(|v| *v = v.abs());
         }
-        // (measured on a pulse: the next switch takes the wave's standing level away)
-        if centre {
-            let mean = t.iter().sum::<f32>() / t.len() as f32;
-            t.iter_mut().for_each(|v| *v -= mean);
-        }
         t.push(t[0]);
         Arc::new(t)
     };
@@ -1300,6 +1297,7 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
         pluck: h[2126] != 0,
         free: h[2123] != 0,
         declick: h[2125] != 0,
+        centre,
         tables,
         caps,
     }
@@ -1323,6 +1321,9 @@ impl Default for Patch {
         p
     }
 }
+
+/// Seconds the centre switch takes to drain a standing level to 1/e.
+const CENTRE_S: f32 = 0.0398;
 
 fn bipolar_at(k: usize) -> bool {
     match k {
@@ -1716,6 +1717,8 @@ struct Sub {
     amp: [f32; 6],
     /// the softened start of each operator
     soft: [f32; 6],
+    /// the standing level each centred operator has gathered
+    dc: [f32; 6],
     inc: [f32; 6],
     tab: [u8; 6],
     pl: [f32; 9],
@@ -1967,6 +1970,7 @@ impl Voice {
                 raw: [0.0; 6],
                 amp: [0.0; 6],
                 soft: [0.0; 6],
+                dc: [0.0; 6],
                 inc: [0.0; 6],
                 tab,
                 pl: [1.0; 9],
@@ -2032,8 +2036,7 @@ impl Voice {
         self.t as f32 / self.sr
     }
 
-    /// Place the note in the song. Measured on the first layout: each voice of a unison set stands where its detuning
-    /// would have carried it had it run since the song began, so a later note starts with its voices already apart.
+    /// Place the note in the song: free-running operators stand where the song's clock has carried them.
     pub fn started_at(&mut self, p: &Patch, hz: f32, secs: f64) {
         self.song = secs;
         // a free-running operator turns with the song, not with the note: where it stands when a note begins is
@@ -2041,12 +2044,11 @@ impl Voice {
         // running a little under three thousandths of a second ahead); the chance start stays for notes played
         // by hand, which have no place in the song
         for s in self.subs.iter_mut() {
-            let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
             for k in 0..6 {
                 let o = &p.ops[k];
                 if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
-                    // (each voice of a unison set by its own detuned pitch; the first layout's drift below adds that part)
-                    let own = if p.lay.first { low } else { s.detune };
+                    // (each voice of a unison set by its own detuned pitch, on every layout)
+                    let own = s.detune;
                     // (the pitch its maps set does not count: measured on one voice with a map bending it)
                     let f = (hz * (p.pitch / 12.0).exp2() * own * o.ratio + o.offset_hz) as f64;
                     // (measured on the later layouts at six places on the unison phase knob, no detuning: the whole
@@ -2059,17 +2061,8 @@ impl Voice {
                 }
             }
         }
-        // (measured on both later layouts with the phase knob at nothing: every note starts with its voices together)
-        if !p.lay.first {
-            return;
-        }
-        for s in self.subs.iter_mut() {
-            let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
-            let off = (s.detune / low) as f64 - 1.0;
-            for k in 0..6 {
-                s.ph[k] += (off * (hz * (p.pitch / 12.0).exp2() * low * p.ops[k].ratio) as f64 * secs).fract();
-            }
-        }
+        // (measured on every layout with the phase knob at nothing: operators that are not free start each
+        // note with their voices together)
     }
 
     fn control(&mut self, p: &Patch, dphase: f32, first: bool) {
@@ -2376,6 +2369,7 @@ impl Voice {
         };
         // with the voices merged, the whole unison set goes through one run of the filters (measured: no width,
         // and a shaper in the filter is driven by the sum)
+        let drain = 1.0 - (-1.0 / (CENTRE_S * self.sr)).exp();
         let ease = if self.over == 1 { 0.02 } else { 1.0 - 0.98f32.powf(1.0 / self.over as f32) };
         let merge = p.uni_mono && self.subs.len() > 1;
         let end = self.subs.len() - 1;
@@ -2462,6 +2456,13 @@ impl Voice {
                 } else {
                     y * s.amp[i]
                 };
+                if o.centre {
+                    // (measured: the standing level goes after the operator's own level, at the pace of a
+                    // gentle high-pass near four hertz, so a wave that leans one way starts off-centre and
+                    // settles, and a fast fade leaves a short swing the other way)
+                    s.dc[i] += (s.out[i] - s.dc[i]) * drain;
+                    s.out[i] -= s.dc[i];
+                }
                 s.ph[i] += s.inc[i] as f64;
                 s.ph[i] -= s.ph[i].floor();
                 let g = p.out[i];
@@ -3158,7 +3159,7 @@ pub(crate) mod tests {
     }
 
     /// The voices of a set run left to right, sharp and flat by turns, each a fixed share of the spread off pitch;
-    /// a note placed later in the song starts with its voices already drifted apart.
+    /// a note placed later in the song still starts with them together.
     #[test]
     fn unison_spread_and_drift_follow_the_measured_law() {
         let mut p = lone();
@@ -3185,9 +3186,8 @@ pub(crate) mod tests {
         assert!(v.subs[0].detune > 1.0 && v.subs[1].detune < 1.0);
         let before = [v.subs[0].ph[0], v.subs[1].ph[0]];
         v.started_at(&p, 440.0, 2.0);
-        let want = ((v.subs[0].detune as f64 - 1.0) * (440.0 * p.ops[0].ratio) as f64 * 2.0).fract() as f32;
-        assert!(((v.subs[0].ph[0] - before[0]) as f32 - want).abs() < 1e-4 && want.abs() > 0.01);
-        assert!(v.subs[1].ph[0] < before[1], "the flat voice falls behind");
+        // (an operator that is not free starts every note with its voices together, on the first layout too)
+        assert!(v.subs[0].ph[0] == before[0] && v.subs[1].ph[0] == before[1]);
     }
 
     /// A free-running operator stands where the song's clock has carried it: its pitch times the song's time
