@@ -9,6 +9,13 @@ fn main() {
     let raw = &g.raw[..];
     let Some(pt) = cereal_engine::fm::Patch::parse(raw) else { return println!("not read, {} bytes", raw.len()) };
     println!("volume {} pitch {} out {:?} uni {}", pt.volume, pt.pitch, pt.out, pt.uni);
+    for k in 0..6 {
+        let a = &pt.arts[k * 6 + 3];
+        if a.env.on() && a.env.decay > 0 {
+            let bends: Vec<(f32, f32, u8)> = a.env.pts.iter().take(a.env.decay as usize + 1).map(|p| (p.x, p.tension, p.mode)).collect();
+            println!("glide op {k} reach {} at {} flags {} loop {} bends {:?}", pt.ops[k].pitch_cents, a.env.decay, a.env.flags, a.env.loop_start, bends);
+        }
+    }
     for (k, a) in pt.arts.iter().enumerate() {
         if a.env.live || a.lfo.live {
             println!("art {k} on: env {} flags {} lfo {} flags {} bipolar {} switches at {} {}", a.env.live, a.env.flags, a.lfo.live, a.lfo.flags, a.bipolar, a.env.span.1.saturating_sub(16), a.lfo.span.1.saturating_sub(16));
@@ -25,7 +32,7 @@ fn main() {
         }
         println!("room on {} vol {} secs {} cuts {} {}", d[1083], at(1079), at(1067), at(1071), at(1051));
     }
-    println!("velocity to volume {} mono set {}", pt.vel_vol, pt.uni_mono);
+    println!("velocity to volume {} mono set {} slide {:?}", pt.vel_vol, pt.uni_mono, pt.slide);
     println!("tail {:?}", pt.tail);
     println!("version word {:?}", &raw[..4.min(raw.len())]);
     if std::env::var("ARTS").is_ok() {
@@ -36,7 +43,7 @@ fn main() {
                     println!("art {k} map {m} live {} flags {} pts {:?}", c.live, c.flags, c.pts.iter().map(|p| (p.x, p.y, p.tension)).collect::<Vec<_>>());
                 }
             }
-            println!("art {k} env flags {} decay {} loop {} sus {} pts {:?} | lfo flags {} n {}", e.flags, e.decay, e.loop_start, e.sustain, e.pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(), a.lfo.flags, a.lfo.pts.len());
+            println!("art {k} env flags {} decay {} loop {} sus {} pts {:?} | lfo flags {} hz {} shape {:?} pts {:?}", e.flags, e.decay, e.loop_start, e.sustain, e.pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(), a.lfo.flags, a.lfo_hz, a.lfo_shape, a.lfo.pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
             if a.lfo.on() {
                 println!("   lfo hz {} shape {:?} pts {:?}", a.lfo_hz, a.lfo_shape, a.lfo.pts.iter().map(|p| (p.x, p.y, p.tension)).collect::<Vec<_>>());
             }

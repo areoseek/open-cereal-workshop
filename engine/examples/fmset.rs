@@ -1,5 +1,6 @@
 //! Write a copy of a project with whole numbers of one operator synth block changed:
-//! fmset in.flp out.flp channel offset=value ...   (offsets into the unpacked block; F1+8 and O2+4 count from a filter or operator)
+//! fmset in.flp out.flp channel offset=value ...   (SPLICE=other.flp:from:to:from2:to2 grafts a stretch of another project's block first)
+//!   (offsets into the unpacked block; F1+8 and O2+4 count from a filter or operator)
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut lib = cereal_engine::Library::new();
@@ -83,7 +84,19 @@ fn main() {
             None => (place(o), v.parse().unwrap(), 4),
         })
         .collect();
+    // SPLICE=other.flp:from:to:from2:to2 first swaps bytes from..to for the other project's from2..to2
+    let graft = std::env::var("SPLICE").ok().map(|v| {
+        let f: Vec<String> = v.split(':').map(|x| x.to_string()).collect();
+        let mut lib = cereal_engine::Library::new();
+        let (o, _) = cereal_engine::load_flp(std::path::Path::new(&f[0]), &mut lib).unwrap();
+        let d = cereal_engine::fm::Patch::unpack(&o.channels[n].gen.as_ref().unwrap().raw).unwrap();
+        let at: Vec<usize> = f[1..].iter().map(|x| x.parse().unwrap()).collect();
+        (at[0], at[1], d[at[2]..at[3]].to_vec())
+    });
     let (raw, patch) = cereal_engine::fm::Patch::edited(&g.raw, |d| {
+        if let Some((from, to, with)) = &graft {
+            d.splice(*from..*to, with.iter().copied());
+        }
         for (o, v, wide) in &sets {
             d[*o..*o + wide].copy_from_slice(&v.to_le_bytes()[..*wide]);
         }

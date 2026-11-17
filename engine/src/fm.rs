@@ -302,6 +302,16 @@ pub struct Curve {
 }
 
 impl Curve {
+    /// How far along a slide over the attack part (start to the attack marker) a point `u` of the way
+    /// through it in time is: the bend drawn on the piece that ends at the marker, taken over the whole part
+    /// (measured: a sequence whose last piece is fully tense does not slide though its first is straight).
+    pub fn attack_way(&self, u: f32) -> f32 {
+        match self.pts.get(self.decay.max(0) as usize) {
+            Some(p) => bent(u, p.tension, p.mode),
+            None => 1.0,
+        }
+    }
+
     pub fn flat(y: f32) -> Self {
         let mut c = Self { pts: vec![Pt { x: 0.0, y, ..Default::default() }, Pt { x: 1.0, y, ..Default::default() }], flags: 0, live: false, decay: -1, loop_start: -1, sustain: -1, span: (0, 0), t: vec![] };
         c.prepare([1.0; 3]);
@@ -551,18 +561,27 @@ impl Art {
     /// `beat` is how many beats pass in a second. Lines count their time in beats: the ones marked as following
     /// the tempo in beats of the song, the others in beats at 120 to the minute (measured: a piece drawn one
     /// unit long lasts half a second).
-    fn value(&self, stat: f32, t: f32, rel: Option<f32>, lfo_gain: f32, beat: f32) -> f32 {
+    fn value(&self, stat: f32, t: f32, rel: Option<f32>, lfo_gain: f32, beat: f32, song: f64, slide: (f32, f32)) -> f32 {
         let read = |c: &Curve| {
             let b = if c.flags & 1 != 0 { beat } else { 2.0 };
             c.env(t * b, rel.map(|r| r * b))
         };
+        // the envelope alone runs on the slide's clock: its first `slide.0` seconds pass `slide.1` times slower
+        let own = || {
+            let (len, by) = slide;
+            let warp = |x: f32| if len <= 0.0 { x } else if x < len { x / by } else { x - len + len / by };
+            let b = if self.env.flags & 1 != 0 { beat } else { 2.0 };
+            self.env.env(warp(t) * b, rel.map(|r| warp(r) * b))
+        };
         // (measured: a wave marked as following the tempo runs at its speed when the song is at 120)
         let rate = if self.lfo.flags & 1 != 0 { beat * 0.5 } else { 1.0 };
-        let l = if self.lfo.on() { lfo_wave(self.lfo_hz * rate * t, self.lfo_shape) * (read(&self.lfo) - 0.5) * 2.0 * lfo_gain } else { 0.0 };
+        // (measured: a wave with the second switch set turns with the song, not from the start of the note)
+        let turn = if self.lfo.flags & 2 != 0 { ((self.lfo_hz * rate) as f64 * (song + t as f64)).fract() as f32 } else { self.lfo_hz * rate * t };
+        let l = if self.lfo.on() { lfo_wave(turn, self.lfo_shape) * (read(&self.lfo) - 0.5) * 2.0 * lfo_gain } else { 0.0 };
         if self.bipolar {
-            stat + if self.env.on() { (read(&self.env) - 0.5) * 2.0 } else { 0.0 } + l
+            stat + if self.env.on() { (own() - 0.5) * 2.0 } else { 0.0 } + l
         } else {
-            (stat * if self.env.on() { read(&self.env) } else { 1.0 } * (1.0 + l)).max(0.0)
+            (stat * if self.env.on() { own() } else { 1.0 } * (1.0 + l)).max(0.0)
         }
     }
 }
@@ -647,6 +666,9 @@ pub struct Patch {
     pub uni_sub: f32,
     /// The voices of a unison set all sit in the middle (measured: one switch byte takes the width away).
     pub uni_mono: bool,
+    /// Sliding in from the note before, when its switch is on: whether a far note takes longer, and how the
+    /// distance is held in (0 not at all, 1 folded into an octave, 2 to 5 at most four down to one semitone).
+    pub slide: Option<(bool, u8)>,
     /// how many times over the voice is worked out, as a power of two: for a render and for live play
     /// (measured on renders: none means the plain samples with nothing filtered at all)
     pub over: [u8; 2],
@@ -994,9 +1016,10 @@ fn bend_of(k: f32) -> f32 {
 const UNI_SHARE: [f32; 9] = [0.7767, 0.9467, 0.8225, 1.0459, 0.9130, 1.0, 0.7855, 0.9892, 0.8652];
 
 /// How fast a slow wave runs for its stored speed (measured at six settings: 32 Hz at the top of the knob and
-/// ten times slower for every quarter of it below).
+/// ten times slower for every quarter of it below; timed again over long notes at eleven slower settings: the
+/// whole line sits 0.0032 Hz lower, so the bottom of the knob stands still).
 pub fn lfo_hz(speed: i32) -> f32 {
-    0.0032 * 10f32.powf(4.0 * speed.clamp(0, 65536) as f32 / 65536.0)
+    0.0032 * (10f32.powf(4.0 * speed.clamp(0, 65536) as f32 / 65536.0) - 1.0)
 }
 
 /// The three settings stored after a slow wave's speed, each brought to -1..=1: tension, skew and pulse width.
@@ -1138,11 +1161,12 @@ fn op_from(h: &[u8], lay: &OpLay) -> Op {
     // (measured with two drawn harmonics: skew and the sine shaper bend every harmonic's own wave, tension bends
     // the finished sum)
     let mut base: Vec<f32> = (0..TN).map(|k| shape(sh, if plain { tn } else { 0.0 }, sk, sn, k as f32 / TN as f32)).collect();
-    // the pre-filter cuts the wave off above a harmonic: four are left at the bottom of the knob, three times as
-    // many for every eighth of its travel (measured at 0, 16, 32)
+    // the pre-filter cuts the wave off above a harmonic: four are left at the bottom of the knob, close to three
+    // times as many for every eighth of its travel (measured at nine settings up to 32: 4, 6, 8, 9, 10, 13, 17,
+    // 22 and 38 left at 0, 4, 8, 10, 12, 16, 20, 24 and 32)
     // (it works on the finished wave: drawn harmonics above the cut are gone too, measured on an older organ)
     let pre = i(2116).clamp(0, 128);
-    let kept = (4.33 * 3f32.powf(pre as f32 / 16.0)) as usize;
+    let kept = (4.4 * 2.95f32.powf(pre as f32 / 16.0)).round() as usize;
     if pre < 128 {
         keep_harmonics(&mut base, kept);
     }
@@ -1256,7 +1280,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1462,6 +1486,9 @@ impl Patch {
         // every layout that has it (measured: the set in the middle from layout 13 on at least, the velocity
         // switch from 18)
         p.uni_mono = ver >= 7 && d.len() > 966 && d[966] != 0;
+        // (measured by flipping each byte: the slide's own switch, the one that lets distance set its time, and
+        // the limit on its distance, all there from layout 15 on)
+        p.slide = (ver >= 15 && d.len() > 973 && d[970] != 0).then(|| (d[971] != 0, d[973]));
         if d.len() > 788 {
             p.over = [d[784].min(6), d[780].min(6)];
         }
@@ -1779,7 +1806,7 @@ pub struct Voice {
     fsteps: u8,
     /// the slide in from the note before, for each operator: how far (in the pitch output's own measure) and
     /// for how many seconds (beats, when below nothing)
-    glide: [(f32, f32); 6],
+    glide: [(f32, f32, f32); 6],
     halvers: Vec<Halver>,
     /// the same for what goes to the effects, and that share of the last frame made
     send_halvers: Vec<Halver>,
@@ -1790,6 +1817,8 @@ pub struct Voice {
     ctl: u32,
     /// beats in a second, for lines that follow the tempo
     pub beat: f32,
+    /// where in the song the note began, in seconds
+    song: f64,
     subs: Vec<Sub>,
     main_l: f32,
     main_r: f32,
@@ -1891,22 +1920,34 @@ impl Voice {
                 hseed: 3_099_528_473u32,
             });
         }
-        // an operator whose pitch envelope has an attack part slides in from the note before over that part
-        // (measured: straight in pitch, from no further than a sixth of the envelope's reach, on top of
-        // whatever the envelope itself does; no attack marker or no envelope, no slide)
-        let mut glide = [(0.0f32, 0.0f32); 6];
-        if let Some(from) = from.filter(|f| *f != key) {
+        // with the slide switch on, an operator whose pitch envelope has an attack part slides in from the note
+        // before over that part (measured from six distances: straight in pitch at an octave per length of that
+        // part, so a far note takes longer; on top of whatever the envelope itself does; no attack marker or no
+        // envelope, no slide), and it follows the bend drawn on that part: a fully tense piece arrives almost at
+        // once. The distance can be folded into an octave or held to a few semitones, and with the time switch
+        // off every slide takes the length of the part whatever its distance.
+        let mut glide = [(0.0f32, 0.0f32, 1.0f32); 6];
+        if let (Some(from), Some((by_distance, limit))) = (from.filter(|f| *f != key), p.slide) {
+            let st = from as f32 - key as f32;
+            let st = match limit {
+                0 => st,
+                1 => st.signum() * ((st.abs() - 1.0).rem_euclid(12.0) + 1.0),
+                2..=5 => st.clamp(limit as f32 - 6.0, 6.0 - limit as f32),
+                _ => 0.0,
+            };
+            let far = st / 12.0;
             for (k, g) in glide.iter_mut().enumerate() {
                 let (Some(a), reach) = (p.arts.get(k * 6 + 3), p.ops[k].pitch_cents) else { continue };
                 let at = a.env.decay;
-                if a.env.on() && at > 0 && reach > 0.0 {
+                if a.env.on() && at > 0 && reach > 0.0 && far != 0.0 {
                     if let Some(len) = a.env.t.get(at as usize).copied().filter(|l| *l > 0.0) {
-                        *g = (((from as f32 - key as f32) * 100.0 / reach).clamp(-1.0 / 6.0, 1.0 / 6.0), if a.env.flags & 1 != 0 { -len } else { len * 0.5 });
+                        let by = if by_distance { far.abs() } else { 1.0 };
+                        *g = (far * 1200.0 / reach, by * if a.env.flags & 1 != 0 { -len } else { len * 0.5 }, by);
                     }
                 }
             }
         }
-        let mut v = Self { glide, over, fsteps: if over == 1 { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, subs, main_l: 1.0, main_r: 1.0 };
+        let mut v = Self { glide, over, fsteps: if over == 1 { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -1930,6 +1971,7 @@ impl Voice {
     /// Place the note in the song. Measured: each voice of a unison set stands where its detuning would have carried
     /// it had it run since the song began, so a later note starts with its voices already apart.
     pub fn started_at(&mut self, p: &Patch, hz: f32, secs: f64) {
+        self.song = secs;
         for s in self.subs.iter_mut() {
             let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
             let off = (s.detune / low) as f64 - 1.0;
@@ -1944,20 +1986,28 @@ impl Voice {
         let rel = self.rel;
         let sr = self.sr;
         let beat = self.beat;
+        let song = self.song;
         for s in self.subs.iter_mut() {
             if first || p.any_moving {
                 for (k, a) in p.arts.iter().enumerate().take(ARTS) {
                     if first || a.moving() {
-                        s.val[k] = a.value(s.stat[k], t, rel, p.lfo, beat);
+                        // (measured: while a note slides in from the last key, the attack part of its pitch
+                        // envelope takes as long as the slide does)
+                        let mut slide = (0.0, 1.0);
+                        if k < 36 && k % 6 == 3 && self.glide[k / 6].1 != 0.0 {
+                            let (_, len, by) = self.glide[k / 6];
+                            slide = (if len < 0.0 { -len / beat.max(1e-3) } else { len }, by);
+                        }
+                        s.val[k] = a.value(s.stat[k], t, rel, p.lfo, beat, song, slide);
                     }
                 }
             }
             for k in 0..6 {
                 let o = &p.ops[k];
                 // (measured: the pitch output bends the fixed part of the frequency by the same interval)
-                let (far, len) = self.glide[k];
+                let (far, len, _) = self.glide[k];
                 let len = if len < 0.0 { -len / beat.max(1e-3) } else { len };
-                let slide = if t < len { far * (1.0 - t / len) } else { 0.0 };
+                let slide = if t < len { far * (1.0 - p.arts[k * 6 + 3].env.attack_way(t / len)) } else { 0.0 };
                 let art = ((s.val[k * 6 + 3] + slide) * o.pitch_cents / 1200.0).exp2();
                 let bend = (p.pitch / 12.0).exp2() * art;
                 s.inc[k] = (dphase * s.detune * bend * o.ratio + o.offset_hz * art / sr).clamp(-0.5, 0.5);
@@ -2857,7 +2907,9 @@ pub(crate) mod tests {
     fn slow_wave_speed_and_shape_follow_the_measured_laws() {
         // 32 Hz at the top, ten times slower for each quarter of the knob
         assert!((lfo_hz(65536) - 32.0).abs() < 0.01);
-        assert!((lfo_hz(32768) - 0.32).abs() < 0.001);
+        assert!((lfo_hz(32768) - 0.3168).abs() < 0.001);
+        assert!((2.0 / lfo_hz(21502) - 32.045).abs() < 0.1);
+        assert_eq!(lfo_hz(0), 0.0);
         assert!((lfo_hz(52544) - 5.15).abs() < 0.03);
         // a plain triangle that starts at rest going up
         let plain = [0.0; 3];
