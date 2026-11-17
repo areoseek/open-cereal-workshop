@@ -2,6 +2,21 @@
 
 An open source, pattern-based music workstation written in Rust. Native on Linux, also built for Windows.
 
+> [!NOTE]
+> **Do not take our word for it: check the software yourself.**
+> Everything this program does is in the open. If you have any doubt about a download, please:
+>
+> - **Read the source code.** All of it is in this repository:
+>   <https://github.com/areoseek/open-cereal-workshop>. Use the green **Code** button there and choose
+>   **Download ZIP**, or run `git clone https://github.com/areoseek/open-cereal-workshop.git`. The exact source
+>   of each release is also attached to it as "Source code (zip)" and "Source code (tar.gz)" on the
+>   [Releases page](https://github.com/areoseek/open-cereal-workshop/releases).
+> - **Scan the download before you run it.** Upload the file you downloaded to an online scanner such as
+>   [VirusTotal](https://www.virustotal.com/), which checks it with many antivirus engines at once. A new,
+>   unsigned program can draw one or two generic "unknown file" flags there; many engines naming a specific
+>   threat would be a real reason not to run it.
+> - **Build it yourself** if you would rather not trust a ready-made file at all. See "Build from source" below.
+
 **Getting started:** installing a release, the first-start setup and adding plug-ins are explained in
 [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
 
