@@ -13,6 +13,10 @@ use std::sync::{Arc, OnceLock};
 const TN: usize = 16384;
 /// Frames between two looks at the envelopes.
 const TICK: u32 = 16;
+/// Frames of the plain rate between two looks at the pitch lines, which hold in between in newer states.
+const PITCH_TICK: u32 = 96;
+/// Seconds the pitch lines of older states run behind the note at the plain rate.
+const PITCH_LAG: f32 = 0.00101;
 /// Phase swing, in cycles, of a full-scale modulator at 100 %.
 const DEPTH: f32 = 2.0;
 /// How much weaker an operator's feed into itself is than a feed from another.
@@ -30,21 +34,21 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     (a.cos() * std::f32::consts::SQRT_2, a.sin() * std::f32::consts::SQRT_2)
 }
 
-/// Where a filter's cutoff knob at 0..1 puts the corner of the low-pass kinds (fitted to renders at nine
-/// settings, within 2 %).
+/// Where a filter's cutoff knob at 0..1 puts the corner of the first low-pass (fitted to a stepped sweep
+/// through one stage at twelve settings, within 1 %).
 fn cutoff_hz(c: f32) -> f32 {
-    71.0 + 7449.0 * (29.6f32.powf(c) - 1.0) / 28.6
+    69.73 + 291.33 * ((3.1105 * c + 0.1386 * c * c).exp() - 1.0)
 }
 
-/// The same knob for the second low-pass and its high-pass twin (fitted to hiss through one stage at nine
-/// settings, within 1 %).
+/// The same knob for the second low-pass and its high-pass twin (fitted to a stepped sweep through one stage at ten
+/// settings, within 0.1 %).
 fn second_hz(c: f32) -> f32 {
-    141.28 * 82.8f32.powf(c) - 63.83
+    145.99 * 75.99f32.powf(c) - 68.88
 }
 
 /// The same knob for the wide low-pass, which opens far past the top of hearing.
 fn wide_hz(c: f32) -> f32 {
-    28.34 * 1679f32.powf(c) + 104.3
+    30.667 * 1423.9f32.powf(c) + 95.95
 }
 
 /// The same knob for the band, high-pass, shelf and peak kinds, which reach much lower and higher.
@@ -52,13 +56,24 @@ fn band_hz(c: f32) -> f32 {
     17.66 * 1496f32.powf(c) - 13.2
 }
 
-/// What the resonance knob does, read off renders at every eighth of its travel and joined smoothly.
-/// Damping of the ringing low-pass (1 = just short of a peak):
-const DAMP: [f32; 9] = [1.0, 0.943, 0.82, 0.626, 0.412, 0.2164, 0.1035, 0.04615, 0.0202];
-/// damping of the low-pass and high-pass that start out far from ringing:
-const DAMP_WIDE: [f32; 9] = [9.94, 7.12, 4.11, 1.97, 0.837, 0.337, 0.1325, 0.0515, 0.0209];
-/// width of the band-pass and notch in octaves:
-const WIDTH: [f32; 9] = [0.0104, 0.1036, 0.27, 0.567, 1.094, 2.02, 3.72, 6.67, 12.0];
+/// What the resonance knob does to the damping of the ringing low-pass kinds (1 = just short of a peak).
+/// Fitted to a stepped sweep through one stage at eleven settings, within 0.2 %.
+fn ring_damp(r: f32) -> f32 {
+    1.0 / (0.9492 + 0.04974 * 969.5f32.powf(r.clamp(0.0, 1.0)))
+}
+
+/// The same for the low-pass, high-pass and all-pass that start out far from ringing (eleven settings, 0.02 %).
+fn wide_damp(r: f32) -> f32 {
+    1.0 / (0.07515 + 0.02492 * 2004f32.powf(r.clamp(0.0, 1.0)))
+}
+
+/// Width of the band-pass and notch in octaves (fourteen settings, 0.2 %).
+fn band_octaves(r: f32) -> f32 {
+    0.12894 * 101.02f32.powf(r.clamp(0.0, 1.0)) - 0.1181
+}
+
+/// What the resonance knob does to the peak and the shelves, read off renders at every eighth of its travel
+/// and joined smoothly.
 /// sharpness of the peak:
 const PEAK_Q: [f32; 9] = [137.9, 20.0, 9.7, 5.8, 2.267, 0.91, 0.382, 0.178, 0.083];
 /// steepness of the shelves:
@@ -488,6 +503,25 @@ impl Curve {
     }
 
     /// Read as an envelope `t` seconds into the note; `rel` is when the key was let go.
+    /// Where on the line a moment falls when every point sits on the nearest step of a coarse clock.
+    fn snapped(&self, t: f32, grid: f32) -> f32 {
+        if grid <= 0.0 {
+            return t;
+        }
+        let r = |x: f32| (x / grid).round() * grid;
+        let n = self.t.len();
+        for i in 0..n.saturating_sub(1) {
+            let (a, b) = (r(self.t[i]), r(self.t[i + 1]));
+            if t < b - grid * 0.01 {
+                return if b - a > grid * 0.5 { self.t[i] + (t - a).max(0.0) / (b - a) * (self.t[i + 1] - self.t[i]) } else { self.t[i + 1] };
+            }
+        }
+        match n {
+            0 => t,
+            _ => self.t[n - 1] + (t - r(self.t[n - 1])).max(0.0),
+        }
+    }
+
     pub fn env(&self, t: f32, rel: Option<f32>) -> f32 {
         let n = self.pts.len();
         if n == 0 {
@@ -572,7 +606,7 @@ impl Art {
     /// `beat` is how many beats pass in a second. Lines count their time in beats: the ones marked as following
     /// the tempo in beats of the song, the others in beats at 120 to the minute (measured: a piece drawn one
     /// unit long lasts half a second).
-    fn value(&self, stat: f32, t: f32, rel: Option<f32>, lfo_gain: f32, beat: f32, song: f64, slide: (f32, f32)) -> f32 {
+    fn value(&self, stat: f32, t: f32, rel: Option<f32>, lfo_gain: f32, beat: f32, song: f64, slide: (f32, f32), grid: f32) -> f32 {
         let read = |c: &Curve| {
             let b = if c.flags & 1 != 0 { beat } else { 2.0 };
             c.env(t * b, rel.map(|r| r * b))
@@ -582,7 +616,7 @@ impl Art {
             let (len, by) = slide;
             let warp = |x: f32| if len <= 0.0 { x } else if x < len { x / by } else { x - len + len / by };
             let b = if self.env.flags & 1 != 0 { beat } else { 2.0 };
-            self.env.env(warp(t) * b, rel.map(|r| warp(r) * b))
+            self.env.env(self.env.snapped(warp(t) * b, grid * b), rel.map(|r| self.env.snapped(warp(r) * b, grid * b)))
         };
         // (measured: a wave marked as following the tempo runs at its speed when the song is at 120)
         let rate = if self.lfo.flags & 1 != 0 { beat * 0.5 } else { 1.0 };
@@ -680,6 +714,8 @@ pub struct Patch {
     /// The voices take the older set of shares of the spread (measured: the first two layouts and, again,
     /// states written from version 24 on; version 19 to 22 states take the other set).
     pub uni_old_share: bool,
+    /// The pitch lines are read on a coarse clock (seen in a version 24 state, not in 17 and below).
+    pub pitch_coarse: bool,
     /// The voices of a unison set all sit in the middle (measured: one switch byte takes the width away).
     pub uni_mono: bool,
     /// Sliding in from the note before, when its switch is on: whether a far note takes longer, and how the
@@ -1322,7 +1358,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { uni_old_share: false, volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, pitch_shared: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { uni_old_share: false, pitch_coarse: false, volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, pitch_shared: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1571,6 +1607,7 @@ impl Patch {
         }
         let start = r.p;
         p.uni_old_share = ver < 17 || ver >= 24;
+        p.pitch_coarse = ver > 17;
         p.lay = if ver < 12 {
             OpLay::FIRST
         } else if ver < 17 {
@@ -1730,10 +1767,6 @@ struct Sub {
     plan: [[[f32; 6]; 6]; 3],
     stages: [u8; 3],
     ap: [[f32; 20]; 3],
-    /// what takes each filter up to twice the rate and back
-    twice: [Twice; 3],
-    /// what brings the filters' four outputs (out and send, left and right) back down together
-    mixd: [Twice; 4],
     fb: [f32; 3],
     fg: [f32; 3],
     fk: [f32; 3],
@@ -1763,21 +1796,6 @@ struct Halver {
 /// to its new top and is three decibels down right at it).
 const HALF: [f32; 6] = [0.039_185, 0.302_594, 0.674_638, 0.147_348, 0.482_520, 0.882_997];
 
-/// The stage factors of the two halving steps, first row then second row (the first step works at four times
-/// the rate, where what matters is far below the edge, and can be short).
-fn half_taps() -> &'static [Vec<f32>; 2] {
-    static T: std::sync::OnceLock<[Vec<f32>; 2]> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
-        [
-            vec![0.079_866_426, 0.545_353_65, 0.283_829_35, 0.834_411_9],
-            vec![
-                0.036_681_502, 0.274_631_76, 0.561_098_97, 0.769_741_83, 0.892_260_8, 0.962_094_55, 0.136_547_62, 0.423_138_62, 0.677_540_05, 0.839_889_6,
-                0.931_541_96, 0.987_816_4,
-            ],
-        ]
-    })
-}
-
 impl Halver {
     fn new() -> Self {
         Self { z: [[[0.0; 4]; 2]; 12], late: [0.0; 2] }
@@ -1804,54 +1822,6 @@ impl Halver {
     }
 }
 
-/// Takes one line of sound up to twice the rate and back down with the same two rows of all-pass stages, so
-/// that a filter between the two steps works as it would at the higher rate with nothing lost at the top.
-#[derive(Debug, Clone, Copy)]
-struct Twice {
-    up: [[f32; 2]; 12],
-    down: [[f32; 4]; 12],
-    late: f32,
-}
-
-impl Twice {
-    fn new() -> Self {
-        Self { up: [[0.0; 2]; 12], down: [[0.0; 4]; 12], late: 0.0 }
-    }
-
-    fn up(&mut self, x: f32) -> [f32; 2] {
-        let taps = &half_taps()[1];
-        let half = taps.len() / 2;
-        let mut rows = [x; 2];
-        for (k, &t) in taps.iter().enumerate() {
-            let z = &mut self.up[k];
-            let v = &mut rows[k / half];
-            let y = z[0] + (*v - z[1]) * t;
-            *z = [*v, y];
-            *v = y;
-        }
-        rows
-    }
-
-    fn down(&mut self, pair: [f32; 2]) -> f32 {
-        let taps = &half_taps()[1];
-        let half = taps.len() / 2;
-        let mut out = 0.0;
-        for x in pair {
-            let mut rows = [x; 2];
-            for (k, &t) in taps.iter().enumerate() {
-                let z = &mut self.down[k];
-                let v = &mut rows[k / half];
-                let y = z[1] + (*v - z[3]) * t;
-                *z = [*v, z[0], y, z[2]];
-                *v = y;
-            }
-            out = 0.5 * (rows[0] + self.late);
-            self.late = rows[1];
-        }
-        out
-    }
-}
-
 /// One sounding note.
 #[derive(Debug, Clone)]
 pub struct Voice {
@@ -1860,8 +1830,6 @@ pub struct Voice {
     /// how many frames are worked out for each one given: operators that bend each other make partials far
     /// above the top of the hearing range, and those must be made and filtered away, not folded back down
     over: u32,
-    /// steps each filter takes per frame
-    fsteps: u8,
     /// the slide in from the note before, for each operator: how far (in the pitch output's own measure) and
     /// for how many seconds (beats, when below nothing)
     glide: [(f32, f32, f32); 6],
@@ -1982,8 +1950,6 @@ impl Voice {
                 plan: [[[0.0; 6]; 6]; 3],
                 stages: [0; 3],
                 ap: [[0.0; 20]; 3],
-                twice: [Twice::new(); 3],
-                mixd: [Twice::new(); 4],
                 fb: [0.0; 3],
                 fg: [0.1; 3],
                 fk: [1.0; 3],
@@ -2018,7 +1984,7 @@ impl Voice {
                 }
             }
         }
-        let mut v = Self { glide, over, fsteps: if over == 1 && !(p.lay.first && p.filts.iter().any(|f| f.flat)) { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, loose, subs, main_l: 1.0, main_r: 1.0 };
+        let mut v = Self { glide, over, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, loose, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -2069,7 +2035,9 @@ impl Voice {
     }
 
     fn control(&mut self, p: &Patch, dphase: f32, first: bool) {
-        let t = self.t as f32 / self.sr;
+        // (measured at the plain rate: a line that jumps at its very start has jumped by the note's first frame,
+        // and the levels ease up from where it stood before the jump)
+        let t = if first { 0.0 } else { (self.t as f32 / self.sr).max(1e-6) };
         let rel = self.rel;
         let sr = self.sr;
         let beat = self.beat;
@@ -2085,7 +2053,20 @@ impl Voice {
                             let (_, len, by) = self.glide[k / 6];
                             slide = (if len < 0.0 { -len / beat.max(1e-3) } else { len }, by);
                         }
-                        s.val[k] = a.value(s.stat[k], t, rel, p.lfo, beat, song, slide);
+                        // (measured on a fast falling pitch at four rates in a newer state: the pitch lines are
+                        // read once every so many frames and hold in between, with their points on that same
+                        // clock and one plain frame behind, which shows as steps in a fast sweep; older states read
+                        // them finely, a little late)
+                        let pitch = k < 36 && k % 6 == 3;
+                        if pitch && p.pitch_coarse && !first && self.t % (PITCH_TICK * self.over) != 0 {
+                            continue;
+                        }
+                        let (tt, grid) = match (pitch, p.pitch_coarse) {
+                            (true, true) => ((t - self.over as f32 / sr).max(1e-6), (PITCH_TICK * self.over) as f32 / sr),
+                            (true, false) => ((t - PITCH_LAG / self.over as f32).max(1e-6), 0.0),
+                            _ => (t, 0.0),
+                        };
+                        s.val[k] = a.value(s.stat[k], tt, rel, p.lfo, beat, song, slide, grid);
                     }
                 }
             }
@@ -2127,7 +2108,6 @@ impl Voice {
                 // knob scales only what moves in time)
                 let c = (f.cut + s.stat[b + 2] * 0.5 + (s.val[b + 2] - s.stat[b + 2]) * f.env_amt).clamp(0.0, 1.0);
                 let r = (f.res + s.val[b + 3] * 0.5).clamp(0.0, 1.0);
-                let sr = sr * self.fsteps as f32;
                 let g_at = |hz: f32| (PI * hz.min(sr * 0.45) / sr).tan();
                 s.fg[k] = g_at(band_hz(c));
                 s.fk[k] = 2.0 - 1.9 * r;
@@ -2149,7 +2129,7 @@ impl Voice {
                     7 => {
                         // (measured by the turn of a sine at four corners and two slopes: the all-pass is damped
                         // like the high-pass, the knob's wide law shared out over its stages)
-                        let wide = if f.flat { 9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp() } else { table(&DAMP_WIDE, r) };
+                        let wide = if f.flat { 9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp() } else { wide_damp(r) };
                         let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -2.0 * kk, 0.0]));
                         let far: [f32; 2] = if f.slope == 4 { [0.43, 0.43] } else { [0.71, 0.49] };
@@ -2170,7 +2150,7 @@ impl Voice {
                             let kf = if r >= 0.25 { law(r) } else { (0.0072f32.ln() * (1.0 - r * 4.0) + law(0.25).ln() * r * 4.0).exp() };
                             2.0 * (kf * 0.5).asinh() / std::f32::consts::LN_2
                         } else {
-                            table(&WIDTH, r)
+                            band_octaves(r)
                         };
                         let steps = f.slope.max(1) as f32;
                         let kk = width(if f.kind == 5 { w / n.max(1) as f32 } else { w * steps });
@@ -2189,7 +2169,7 @@ impl Voice {
                         let wide = if f.flat {
                             9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp()
                         } else {
-                            table(&DAMP_WIDE, r)
+                            wide_damp(r)
                         };
                         let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -kk, -1.0]));
@@ -2304,27 +2284,35 @@ impl Voice {
                             let own = if st == ringer { r } else { 0.0 };
                             let kk = match kind {
                                 0 if f.flat => flat_width(own) / (cutoff_hz(cs) * (1.07 - 0.07 * own)),
-                                0 => if st == ringer { 1.0 - 0.79 * r } else { 1.0 },
+                                0 => if st == ringer { 1.0 - 0.8 * r } else { 1.0 },
                                 3 if f.flat => (9.94 * (-4.33 * turned.powf(1.45)).exp()).powf(1.0 / n.max(1) as f32),
                                 _ if f.flat => (-2.43 * turned.powf(2.44)).exp().powf(1.0 / n.max(1) as f32),
-                                3 => table(&DAMP_WIDE, r).powf(1.0 / n.max(1) as f32),
-                                _ if spread => table(&DAMP, r).powf(1.0 / n as f32),
-                                _ => table(&DAMP, r).powf(1.0 / n.max(1) as f32),
+                                3 => wide_damp(r).powf(1.0 / n.max(1) as f32),
+                                _ if spread => ring_damp(r).powf(1.0 / n as f32),
+                                _ => ring_damp(r).powf(1.0 / n.max(1) as f32),
                             };
-                            let m = match kind {
-                                0 => [lv[2], lv[1] - lv[2] * kk, lv[0] - lv[2]],
-                                2 => [1.0, 0.0, -1.0],
-                                _ => [0.0, 0.0, 1.0],
-                            };
-                            let g = match kind {
+                            if kind == 3 {
+                                // the wide one is a trapezoid stage whose step is bent for the rate and stops
+                                // just short of the top
+                                *slot = stage((PI * wide_hz(cs) / sr).min(1.4255).tan(), kk, [0.0, 0.0, 1.0]);
+                                continue;
+                            }
+                            let (hz, top) = match kind {
                                 // (its corner sits a little higher the less it rings)
-                                0 if f.flat => g_at(cutoff_hz(cs) * (1.07 - 0.07 * own)),
-                                0 => g_at(cutoff_hz(cs)),
-                                // the wide one's step is not bent for the sample rate, and stops at four tenths of it
-                                3 => PI * wide_hz(cs).min(sr * 0.6) / sr,
-                                _ => g_at(second_hz(cs)),
+                                0 if f.flat => (cutoff_hz(cs) * (1.07 - 0.07 * own), 0.3),
+                                0 => (cutoff_hz(cs), 0.3),
+                                // (the second and third stop at a fifth of the rate)
+                                _ => (second_hz(cs), 0.2),
                             };
-                            *slot = stage(g, kk, m);
+                            let step = 2.0 * (PI * hz.min(sr * top) / sr).sin();
+                            // (measured: step times damping never passes nine tenths in the second and third)
+                            let kk = if kind == 0 { kk.min((3.9 - step * step) / (2.0 * step)) } else { kk.min(0.9 / step) };
+                            *slot = match kind {
+                                0 => [step, kk, 0.0, lv[2], lv[1] - lv[2] * kk, lv[0] - lv[2]],
+                                // (the third is the input less the low output one step on)
+                                2 => [step, kk, 1.0, 1.0, 0.0, -1.0],
+                                _ => [step, kk, 0.0, 0.0, 0.0, 1.0],
+                            };
                         }
                     }
                 }
@@ -2496,14 +2484,12 @@ impl Voice {
                     sum[j] += s.out[j] * s.gain;
                 }
             }
-            // (measured: a filter mixed with the one it feeds meets it in step at every pitch, so the three
-            // filters sit together between one doubling and one halving, not each between its own)
-            let mut carry = [0.0f32; 2];
-            let mut bus = [[0.0f32; 4]; 2];
+            let mut carry = 0.0f32;
+            let mut bus = [0.0f32; 4];
             let mut ran = false;
             for k in 0..3 {
                 if !p.fused[k] || (merge && nth != end) {
-                    carry = [0.0; 2];
+                    carry = 0.0;
                     continue;
                 }
                 ran = true;
@@ -2529,12 +2515,9 @@ impl Voice {
                     };
                     x + (shaped - x) * (f.ws_mix * s.val[b + 7]).clamp(0.0, 1.0)
                 };
-                // (measured with hiss: the curves are those of filters stepped at twice the rate, and nothing is
-                // lost at the very top, so at the plain rate every filter works between a doubling and a halving)
-                let fed = if self.fsteps == 2 { s.twice[k].up(x) } else { [x; 2] };
-                let mut next = [0.0f32; 2];
-                for step in 0..self.fsteps as usize {
-                x = fed[step] + carry[step];
+                // (measured with a stepped sine sweep at three rates: every filter takes one step per worked
+                // frame, with nothing put in to make the plain rate behave like a higher one)
+                x += carry;
                 // (measured with a falling level in front of a driven filter and of a shaper: the level is
                 // set on the way in, so both keep the sound up while it falls)
                 x *= s.val[b + 1];
@@ -2647,6 +2630,16 @@ impl Voice {
                         *z = [low, band];
                         x = m0 * low + m1 * band + m2 * high;
                     }
+                } else if f.kind <= 2 {
+                    // the low-pass family steps the simple way: low from the old band, band from the new high
+                    for st in 0..s.stages[k] as usize {
+                        let [step, damp, ahead, m0, m1, m2] = s.plan[k][st];
+                        let z = &mut s.fs[k][st];
+                        let low = z[0] + step * z[1];
+                        let band = z[1] + step * (x - low - damp * z[1]);
+                        x = m0 * x + m1 * z[1] + m2 * (low + ahead * step * band);
+                        *z = [low, band];
+                    }
                 } else {
                     for st in 0..s.stages[k] as usize {
                         let [a1, a2, a3, m0, m1, m2] = s.plan[k][st];
@@ -2666,34 +2659,27 @@ impl Voice {
                     x = 0.0;
                     s.fs[k] = [[0.0; 2]; 6];
                     s.ap[k] = [0.0; 20];
-                    s.twice[k] = Twice::new();
                     s.fb[k] = 0.0;
                 }
                 // a ringing stage after a hot shaper is kept inside sane bounds
                 x = x.clamp(-8.0, 8.0);
-                next[step] = x * f.next;
+                carry = x * f.next;
                 let g = p.out[6 + k];
                 if g != 0.0 {
-                    bus[step][0] += x * g * s.pl[6 + k];
-                    bus[step][1] += x * g * s.pr[6 + k];
+                    bus[0] += x * g * s.pl[6 + k];
+                    bus[1] += x * g * s.pr[6 + k];
                 }
                 let g = p.send[6 + k];
                 if g != 0.0 {
-                    bus[step][2] += x * g * s.pl[6 + k];
-                    bus[step][3] += x * g * s.pr[6 + k];
+                    bus[2] += x * g * s.pl[6 + k];
+                    bus[3] += x * g * s.pr[6 + k];
                 }
-                }
-                carry = next;
             }
             if ran {
-                let mut down = [0.0f32; 4];
-                for (c, d) in down.iter_mut().enumerate() {
-                    *d = if self.fsteps == 2 { s.mixd[c].down([bus[0][c], bus[1][c]]) } else { bus[0][c] };
-                }
-                fl += down[0];
-                fr += down[1];
-                fsl += down[2];
-                fsr += down[3];
+                fl += bus[0];
+                fr += bus[1];
+                fsl += bus[2];
+                fsr += bus[3];
             }
             let th = (s.pan + 1.0) * std::f32::consts::FRAC_PI_4;
             let (ul, ur) = (th.cos() * std::f32::consts::SQRT_2 * s.gain, th.sin() * std::f32::consts::SQRT_2 * s.gain);
