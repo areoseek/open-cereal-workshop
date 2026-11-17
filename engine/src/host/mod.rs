@@ -763,6 +763,8 @@ pub struct Instance {
     calls: AtomicU64,
     seen_calls: AtomicU64,
     gui_open: AtomicBool,
+    /// Our own window around an editor that can only sit inside one.
+    embed: Mutex<Option<view3::os::Win>>,
     offline: AtomicBool,
     /// How many frames late its sound comes out, as it said when last started.
     latency: AtomicU32,
@@ -821,6 +823,7 @@ impl Instance {
                 calls: AtomicU64::new(0),
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
+                embed: Mutex::new(None),
                 offline: AtomicBool::new(false),
                 latency: AtomicU32::new(0),
                 has_note_in,
@@ -926,6 +929,7 @@ impl Instance {
                 calls: AtomicU64::new(0),
                 seen_calls: AtomicU64::new(0),
                 gui_open: AtomicBool::new(false),
+                embed: Mutex::new(None),
                 offline: AtomicBool::new(false),
                 latency: AtomicU32::new(0),
                 has_note_in,
@@ -1362,6 +1366,7 @@ impl Instance {
             return v.idle(self.seen_calls.swap(calls, Relaxed) == calls);
         }
         let s = self.shared();
+        self.tend_inside();
         // SAFETY: main-thread calls into a live plug-in.
         unsafe {
             if s.callback.swap(false, Relaxed) {
@@ -1415,6 +1420,8 @@ impl Instance {
                     }
                     let input = InputEvents { ctx: &mut p.events as *mut Vec<AnyEvent> as *mut c_void, size: Some(in_size), get: Some(in_get) };
                     let output = OutputEvents { ctx: self.shared as *mut c_void, try_push: Some(out_push) };
+                    // (a started plug-in takes this call as its sound thread would make it; the lock stands in)
+                    let _role = p.active.then(AudioRole::take);
                     flush(self.plugin, &input, &output);
                 }
             }
@@ -1429,16 +1436,24 @@ impl Instance {
         self.window_api().is_some()
     }
 
-    fn window_api(&self) -> Option<&'static [u8]> {
+    /// The window kind the plug-in can open, and whether it floats by itself (otherwise it sits in a window
+    /// we make for it).
+    fn window_api(&self) -> Option<(&'static [u8], bool)> {
         if self.v3.is_some() {
             return None;
         }
         let apis: &[&'static [u8]] = if cfg!(windows) { &[WINDOW_WIN32] } else { &[WINDOW_WAYLAND, WINDOW_X11] };
+        let inside: &[&'static [u8]] = if cfg!(windows) { &[WINDOW_WIN32] } else { &[WINDOW_X11] };
         // SAFETY: the window table of a live plug-in, on the window's thread.
         unsafe {
             let g = self.gui.as_ref()?;
             let ok = g.is_api_supported?;
-            apis.iter().copied().find(|a| ok(self.plugin, a.as_ptr() as *const c_char, true))
+            if let Some(a) = apis.iter().copied().find(|a| ok(self.plugin, a.as_ptr() as *const c_char, true)) {
+                return Some((a, true));
+            }
+            // many editors only know how to sit inside a window handed to them
+            g.set_parent?;
+            inside.iter().copied().find(|a| ok(self.plugin, a.as_ptr() as *const c_char, false)).map(|a| (a, false))
         }
     }
 
@@ -1451,8 +1466,11 @@ impl Instance {
         if self.gui_open.load(Relaxed) && !self.shared().gui_closed.load(Relaxed) {
             return true;
         }
-        let Some(api) = self.window_api() else { return false };
+        let Some((api, floating)) = self.window_api() else { return false };
         guard_x_errors();
+        if !floating {
+            return self.show_inside(api, title);
+        }
         // SAFETY: as in `window_api`.
         unsafe {
             let Some(g) = self.gui.as_ref() else { return false };
@@ -1479,6 +1497,92 @@ impl Instance {
         }
     }
 
+    /// The editor inside a window of ours: made at the size it asks for, and handed over as its parent.
+    fn show_inside(&self, api: &'static [u8], title: &str) -> bool {
+        // SAFETY: as in `window_api`.
+        unsafe {
+            let Some(g) = self.gui.as_ref() else { return false };
+            if self.gui_open.swap(false, Relaxed) {
+                if let Some(d) = g.destroy {
+                    d(self.plugin);
+                }
+            }
+            if let Ok(mut e) = self.embed.lock() {
+                *e = None;
+            }
+            self.shared().gui_closed.store(false, Relaxed);
+            if !g.create.is_some_and(|f| f(self.plugin, api.as_ptr() as *const c_char, false)) {
+                return false;
+            }
+            let (mut w, mut h) = (800u32, 600u32);
+            if let Some(f) = g.get_size {
+                let (mut a, mut b) = (0u32, 0u32);
+                if f(self.plugin, &mut a, &mut b) && a > 0 && b > 0 {
+                    (w, h) = (a, b);
+                }
+            }
+            let resizable = g.can_resize.is_some_and(|f| f(self.plugin));
+            let win = view3::os::Win::open(title, w as i32, h as i32, resizable);
+            let shown = win.as_ref().is_some_and(|win| {
+                let parent = Window { api: api.as_ptr() as *const c_char, handle: win.handle() as usize };
+                g.set_parent.is_some_and(|f| f(self.plugin, &parent)) && {
+                    // (some editors answer false here though they are up: being parented is what counts)
+                    if let Some(f) = g.show {
+                        f(self.plugin);
+                    }
+                    true
+                }
+            });
+            if !shown {
+                if let Some(d) = g.destroy {
+                    d(self.plugin);
+                }
+                return false;
+            }
+            if let Ok(mut e) = self.embed.lock() {
+                *e = win;
+            }
+            if let Ok(mut r) = self.shared().resize.lock() {
+                *r = None;
+            }
+            self.gui_open.store(true, Relaxed);
+            true
+        }
+    }
+
+    /// Our window around an editor: closed with its button, sized with its frame or when the editor asks.
+    fn tend_inside(&self) {
+        let asked = self.shared().resize.lock().ok().and_then(|mut r| r.take());
+        let (closed, size) = {
+            let Ok(mut e) = self.embed.lock() else { return };
+            let Some(win) = e.as_mut() else { return };
+            // SAFETY: as in `window_api`.
+            let resizable = unsafe { self.gui.as_ref().and_then(|g| g.can_resize).is_some_and(|f| f(self.plugin)) };
+            if let Some((w, h)) = asked {
+                win.resize(w as i32, h as i32, resizable);
+            }
+            let (closed, size) = win.poll();
+            (closed, if resizable && asked.is_none() { size } else { None })
+        };
+        if closed {
+            return self.hide_window();
+        }
+        if let Some((w, h)) = size {
+            // SAFETY: as in `window_api`.
+            unsafe {
+                if let Some(g) = self.gui.as_ref() {
+                    let (mut w, mut h) = (w.max(1) as u32, h.max(1) as u32);
+                    if let Some(f) = g.adjust_size {
+                        f(self.plugin, &mut w, &mut h);
+                    }
+                    if let Some(f) = g.set_size {
+                        f(self.plugin, w, h);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn hide_window(&self) {
         if let Some(v) = &self.v3 {
             return v.hide_window();
@@ -1495,6 +1599,9 @@ impl Instance {
                     }
                 }
             }
+        }
+        if let Ok(mut e) = self.embed.lock() {
+            *e = None;
         }
     }
 

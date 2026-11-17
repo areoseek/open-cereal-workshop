@@ -3962,6 +3962,15 @@ impl App {
     fn small_windows(&mut self, ctx: &egui::Context) {
         // hosted plug-ins get their turn on this thread: timers, callbacks, and word of settings changed in their own windows
         let hosted = self.song.hosted();
+        // one that left the song (its channel or slot was deleted, or another project came) takes its window along
+        let seen_id = egui::Id::new("hosted-seen");
+        let before: Vec<std::sync::Arc<cereal_engine::host::Instance>> = ctx.data_mut(|d| d.get_temp(seen_id).unwrap_or_default());
+        for old in before.iter().filter(|o| !hosted.iter().any(|h| std::sync::Arc::ptr_eq(h, o))) {
+            old.hide_window();
+        }
+        if !(before.is_empty() && hosted.is_empty()) {
+            ctx.data_mut(|d| d.insert_temp(seen_id, hosted.clone()));
+        }
         if !hosted.is_empty() {
             for h in &hosted {
                 h.idle();
@@ -4088,7 +4097,12 @@ impl App {
         if !self.problems.is_empty() {
             let mut close = false;
             egui::Window::new("There were problems opening the project").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                ui.label("The project is open, but these parts of it will not sound:");
+                ui.label("The project is open, but these parts of it could not be opened as they were saved. Samples that were not found stay silent.");
+                if self.settings.opt(setup::OPT_STAND_IN) {
+                    ui.label(RichText::new("Instruments that are missing play a plain stand-in voice instead (Settings, Audio). Missing effects pass the sound through untouched.").small().color(TEXT_DIM));
+                } else {
+                    ui.label(RichText::new("Instruments that are missing stay silent. A plain stand-in voice can play in their place (Settings, Audio).").small().color(TEXT_DIM));
+                }
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for p in &self.problems {
                         ui.label(p);

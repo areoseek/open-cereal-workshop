@@ -236,7 +236,7 @@ When the plug-in is not installed, the project still opens:
 
 ![Problems window and a missing plug-in channel](img/getting-started/07-missing-plugin.png)
 
-1. A window called **There were problems opening the project** lists each part that will not sound, for
+1. A window called **There were problems opening the project** lists each part that could not be opened as it was saved, for
    example: Channel "Surge XT": the plug-in "Surge XT" is not installed here. Click **OK**.
 2. The channel stays in the rack under its name. Its settings window says the plug-in is not installed.
 
