@@ -817,7 +817,7 @@ fn effects(d: &[u8]) -> crate::tailfx::Set {
     let mut set = Set::default();
     let order = at(d, 724).clamp(0, crate::opfx::VOICES as i32) as u8;
     if order > 0 && at(d, 748) != 0 {
-        set.chorus = Some(Chorus { order, depth: k(728, 1024).max(0.0), speed: k(732, 1024).max(0.0), delay: k(736, 128).max(0.0), spread: k(740, 128), cross: k(744, 128), vol: k(748, 128) });
+        set.chorus = Some(Chorus { order, depth: k(728, 1024).max(0.0), speed: k(732, 1024).max(0.0), delay: k(736, 128).max(0.0), spread: k(740, 128), cross: k(744, 128), vol: k(748, 128), floor: (8u32 >> d[784].min(6)).max(2) as f32 });
     }
     for (n, base) in [978usize, 1001, 1024].into_iter().enumerate() {
         if d[base + 22] == 0 {

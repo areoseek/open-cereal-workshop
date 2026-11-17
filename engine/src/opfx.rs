@@ -18,6 +18,9 @@ pub struct Chorus {
     pub spread: f32,
     pub cross: f32,
     pub vol: f32,
+    /// The shortest delay a voice may have, in frames at 44.1 kHz: 8, or 4 with the voices worked out twice
+    /// over, or 2 beyond that (measured on the shortest voice at every setting).
+    pub floor: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -107,9 +110,6 @@ impl Chorus {
     }
 }
 
-/// Frames the room's answer trails what it hears.
-const ROOM_LATE: usize = 18;
-
 /// Frames of delay (at 44.1 kHz) a voice travels per second for a place on the speed knob. The time a frame
 /// takes falls a hundredfold over the knob (fitted to eighteen measured places, all within 0.02 %).
 fn pace(speed: f32) -> f32 {
@@ -187,8 +187,6 @@ pub struct State {
     pub next: u64,
     /// How far the song had run in frames when this block began (set by the caller).
     pub frame: u64,
-    /// The room answers a little late.
-    late: std::collections::VecDeque<[f32; 2]>,
     echo: [Line; 3],
     room: Option<(Room, Box<Unit>)>,
     feed: Vec<[f32; 2]>,
@@ -199,7 +197,7 @@ pub struct State {
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, next: 0, late: std::collections::VecDeque::new(), echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
+        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, next: 0, echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
     }
 
     /// Turn what was sent to the effects (`buf`) into what they put out. `step` is frames per sixteenth note.
@@ -245,8 +243,8 @@ impl State {
                 let part = (k + 1) as f32 / order as f32;
                 let p = 1.0 + (pull(order, side, k) - 1.0) * w;
                 let deep = 20.0 + (full - 20.0) * part;
-                // no delay gets under eight frames
-                let low = (base * (1.0 - w + w * part * p)).max(8.0);
+                // no delay gets under a floor: eight frames, fewer when the voices are worked out several times over
+                let low = (base * (1.0 - w + w * part * p)).max(c.floor);
                 let moved = travel * ((1.0 - w) * deep / full + w * p);
                 v[side][k] = (low * fr, deep * fr, over * part);
                 rate[side][k] = moved as f64 / (2.0 * deep as f64) / sr as f64;
@@ -374,14 +372,8 @@ impl State {
         let Some((_, unit)) = &mut self.room else { return };
         let cx = Ctx { sr: self.sr, step, clock: Default::default() };
         self.wet.clear();
-        while self.late.len() < ROOM_LATE {
-            self.late.push_back([0.0; 2]);
-        }
-        for i in 0..n {
-            self.late.push_back(self.feed[i]);
-            let x = self.late.pop_front().unwrap_or_default();
-            self.wet.push(x);
-        }
+        // (no wait before the room: its answer to a known signal lines up with the reference to the frame)
+        self.wet.extend_from_slice(&self.feed[..n]);
         for c in self.wet.chunks_mut(256) {
             unit.process(c, &cx);
         }
@@ -433,12 +425,11 @@ mod tests {
     }
 
     #[test]
-    fn the_room_answers_late() {
+    fn the_room_answers() {
         let room = Room { high: 221.0, size: 50.0, diffusion: 0.5, decay: 10.0, wet: 1.0, ..Default::default() };
         let mut s = State::new(44100.0);
         let mut io = click(8192);
         s.process(&Set { room: Some(room), ..Default::default() }, &mut io, 4000.0);
-        assert!(io[..ROOM_LATE].iter().all(|f| *f == [0.0; 2]));
         assert!(io.iter().any(|f| f[0].abs() > 1e-4));
     }
 
@@ -459,7 +450,7 @@ mod tests {
 
     #[test]
     fn the_chorus_sweeps_between_its_delays() {
-        let c = Chorus { order: 1, depth: 0.5, speed: 0.75, delay: 0.0625, spread: 0.0, cross: 0.0, vol: 1.0 };
+        let c = Chorus { order: 1, depth: 0.5, speed: 0.75, delay: 0.0625, spread: 0.0, cross: 0.0, vol: 1.0, floor: 8.0 };
         assert!((c.base() - 71.3).abs() < 0.1 && (c.swing() - 526.18).abs() < 0.05 && (1.0 / c.hz() - 5.075).abs() < 0.01, "{} {} {}", c.base(), c.swing(), 1.0 / c.hz());
         // measured places on the speed knob (frames a second)
         for (knob, want) in [(0.0, 5.8407), (0.25, 18.649), (0.5, 60.512), (0.75, 207.26), (1.0, 881.92)] {
