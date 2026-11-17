@@ -61,6 +61,10 @@ pub struct Set {
     pub chorus: Option<Chorus>,
     pub echoes: [Option<Echo>; 3],
     pub room: Option<Room>,
+    /// How many times the synth doubles its rate, for a render and for live play. The section works at that
+    /// raised rate too (measured: delays and room lengths fall on the finer frames), so whoever feeds it hands
+    /// over that many frames for each one wanted back.
+    pub over: [u8; 2],
 }
 
 /// The knob law most of this synth's dials follow.
@@ -180,6 +184,10 @@ impl Line {
 
 pub struct State {
     sr: f32,
+    /// The rate the section itself works at (the song's, times the setting).
+    work: f32,
+    mult: u64,
+    downs: Vec<crate::fm::Halver>,
     cho: Line,
     phase: [[f64; VOICES]; 2],
     started: bool,
@@ -197,11 +205,43 @@ pub struct State {
 
 impl State {
     pub fn new(sr: f32) -> Self {
-        Self { sr, cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, next: 0, echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
+        Self { sr, work: sr, mult: 1, downs: Vec::new(), cho: Line::new(), phase: [[0.0; VOICES]; 2], started: false, frame: 0, next: 0, echo: [Line::new(), Line::new(), Line::new()], room: None, feed: Vec::new(), carry: Vec::new(), wet: Vec::new(), out: Vec::new() }
     }
 
     /// Turn what was sent to the effects (`buf`) into what they put out. `step` is frames per sixteenth note.
     pub fn process(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32) {
+        let n = buf.len();
+        self.process_raised(set, buf, n, step);
+    }
+
+    /// The same for a synth that works its voices out several times over: `buf` holds that many frames for
+    /// each of the `n` wanted, and the answer comes back in its first `n`. The section runs on the finer
+    /// frames and comes down through the same halving the voices use, so both stay in step.
+    pub fn process_raised(&mut self, set: &Set, buf: &mut [[f32; 2]], n: usize, step: f32) {
+        let k = if n == 0 { 0 } else { (buf.len() / n).max(1).trailing_zeros() as usize };
+        if self.downs.len() != k {
+            self.downs = vec![crate::fm::Halver::new(); k];
+            self.room = None;
+            self.cho.buf = Vec::new();
+            for e in &mut self.echo {
+                e.buf = Vec::new();
+            }
+        }
+        self.mult = 1 << k;
+        self.work = self.sr * self.mult as f32;
+        let all = n << k;
+        self.run(set, &mut buf[..all], step * self.mult as f32);
+        let mut len = all;
+        for down in &mut self.downs {
+            len /= 2;
+            for i in 0..len {
+                buf[i] = down.push(buf[2 * i], buf[2 * i + 1], &crate::fm::HALF);
+            }
+        }
+        buf[n..].fill([0.0; 2]);
+    }
+
+    fn run(&mut self, set: &Set, buf: &mut [[f32; 2]], step: f32) {
         let n = buf.len();
         self.out.clear();
         self.out.resize(n, [0.0; 2]);
@@ -225,7 +265,7 @@ impl State {
     /// from the same shortest delay, left and right half a sweep apart. Spread lets each keep the same pace
     /// instead, so shallow voices turn sooner and sit closer, and shifts where the sweeps start.
     fn chorus(&mut self, c: &Chorus, n: usize) {
-        let sr = self.sr;
+        let sr = self.work;
         let order = (c.order as usize).clamp(1, VOICES);
         let fr = sr / 44100.0;
         let (base, full, travel) = (c.base(), c.swing(), pace(c.speed));
@@ -243,8 +283,8 @@ impl State {
                 let part = (k + 1) as f32 / order as f32;
                 let p = 1.0 + (pull(order, side, k) - 1.0) * w;
                 let deep = 20.0 + (full - 20.0) * part;
-                // no delay gets under a floor: eight frames, fewer when the voices are worked out several times over
-                let low = (base * (1.0 - w + w * part * p)).max(c.floor);
+                // no delay gets under a floor: eight frames of the rate worked at, and never under two of the song's
+                let low = (base * (1.0 - w + w * part * p)).max((c.floor / self.mult as f32).max(2.0));
                 let moved = travel * ((1.0 - w) * deep / full + w * p);
                 v[side][k] = (low * fr, deep * fr, over * part);
                 rate[side][k] = moved as f64 / (2.0 * deep as f64) / sr as f64;
@@ -257,19 +297,19 @@ impl State {
             for side in 0..2 {
                 for k in 0..order {
                     let ahead = 0.5 * w as f64 * (k + 1) as f64 / order as f64 + 0.5 * side as f64;
-                    self.phase[side][k] = (ahead + self.frame as f64 * rate[side][k]).rem_euclid(1.0);
+                    self.phase[side][k] = (ahead + (self.frame * self.mult) as f64 * rate[side][k]).rem_euclid(1.0);
                 }
             }
         } else if self.frame != self.next {
             // the section rested while nothing sounded (or the song jumped): the sweeps went on turning
-            let gap = self.frame as f64 - self.next as f64;
+            let gap = (self.frame as f64 - self.next as f64) * self.mult as f64;
             for side in 0..2 {
                 for k in 0..order {
                     self.phase[side][k] = (self.phase[side][k] + gap * rate[side][k]).rem_euclid(1.0);
                 }
             }
         }
-        self.next = self.frame + n as u64;
+        self.next = self.frame + n as u64 / self.mult;
         for i in 0..n {
             let x = self.feed[i];
             let at = self.cho.at;
@@ -302,7 +342,7 @@ impl State {
     }
 
     fn echoes(&mut self, set: &Set, n: usize, step: f32) {
-        let sr = self.sr;
+        let sr = self.work;
         self.carry.clear();
         self.carry.resize(n, [0.0; 2]);
         self.wet.clear();
@@ -366,11 +406,11 @@ impl State {
             match &mut self.room {
                 // only the level moved: the room keeps ringing
                 Some((was, _)) if Room { wet: r.wet, ..*was } == *r => was.wet = r.wet,
-                _ => self.room = Some((*r, Box::new(Unit::new(fx, self.sr)))),
+                _ => self.room = Some((*r, Box::new(Unit::new(fx, self.work)))),
             }
         }
         let Some((_, unit)) = &mut self.room else { return };
-        let cx = Ctx { sr: self.sr, step, clock: Default::default() };
+        let cx = Ctx { sr: self.work, step, clock: Default::default() };
         self.wet.clear();
         // (no wait before the room: its answer to a known signal lines up with the reference to the frame)
         self.wet.extend_from_slice(&self.feed[..n]);

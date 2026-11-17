@@ -178,6 +178,12 @@ pub struct Set {
 }
 
 impl Set {
+    /// How many frames the effects want for each frame of the song (see `split`): more than one for an
+    /// instrument that works its voices out several times over. `live` picks its setting for live play.
+    pub fn fine(&self, live: bool) -> usize {
+        self.op.as_ref().map_or(1, |o| 1usize << o.over[live as usize].min(6))
+    }
+
     pub fn any(&self) -> bool {
         self.split || self.level || self.wide || self.zone.is_some() || self.stack.is_some() || self.tone.is_some() || self.rack.is_some() || self.delay.is_some() || self.chorus.is_some() || self.gate.is_some() || self.body.is_some() || self.reverb.is_some()
     }
@@ -279,7 +285,7 @@ impl State {
         if let Some(k) = &set.stack {
             self.stack.get_or_insert_with(|| Box::new(crate::stackfx::State::new(self.sr))).process(k, buf, step, self.frame);
         }
-        self.tone(set, buf);
+        self.tone(set, buf, 1.0);
         self.rest(set, buf, step, song);
         self.level(set, buf);
         if let (Some(k), Some(st)) = (&set.stack, &mut self.stack) {
@@ -336,33 +342,38 @@ impl State {
 
     /// For an instrument that sends only a share of its sound to the effects: `sent` goes through them and
     /// joins `plain`, and the equaliser works on whichever part it is set to (see `Set::tone_at`).
+    ///
+    /// `sent` may hold several frames for each one of `plain` (an instrument that works several times over and
+    /// keeps its effects on those finer frames, see `Set::fine`).
     pub fn split(&mut self, set: &Set, plain: &mut [[f32; 2]], sent: &mut [[f32; 2]], step: f32, song: Option<f64>) {
+        let n = plain.len();
         match set.tone_at {
-            2 => self.tone(set, plain),
-            3 => self.tone(set, sent),
+            2 => self.tone(set, plain, 1.0),
+            // on the finer frames the bands sit at the same pitches
+            3 => self.tone(set, sent, (sent.len() / n.max(1)).max(1) as f32),
             _ => {}
         }
         match &set.op {
             Some(o) => {
                 let st = self.op.get_or_insert_with(|| Box::new(crate::opfx::State::new(self.sr)));
                 st.frame = self.frame.unwrap_or(st.next);
-                st.process(o, sent, step)
+                st.process_raised(o, sent, n, step)
             }
-            None => self.rest(set, sent, step, song),
+            None => self.rest(set, &mut sent[..n], step, song),
         }
-        for (o, f) in plain.iter_mut().zip(sent.iter_mut()) {
+        for (o, f) in plain.iter_mut().zip(sent.iter()) {
             o[0] += f[0];
             o[1] += f[1];
-            *f = [0.0; 2];
         }
+        sent.fill([0.0; 2]);
         if set.tone_at < 2 {
-            self.tone(set, plain);
+            self.tone(set, plain, 1.0);
         }
         self.level(set, plain);
     }
 
-    fn tone(&mut self, set: &Set, buf: &mut [[f32; 2]]) {
-        let sr = self.sr;
+    fn tone(&mut self, set: &Set, buf: &mut [[f32; 2]], fine: f32) {
+        let sr = self.sr * fine;
         if let Some(bands) = &set.tone {
             for (band, z) in bands.iter().zip(self.tone.iter_mut()) {
                 if band.db == 0.0 {

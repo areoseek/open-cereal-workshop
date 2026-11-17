@@ -1503,6 +1503,12 @@ impl ToneState {
         self.fm.as_ref().map_or([0.0; 2], |v| v.sent())
     }
 
+    /// The same share on the finer frames of an instrument that works several times over (see the voice).
+    #[inline]
+    pub fn sent_fine(&self) -> &[[f32; 2]] {
+        self.fm.as_ref().map_or(&[], |v| v.sent_fine())
+    }
+
     /// One frame. `dphase` is the note's cycles per frame.
     #[inline]
     pub fn frame(&mut self, tone: &Tone, dphase: f32) -> [f32; 2] {

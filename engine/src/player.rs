@@ -1552,6 +1552,7 @@ impl Voice {
     fn render(&mut self, bus: &mut [[f32; 2]], mut side: Option<&mut [[f32; 2]]>) -> bool {
         let mut wrote = false;
         let sends = self.tone.as_ref().is_some_and(|t| t.sends());
+        let frames = bus.len().max(1);
         for (at, out) in bus.iter_mut().enumerate() {
             if self.delay > 0 {
                 self.delay -= 1;
@@ -1741,12 +1742,26 @@ impl Voice {
             out[1] += s[1] * gr;
             if sends {
                 let x = self.tstate.sent();
-                let to = match side.as_mut() {
-                    Some(b) => &mut b[at],
-                    None => out,
-                };
-                to[0] += x[0] * gl;
-                to[1] += x[1] * gr;
+                match side.as_mut() {
+                    // the effects work on finer frames than the song's: they get every one of them
+                    Some(b) if b.len() >= 2 * frames => {
+                        let m = b.len() / frames;
+                        let fine = self.tstate.sent_fine();
+                        for (j, to) in b[at * m..(at + 1) * m].iter_mut().enumerate() {
+                            let x = if fine.len() == m { fine[j] } else { x };
+                            to[0] += x[0] * gl;
+                            to[1] += x[1] * gr;
+                        }
+                    }
+                    Some(b) => {
+                        b[at][0] += x[0] * gl;
+                        b[at][1] += x[1] * gr;
+                    }
+                    None => {
+                        out[0] += x[0] * gl;
+                        out[1] += x[1] * gr;
+                    }
+                }
             }
             self.t += 1;
             if self.releasing {
@@ -4432,7 +4447,7 @@ impl Player {
                 (None, None, None) => {}
                 (None, None, Some(_)) => *slot = None,
                 (None, Some(t), Some(ChanFx { tail: Some(have), .. })) => have.0 = t,
-                (None, Some(t), _) => *slot = Some(ChanFx { unit: None, tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], send: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
+                (None, Some(t), _) => *slot = Some(ChanFx { unit: None, send: vec![[0.0; 2]; BLOCK * t.fine(false).max(t.fine(true))], tail: Some((t, crate::tailfx::State::new(self.sr))), buf: vec![[0.0; 2]; BLOCK], dirty: false, ring: 0 }),
                 (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b) => {}
                 // only settings were turned: the running units take them and keep their sound
                 (Some(b), _, Some(ChanFx { unit: Some(u), .. })) if u.fx.sub.as_ref().zip(b.fx.sub.as_ref()).is_some_and(|(a, b)| a.same_wiring(b)) => u.fx.sub = b.fx.sub.clone(),
@@ -4501,7 +4516,8 @@ impl Player {
             }
             if let Some(Some(cf)) = self.chan_fx.get_mut(v.chan as usize) {
                 let apart = v.feed == 0 && cf.tail.as_ref().is_some_and(|t| t.0.split);
-                let side = if apart { Some(&mut cf.send[..n]) } else { None };
+                let fine = cf.tail.as_ref().map_or(1, |t| t.0.fine(!self.offline));
+                let side = if apart { Some(&mut cf.send[..n * fine]) } else { None };
                 let into = if v.feed == 0 { Some(&mut cf.buf[..n]) } else { cf.unit.as_mut().and_then(|u| u.bay_feed(v.feed as usize - 1, n)) };
                 if into.is_some_and(|b| v.render(b, side)) {
                     cf.dirty = true;
@@ -4558,7 +4574,8 @@ impl Player {
             if let Some((set, st)) = &mut cf.tail {
                 st.frame = Some(self.run);
                 if set.split {
-                    st.split(set, &mut cf.buf[..n], &mut cf.send[..n], cx.step, at_step);
+                    let fine = set.fine(!self.offline);
+                    st.split(set, &mut cf.buf[..n], &mut cf.send[..n * fine], cx.step, at_step);
                 } else {
                     st.process(set, &mut cf.buf[..n], cx.step, at_step);
                 }

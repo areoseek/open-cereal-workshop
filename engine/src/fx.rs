@@ -3300,6 +3300,15 @@ const REV2_LEN: [[u16; 26]; 100] = [
     [233, 310, 605, 828, 310, 310, 1984, 1468, 5805, 3934, 581, 3958, 6500, 9949, 13398, 16379, 20477, 21935, 771, 3694, 7927, 10141, 13510, 17089, 20602, 21797],
     [235, 313, 610, 835, 313, 313, 2002, 1481, 5856, 3969, 586, 3993, 6557, 10036, 13516, 16523, 20657, 22128, 778, 3726, 7997, 10230, 13628, 17240, 20783, 21988],
 ];
+/// The same lengths as real numbers for one unit of room scale (15 + size), for rates other than 44.1 kHz:
+/// every piece is cut down to whole frames of the rate it runs at. The ten diffusers, then for each half
+/// three taps on the first line, the first line itself, the tap inside the inner diffuser and the three
+/// places on the second line.
+const REV2_REAL: [f32; 10] = [2.05164, 2.7225, 5.31096, 7.267, 2.7225, 2.7225, 17.40958, 12.88631, 50.92545, 34.51266];
+const REV2_REAL_TAP: [[f32; 8]; 2] = [
+    [5.10046, 34.72331, 57.02286, 66.609, 20.6825, 26.1582, 62.1016, 74.894],
+    [6.76836, 32.40376, 69.54246, 84.0097, 4.9669, 31.4052, 62.2172, 72.6915],
+];
 const REV2_EARLY: [f32; 2] = [0.1758, 0.1668];
 /// The powers the ring diffusers' gains take.
 const REV2_G5: f32 = 1.265;
@@ -6289,12 +6298,20 @@ impl Unit {
                 let cross = sp.signum() * (5f32.powf(sp.abs()) - 1.0) / 8.0;
                 // lengths: one measured row per whole room size
                 let row = &REV2_LEN[(size.round() as usize).clamp(1, 100) - 1];
-                let fl = |v: u16, cap: usize| ((v as f32 * k).round() as usize).clamp(1, cap - 2);
+                let real = (k - 1.0).abs() > 1e-4;
+                let (rv_real, rv_tap) = (REV2_REAL, REV2_REAL_TAP);
+                // the lengths are laid out at four times the plain rate at most; above that they are doubled
+                let mut fold = 1usize;
+                while k / fold as f32 > 4.0001 {
+                    fold *= 2;
+                }
+                let unit = (15.0 + size.round().clamp(1.0, 100.0)) * k / fold as f32;
+                let fl = |i: usize, cap: usize| (if real { (rv_real[i] * unit).floor() as usize * fold } else { row[i] as usize }).clamp(1, cap - 2);
                 let mut ap = [0usize; 8];
                 for i in 0..8 {
-                    ap[i] = fl(row[i], self.lines[i].len());
+                    ap[i] = fl(i, self.lines[i].len());
                 }
-                let mid = [fl(row[8], self.lines[10].len()), fl(row[9], self.lines[11].len())];
+                let mid = [fl(8, self.lines[10].len()), fl(9, self.lines[11].len())];
                 let e_at = [
                     (((16.05 * (size + 3.0)).round() * k).round() as usize).min(n - 2),
                     (((12.19 * (size + 3.0)).round() * k).round() as usize).min(n - 2),
@@ -6302,8 +6319,19 @@ impl Unit {
                 let mut at = [[0usize; 8]; 2];
                 for hf in 0..2 {
                     let cap = self.lines[8 + hf].len();
-                    for i in 0..8 {
-                        at[hf][i] = ((row[10 + hf * 8 + i] as f32 * k).round() as usize).max(1);
+                    if real {
+                        // the pieces themselves, put back into places counted from the start of the half
+                        let c = &rv_tap[hf];
+                        let q = |v: f32| ((v * unit).floor() as usize * fold).max(1);
+                        let p0 = q(c[3]);
+                        at[hf] = [q(c[0]), q(c[1]), q(c[2]), p0 + q(c[4]), p0 + mid[hf], 0, 0, 0];
+                        for i in 5..8 {
+                            at[hf][i] = at[hf][4] + q(c[i]);
+                        }
+                    } else {
+                        for i in 0..8 {
+                            at[hf][i] = (row[10 + hf * 8 + i] as usize).max(1);
+                        }
                     }
                     // the first three taps and the entry of the inner diffuser come off the first
                     // line, taps four and five from inside the inner diffuser, the rest after it

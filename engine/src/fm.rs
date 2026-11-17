@@ -817,7 +817,7 @@ fn effects(d: &[u8]) -> crate::tailfx::Set {
     let mut set = Set::default();
     let order = at(d, 724).clamp(0, crate::opfx::VOICES as i32) as u8;
     if order > 0 && at(d, 748) != 0 {
-        set.chorus = Some(Chorus { order, depth: k(728, 1024).max(0.0), speed: k(732, 1024).max(0.0), delay: k(736, 128).max(0.0), spread: k(740, 128), cross: k(744, 128), vol: k(748, 128), floor: (8u32 >> d[784].min(6)).max(2) as f32 });
+        set.chorus = Some(Chorus { order, depth: k(728, 1024).max(0.0), speed: k(732, 1024).max(0.0), delay: k(736, 128).max(0.0), spread: k(740, 128), cross: k(744, 128), vol: k(748, 128), floor: 8.0 });
     }
     for (n, base) in [978usize, 1001, 1024].into_iter().enumerate() {
         if d[base + 22] == 0 {
@@ -837,6 +837,7 @@ fn effects(d: &[u8]) -> crate::tailfx::Set {
         let v = |o: usize| at(d, o) as f32;
         set.room = Some(Room { low_hz: v(1047), high: v(1051), predelay: v(1055), size: v(1059), diffusion: v(1063), decay: v(1067), damping: v(1071), colour: at(d, 1075).clamp(0, 5) as u8, wet: k(1079, 128) });
     }
+    set.over = [d[784].min(6), d[780].min(6)];
     crate::tailfx::Set { op: Some(set), ..Default::default() }
 }
 
@@ -1785,7 +1786,7 @@ struct Sub {
 /// below a quarter of the rate and drops what is above. It is flat right up to the top of what is kept and
 /// only a couple of frames late (measured against hiss: the original's top octave is not rolled off).
 #[derive(Debug, Clone)]
-struct Halver {
+pub(crate) struct Halver {
     /// per stage and side: the last two frames in and out
     z: [[[f32; 4]; 2]; 12],
     late: [f32; 2],
@@ -1794,14 +1795,14 @@ struct Halver {
 /// The stage factors of one halving of a voice worked out above the rate asked for, first row then second
 /// (fitted to renders of a narrow pulse at every setting: all the steps are alike, each passes everything up
 /// to its new top and is three decibels down right at it).
-const HALF: [f32; 6] = [0.039_185, 0.302_594, 0.674_638, 0.147_348, 0.482_520, 0.882_997];
+pub(crate) const HALF: [f32; 6] = [0.039_185, 0.302_594, 0.674_638, 0.147_348, 0.482_520, 0.882_997];
 
 impl Halver {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { z: [[[0.0; 4]; 2]; 12], late: [0.0; 2] }
     }
 
-    fn push(&mut self, a: [f32; 2], b: [f32; 2], taps: &[f32]) -> [f32; 2] {
+    pub(crate) fn push(&mut self, a: [f32; 2], b: [f32; 2], taps: &[f32]) -> [f32; 2] {
         let half = taps.len() / 2;
         let mut out = [0.0f32; 2];
         for x in [a, b] {
@@ -1837,6 +1838,9 @@ pub struct Voice {
     /// the same for what goes to the effects, and that share of the last frame made
     send_halvers: Vec<Halver>,
     sent: [f32; 2],
+    /// what each of the finer frames behind the last one sent to the effects
+    sent_fine: Vec<[f32; 2]>,
+    fine_at: usize,
     sr: f32,
     t: u32,
     rel: Option<f32>,
@@ -1984,7 +1988,7 @@ impl Voice {
                 }
             }
         }
-        let mut v = Self { glide, over, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, loose, subs, main_l: 1.0, main_r: 1.0 };
+        let mut v = Self { glide, over, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sent_fine: vec![[0.0; 2]; over as usize], fine_at: 0, sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, loose, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -2362,6 +2366,7 @@ impl Voice {
     pub fn frame(&mut self, p: &Patch, dphase: f32) -> [f32; 2] {
         let any = p.send.iter().any(|&g| g != 0.0);
         let n = self.halvers.len();
+        self.fine_at = 0;
         let out = self.halved(p, dphase / self.over as f32, n, any);
         self.sent = [out.1[0] * p.send_side[0], out.1[1] * p.send_side[1]];
         out.0
@@ -2370,7 +2375,12 @@ impl Voice {
     /// One frame at the rate left after `level` halvings, with its share for the effects.
     fn halved(&mut self, p: &Patch, d: f32, level: usize, any: bool) -> ([f32; 2], [f32; 2]) {
         if level == 0 {
-            return (self.one(p, d), self.sent);
+            let o = self.one(p, d);
+            if let Some(f) = self.sent_fine.get_mut(self.fine_at) {
+                *f = [self.sent[0] * p.send_side[0], self.sent[1] * p.send_side[1]];
+            }
+            self.fine_at += 1;
+            return (o, self.sent);
         }
         let a = self.halved(p, d, level - 1, any);
         let b = self.halved(p, d, level - 1, any);
@@ -2381,6 +2391,11 @@ impl Voice {
     /// The share of the last frame that goes to the effects.
     pub fn sent(&self) -> [f32; 2] {
         self.sent
+    }
+
+    /// The same share before the rate came back down: one entry for each finer frame behind the last frame.
+    pub fn sent_fine(&self) -> &[[f32; 2]] {
+        &self.sent_fine
     }
 
     fn one(&mut self, p: &Patch, dphase: f32) -> [f32; 2] {
