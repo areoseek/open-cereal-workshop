@@ -2255,15 +2255,17 @@ impl Voice {
                             // (measured at seven settings with a quiet and a loud sine: what comes out of
                             // the bend flat out grows by `UP`, quiet sound by `MORE` on top of that)
                             let base = 1.692 * 17.9f32.powf((lv - 64.0) / 64.0);
-                            const UP: [f32; 5] = [0.0, 1.9, 6.1, 10.6, 16.4];
-                            const MORE: [f32; 5] = [0.0, 2.0, 6.0, 12.3, 19.0];
+                            // (remeasured with sweeps at eight settings of the drive and three of the resonance:
+                            // both tables start a little under the half-way mark and are level below a quarter)
+                            const UP: [f32; 5] = [2.7, 4.3, 8.8, 14.5, 20.6];
+                            const MORE: [f32; 5] = [-2.0, 0.0, 4.5, 10.8, 17.5];
                             let at = ((lv - 64.0) / 16.0).clamp(0.0, 4.0);
                             let i = (at as usize).min(3);
-                            let db = UP[i] + (UP[i + 1] - UP[i]) * (at - i as f32);
-                            let more = MORE[i] + (MORE[i + 1] - MORE[i]) * (at - i as f32);
-                            // (three slopes measured since: each ladder is pushed and pulled on its own, by
-                            // half of what a pair showed, and comes out 3 dB lower flat out. Tried since: starting
-                            // the bend later suits the overtones of a quiet sine but leaves real patches too loud)
+                            let low = ((64.0 - lv) / 32.0).clamp(0.0, 1.0);
+                            let db = UP[i] + (UP[i + 1] - UP[i]) * (at - i as f32) + (0.3 - UP[0]) * low;
+                            let more = MORE[i] + (MORE[i + 1] - MORE[i]) * (at - i as f32) - MORE[0] * low;
+                            // (each ladder is pushed and pulled on its own, by half of what a pair showed, and
+                            // comes out 3 dB lower flat out)
                             plan[0][5] = 10f32.powf((db - 3.0) / 20.0) / base;
                             plan[0][4] = 10f32.powf((db + more) / 40.0) / plan[0][5];
                         }
@@ -2573,10 +2575,7 @@ impl Voice {
                     // has its own push, pull and resonance, which goes back in under its first bend
                     let bend = |v: f32| v / (1.0 + v * v).sqrt();
                     let (push, pull) = (s.plan[k][0][4], s.plan[k][0][5]);
-                    // (with resonance the sound stays cleaner than the make-up alone would leave it: part of
-                    // the make-up is taken off going in and given back coming out)
-                    let pre = s.plan[k][0][2].sqrt();
-                    let n = s.stages[k] as usize;
+                                        let n = s.stages[k] as usize;
                     let mut sum = 0.0f32;
                     for _ in 0..4 {
                         let mut v = x;
@@ -2584,13 +2583,13 @@ impl Voice {
                             let [big, back, make_up, ..] = s.plan[k][st];
                             let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
                             let z = [&mut lo[st * 2], &mut hi[0]];
-                            let mut a = bend(v * push / pre - back * z[1][1]);
+                            let mut a = bend(v * push - back * z[1][1]);
                             for q in 0..4 {
                                 let m = &mut z[q / 2][q % 2];
                                 *m += big * (a - bend(*m));
                                 a = bend(*m);
                             }
-                            v = z[1][1] * pull * make_up * pre;
+                            v = z[1][1] * pull * make_up;
                         }
                         sum += v;
                     }
