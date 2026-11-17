@@ -220,9 +220,14 @@ close, not identical:
   Plush Reverb: which stored fields are size, diffusion, brightness and character, the decay law
   (0.1 s to 100 s across the travel), the gain law (746 is unity, twenty units to the dB), which switch byte is
   the predelay tempo lock.
-- Six Op: modulation depth, envelope time unit, LFO speed scale, knob laws, filter type order (worked out from
-  statistics over the user's presets), curve tension sense, shaper curve reading, the level against other
-  instruments. The effects send column is treated as plain output until the effects section exists.
+- Six Op: now checked preset by preset against renders of forty of the user's own patches (two notes each).
+  Measured and followed: the centre switch (a gentle high-pass after the operator's level), the feed of an
+  operator into itself (one plain factor), the all-pass kind (damped and staged like the high-pass), free-running
+  operators on the song clock, voices that start together otherwise, a sustain marker on the last point (the
+  line stays where the key found it), the unison laws per block version, the chorus, the room and the echoes.
+  Still estimates: the room at very small sizes, the unison pan law at part pan, the first layout's low corner,
+  the echoes' serial switch, a few unplaced switch bytes. Patches with chance maps on many voices do not render
+  the same twice in the original either, so they cannot be matched sample for sample.
 - Triple Osc: field order inside an oscillator block, the mix law between oscillators, detune width, the
   meaning of the four switches.
 - Instruments and effects not listed as built play a stand-in voice or pass sound through. Their settings are

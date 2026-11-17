@@ -15,6 +15,8 @@ const TN: usize = 16384;
 const TICK: u32 = 16;
 /// Phase swing, in cycles, of a full-scale modulator at 100 %.
 const DEPTH: f32 = 2.0;
+/// How much weaker an operator's feed into itself is than a feed from another.
+const SELF_FEED: f32 = 0.0687;
 /// How steeply the knobs of the grid rise: the amount is (GRID^x - 1) / (GRID - 1) for a knob at x.
 const GRID: f32 = 11.16;
 
@@ -515,7 +517,11 @@ impl Curve {
                 let from = held(tr);
                 let dt = (t - tr).max(0.0);
                 let span = self.length() - ts;
-                if span <= 1e-6 || dt >= span {
+                if s + 1 >= n {
+                    // (measured: with the marker on the last point there is nothing left to play, and the line
+                    // stays where the key found it)
+                    from
+                } else if dt >= span {
                     self.pts[n - 1].y
                 } else if s + 1 < n && dt < self.t[s + 1] - ts {
                     // (measured) the first stretch after the marker starts from wherever the line was when
@@ -1474,12 +1480,9 @@ impl Patch {
                 if r < 6 {
                     p.fm[r][c] = cell(12, r, c) * 2.0;
                     if r == c {
-                        // an operator fed back into itself bends far less than one fed by another: 0.07 of it
-                        // low on the knob, a fifth more around three quarters (measured on the overtones of a
-                        // plain tone at four settings)
-                        let g = p.fm[r][c].abs() * 0.5;
-                        let m = 1.0 + 0.2 * ((g - 0.23) / 0.27).clamp(0.0, 1.0) - 0.1 * ((g - 0.5) / 0.5).clamp(0.0, 1.0);
-                        p.fm[r][c] *= 0.07 * m;
+                        // an operator fed back into itself bends far less than one fed by another (measured
+                        // on a rich wave at three settings and two pitches: one plain factor)
+                        p.fm[r][c] *= SELF_FEED;
                     }
                     p.rm[r][c] = cell(336, r, c);
                 } else {
@@ -2143,12 +2146,25 @@ impl Voice {
                 let mut count = n;
                 let plan = &mut s.plan[k];
                 match f.kind {
-                    4 | 5 | 7 => {
+                    7 => {
+                        // (measured by the turn of a sine at four corners and two slopes: the all-pass is damped
+                        // like the high-pass, the knob's wide law shared out over its stages)
+                        let wide = if f.flat { 9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp() } else { table(&DAMP_WIDE, r) };
+                        let kk = wide.powf(1.0 / n.max(1) as f32);
+                        plan[..n].fill(stage(s.fg[k], kk, [1.0, -2.0 * kk, 0.0]));
+                        let far: [f32; 2] = if f.slope == 4 { [0.43, 0.43] } else { [0.71, 0.49] };
+                        if f.slope >= 4 {
+                            for st in 1..n {
+                                plan[st] = stage(g_at(band_hz(1.0 - far[st - 1] * (1.0 - c))), kk, [1.0, -2.0 * kk, 0.0]);
+                            }
+                        }
+                    }
+                    4 | 5 => {
                         // band kinds keep their overall width whatever the slope: each stage of a band-pass
                         // is made wider, each stage of a notch narrower
                         // (the second switch gives the band-pass and the first notch a narrower law that
                         // widens with the corner)
-                        let w = if f.flat && f.kind != 7 {
+                        let w = if f.flat {
                             // (below a quarter of the knob it runs down to the same needle as without the switch)
                             let law = |r: f32| 0.041 * (4.43 * r + 0.96 * (c - 0.5)).exp();
                             let kf = if r >= 0.25 { law(r) } else { (0.0072f32.ln() * (1.0 - r * 4.0) + law(0.25).ln() * r * 4.0).exp() };
@@ -2157,11 +2173,10 @@ impl Voice {
                             table(&WIDTH, r)
                         };
                         let steps = f.slope.max(1) as f32;
-                        let kk = width(if f.kind == 5 { w / n.max(1) as f32 } else if f.kind == 4 { w * steps } else { w });
+                        let kk = width(if f.kind == 5 { w / n.max(1) as f32 } else { w * steps });
                         let m = match f.kind {
                             4 => [0.0, kk, 0.0],
-                            5 => [1.0, -kk, 0.0],
-                            _ => [1.0, -2.0 * kk, 0.0],
+                            _ => [1.0, -kk, 0.0],
                         };
                         plan[..n].fill(stage(s.fg[k], kk, m));
                         if f.kind == 4 && f.slope >= 4 {
@@ -3224,7 +3239,7 @@ pub(crate) mod tests {
         let mut d = plain_block();
         d[12..16].copy_from_slice(&64i32.to_le_bytes());
         let p = Patch::from_plain(&d, 25).unwrap();
-        assert!((p.fm[0][0] / p.fm[0][1] - 0.07).abs() < 0.001);
+        assert!((p.fm[0][0] / p.fm[0][1] - SELF_FEED).abs() < 0.001);
         let mut q = lone();
         q.fm[0][0] = 2.0 * 0.07 * 1.1;
         q.wire();
