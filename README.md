@@ -2,6 +2,9 @@
 
 An open source, pattern-based music workstation written in Rust. Native on Linux, also built for Windows.
 
+**Getting started:** installing a release, the first-start setup and adding plug-ins are explained in
+[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
+
 > [!WARNING]
 > **You must bring your own FL Studio installer file. We cannot include it, or anything from it.**
 > This project ships none of FL Studio's samples, presets or demo songs, and never will: they belong to
