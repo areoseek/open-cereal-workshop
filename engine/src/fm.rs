@@ -669,6 +669,9 @@ pub struct Patch {
     /// How much of each voice is a copy an octave down (measured: the copy takes this share, the voice keeps
     /// the rest; it works with a single voice too).
     pub uni_sub: f32,
+    /// The voices take the older set of shares of the spread (measured: the first two layouts and, again,
+    /// states written from version 24 on; version 19 to 22 states take the other set).
+    pub uni_old_share: bool,
     /// The voices of a unison set all sit in the middle (measured: one switch byte takes the width away).
     pub uni_mono: bool,
     /// Sliding in from the note before, when its switch is on: whether a far note takes longer, and how the
@@ -1315,7 +1318,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, pitch_shared: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { uni_old_share: false, volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, pitch_shared: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1563,6 +1566,7 @@ impl Patch {
             r.bytes(usize::try_from(n).ok()?)?;
         }
         let start = r.p;
+        p.uni_old_share = ver < 17 || ver >= 24;
         p.lay = if ver < 12 {
             OpLay::FIRST
         } else if ver < 17 {
@@ -1905,22 +1909,27 @@ impl Voice {
             let (down, share) = if low { (0.5, p.uni_sub) } else { (1.0, 1.0 - p.uni_sub) };
             let u = if n == 1 { 0.0 } else { 1.0 - s as f32 / (n - 1) as f32 * 2.0 };
             // (measured: the key axis counts the key after the patch's own transposing)
-            let xs = [((key as f32 + p.pitch) / 120.0).clamp(0.0, 1.0), axes[0].clamp(0.0, 1.0), (axes[1] - 0.5 + p.modx).clamp(0.0, 1.0), (axes[2] - 0.5 + p.mody).clamp(0.0, 1.0), rand, (u + 1.0) * 0.5];
+            // (measured on a six voice patch with pitch and phase mapped over the set: the first voice sits at the
+            // left end of the unison axis)
+            let xs = [((key as f32 + p.pitch) / 120.0).clamp(0.0, 1.0), axes[0].clamp(0.0, 1.0), (axes[1] - 0.5 + p.modx).clamp(0.0, 1.0), (axes[2] - 0.5 + p.mody).clamp(0.0, 1.0), rand, (1.0 - u) * 0.5];
             let mut stat = [0.0; ARTS];
             for (k, a) in p.arts.iter().enumerate().take(ARTS) {
                 stat[k] = a.stat(&xs);
             }
-            let spread = (u.abs() * if (if n % 2 == 1 && s > n / 2 { s - 1 } else { s }) % 2 == 0 { 1.0 } else { -1.0 } * uni_spread(p.uni_pitch, p.lay.early()) * if p.lay.early() { UNI_SHARE_OLD } else { UNI_SHARE }[s % 9] / 1200.0).exp2();
+            // (measured on three layouts: the octave-down copy of a voice takes the next voice's share)
+            let spread = (u.abs() * if (if n % 2 == 1 && s > n / 2 { s - 1 } else { s }) % 2 == 0 { 1.0 } else { -1.0 } * uni_spread(p.uni_pitch, p.lay.early()) * if p.uni_old_share { UNI_SHARE_OLD } else { UNI_SHARE }[(s + low as usize) % 9] / 1200.0).exp2();
             let mut ph = [0.0f64; 6];
             let mut tab = [0u8; 6];
             for k in 0..6 {
                 let o = &p.ops[k];
-                // measured on the first two layouts: the voices' starts are spread evenly over the set share of one
+                // measured on the first two layouts, and again on states of version 24: the voices' starts are spread evenly over the set share of one
                 // cycle (two cycles at the top of the knob). Measured on the rest, at eight places on the knob,
                 // two spreads and two keys: each voice starts as far round as its own detuning would carry it in
                 // a set count of cycles, a hundred thousand at the top and falling with the eighth power of the
                 // knob, so the low third of the knob leaves the voices together
-                ph[k] = o.phase as f64 + if p.lay.early() { (s as f32 / n as f32 * p.uni_phase) as f64 } else { ((spread - 1.0) as f64 * 1.0e5 * (p.uni_phase as f64).min(1.0).powi(8)).rem_euclid(1.0) };
+                ph[k] = o.phase as f64 + if p.uni_old_share { (s as f32 / n as f32 * p.uni_phase) as f64 } else {
+                    ((spread - 1.0) as f64 * 1.0e5 * (p.uni_phase as f64).min(1.0).powi(8)).rem_euclid(1.0)
+                };
                 // (measured: an operator that stands still, at no pitch of its own, starts at its set place
                 // whatever this switch says)
                 if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
@@ -2038,7 +2047,14 @@ impl Voice {
                 if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
                     // (each voice of a unison set by its own detuned pitch; the first layout's drift below adds that part)
                     let own = if p.lay.first { low } else { s.detune };
+                    // (the pitch its maps set does not count: measured on one voice with a map bending it)
                     let f = (hz * (p.pitch / 12.0).exp2() * own * o.ratio + o.offset_hz) as f64;
+                    // (measured on the later layouts at six places on the unison phase knob, no detuning: the whole
+                    // set stands the knob's count of cycles further round, where an operator that is not free
+                    // keeps only each voice's share of it)
+                    if !p.uni_old_share {
+                        s.ph[k] += (1.0e5 * (p.uni_phase as f64).min(1.0).powi(8)).rem_euclid(1.0);
+                    }
                     s.ph[k] += (f * (secs + std::env::var("CEREAL_FREE_AHEAD").ok().and_then(|v| v.parse::<f64>().ok()).map_or(FREE_AHEAD, |v| v / 44100.0))).rem_euclid(1.0) - self.loose[k] as f64;
                 }
             }
@@ -2051,7 +2067,7 @@ impl Voice {
             let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
             let off = (s.detune / low) as f64 - 1.0;
             for k in 0..6 {
-                s.ph[k] += (off * (hz * low * p.ops[k].ratio) as f64 * secs).fract();
+                s.ph[k] += (off * (hz * (p.pitch / 12.0).exp2() * low * p.ops[k].ratio) as f64 * secs).fract();
             }
         }
     }
@@ -3120,11 +3136,11 @@ pub(crate) mod tests {
         // (the later blocks turn each voice by its own detuning, so with none the knob does nothing)
         let o = run(&p, 57, 24000, 24000);
         assert!((level(&o[4800..], 440.0) / one - 2.0 / (0.621 * 2.0 + 0.34)).abs() < 0.03, "no detuning, no turn");
-        let keep = p.lay.harmonics;
-        p.lay.harmonics = 128;
+        // (the first two layouts and the states of version 24 on spread the starts evenly instead)
+        p.uni_old_share = true;
         let o = run(&p, 57, 24000, 24000);
         assert!(level(&o[4800..], 440.0) < one * 0.01, "half a cycle apart cancels");
-        p.lay.harmonics = keep;
+        p.uni_old_share = false;
         p.uni_phase = 0.0;
         for vol in [0.0, 1.0] {
             p.uni_vol = vol;
