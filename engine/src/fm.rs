@@ -253,6 +253,11 @@ pub struct OpLay {
 }
 
 impl OpLay {
+    /// The first two layouts, which share the older unison laws.
+    pub fn early(&self) -> bool {
+        self.harmonics < 256
+    }
+
     pub const NEW: OpLay = OpLay { len: 2128, noise: 48, mags: 52, harmonics: 256, tail: 2100, flags: 2120, switches: 8, first: false };
     pub const MID: OpLay = OpLay { len: 1104, noise: 48, mags: 52, harmonics: 128, tail: 1076, flags: 1096, switches: 8, first: false };
     pub const FIRST: OpLay = OpLay { len: 271, noise: 260, mags: 48, harmonics: 24, tail: 240, flags: 264, switches: 7, first: true };
@@ -850,7 +855,16 @@ impl<'a> R<'a> {
         lfo.prepare([1.0; 3]);
         let mut maps: [Curve; 6] = Default::default();
         for m in maps.iter_mut() {
+            // (measured with a map on a filter's level in one of the oldest blocks: their maps bend about
+            // half as far, ten and a half doublings at full tension; their envelopes and the shaper's line
+            // measured as they are)
+            let oldest = self.d.get(self.p + 4..self.p + 8) == Some(&[0, 0, 0, 0]);
             *m = self.curve(3)?;
+            if oldest {
+                for pt in m.pts.iter_mut() {
+                    pt.tension *= 0.52;
+                }
+            }
             m.prepare([1.0; 3]);
         }
         Some(Art { env, lfo, lfo_hz: lfo_hz(speed), lfo_shape: lfo_shape(&rest), maps, bipolar })
@@ -1014,8 +1028,22 @@ fn bend_of(k: f32) -> f32 {
     k.signum() * 0.1447 * ((3.08 * k.abs()).exp() - 1.0)
 }
 
-/// How much of the unison spread each voice takes, in the order the voices are made (measured).
-const UNI_SHARE: [f32; 9] = [0.7767, 0.9467, 0.8225, 1.0459, 0.9130, 1.0, 0.7855, 0.9892, 0.8652];
+/// How much of the unison spread each voice takes, in the order the voices are made (measured on sets of two
+/// to nine voices at the top of the knob, each voice split off the others by its own pitch).
+const UNI_SHARE: [f32; 9] = [0.7886, 0.9533, 0.8072, 0.9764, 0.9158, 1.0334, 0.7562, 1.0682, 0.8856];
+/// The same for the first two layouts, which carry another set (measured on sets of two, four and six in the
+/// first and on a set of four in the second).
+const UNI_SHARE_OLD: [f32; 9] = [0.7767, 0.9467, 0.8225, 1.0459, 0.9130, 1.0, 0.7855, 0.9892, 0.8652];
+
+/// The unison spread in cents for the pitch knob at 0..=1 (measured at every quarter: 3.2, 11.4, 32.2 and 84.7
+/// cents; the first two layouts open sooner and end lower: 4.7, 13.1, 28.4 and about 56).
+fn uni_spread(knob: f32, early: bool) -> f32 {
+    if early {
+        5.73 * (10.8f32.powf(knob) - 1.0)
+    } else {
+        2.117 * (41.0f32.powf(knob) - 1.0)
+    }
+}
 
 /// How fast a slow wave runs for its stored speed (measured at six settings: 32 Hz at the top of the knob and
 /// ten times slower for every quarter of it below; timed again over long notes at eleven slower settings: the
@@ -1456,7 +1484,7 @@ impl Patch {
         p.uni_pan = at(d, 696).clamp(0, 128) as f32 / 128.0;
         p.uni_vol = at(d, 700).clamp(0, 128) as f32 / 128.0;
         p.uni_pitch = at(d, 704).clamp(0, 256) as f32 / 256.0;
-        p.uni_phase = at(d, 712).clamp(0, 128) as f32 / 128.0;
+        p.uni_phase = at(d, 712).clamp(0, 256) as f32 / 128.0;
         p.uni_sub = at(d, 708).clamp(0, 128) as f32 / 128.0;
         // measured: centre leaves both sides alone, either end gives one side 3 dB more and silences the other
         let turn = (1.0 + at(d, 720).clamp(-128, 128) as f32 / 128.0) * std::f32::consts::FRAC_PI_4;
@@ -1640,6 +1668,16 @@ impl Patch {
         let vols = (0..6).map(|k| k * 6 + 1).chain((0..3).map(|k| 36 + k * 8 + 1));
         for k in vols {
             let e = &self.arts[k].env;
+            if e.on() {
+                let b = if e.flags & 1 != 0 { beat.max(1e-3) } else { 2.0 };
+                tail = tail.max(e.tail(t * b) / b);
+            }
+        }
+        // the drawn rise and fall of a slow wave that is switched on holds the note open the same way, whatever
+        // it moves (measured with one on an operator's volume and one on its pitch, each alone: a note with no
+        // volume envelope left rang for the nine tenths of a second after the wave's hold point)
+        for a in self.arts.iter().take(ARTS) {
+            let e = &a.lfo;
             if e.on() {
                 let b = if e.flags & 1 != 0 { beat.max(1e-3) } else { 2.0 };
                 tail = tail.max(e.tail(t * b) / b);
@@ -1865,12 +1903,17 @@ impl Voice {
             for (k, a) in p.arts.iter().enumerate().take(ARTS) {
                 stat[k] = a.stat(&xs);
             }
+            let spread = (u.abs() * if (if n % 2 == 1 && s > n / 2 { s - 1 } else { s }) % 2 == 0 { 1.0 } else { -1.0 } * uni_spread(p.uni_pitch, p.lay.early()) * if p.lay.early() { UNI_SHARE_OLD } else { UNI_SHARE }[s % 9] / 1200.0).exp2();
             let mut ph = [0.0f64; 6];
             let mut tab = [0u8; 6];
             for k in 0..6 {
                 let o = &p.ops[k];
-                // measured: the voices' starts are spread evenly over the set share of one cycle
-                ph[k] = (o.phase + s as f32 / n as f32 * p.uni_phase) as f64;
+                // measured on the first two layouts: the voices' starts are spread evenly over the set share of one
+                // cycle (two cycles at the top of the knob). Measured on the rest, at eight places on the knob,
+                // two spreads and two keys: each voice starts as far round as its own detuning would carry it in
+                // a set count of cycles, a hundred thousand at the top and falling with the eighth power of the
+                // knob, so the low third of the knob leaves the voices together
+                ph[k] = o.phase as f64 + if p.lay.early() { (s as f32 / n as f32 * p.uni_phase) as f64 } else { ((spread - 1.0) as f64 * 1.0e5 * (p.uni_phase as f64).min(1.0).powi(8)).rem_euclid(1.0) };
                 // (measured: an operator that stands still, at no pitch of its own, starts at its set place
                 // whatever this switch says)
                 if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
@@ -1895,7 +1938,7 @@ impl Voice {
                 // spread grows as a power of the knob (3.2 cents at a quarter, 11.5 at the middle, 32 at three
                 // quarters, 85 at the top) and every voice has a fixed share of it, the same on every note; the level knob fades in the outer voices of three or more and the whole set is scaled
                 // by 1 / (0.621 n + 0.34)
-                detune: (u.abs() * if (if n % 2 == 1 && s > n / 2 { s - 1 } else { s }) % 2 == 0 { 1.0 } else { -1.0 } * 2.128 * (40.8f32.powf(p.uni_pitch) - 1.0) * UNI_SHARE[s % 9] / 1200.0).exp2() * down,
+                detune: spread * down,
                 pan: if p.uni_mono { 0.0 } else { -u * p.uni_pan },
                 gain: share * match n {
                     1 => 1.0,
@@ -1973,10 +2016,14 @@ impl Voice {
         self.t as f32 / self.sr
     }
 
-    /// Place the note in the song. Measured: each voice of a unison set stands where its detuning would have carried
-    /// it had it run since the song began, so a later note starts with its voices already apart.
+    /// Place the note in the song. Measured on the first layout: each voice of a unison set stands where its detuning
+    /// would have carried it had it run since the song began, so a later note starts with its voices already apart.
     pub fn started_at(&mut self, p: &Patch, hz: f32, secs: f64) {
         self.song = secs;
+        // (measured on both later layouts with the phase knob at nothing: every note starts with its voices together)
+        if !p.lay.first {
+            return;
+        }
         for s in self.subs.iter_mut() {
             let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
             let off = (s.detune / low) as f64 - 1.0;
@@ -3047,8 +3094,14 @@ pub(crate) mod tests {
         p.uni_pitch = 0.0;
         p.uni_pan = 0.0;
         p.uni_phase = 1.0;
+        // (the later blocks turn each voice by its own detuning, so with none the knob does nothing)
+        let o = run(&p, 57, 24000, 24000);
+        assert!((level(&o[4800..], 440.0) / one - 2.0 / (0.621 * 2.0 + 0.34)).abs() < 0.03, "no detuning, no turn");
+        let keep = p.lay.harmonics;
+        p.lay.harmonics = 128;
         let o = run(&p, 57, 24000, 24000);
         assert!(level(&o[4800..], 440.0) < one * 0.01, "half a cycle apart cancels");
+        p.lay.harmonics = keep;
         p.uni_phase = 0.0;
         for vol in [0.0, 1.0] {
             p.uni_vol = vol;
@@ -3076,11 +3129,19 @@ pub(crate) mod tests {
         p.uni_phase = 0.0;
         let v = Voice::start(&p, 48000.0, 57, [0.8, 0.5, 0.5], 440.0 / 48000.0, 1);
         let cents: Vec<f32> = v.subs.iter().map(|s| s.detune.log2() * 1200.0).collect();
-        // 11.46 cents of spread at the middle of the knob, the voices either side of the middle one going opposite ways
-        assert!((cents[0].abs() - 11.46 * UNI_SHARE[0].abs()).abs() < 0.02 && cents[1] == 0.0 && (cents[2].abs() - 11.46 * UNI_SHARE[2].abs()).abs() < 0.02, "{cents:?}");
+        // 11.44 cents of spread at the middle of the knob, the voices either side of the middle one going opposite ways
+        assert!((uni_spread(0.5, false) - 11.44).abs() < 0.01 && (uni_spread(1.0, false) - 84.68).abs() < 0.02 && (uni_spread(0.5, true) - 13.1).abs() < 0.05);
+        assert!((cents[0].abs() - 11.44 * UNI_SHARE[0].abs()).abs() < 0.02 && cents[1] == 0.0 && (cents[2].abs() - 11.44 * UNI_SHARE[2].abs()).abs() < 0.02, "{cents:?}");
         assert!(cents[0] * cents[2] < 0.0 || UNI_SHARE[0] * UNI_SHARE[2] < 0.0, "{cents:?}");
         assert!(v.subs[0].pan == -1.0 && v.subs[1].pan == 0.0 && v.subs[2].pan == 1.0);
         p.uni = 2;
+        // the later blocks: the phase knob turns each voice by its detuning times 1e5 p^8 cycles
+        p.uni_phase = 0.5;
+        let v = Voice::start(&p, 48000.0, 57, [0.8, 0.5, 0.5], 440.0 / 48000.0, 1);
+        let want = ((v.subs[0].detune as f64 - 1.0) * 1.0e5 / 256.0).rem_euclid(1.0);
+        assert!((v.subs[0].ph[0] - p.ops[0].phase as f64 - want).abs() < 1e-6 && want > 0.01, "{want}");
+        p.uni_phase = 0.0;
+        p.lay.first = true;
         let mut v = Voice::start(&p, 48000.0, 57, [0.8, 0.5, 0.5], 440.0 / 48000.0, 1);
         assert!(v.subs[0].detune > 1.0 && v.subs[1].detune < 1.0);
         let before = [v.subs[0].ph[0], v.subs[1].ph[0]];
