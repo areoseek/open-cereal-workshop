@@ -69,7 +69,7 @@ fn wide_damp(r: f32) -> f32 {
 
 /// Width of the band-pass and notch in octaves (fourteen settings, 0.2 %).
 fn band_octaves(r: f32) -> f32 {
-    0.12894 * 101.02f32.powf(r.clamp(0.0, 1.0)) - 0.1181
+    0.1198 * 101.02f32.powf(r.clamp(0.0, 1.0)) - 0.10973
 }
 
 /// What the resonance knob does to the peak and the shelves, read off renders at every eighth of its travel
@@ -1766,7 +1766,7 @@ struct Sub {
     fs: [[[f32; 2]; 6]; 3],
     plan: [[[f32; 6]; 6]; 3],
     stages: [u8; 3],
-    ap: [[f32; 20]; 3],
+    ap: [[f32; 21]; 3],
     fb: [f32; 3],
     fg: [f32; 3],
     fk: [f32; 3],
@@ -1949,7 +1949,7 @@ impl Voice {
                 fs: [[[0.0; 2]; 6]; 3],
                 plan: [[[0.0; 6]; 6]; 3],
                 stages: [0; 3],
-                ap: [[0.0; 20]; 3],
+                ap: [[0.0; 21]; 3],
                 fb: [0.0; 3],
                 fg: [0.1; 3],
                 fk: [1.0; 3],
@@ -2122,7 +2122,17 @@ impl Voice {
                     let a1 = 1.0 / (1.0 + g * (g + k));
                     [a1, g * a1, g * g * a1, m[0], m[1], m[2]]
                 };
-                let width = |octaves: f32| 2.0 * (std::f32::consts::LN_2 * 0.5 * octaves).sinh();
+                // (measured on two and three stage band-passes: the width in octaves is stretched by the
+                // stage's angle over its sine, so a stage near the top of the range comes out wider)
+                let width = |octaves: f32, g: f32| {
+                    let turn = 2.0 * g.atan();
+                    let stretch = if turn > 1e-4 { turn / turn.sin().max(1e-4) } else { 1.0 };
+                    2.0 * (std::f32::consts::LN_2 * 0.5 * octaves * stretch).sinh()
+                };
+                // (measured at three corners: the later stages of the two widest slopes sit part of the way,
+                // in octaves, from the corner up to 44.1 kHz)
+                let part: [f32; 2] = if f.slope == 4 { [0.5, 0.5] } else { [0.25, 0.4375] };
+                let up = |hz: f32, share: f32| hz * (44100.0 / hz.max(1.0)).powf(share);
                 let mut count = n;
                 let plan = &mut s.plan[k];
                 match f.kind {
@@ -2132,10 +2142,9 @@ impl Voice {
                         let wide = if f.flat { 9.94 * (-4.33 * (r * (0.70 + 0.59 * c)).max(0.0).powf(1.45)).exp() } else { wide_damp(r) };
                         let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -2.0 * kk, 0.0]));
-                        let far: [f32; 2] = if f.slope == 4 { [0.43, 0.43] } else { [0.71, 0.49] };
                         if f.slope >= 4 {
                             for st in 1..n {
-                                plan[st] = stage(g_at(band_hz(1.0 - far[st - 1] * (1.0 - c))), kk, [1.0, -2.0 * kk, 0.0]);
+                                plan[st] = stage(g_at(up(band_hz(c), part[st - 1])), kk, [1.0, -2.0 * kk, 0.0]);
                             }
                         }
                     }
@@ -2153,16 +2162,11 @@ impl Voice {
                             band_octaves(r)
                         };
                         let steps = f.slope.max(1) as f32;
-                        let kk = width(if f.kind == 5 { w / n.max(1) as f32 } else { w * steps });
-                        let m = match f.kind {
-                            4 => [0.0, kk, 0.0],
-                            _ => [1.0, -kk, 0.0],
-                        };
-                        plan[..n].fill(stage(s.fg[k], kk, m));
-                        if f.kind == 4 && f.slope >= 4 {
-                            // the two widest band-passes move their later stages up, which spreads the band
-                            let far = if f.slope == 4 { 0.435 } else { 0.613 };
-                            plan[1..n].fill(stage(g_at(band_hz(1.0 - far * (1.0 - c))), kk, m));
+                        let each = if f.kind == 5 { w / steps } else { w * steps };
+                        for st in 0..n {
+                            let g = if st > 0 && f.slope >= 4 { g_at(up(band_hz(c), part[st - 1])) } else { s.fg[k] };
+                            let kk = width(each, g);
+                            plan[st] = stage(g, kk, if f.kind == 4 { [0.0, kk, 0.0] } else { [1.0, -kk, 0.0] });
                         }
                     }
                     6 => {
@@ -2174,10 +2178,9 @@ impl Voice {
                         let kk = wide.powf(1.0 / n.max(1) as f32);
                         plan[..n].fill(stage(s.fg[k], kk, [1.0, -kk, -1.0]));
                         // the two widest slopes move their later stages up, like the low-pass family
-                        let far: [f32; 2] = if f.slope == 4 { [0.43, 0.43] } else { [0.71, 0.49] };
                         if f.slope >= 4 {
                             for st in 1..n {
-                                plan[st] = stage(g_at(band_hz(1.0 - far[st - 1] * (1.0 - c))), kk, [1.0, -kk, -1.0]);
+                                plan[st] = stage(g_at(up(band_hz(c), part[st - 1])), kk, [1.0, -kk, -1.0]);
                             }
                         }
                     }
@@ -2187,7 +2190,14 @@ impl Voice {
                         let a = 10f32.powf(f.db / 40.0);
                         plan[0] = if f.kind == 9 {
                             // (sharper with the second switch on)
-                            let q = if f.flat { (99.5 * (-5.64 * r).exp()).min(137.9) } else { table(&PEAK_Q, r) };
+                            let q = if f.flat {
+                                (99.5 * (-5.64 * r).exp()).min(137.9)
+                            } else if r < 0.5 {
+                                // (the sharp half, measured by walking a small peak across one pitch of the sweep)
+                                87.2 * (-7.30 * r).exp()
+                            } else {
+                                table(&PEAK_Q, r)
+                            };
                             let kk = 1.0 / (q * a);
                             stage(s.fg[k], kk, [1.0, kk * (a * a - 1.0), 0.0])
                         } else {
@@ -2205,24 +2215,37 @@ impl Voice {
                         // (corner fitted to where the peaks of a ten-stage row sit at four settings of the knob;
                         // the row's coefficient comes straight from the corner, with no bending for the sample rate)
                         s.fg[k] = PI * (93.9 * 150f32.powf(c) - 86.4).clamp(1.0, sr * 0.45) / sr;
-                        s.fk[k] = 0.916 * r.powf(0.40);
+                        s.fk[k] = 0.9283 * r.powf(0.4907);
                     }
                     11 => {
                         // the drive kind is a ladder of four plain stages per slope step, each with the
                         // resonance fed back round it and half of the loss made up
                         count = n;
-                        // (measured near and at wide open: past 15.85 kHz the corner climbs more slowly)
-                        let over = (180.3 * 167.3f32.powf(c) - 70.3 - 15850.0).max(0.0);
-                        let g = g_at(180.3 * 167.3f32.powf(c) - 70.3 - over + over / (1.0 + over / 26000.0));
-                        let big = g / (1.0 + g);
-                        // (fitted to the response at four settings of the knob and three slopes, from a
-                        // low note rich in harmonics: every ladder has the resonance round it, less of it
-                        // the more ladders there are, and a third more once there is drive)
+                        // (measured with a stepped sweep at nine corners and no drive: the ladder runs four
+                        // times a frame on a held input, each stage a plain one-store step, what comes back
+                        // is one of those steps late, and the four results are averaged. Near the top the
+                        // corner strays from the curve, so the last stretch follows the measured points.)
+                        const STRAY: [(f32, f32); 5] = [(0.625, 0.975), (0.762, 0.965), (0.875, 0.942), (0.9375, 1.226), (1.0, 1.141)];
+                        let mut stray = STRAY[0].1;
+                        for w in STRAY.windows(2) {
+                            if c > w[0].0 {
+                                stray = w[0].1 + (w[1].1 - w[0].1) * ((c - w[0].0) / (w[1].0 - w[0].0)).min(1.0);
+                            }
+                        }
+                        let hz = 180.3 * 167.3f32.powf(c) - 70.3;
+                        let big = 1.0 - (-stray * 2.0 * PI * hz / (4.0 * sr)).exp();
+                        // (with resonance the corner sits a touch lower, the more so the higher it is)
+                        let big = big * (1.0 - 0.25 * big * big * (1.6 * r).min(1.0));
+                        // (resonance fitted at three settings of the knob, two corners and three slopes: a
+                        // little more of it the higher the corner, less of it per ladder the more ladders
+                        // there are, and it eases off again right at the top)
                         let rows = n.max(1) as f32 - 1.0;
-                        let lean = if f.drive > 0.0 { 0.75 } else { 1.0 };
-                        let kb = r / ((0.265 + 0.073 * rows) * lean + 0.036 * rows * r);
+                        let lift = 0.938 + 0.36 * c * c - (c - 0.875).max(0.0) * 4.07;
+                        // (a third more of it once the drive is well up; a little drive leaves it alone)
+                        let lean = 1.0 - 0.25 * ((f.drive * 128.0 - 8.0) / 36.0).clamp(0.0, 1.0);
+                        let kb = 4.0 * r * lift * 0.265 / ((0.265 + 0.073 * rows) * lean + 0.036 * rows * r);
                         for slot in plan.iter_mut().take(n) {
-                            *slot = [big, kb, 1.0 + 0.51 * kb, 1.0 / (1.0 + kb * big * big * big * big), 0.0, 0.0];
+                            *slot = [big, kb, 1.0 + 0.5 * kb, 0.0, 0.0, 0.0];
                         }
                         if f.drive > 0.0 {
                             // with any drive the ladder works on a scaled copy of the signal: how far it is
@@ -2265,15 +2288,18 @@ impl Voice {
                     kind => {
                         // the low-pass family: one stage rings, the rest stay just short of ringing; the two
                         // widest slopes put their other stages part of the way up to the top and ring there
+                        // (fitted to a stepped sweep at three corners: how far up they go leans a little on
+                        // where the corner is)
+                        let x = c - 0.375;
                         let far: [f32; 3] = match (f.slope, kind) {
-                            (4, 0) => [0.0, 0.53, 0.0],
-                            (5, 0) => [0.0, 0.774, 0.592],
-                            // (these lean a little on where the corner is)
-                            (4, _) => [0.0, 0.521 - 0.1 * (c - 0.375), 0.0],
-                            _ => [0.0, 0.769 - 0.106 * (c - 0.375), 0.582 - 0.18 * (c - 0.375)],
+                            (4, 3) => [0.0, 0.5025, 0.0],
+                            (5, 3) => [0.0, 0.762, 0.5712 - 0.066 * x],
+                            (4, 0) => [0.0, 0.532 - 0.0947 * x + 0.0711 * x * x, 0.0],
+                            (5, 0) => [0.0, 0.7725 - 0.0891 * x + 0.0967 * x * x, 0.593 - 0.0784 * x + 0.0569 * x * x],
+                            (4, _) => [0.0, 0.5213 - 0.085 * x + 0.073 * x * x, 0.0],
+                            _ => [0.0, 0.7703 - 0.0891 * x + 0.0967 * x * x, 0.5845 - 0.0784 * x + 0.0569 * x * x],
                         };
-                        // (the wide kind does not: its two widest slopes measured the same as two and three plain steps)
-                        let spread = f.slope >= 4 && kind != 3;
+                        let spread = f.slope >= 4;
                         let ringer = if spread { n - 1 } else { 0 };
                         let lv = [f.levels[0] * s.val[b + 4], f.levels[1] * s.val[b + 5], f.levels[2] * s.val[b + 6]];
                         for (st, slot) in plan.iter_mut().enumerate().take(count) {
@@ -2308,7 +2334,11 @@ impl Voice {
                             // (measured: step times damping never passes nine tenths in the second and third)
                             let kk = if kind == 0 { kk.min((3.9 - step * step) / (2.0 * step)) } else { kk.min(0.9 / step) };
                             *slot = match kind {
-                                0 => [step, kk, 0.0, lv[2], lv[1] - lv[2] * kk, lv[0] - lv[2]],
+                                0 => {
+                                    // (measured with all three level knobs up: the band it mixes in is the fresh one)
+                                    let up = lv[2] + lv[1] * step;
+                                    [step, kk, 0.0, up, lv[1] - up * kk, lv[0] - up]
+                                }
                                 // (the third is the input less the low output one step on)
                                 2 => [step, kk, 1.0, 1.0, 0.0, -1.0],
                                 _ => [step, kk, 0.0, 0.0, 0.0, 1.0],
@@ -2522,25 +2552,19 @@ impl Voice {
                 // set on the way in, so both keep the sound up while it falls)
                 x *= s.val[b + 1];
                 if f.kind == 12 {
-                    // phaser: a row of all-pass stages whose output comes back to its own input, solved
-                    // without a sample of delay (the row is a straight line: gain times input plus memory)
+                    // phaser: a row of all-pass stages whose output comes back to its own input one
+                    // frame late (measured with a stepped sweep at two settings of the knob)
                     let g = s.fg[k];
                     let a = (g - 1.0) / (g + 1.0);
                     // (the second switch adds five to the order)
                     let n = (f.slope.clamp(1, 5) as usize + if f.flat { 5 } else { 0 }) * 2;
-                    let (mut gain, mut held) = (1.0f32, 0.0f32);
-                    for z in s.ap[k].iter().take(n) {
-                        held = a * held + *z;
-                        gain *= a;
-                    }
-                    let back = s.fk[k];
-                    let u = (x + back * held) / (1.0 - back * gain);
-                    let mut y = u;
+                    let mut y = x + s.fk[k] * s.ap[k][20];
                     for z in s.ap[k].iter_mut().take(n) {
                         let o = a * y + *z;
                         *z = y - a * o;
                         y = o;
                     }
+                    s.ap[k][20] = y;
                     // (what leaves is the end of the row: as loud as its start at every pitch, but turned, which
                     // shows once it is mixed with another path. Measured against the filter before it.)
                     x = y;
@@ -2548,78 +2572,48 @@ impl Voice {
                     // the driven ladders: every stage bends what comes in and what it holds, and each ladder
                     // has its own push, pull and resonance, which goes back in under its first bend
                     let bend = |v: f32| v / (1.0 + v * v).sqrt();
-                    let lean = |v: f32| {
-                        let q = 1.0 / (1.0 + v * v);
-                        q * q.sqrt()
-                    };
                     let (push, pull) = (s.plan[k][0][4], s.plan[k][0][5]);
                     // (with resonance the sound stays cleaner than the make-up alone would leave it: part of
                     // the make-up is taken off going in and given back coming out)
                     let pre = s.plan[k][0][2].sqrt();
-                    for st in 0..s.stages[k] as usize {
-                        let [big, back, make_up, ..] = s.plan[k][st];
-                        let u_in = x * push / pre;
-                        let g = big / (1.0 - big).max(1e-6);
-                        let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
-                        let z = [&mut lo[st * 2], &mut hi[0]];
-                        let held = [z[0][0], z[0][1], z[1][0], z[1][1]];
-                        // the four stages for one guess of what comes back; gives the last stage and how
-                        // steeply it follows the guess
-                        let chain = |guess: f32, keep: &mut [f32; 4]| -> (f32, f32) {
-                            let arg = u_in - back * guess;
-                            let mut a = bend(arg);
-                            let mut slope = -back * lean(arg);
-                            let mut u = 0.0;
+                    let n = s.stages[k] as usize;
+                    let mut sum = 0.0f32;
+                    for _ in 0..4 {
+                        let mut v = x;
+                        for st in 0..n {
+                            let [big, back, make_up, ..] = s.plan[k][st];
+                            let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
+                            let z = [&mut lo[st * 2], &mut hi[0]];
+                            let mut a = bend(v * push / pre - back * z[1][1]);
                             for q in 0..4 {
-                                let m = held[q];
-                                let want = m + g * a;
-                                u = m;
-                                for _ in 0..2 {
-                                    u -= (u + g * bend(u) - want) / (1.0 + g * lean(u));
-                                }
-                                keep[q] = 2.0 * u - m;
-                                slope *= g / (1.0 + g * lean(u));
-                                if q < 3 {
-                                    slope *= lean(u);
-                                    a = bend(u);
-                                }
+                                let m = &mut z[q / 2][q % 2];
+                                *m += big * (a - bend(*m));
+                                a = bend(*m);
                             }
-                            (u, slope)
-                        };
-                        let mut keep = [0.0f32; 4];
-                        let mut guess = held[3];
-                        if back > 0.0 {
-                            for _ in 0..2 {
-                                let (got, slope) = chain(guess, &mut keep);
-                                guess -= (got - guess) / (slope - 1.0);
-                            }
+                            v = z[1][1] * pull * make_up * pre;
                         }
-                        let (got, _) = chain(guess, &mut keep);
-                        for q in 0..4 {
-                            z[q / 2][q % 2] = keep[q];
-                        }
-                        x = got * pull * make_up * pre;
+                        sum += v;
                     }
+                    x = sum * 0.25;
                 } else if f.kind == 11 {
-                    for st in 0..s.stages[k] as usize {
-                        let [big, back, make_up, solve, ..] = s.plan[k][st];
-                        let keep = 1.0 - big;
-                        let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
-                        let z = [&mut lo[st * 2], &mut hi[0]];
-                        // what the four stages would give with nothing coming in
-                        let mut held = 0.0f32;
-                        for q in 0..4 {
-                            held = big * held + keep * z[q / 2][q % 2];
+                    let n = s.stages[k] as usize;
+                    let mut sum = 0.0f32;
+                    for _ in 0..4 {
+                        let mut v = x;
+                        for st in 0..n {
+                            let [big, back, make_up, ..] = s.plan[k][st];
+                            let (lo, hi) = s.fs[k].split_at_mut(st * 2 + 1);
+                            let z = [&mut lo[st * 2], &mut hi[0]];
+                            v = v * make_up - back * z[1][1];
+                            for q in 0..4 {
+                                let m = &mut z[q / 2][q % 2];
+                                *m += big * (v - *m);
+                                v = *m;
+                            }
                         }
-                        let mut y = (x * make_up - back * held) * solve;
-                        for q in 0..4 {
-                            let m = &mut z[q / 2][q % 2];
-                            let v = (y - *m) * big;
-                            y = v + *m;
-                            *m = y + v;
-                        }
-                        x = y;
+                        sum += v;
                     }
+                    x = sum * 0.25;
                 } else if f.kind == 0 && p.lay.first && f.flat {
                     for st in 0..s.stages[k] as usize {
                         let [step, damp, _, m0, m1, m2] = s.plan[k][st];
@@ -2658,7 +2652,7 @@ impl Voice {
                 if !x.is_finite() {
                     x = 0.0;
                     s.fs[k] = [[0.0; 2]; 6];
-                    s.ap[k] = [0.0; 20];
+                    s.ap[k] = [0.0; 21];
                     s.fb[k] = 0.0;
                 }
                 // a ringing stage after a hot shaper is kept inside sane bounds
