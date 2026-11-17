@@ -16,6 +16,24 @@ An open source, pattern-based music workstation written in Rust. Native on Linux
 > next start, "Do not ask again" stops asking) and work with the built-in instruments and your own sample
 > folders. It is always available under Options.
 
+> [!WARNING]
+> **On Windows the program is not signed, so Windows will warn you when you start it.**
+> The first time you run `open-cereal-workshop.exe`, Microsoft Defender SmartScreen shows a blue window saying
+> "Windows protected your PC" and that the publisher is unknown. Your browser may also flag the download.
+>
+> **What to do:** in that window click **More info**, then **Run anyway**. If there is no "Run anyway" button,
+> right-click the .exe, choose **Properties**, tick **Unblock** at the bottom and click OK, then start it again.
+> You only need to do this once for each version you download.
+>
+> **Why it happens:** Windows trusts a program only when it carries a code-signing certificate, which a
+> publisher has to buy from a certificate company every year after proving a legal identity. The warning is
+> about that missing signature. It does not mean anything was found in the file.
+>
+> **Why it will keep happening:** this is a free project made by volunteers, with no company behind it and no
+> money coming in, so there is no paid certificate and none is planned. Every release will show the warning.
+> If you would rather not trust a download, the full source is here and you can build the .exe yourself
+> (see "Build from source" below). Linux builds are not affected.
+
 ## What it is
 
 Open Cereal Workshop is a digital audio workstation that aims to work like FL Studio, so that someone who
@@ -194,7 +212,7 @@ original, so levels, curves and scales are close rather than identical. The main
 **Third-party plug-ins**
 - DirectX plug-ins and VST2 shell files are not hosted.
 - A plug-in's own window floats; it cannot be docked inside ours, and key presses are not passed on to it.
-- The VST3 editor window on Windows is written but not yet tried on a Windows machine.
+- Plug-in editor windows get less testing on Windows than on Linux.
 - A project naming a plug-in that is not installed keeps its block untouched and lists it when the project
   opens; a setting (Settings, Audio: "Stand-in voice for missing plug-ins") lets a plain voice of ours play in
   its place.
@@ -211,8 +229,9 @@ original, so levels, curves and scales are close rather than identical. The main
 - The built-in bass synth of versions 4 and 5 stays silent; early mixer send and pan scales are estimated.
 
 **Packaging and platforms**
-- No release has been made. The AppImage, Arch package and Windows installer scripts are written but untested in
-  a real release. There is no Flatpak.
+- Releases carry a Debian package, a Linux tarball and a Windows zip. The AppImage, Arch package and Windows
+  installer scripts are written but untested in a real release. There is no Flatpak. The Windows build is not
+  signed (see the warning at the top).
 - Windows gets less day-to-day testing than Linux.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned next.
