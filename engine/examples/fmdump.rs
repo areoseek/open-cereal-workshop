@@ -32,7 +32,7 @@ fn main() {
         }
         println!("room on {} vol {} secs {} cuts {} {}", d[1083], at(1079), at(1067), at(1071), at(1051));
     }
-    println!("velocity to volume {} mono set {} slide {:?}", pt.vel_vol, pt.uni_mono, pt.slide);
+    println!("velocity to volume {} mono set {} slide {:?} shared pitch {}", pt.vel_vol, pt.uni_mono, pt.slide, pt.pitch_shared);
     println!("tail {:?}", pt.tail);
     println!("version word {:?}", &raw[..4.min(raw.len())]);
     if std::env::var("ARTS").is_ok() {

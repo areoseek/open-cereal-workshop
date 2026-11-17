@@ -669,6 +669,8 @@ pub struct Patch {
     /// Sliding in from the note before, when its switch is on: whether a far note takes longer, and how the
     /// distance is held in (0 not at all, 1 folded into an octave, 2 to 5 at most four down to one semitone).
     pub slide: Option<(bool, u8)>,
+    /// The first operator's pitch movement moves every operator.
+    pub pitch_shared: bool,
     /// how many times over the voice is worked out, as a power of two: for a render and for live play
     /// (measured on renders: none means the plain samples with nothing filtered at all)
     pub over: [u8; 2],
@@ -1280,7 +1282,7 @@ impl Default for Patch {
         }
         let mut out = [0.0; 9];
         out[0] = 1.0;
-        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
+        let mut p = Self { volume: 1.0, lfo: 1.0, pitch: 0.0, send: [0.0; 9], fm: [[0.0; 6]; 6], rm: [[0.0; 6]; 6], feed: [[0.0; 6]; 3], pan: [0.0; 9], out, ops, filts: Default::default(), arts, uni: 1, send_side: [1.0; 2], uni_pan: 1.0, uni_vol: 0.8, uni_pitch: 0.5, uni_phase: 0.1, uni_sub: 0.0, uni_mono: false, slide: None, pitch_shared: false, over: [0; 2], vel_vol: true, modx: 0.5, mody: 0.75, op_at: [0; 6], filt_at: [0; 3], lay: OpLay::NEW, tail: Default::default(), used: [false; 6], fused: [false; 3], any_moving: false };
         p.wire();
         p
     }
@@ -1489,8 +1491,9 @@ impl Patch {
         // (measured by flipping each byte: the slide's own switch, the one that lets distance set its time, and
         // the limit on its distance, all there from layout 15 on)
         p.slide = (ver >= 15 && d.len() > 973 && d[970] != 0).then(|| (d[971] != 0, d[973]));
-        if d.len() > 788 {
+        if d.len() > 790 {
             p.over = [d[784].min(6), d[780].min(6)];
+            p.pitch_shared = d[790] != 0;
         }
         p.vel_vol = ver < 18 || d.len() <= 974 || d[974] != 0;
         // (measured: the byte after the unison one lets a standing level drain away)
@@ -1582,7 +1585,7 @@ impl Patch {
                 ws_bipolar: bip,
                 ws: (0..=256).map(|j| ws.map(j as f32 / 256.0)).collect(),
                 hq: !first && h[40] != 0,
-                flat: !first && h[41] != 0,
+                flat: h[41] != 0,
             };
             for a in 0..8 {
                 let g = match a {
@@ -1845,13 +1848,15 @@ impl Voice {
         let over = 1u32 << p.over[if live { 1 } else { 0 }];
         let (sr, dphase) = (sr * over as f32, dphase / over as f32);
         let n = p.uni.clamp(1, 9) as usize;
-        let rand = rnd(&mut seed) * 0.5 + 0.5;
         let copies = if p.uni_sub > 0.0 { 2 } else { 1 };
         let mut subs = Vec::with_capacity(n * copies);
         // (measured: a free-running operator starts anywhere, but all the voices of a unison set start together)
         let loose: [f32; 6] = std::array::from_fn(|_| rnd(&mut seed) * 0.5 + 0.5);
         for s2 in 0..n * copies {
             let (s, low) = (s2 % n, s2 >= n);
+            // (measured: every voice of a unison set draws its own chance value, so a phase mapped to chance
+            // leaves the voices out of step and the set as loud as that many strangers)
+            let rand = rnd(&mut seed) * 0.5 + 0.5;
             let (down, share) = if low { (0.5, p.uni_sub) } else { (1.0, 1.0 - p.uni_sub) };
             let u = if n == 1 { 0.0 } else { 1.0 - s as f32 / (n - 1) as f32 * 2.0 };
             // (measured: the key axis counts the key after the patch's own transposing)
@@ -1947,7 +1952,7 @@ impl Voice {
                 }
             }
         }
-        let mut v = Self { glide, over, fsteps: if over == 1 { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, subs, main_l: 1.0, main_r: 1.0 };
+        let mut v = Self { glide, over, fsteps: if over == 1 && !(p.lay.first && p.filts.iter().any(|f| f.flat)) { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -2002,13 +2007,22 @@ impl Voice {
                     }
                 }
             }
+            let mut shared = 0.0;
             for k in 0..6 {
                 let o = &p.ops[k];
                 // (measured: the pitch output bends the fixed part of the frequency by the same interval)
                 let (far, len, _) = self.glide[k];
                 let len = if len < 0.0 { -len / beat.max(1e-3) } else { len };
                 let slide = if t < len { far * (1.0 - p.arts[k * 6 + 3].env.attack_way(t / len)) } else { 0.0 };
-                let art = ((s.val[k * 6 + 3] + slide) * o.pitch_cents / 1200.0).exp2();
+                let mut cents = (s.val[k * 6 + 3] + slide) * o.pitch_cents;
+                // (measured: with the shared pitch switch on, the first operator's pitch movement, slide and
+                // all, moves every operator; off, an operator with no movement of its own stays put)
+                if k == 0 {
+                    shared = if p.pitch_shared { cents } else { 0.0 };
+                } else {
+                    cents += shared;
+                }
+                let art = (cents / 1200.0).exp2();
                 let bend = (p.pitch / 12.0).exp2() * art;
                 s.inc[k] = (dphase * s.detune * bend * o.ratio + o.offset_hz * art / sr).clamp(-0.5, 0.5);
                 let pan = (p.pan[k] + s.val[k * 6]).clamp(-1.0, 1.0);
@@ -2155,6 +2169,23 @@ impl Voice {
                             // the bend later suits the overtones of a quiet sine but leaves real patches too loud)
                             plan[0][5] = 10f32.powf((db - 3.0) / 20.0) / base;
                             plan[0][4] = 10f32.powf((db + more) / 40.0) / plan[0][5];
+                        }
+                    }
+                    0 if p.lay.first && f.flat => {
+                        // The first kind with its second switch on, in the oldest blocks (measured with hiss, one knob at a time): every
+                        // stage is the plain two-store filter stepped once a sample, whose damping times its
+                        // step is set by the resonance knob alone, so it keeps a set width in Hz wherever
+                        // the corner sits. One stage follows the knob; the others stay at the knob's bottom,
+                        // where the filter is no more than one gentle pole. Each stage mixes its own low,
+                        // band and high outputs by the three level knobs and hands that on to the next.
+                        // (a map can push the corner past the top of the knob)
+                        let c = (f.cut + s.stat[b + 2] * 0.5 + (s.val[b + 2] - s.stat[b + 2]) * f.env_amt).clamp(0.0, 1.1);
+                        let hz = (257.4 * 28.5f32.powf(c) - 170.0).clamp(20.0, sr * 0.3);
+                        let step = 2.0 * (PI * hz / sr).sin();
+                        let lv = [f.levels[0] * s.val[b + 4], f.levels[1] * s.val[b + 5], f.levels[2] * s.val[b + 6]];
+                        for (st, slot) in plan.iter_mut().enumerate().take(count) {
+                            let damp = if st == 0 { (1.0 - 0.8 * r) * (1.0 - 0.8 * r) } else { 1.0 };
+                            *slot = [step, damp / step, 0.0, lv[0], lv[1], lv[2]];
                         }
                     }
                     kind => {
@@ -2503,6 +2534,16 @@ impl Voice {
                             *m = y + v;
                         }
                         x = y;
+                    }
+                } else if f.kind == 0 && p.lay.first && f.flat {
+                    for st in 0..s.stages[k] as usize {
+                        let [step, damp, _, m0, m1, m2] = s.plan[k][st];
+                        let z = &mut s.fs[k][st];
+                        let low = z[0] + step * z[1];
+                        let high = x - low - damp * z[1];
+                        let band = z[1] + step * high;
+                        *z = [low, band];
+                        x = m0 * low + m1 * band + m2 * high;
                     }
                 } else {
                     for st in 0..s.stages[k] as usize {
