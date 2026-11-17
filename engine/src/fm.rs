@@ -1037,6 +1037,11 @@ const UNI_SHARE_OLD: [f32; 9] = [0.7767, 0.9467, 0.8225, 1.0459, 0.9130, 1.0, 0.
 
 /// The unison spread in cents for the pitch knob at 0..=1 (measured at every quarter: 3.2, 11.4, 32.2 and 84.7
 /// cents; the first two layouts open sooner and end lower: 4.7, 13.1, 28.4 and about 56).
+/// How far ahead of the song a free-running operator's clock stands, in seconds (the best fit is 128 frames).
+/// Renders of one project come out at 128 or at 256 frames from one run to the next, so the checking tools
+/// can set the count themselves.
+const FREE_AHEAD: f64 = 128.0 / 44100.0;
+
 fn uni_spread(knob: f32, early: bool) -> f32 {
     if early {
         5.73 * (10.8f32.powf(knob) - 1.0)
@@ -1840,6 +1845,8 @@ impl Twice {
 /// One sounding note.
 #[derive(Debug, Clone)]
 pub struct Voice {
+    /// the chance start each free-running operator was given
+    loose: [f32; 6],
     /// how many frames are worked out for each one given: operators that bend each other make partials far
     /// above the top of the hearing range, and those must be made and filtered away, not folded back down
     over: u32,
@@ -1995,7 +2002,7 @@ impl Voice {
                 }
             }
         }
-        let mut v = Self { glide, over, fsteps: if over == 1 && !(p.lay.first && p.filts.iter().any(|f| f.flat)) { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, subs, main_l: 1.0, main_r: 1.0 };
+        let mut v = Self { glide, over, fsteps: if over == 1 && !(p.lay.first && p.filts.iter().any(|f| f.flat)) { 2 } else { 1 }, halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], send_halvers: vec![Halver::new(); p.over[if live { 1 } else { 0 }] as usize], sent: [0.0; 2], sr, t: 0, rel: None, ctl: 0, beat: 2.0, song: 0.0, loose, subs, main_l: 1.0, main_r: 1.0 };
         v.control(p, dphase, true);
         for s in v.subs.iter_mut() {
             for k in 0..6 {
@@ -2020,6 +2027,22 @@ impl Voice {
     /// would have carried it had it run since the song began, so a later note starts with its voices already apart.
     pub fn started_at(&mut self, p: &Patch, hz: f32, secs: f64) {
         self.song = secs;
+        // a free-running operator turns with the song, not with the note: where it stands when a note begins is
+        // its own pitch times the song's time (measured on two notes an octave apart: both starts fit one clock
+        // running a little under three thousandths of a second ahead); the chance start stays for notes played
+        // by hand, which have no place in the song
+        for s in self.subs.iter_mut() {
+            let low = if s.detune < 0.75 { 0.5 } else { 1.0 };
+            for k in 0..6 {
+                let o = &p.ops[k];
+                if o.free && (o.ratio != 0.0 || o.offset_hz != 0.0) {
+                    // (each voice of a unison set by its own detuned pitch; the first layout's drift below adds that part)
+                    let own = if p.lay.first { low } else { s.detune };
+                    let f = (hz * (p.pitch / 12.0).exp2() * own * o.ratio + o.offset_hz) as f64;
+                    s.ph[k] += (f * (secs + std::env::var("CEREAL_FREE_AHEAD").ok().and_then(|v| v.parse::<f64>().ok()).map_or(FREE_AHEAD, |v| v / 44100.0))).rem_euclid(1.0) - self.loose[k] as f64;
+                }
+            }
+        }
         // (measured on both later layouts with the phase knob at nothing: every note starts with its voices together)
         if !p.lay.first {
             return;
@@ -3149,6 +3172,33 @@ pub(crate) mod tests {
         let want = ((v.subs[0].detune as f64 - 1.0) * (440.0 * p.ops[0].ratio) as f64 * 2.0).fract() as f32;
         assert!(((v.subs[0].ph[0] - before[0]) as f32 - want).abs() < 1e-4 && want.abs() > 0.01);
         assert!(v.subs[1].ph[0] < before[1], "the flat voice falls behind");
+    }
+
+    /// A free-running operator stands where the song's clock has carried it: its pitch times the song's time
+    /// (128 frames ahead), each unison voice by its own detuned pitch, whatever chance start it was dealt.
+    #[test]
+    fn free_running_operators_turn_with_the_song() {
+        let mut p = lone();
+        p.ops[0].free = true;
+        p.uni = 2;
+        p.uni_pitch = 0.5;
+        p.uni_phase = 0.0;
+        for seed in [1, 77] {
+            let mut v = Voice::start(&p, 44100.0, 57, [0.8, 0.5, 0.5], 440.0 / 44100.0, seed);
+            v.started_at(&p, 440.0, 3.25);
+            for s in &v.subs {
+                let f = (440.0 * (p.pitch / 12.0).exp2() * s.detune * p.ops[0].ratio) as f64;
+                let want = (f * (3.25 + 128.0 / 44100.0)).rem_euclid(1.0);
+                let got = (s.ph[0] - p.ops[0].phase as f64).rem_euclid(1.0);
+                assert!((got - want).abs() < 1e-4 || (got - want).abs() > 1.0 - 1e-4, "{got} {want}");
+            }
+        }
+        // one that is not free keeps its set start
+        p.ops[0].free = false;
+        let mut v = Voice::start(&p, 44100.0, 57, [0.8, 0.5, 0.5], 440.0 / 44100.0, 1);
+        let before = v.subs[0].ph[0];
+        v.started_at(&p, 440.0, 3.25);
+        assert_eq!(v.subs[0].ph[0], before);
     }
 
     /// An operator fed back into itself is read far weaker than a feed from another, stays a steady tone at
