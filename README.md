@@ -59,9 +59,8 @@ the code are our own.
 
 ## Status
 
-Early. This is one developer's project, written with AI assistance. A lot works, but expect rough edges,
-missing pieces and sounds that are close rather than identical. There are no release builds yet; build from
-source. Bug reports with a project file that shows the problem are the most useful kind.
+Early. This is a single developer project, written with heavy AI assistance. A lot works, but expect rough edges,
+missing pieces and sounds that are close rather than identical. Bugg reports with a project file that shows the problem are the most useful kind
 
 ## Screenshots
 
